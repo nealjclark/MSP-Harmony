@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+infra/azure/postgres.json
+.env
+.env.*
+!.env.example
+local.settings.json
+.DS_Store
+*.log
+/.vscode/
+.codex/

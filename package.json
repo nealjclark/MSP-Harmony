@@ -1,0 +1,41 @@
+{
+  "name": "msp-harmony",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/backend/functions/*.js",
+  "scripts": {
+    "dev": "cd src/frontend && vite",
+    "build": "npm run backend:build && cd src/frontend && vite build",
+    "backend:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "backend:build": "npm run backend:clean && tsc -p tsconfig.backend.json",
+    "functions:start": "npm run backend:build && func start",
+    "preview": "cd src/frontend && vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "backend:demo": "tsx src/backend/demo.ts",
+    "cw:check": "tsx src/backend/connectwise/check.ts",
+    "cw:sync:companies": "tsx src/backend/connectwise/syncCompanies.ts",
+    "cw:sync:agreements": "tsx src/backend/connectwise/syncAgreementReport.ts",
+    "db:check": "tsx src/backend/database/check.ts",
+    "db:migrate": "tsx src/backend/database/migrate.ts",
+    "test": "npm run typecheck && tsx src/backend/shared/reconciliation.test.ts && tsx src/backend/shared/reconciliation.cove.test.ts && tsx src/backend/api/reconciliationRuns.test.ts && tsx src/backend/api/reconciliationAdjustments.test.ts && tsx src/backend/mapping/mappingService.test.ts && tsx src/backend/mapping/usageOverridesService.test.ts && tsx src/shared/integrationSettings.test.ts && tsx src/backend/connectwise/client.test.ts && tsx src/backend/connectwise/operations.test.ts && tsx src/backend/connectwise/writeBack.test.ts && tsx src/backend/vendor/cove/client.test.ts && tsx src/backend/vendor/cove/operations.test.ts && tsx src/backend/config/settingsProvider.test.ts && tsx src/backend/config/settingsUpdater.test.ts && tsx src/backend/config/integrationSettingsRepository.test.ts && tsx src/backend/reports/agreementReports.test.ts && tsx src/backend/reports/rawSyncReports.test.ts && tsx src/backend/functions/integrationSettingsFunction.test.ts && tsx src/backend/functions/integrationsFunction.test.ts && tsx src/backend/functions/mappingsFunction.test.ts && tsx src/backend/database/config.test.ts"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.16.0",
+    "@azure/identity": "^4.13.1",
+    "@azure/keyvault-secrets": "^4.11.2",
+    "dotenv": "^17.4.2",
+    "lucide-react": "^1.17.0",
+    "pg": "^8.21.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^18.2.21",
+    "@types/react-dom": "^18.2.7",
+    "tsx": "^4.22.4",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.0"
+  }
+}

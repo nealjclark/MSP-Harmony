@@ -1,0 +1,577 @@
+import { reconcileVendorUsage } from '../shared/reconciliation';
+import type {
+  AgreementAddition,
+  DimensionMap,
+  DimensionValue,
+  QuantityRule,
+  ReconciliationLine,
+  ReconciliationResult,
+  UsageSnapshot,
+  VendorRuleSet,
+} from '../shared/types';
+import {
+  applyReconciliationAdjustments,
+  loadReconciliationAdjustments,
+  type ReconciliationAdjustment,
+  type ReconciliationLineWithAdjustments,
+} from './reconciliationAdjustments';
+import { getVendorRuleSet } from './reconciliation';
+import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
+
+export type ReconcileVendorFromDatabaseOptions = {
+  syncRunId?: string;
+};
+
+type SyncRunRow = {
+  id: string;
+};
+
+type SnapshotRow = {
+  id: string;
+  vendor_id: string;
+  customer_id: string;
+  agreement_id: string;
+  vendor_product_key: string | null;
+  product_code: string;
+  product_name: string;
+  quantity: string | number;
+  observed_at: Date | string;
+  dimensions: unknown;
+};
+
+type AdditionRow = {
+  id: string;
+  customer_id: string;
+  agreement_id: string;
+  product_code: string;
+  product_name: string;
+  quantity: string | number;
+  unit_price: string | number | null;
+  updated_at: Date | string | null;
+};
+
+type LineLabelRow = {
+  customer_id: string;
+  customer_name: string;
+  connectwise_company_id: string;
+  agreement_id: string;
+  agreement_name: string;
+  connectwise_agreement_id: string;
+};
+
+type UsageOverrideRow = {
+  id: string;
+  customer_id: string | null;
+  agreement_id: string | null;
+  source_vendor_product_key: string;
+  target_vendor_product_key: string;
+  target_product_code: string | null;
+  target_product_name: string | null;
+  dimension_filters: unknown;
+  target_dimensions: unknown;
+  reason: string | null;
+};
+
+type UsageOverride = {
+  id: string;
+  customerId?: string;
+  agreementId?: string;
+  sourceVendorProductKey: string;
+  targetVendorProductKey: string;
+  targetProductCode?: string;
+  targetProductName?: string;
+  dimensionFilters: DimensionMap;
+  targetDimensions: DimensionMap;
+  reason?: string;
+};
+
+export type DatabaseReconciliationLine = ReconciliationLine & {
+  customerName?: string;
+  agreementName?: string;
+  connectWiseCompanyId?: string;
+  connectWiseAgreementId?: string;
+  devices: DatabaseReconciliationDevice[];
+  adjustments?: ReconciliationAdjustment[];
+};
+
+export type DatabaseReconciliationDevice = {
+  id: string;
+  vendorProductKey?: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  observedAt: string;
+  dimensions: DimensionMap;
+};
+
+export type ReconciliationProductOption = {
+  vendorProductKey: string;
+  productCode: string;
+  productName: string;
+};
+
+export type DatabaseReconciliationResult = Omit<ReconciliationResult, 'lines'> & {
+  lines: DatabaseReconciliationLine[];
+  syncRunId?: string;
+  snapshotCount: number;
+  agreementAdditionCount: number;
+  productOptions: ReconciliationProductOption[];
+};
+
+export async function reconcileVendorFromDatabase(
+  database: Queryable,
+  vendorId: string,
+  options: ReconcileVendorFromDatabaseOptions = {},
+): Promise<DatabaseReconciliationResult> {
+  const syncRunId = options.syncRunId ?? (await loadLatestSyncRunId(database, vendorId));
+  const ruleSet = await loadRuleSet(database, vendorId);
+
+  if (!syncRunId) {
+    const emptyResult = reconcileVendorUsage({
+      vendorId,
+      rules: ruleSet.rules,
+      snapshots: [],
+      agreementAdditions: [],
+    });
+
+    return {
+      ...emptyResult,
+      lines: [],
+      syncRunId,
+      snapshotCount: 0,
+      agreementAdditionCount: 0,
+      productOptions: productOptionsForRuleSet(ruleSet),
+    };
+  }
+
+  const loadedSnapshots = await loadUsageSnapshots(database, vendorId, syncRunId);
+  const snapshots = applyUsageOverrides(
+    loadedSnapshots,
+    await loadUsageOverrides(database, vendorId, loadedSnapshots),
+    ruleSet,
+  );
+  const agreementAdditions = await loadAgreementAdditions(database, snapshots);
+  const result = reconcileVendorUsage({
+    vendorId,
+    rules: ruleSet.rules,
+    snapshots,
+    agreementAdditions,
+  });
+  const adjustedLines = applyReconciliationAdjustments(
+    result.lines,
+    await loadReconciliationAdjustments(database, vendorId, result.lines),
+  );
+
+  return {
+    ...result,
+    totals: totalsForLines(adjustedLines),
+    lines: await withLineDetails(database, adjustedLines, snapshots, ruleSet),
+    syncRunId,
+    snapshotCount: snapshots.length,
+    agreementAdditionCount: agreementAdditions.length,
+    productOptions: productOptionsForRuleSet(ruleSet),
+  };
+}
+
+function totalsForLines(lines: ReconciliationLine[]) {
+  return lines.reduce(
+    (summary, line) => {
+      if (line.status === 'matched') summary.matched += 1;
+      if (line.status === 'needs-review') summary.needsReview += 1;
+      if (line.status === 'not-billable') summary.notBillable += 1;
+      summary.financialImpact.amount += line.financialImpact.amount;
+      return summary;
+    },
+    {
+      matched: 0,
+      needsReview: 0,
+      notBillable: 0,
+      financialImpact: {
+        amount: 0,
+        currency: 'USD' as const,
+      },
+    },
+  );
+}
+
+async function loadRuleSet(database: Queryable, vendorId: string): Promise<VendorRuleSet> {
+  if (vendorId === 'cove') {
+    return loadCoveRuleSet(database);
+  }
+
+  const ruleSet = getVendorRuleSet(vendorId);
+  if (!ruleSet) {
+    throw new Error(`No reconciliation rule set is configured for vendor "${vendorId}".`);
+  }
+
+  return ruleSet;
+}
+
+async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
+  const result = await database.query<SyncRunRow>(
+    `select id
+     from sync_runs
+     where integration_id = $1
+       and status = 'complete'
+     order by completed_at desc nulls last, started_at desc
+     limit 1`,
+    [vendorId],
+  );
+
+  return result.rows[0]?.id;
+}
+
+async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRunId: string | undefined) {
+  const result = await database.query<SnapshotRow>(
+    `with approved_product_mappings as (
+       select vendor_id,
+              vendor_product_key,
+              min(connectwise_product_code) as connectwise_product_code,
+              min(connectwise_product_name) as connectwise_product_name,
+              count(*) as target_count
+       from vendor_product_mappings
+       where vendor_id = $1
+         and active = true
+         and mapping_status = 'approved'
+       group by vendor_id, vendor_product_key
+       having count(*) = 1
+     )
+     select
+       vendor_usage_snapshots.id,
+       vendor_usage_snapshots.vendor_id,
+       vendor_usage_snapshots.customer_id,
+       vendor_usage_snapshots.agreement_id,
+       vendor_usage_snapshots.vendor_product_key,
+       coalesce(approved_product_mappings.connectwise_product_code, vendor_usage_snapshots.product_code) as product_code,
+       coalesce(approved_product_mappings.connectwise_product_name, vendor_usage_snapshots.product_name) as product_name,
+       vendor_usage_snapshots.quantity,
+       vendor_usage_snapshots.observed_at,
+       vendor_usage_snapshots.dimensions
+     from vendor_usage_snapshots
+     left join approved_product_mappings
+       on approved_product_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+      and approved_product_mappings.vendor_product_key = vendor_usage_snapshots.vendor_product_key
+     where vendor_usage_snapshots.vendor_id = $1
+       and vendor_usage_snapshots.customer_id is not null
+       and vendor_usage_snapshots.agreement_id is not null
+       and ($2::uuid is null or vendor_usage_snapshots.sync_run_id = $2::uuid)
+     order by vendor_usage_snapshots.customer_id, vendor_usage_snapshots.agreement_id, product_code, vendor_usage_snapshots.observed_at`,
+    [vendorId, syncRunId ?? null],
+  );
+
+  return result.rows.map(mapSnapshotRow);
+}
+
+async function loadUsageOverrides(database: Queryable, vendorId: string, snapshots: UsageSnapshot[]) {
+  if (snapshots.length === 0) {
+    return [];
+  }
+
+  const customerIds = [...new Set(snapshots.map((snapshot) => snapshot.clientId))];
+  const agreementIds = [...new Set(snapshots.map((snapshot) => snapshot.agreementId))];
+  const result = await database.query<UsageOverrideRow>(
+    `select
+       id,
+       customer_id,
+       agreement_id,
+       source_vendor_product_key,
+       target_vendor_product_key,
+       target_product_code,
+       target_product_name,
+       dimension_filters,
+       target_dimensions,
+       reason
+     from vendor_usage_overrides
+     where vendor_id = $1
+       and active = true
+       and (customer_id is null or customer_id = any($2::uuid[]))
+       and (agreement_id is null or agreement_id = any($3::uuid[]))
+     order by customer_id nulls last, agreement_id nulls last, created_at, id`,
+    [vendorId, customerIds, agreementIds],
+  );
+
+  return result.rows.map(mapUsageOverrideRow);
+}
+
+function applyUsageOverrides(
+  snapshots: UsageSnapshot[],
+  overrides: UsageOverride[],
+  ruleSet: VendorRuleSet,
+): UsageSnapshot[] {
+  if (overrides.length === 0) {
+    return snapshots;
+  }
+
+  const rulesByVendorProductKey = new Map(
+    ruleSet.rules
+      .filter((rule): rule is QuantityRule & { vendorProductKey: string } => Boolean(rule.vendorProductKey))
+      .map((rule) => [rule.vendorProductKey, rule]),
+  );
+
+  return snapshots.map((snapshot) => {
+    const override = overrides.find((candidate) => usageOverrideMatches(snapshot, candidate));
+    if (!override) {
+      return snapshot;
+    }
+
+    const targetRule = rulesByVendorProductKey.get(override.targetVendorProductKey);
+    const targetDimensions = {
+      ...(targetRule?.dimensions ?? {}),
+      ...override.targetDimensions,
+    };
+
+    return {
+      ...snapshot,
+      vendorProductKey: override.targetVendorProductKey,
+      productCode: override.targetProductCode ?? targetRule?.productCode ?? snapshot.productCode,
+      productName: override.targetProductName ?? targetRule?.productName ?? snapshot.productName,
+      dimensions: {
+        ...snapshot.dimensions,
+        ...targetDimensions,
+        usageOverrideId: override.id,
+        usageOverrideReason: override.reason,
+        originalVendorProductKey: snapshot.vendorProductKey,
+        originalProductCode: snapshot.productCode,
+      },
+    };
+  });
+}
+
+async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnapshot[]) {
+  const agreementIds = [...new Set(snapshots.map((snapshot) => snapshot.agreementId))];
+  if (agreementIds.length === 0) {
+    return [];
+  }
+
+  const result = await database.query<AdditionRow>(
+    `select
+       agreement_additions.id,
+       agreement_additions.customer_id,
+       agreement_additions.agreement_id,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       agreement_additions.quantity,
+       agreement_additions.unit_price,
+       agreement_additions.updated_at
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.agreement_id = any($1::uuid[])
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'`,
+    [agreementIds],
+  );
+
+  return result.rows.map(mapAdditionRow);
+}
+
+async function withLineDetails(
+  database: Queryable,
+  lines: ReconciliationLineWithAdjustments[],
+  snapshots: UsageSnapshot[],
+  ruleSet: VendorRuleSet,
+): Promise<DatabaseReconciliationLine[]> {
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const customerIds = [...new Set(lines.map((line) => line.clientId))];
+  const agreementIds = [...new Set(lines.map((line) => line.agreementId))];
+  const result = await database.query<LineLabelRow>(
+    `select
+       customers.id as customer_id,
+       customers.name as customer_name,
+       customers.connectwise_company_id,
+       agreements.id as agreement_id,
+       agreements.name as agreement_name,
+       agreements.connectwise_agreement_id
+     from agreements
+     inner join customers
+       on customers.id = agreements.customer_id
+     where customers.id = any($1::uuid[])
+        or agreements.id = any($2::uuid[])`,
+    [customerIds, agreementIds],
+  );
+
+  const labelsByLineKey = new Map(
+    result.rows.map((row) => [
+      `${row.customer_id}|${row.agreement_id}`,
+      {
+        customerName: row.customer_name,
+        agreementName: row.agreement_name,
+        connectWiseCompanyId: row.connectwise_company_id,
+        connectWiseAgreementId: row.connectwise_agreement_id,
+      },
+    ]),
+  );
+
+  return lines.map((line) => ({
+    ...line,
+    ...labelsByLineKey.get(`${line.clientId}|${line.agreementId}`),
+    devices: devicesForLine(line, snapshots, ruleSet),
+  }));
+}
+
+function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ruleSet: VendorRuleSet) {
+  const rule = ruleSet.rules.find((candidate) => candidate.id === line.ruleId);
+
+  return snapshots
+    .filter(
+      (snapshot) =>
+        snapshot.clientId === line.clientId &&
+        snapshot.agreementId === line.agreementId &&
+        (!rule || snapshotMatchesRule(snapshot, rule)),
+    )
+    .map((snapshot) => ({
+      id: snapshot.id,
+      vendorProductKey: snapshot.vendorProductKey,
+      productCode: snapshot.productCode,
+      productName: snapshot.productName,
+      quantity: snapshot.quantity,
+      observedAt: snapshot.observedAt,
+      dimensions: snapshot.dimensions,
+    }));
+}
+
+function productOptionsForRuleSet(ruleSet: VendorRuleSet): ReconciliationProductOption[] {
+  return ruleSet.rules
+    .filter((rule): rule is QuantityRule & { vendorProductKey: string } => Boolean(rule.vendorProductKey))
+    .map((rule) => ({
+      vendorProductKey: rule.vendorProductKey,
+      productCode: rule.productCode,
+      productName: rule.productName,
+    }));
+}
+
+function snapshotMatchesRule(snapshot: UsageSnapshot, rule: QuantityRule) {
+  if (rule.vendorProductKey && snapshot.vendorProductKey) {
+    return snapshot.vendorProductKey === rule.vendorProductKey;
+  }
+
+  return targetProductCodes(rule).includes(snapshot.productCode);
+}
+
+function targetProductCodes(target: { productCode: string; targetProductCodes?: string[] }) {
+  return [...new Set([target.productCode, ...(target.targetProductCodes ?? [])])];
+}
+
+function mapSnapshotRow(row: SnapshotRow): UsageSnapshot {
+  return {
+    id: row.id,
+    vendorId: row.vendor_id,
+    clientId: row.customer_id,
+    agreementId: row.agreement_id,
+    vendorProductKey: row.vendor_product_key ?? undefined,
+    productCode: row.product_code,
+    productName: row.product_name,
+    quantity: numericValue(row.quantity),
+    observedAt: isoDate(row.observed_at) ?? new Date(0).toISOString(),
+    dimensions: {
+      ...recordFromJson(row.dimensions),
+      snapshotId: row.id,
+    },
+  };
+}
+
+function mapUsageOverrideRow(row: UsageOverrideRow): UsageOverride {
+  return {
+    id: row.id,
+    customerId: row.customer_id ?? undefined,
+    agreementId: row.agreement_id ?? undefined,
+    sourceVendorProductKey: row.source_vendor_product_key,
+    targetVendorProductKey: row.target_vendor_product_key,
+    targetProductCode: row.target_product_code ?? undefined,
+    targetProductName: row.target_product_name ?? undefined,
+    dimensionFilters: recordFromJson(row.dimension_filters),
+    targetDimensions: recordFromJson(row.target_dimensions),
+    reason: row.reason ?? undefined,
+  };
+}
+
+function mapAdditionRow(row: AdditionRow): AgreementAddition {
+  return {
+    id: row.id,
+    clientId: row.customer_id,
+    agreementId: row.agreement_id,
+    productCode: row.product_code,
+    productName: row.product_name,
+    quantity: numericValue(row.quantity),
+    unitPrice:
+      row.unit_price === null
+        ? undefined
+        : {
+            amount: numericValue(row.unit_price),
+            currency: 'USD',
+          },
+    updatedAt: isoDate(row.updated_at),
+  };
+}
+
+function usageOverrideMatches(snapshot: UsageSnapshot, override: UsageOverride) {
+  if (override.customerId && override.customerId !== snapshot.clientId) {
+    return false;
+  }
+
+  if (override.agreementId && override.agreementId !== snapshot.agreementId) {
+    return false;
+  }
+
+  if (override.sourceVendorProductKey !== snapshot.vendorProductKey) {
+    return false;
+  }
+
+  return matchesDimensionFilters(snapshot.dimensions, override.dimensionFilters);
+}
+
+function matchesDimensionFilters(dimensions: DimensionMap, filters: DimensionMap) {
+  return Object.entries(filters).every(([key, expected]) => dimensionValuesEqual(dimensions[key], expected));
+}
+
+function dimensionValuesEqual(left: DimensionValue, right: DimensionValue) {
+  if (typeof left === 'number' || typeof right === 'number') {
+    return Number(left) === Number(right);
+  }
+
+  return left === right;
+}
+
+function recordFromJson(value: unknown) {
+  if (!value) {
+    return {};
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return recordFromJson(parsed);
+    } catch {
+      return {};
+    }
+  }
+
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return value as Record<string, string | number | boolean | null | undefined>;
+}
+
+function numericValue(value: string | number) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  const parsed = Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isoDate(value: Date | string | null) {
+  if (!value) {
+    return undefined;
+  }
+
+  return value instanceof Date ? value.toISOString() : value;
+}
