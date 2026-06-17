@@ -6,7 +6,7 @@ import {
   deactivateReconciliationAdjustment,
   type CreateReconciliationAdjustmentInput,
 } from '../api/reconciliationAdjustments';
-import { reconcileVendorFromDatabase } from '../api/reconciliationRuns';
+import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -60,6 +60,47 @@ app.http('runVendorReconciliation', {
   authLevel: 'function',
   route: 'reconciliation/{vendorId}/run',
   handler: runVendorReconciliationHttp,
+});
+
+export async function listAgreementAdditionsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const agreementId = request.params.agreementId;
+
+  if (!agreementId || !isUuid(agreementId)) {
+    return jsonResponse(400, {
+      error: 'Agreement additions require a valid agreementId.',
+    });
+  }
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Agreement additions need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      agreementId,
+      additions: await listActiveAgreementAdditions(repositoryContext.pool, agreementId),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to load agreement additions.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+app.http('listAgreementAdditions', {
+  methods: ['GET'],
+  authLevel: 'function',
+  route: 'reconciliation/agreements/{agreementId}/additions',
+  handler: listAgreementAdditionsHttp,
 });
 
 export async function createReconciliationAdjustmentHttp(
@@ -164,4 +205,8 @@ app.http('deactivateReconciliationAdjustment', {
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
   return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }

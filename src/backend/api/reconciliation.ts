@@ -1,9 +1,11 @@
 import { reconcileVendorUsage } from '../shared/reconciliation';
 import type { ReconcileVendorUsageRequest, ReconciliationResult, VendorRuleSet } from '../shared/types';
 import { coveRuleSet } from '../vendor/cove/rules';
+import { ncentralRuleSet } from '../vendor/ncentral/rules';
 
 const vendorRuleSets: Record<string, VendorRuleSet> = {
   [coveRuleSet.vendorId]: coveRuleSet,
+  [ncentralRuleSet.vendorId]: ncentralRuleSet,
 };
 
 export function listVendorRuleSets() {

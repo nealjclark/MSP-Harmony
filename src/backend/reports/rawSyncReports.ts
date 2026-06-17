@@ -44,6 +44,19 @@ type CoveSnapshotRow = {
   raw_payload: unknown;
 };
 
+type NcentralSnapshotRow = {
+  customer_name: string | null;
+  agreement_name: string | null;
+  external_account_id: string | null;
+  vendor_product_key: string | null;
+  product_code: string;
+  product_name: string;
+  quantity: string | number;
+  observed_at: Date | string;
+  dimensions: unknown;
+  raw_payload: unknown;
+};
+
 export const coveRawSyncColumns = [
   'Customer',
   'Agreement',
@@ -63,6 +76,28 @@ export const coveRawSyncColumns = [
   'CreationDate',
   'ExpirationDate',
   'LastComplete',
+  'ExternalAccountId',
+  'Mapped',
+  'ObservedAt',
+  'RawPayload',
+] as const;
+
+export const ncentralRawSyncColumns = [
+  'Customer',
+  'Agreement',
+  'NcentralCustomer',
+  'DeviceId',
+  'Hostname',
+  'DeviceClass',
+  'ProductKey',
+  'ProductCode',
+  'ProductName',
+  'Quantity',
+  'ProductFilter',
+  'OverlayTags',
+  'LastCheckIn',
+  'OS',
+  'Site',
   'ExternalAccountId',
   'Mapped',
   'ObservedAt',
@@ -125,7 +160,91 @@ export async function getRawSyncDetails(
     return getCoveRawSyncDetails(database, syncRunId);
   }
 
+  if (integrationId === 'ncentral') {
+    return getNcentralRawSyncDetails(database, syncRunId);
+  }
+
   return getGenericRawSyncDetails(database, integrationId, syncRunId);
+}
+
+async function getNcentralRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+  const syncRunResult = await database.query<SyncRunRow>(
+    `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
+     from sync_runs
+     where id = $1
+       and integration_id = 'ncentral'
+       and metadata->>'entity' = 'usage-snapshots'
+     limit 1`,
+    [syncRunId],
+  );
+  const syncRunRow = syncRunResult.rows[0];
+
+  if (!syncRunRow) {
+    return undefined;
+  }
+
+  const detailResult = await database.query<NcentralSnapshotRow>(
+    `select
+       customers.name as customer_name,
+       agreements.name as agreement_name,
+       vendor_usage_snapshots.external_account_id,
+       vendor_usage_snapshots.vendor_product_key,
+       vendor_usage_snapshots.product_code,
+       vendor_usage_snapshots.product_name,
+       vendor_usage_snapshots.quantity,
+       vendor_usage_snapshots.observed_at,
+       vendor_usage_snapshots.dimensions,
+       vendor_usage_snapshots.raw_payload
+     from vendor_usage_snapshots
+     left join customers on customers.id = vendor_usage_snapshots.customer_id
+     left join agreements on agreements.id = vendor_usage_snapshots.agreement_id
+     where vendor_usage_snapshots.sync_run_id = $1
+       and vendor_usage_snapshots.vendor_id = 'ncentral'
+     order by coalesce(customers.name, vendor_usage_snapshots.dimensions->>'ncentralCustomerName', vendor_usage_snapshots.external_account_id),
+       vendor_usage_snapshots.product_code,
+       vendor_usage_snapshots.dimensions->>'hostname'`,
+    [syncRunId],
+  );
+  const rows = detailResult.rows.map(mapNcentralSnapshotRow);
+
+  return {
+    integrationId: 'ncentral',
+    syncRun: mapSyncRun(syncRunRow),
+    columns: ncentralRawSyncColumns,
+    rows,
+    summary: {
+      rowCount: rows.length,
+      companyCount: uniqueCount(rows, 'Customer') + uniqueUnmappedNcentralCustomerCount(rows),
+      agreementCount: uniqueCount(rows, 'Agreement'),
+      productCount: uniqueCount(rows, 'ProductCode'),
+    },
+  };
+}
+
+function mapNcentralSnapshotRow(row: NcentralSnapshotRow): RawSyncDetail {
+  const dimensions = recordFromJson(row.dimensions);
+
+  return {
+    Customer: row.customer_name,
+    Agreement: row.agreement_name,
+    NcentralCustomer: stringValue(dimensions.ncentralCustomerName),
+    DeviceId: primitiveValue(dimensions.ncentralDeviceId),
+    Hostname: stringValue(dimensions.hostname),
+    DeviceClass: stringValue(dimensions.deviceClass),
+    ProductKey: row.vendor_product_key,
+    ProductCode: row.product_code,
+    ProductName: row.product_name,
+    Quantity: numberValue(row.quantity) ?? 0,
+    ProductFilter: stringValue(dimensions.productFilterName),
+    OverlayTags: arrayValue(dimensions.overlayTags).join(', '),
+    LastCheckIn: stringValue(dimensions.lastApplianceCheckinTime),
+    OS: stringValue(dimensions.operatingSystem),
+    Site: stringValue(dimensions.siteName),
+    ExternalAccountId: row.external_account_id,
+    Mapped: Boolean(row.customer_name && row.agreement_name),
+    ObservedAt: isoDate(row.observed_at) ?? null,
+    RawPayload: compactJson(row.raw_payload),
+  };
 }
 
 export function isRawSyncIntegrationId(value: string | undefined): value is RawSyncIntegrationId {
@@ -338,4 +457,19 @@ function uniqueUnmappedCustomerCount(rows: RawSyncDetail[]) {
       .map((row) => row.CoveCustomer)
       .filter((value) => value !== null && value !== undefined && value !== ''),
   ).size;
+}
+
+function uniqueUnmappedNcentralCustomerCount(rows: RawSyncDetail[]) {
+  return new Set(
+    rows
+      .filter((row) => !row.Customer)
+      .map((row) => row.NcentralCustomer)
+      .filter((value) => value !== null && value !== undefined && value !== ''),
+  ).size;
+}
+
+function arrayValue(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
 }

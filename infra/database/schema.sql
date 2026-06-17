@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS vendor_account_mappings (
   external_account_id text NOT NULL,
   external_account_name text NOT NULL,
   customer_id uuid NOT NULL REFERENCES customers(id),
-  agreement_id uuid NOT NULL REFERENCES agreements(id),
+  agreement_id uuid REFERENCES agreements(id),
   mapping_status text NOT NULL DEFAULT 'approved',
   confidence text NOT NULL DEFAULT 'manual',
   match_score numeric(8, 4),
@@ -100,6 +100,22 @@ CREATE TABLE IF NOT EXISTS vendor_usage_overrides (
   active boolean NOT NULL DEFAULT true,
   reviewed_by text,
   reviewed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ncentral_filter_mappings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  filter_id text,
+  filter_name text NOT NULL,
+  mapping_type text NOT NULL,
+  vendor_product_key text,
+  display_name text NOT NULL,
+  tag_key text,
+  priority integer NOT NULL DEFAULT 100,
+  mapping_status text NOT NULL DEFAULT 'approved',
+  active boolean NOT NULL DEFAULT true,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -289,6 +305,17 @@ CREATE INDEX IF NOT EXISTS idx_vendor_product_mappings_vendor ON vendor_product_
 CREATE INDEX IF NOT EXISTS idx_vendor_usage_overrides_scope
   ON vendor_usage_overrides(vendor_id, customer_id, agreement_id, source_vendor_product_key)
   WHERE active;
+CREATE INDEX IF NOT EXISTS idx_ncentral_filter_mappings_active
+  ON ncentral_filter_mappings(mapping_type, vendor_product_key, tag_key)
+  WHERE active;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ncentral_filter_mappings_identity
+  ON ncentral_filter_mappings(
+    mapping_type,
+    coalesce(filter_id, ''),
+    filter_name,
+    coalesce(vendor_product_key, ''),
+    coalesce(tag_key, '')
+  );
 CREATE INDEX IF NOT EXISTS idx_vendor_reconciliation_adjustments_scope
   ON vendor_reconciliation_adjustments(vendor_id, customer_id, agreement_id, product_code, line_type)
   WHERE active;
@@ -304,6 +331,7 @@ ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS reviewed_by text;
 ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
 ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
 ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS match_evidence jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE vendor_account_mappings ALTER COLUMN agreement_id DROP NOT NULL;
 
 ALTER TABLE vendor_product_mappings DROP CONSTRAINT IF EXISTS vendor_product_mappings_vendor_id_vendor_product_key_key;
 ALTER TABLE vendor_product_mappings ADD COLUMN IF NOT EXISTS target_index integer NOT NULL DEFAULT 0;
@@ -320,6 +348,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_vendor_product_mappings_target
 ALTER TABLE vendor_usage_snapshots ADD COLUMN IF NOT EXISTS vendor_product_key text;
 CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_mapping
   ON vendor_usage_snapshots(vendor_id, external_account_id, vendor_product_key);
+
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_id text;
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_name text NOT NULL DEFAULT '';
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS mapping_type text NOT NULL DEFAULT 'overlay';
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS vendor_product_key text;
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS display_name text NOT NULL DEFAULT '';
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS tag_key text;
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS priority integer NOT NULL DEFAULT 100;
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS mapping_status text NOT NULL DEFAULT 'approved';
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 ALTER TABLE agreement_additions ADD COLUMN IF NOT EXISTS addition_status text NOT NULL DEFAULT 'Active';
 ALTER TABLE addition_history ADD COLUMN IF NOT EXISTS addition_status text NOT NULL DEFAULT 'Active';

@@ -135,6 +135,18 @@ async function run() {
   assert.equal(accountQueries[0]?.values?.[9], 'reviewer@example.com');
   assert.equal(accountQueries[0]?.values?.[11], true);
 
+  await updateAccountMapping(accountDatabase, 'cove', '2379364', {
+    status: 'approved',
+    customerId: 'customer-2',
+    externalAccountName: 'Ticket Only Customer',
+    reviewedBy: 'reviewer@example.com',
+  });
+
+  assert.equal(accountQueries.length, 2);
+  assert.equal(accountQueries[1]?.values?.[3], 'customer-2');
+  assert.equal(accountQueries[1]?.values?.[4], null);
+  assert.equal(accountQueries[1]?.values?.[11], true);
+
   const workflow = mappingWorkflowDatabase([
     {
       id: 'mapping-101',

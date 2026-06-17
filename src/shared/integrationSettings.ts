@@ -1,6 +1,7 @@
 export type IntegrationId =
   | 'connectwise'
   | 'cove'
+  | 'ncentral'
   | 'sentinelone'
   | 'proofpoint'
   | 'datto'
@@ -98,6 +99,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('partnerName', 'Partner Name', 'COVE_PARTNER_NAME'),
     ],
     scopes: ['devices.read', 'usage.read'],
+    syncFrequency: 'daily',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'ncentral',
+    displayName: 'N-able N-central',
+    category: 'RMM',
+    authMode: 'token',
+    description: 'Filter-driven managed server and workstation billing with custom overlay tags.',
+    endpoint: 'https://ncentral.example.com',
+    requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
+    requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'NCENTRAL_ENDPOINT', 'https://ncentral.example.com')],
+    scopes: ['device-filters.read', 'devices.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
   },

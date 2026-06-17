@@ -87,8 +87,7 @@ const pooledNoOverage = reconcileVendor({
   ],
 });
 const pooledNoOverageAddOn = pooledNoOverage.lines.find((line) => line.productCode === 'COVE-SERVER-STORAGE-ADDON');
-assert.equal(pooledNoOverageAddOn?.status, 'matched');
-assert.equal(pooledNoOverageAddOn?.proposedQuantity, 0);
+assert.equal(pooledNoOverageAddOn, undefined);
 
 const singleServerOverage = reconcileVendor({
   vendorId: 'cove',
@@ -131,8 +130,7 @@ assert.equal(missingCurrentServerLine?.delta, -1);
 const workstationStorage = matchedResult.lines.find(
   (line) => line.productCode === 'COVE-WORKSTATION' && line.lineType === 'usage-add-on',
 );
-assert.equal(workstationStorage?.status, 'not-billable');
-assert.equal(workstationStorage?.proposedQuantity, 0);
+assert.equal(workstationStorage, undefined);
 
 function withAdditionQuantity(
   additions: AgreementAddition[],

@@ -27,6 +27,13 @@ import {
   listUsageOverrides,
   type CreateUsageOverrideInput,
 } from '../mapping/usageOverridesService';
+import { NcentralClient, ncentralCredentialsFromSettings } from '../vendor/ncentral/client';
+import { assertNcentralReady } from '../vendor/ncentral/operations';
+import {
+  listNcentralFilterMappings,
+  upsertNcentralFilterMapping,
+  type UpsertNcentralFilterMappingInput,
+} from '../vendor/ncentral/filterMappings';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -48,6 +55,8 @@ type ProductMappingBody = {
 type UsageOverrideBody = CreateUsageOverrideInput & {
   reviewedBy?: string;
 };
+
+type NcentralFilterMappingBody = UpsertNcentralFilterMappingInput;
 
 export async function listMappingsHttp(
   request: HttpRequest,
@@ -439,6 +448,105 @@ export async function deactivateUsageOverrideHttp(
   }
 }
 
+export async function listNcentralFiltersHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (integrationId !== 'ncentral') {
+    return jsonResponse(400, { error: 'Live filter listing is only available for N-central.' });
+  }
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const provider = createIntegrationSettingsProvider({
+    loadLocalEnv: true,
+    metadataReader: repositoryContext.repository,
+  });
+
+  try {
+    const settings = await provider.getIntegrationSettings('ncentral');
+    assertNcentralReady(settings);
+    const client = new NcentralClient(ncentralCredentialsFromSettings(settings));
+    const pageSize = boundedInteger(request.query.get('pageSize'), 500, 1, 1000);
+    const maxPages = boundedInteger(request.query.get('maxPages'), 20, 1, 100);
+    const filters = await client.listDeviceFilters({ pageSize, maxPages });
+
+    return jsonResponse(200, {
+      integrationId: 'ncentral',
+      filters,
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to list N-central filters.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listNcentralFilterMappingsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (integrationId !== 'ncentral') {
+    return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
+  }
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'N-central filter mappings need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId: 'ncentral',
+      mappings: await listNcentralFilterMappings(repositoryContext.pool),
+    });
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load N-central filter mappings.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertNcentralFilterMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (integrationId !== 'ncentral') {
+    return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as NcentralFilterMappingBody;
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'N-central filter mapping updates need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId: 'ncentral',
+      mapping: await upsertNcentralFilterMapping(repositoryContext.pool, body),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save N-central filter mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 app.http('listMappings', {
   methods: ['GET'],
   authLevel: 'function',
@@ -507,6 +615,27 @@ app.http('deactivateUsageOverride', {
   authLevel: 'function',
   route: 'mappings/{vendorId}/overrides/{overrideId}/deactivate',
   handler: deactivateUsageOverrideHttp,
+});
+
+app.http('listNcentralFilters', {
+  methods: ['GET'],
+  authLevel: 'function',
+  route: 'mappings/{vendorId}/ncentral-filters',
+  handler: listNcentralFiltersHttp,
+});
+
+app.http('listNcentralFilterMappings', {
+  methods: ['GET'],
+  authLevel: 'function',
+  route: 'mappings/{vendorId}/filter-mappings',
+  handler: listNcentralFilterMappingsHttp,
+});
+
+app.http('upsertNcentralFilterMapping', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'function',
+  route: 'mappings/{vendorId}/filter-mappings',
+  handler: upsertNcentralFilterMappingHttp,
 });
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {

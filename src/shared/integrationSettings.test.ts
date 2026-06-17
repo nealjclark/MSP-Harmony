@@ -59,4 +59,20 @@ const registryValidation = validateIntegrationRegistry([
 const coveValidation = registryValidation.find((validation) => validation.integrationId === 'cove');
 assert.equal(coveValidation?.configuredStatus, 'connected');
 
+const ncentral = getIntegrationSettingsDefinition('ncentral');
+assert.ok(ncentral);
+
+const connectedNcentral = validateIntegrationSettings(ncentral, {
+  integrationId: 'ncentral',
+  nonSecrets: {
+    endpoint: 'https://ncentral.example.com',
+  },
+  availableKeyVaultSecrets: ['mspharmony-ncentral-api-token'],
+  lastTestResult: 'success',
+});
+
+assert.equal(connectedNcentral.configuredStatus, 'connected');
+assert.deepEqual(connectedNcentral.missingSecrets, []);
+assert.deepEqual(connectedNcentral.missingNonSecrets, []);
+
 console.log('integration settings tests passed');

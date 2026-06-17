@@ -1,5 +1,6 @@
 import type { IntegrationId } from '../../shared/integrationSettings';
 import { defaultCoveProductMappings, type CoveProductMappingKey } from '../vendor/cove/rules';
+import { defaultNcentralProductMappings } from '../vendor/ncentral/rules';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -139,8 +140,8 @@ type AccountMappingRow = {
   external_account_name: string;
   customer_id: string;
   customer_name: string;
-  agreement_id: string;
-  agreement_name: string;
+  agreement_id: string | null;
+  agreement_name: string | null;
   mapping_status: MappingStatus;
   confidence: MappingConfidence;
   match_score: string | number | null;
@@ -257,6 +258,48 @@ const coveProductClasses: ProductClass[] = [
   },
 ];
 
+const ncentralProductClasses: ProductClass[] = [
+  {
+    vendorProductKey: 'ncentral-physical-server',
+    vendorProductName: 'N-central Managed Physical Server',
+    searchTerms: ['ncentral physical server managed server', 'managed physical server'],
+    requiredTerms: ['server'],
+    excludedTerms: ['virtual', 'workstation', 'laptop', 'desktop'],
+    priority: 3,
+    defaultTarget: {
+      connectwiseProductCode: defaultNcentralProductMappings['ncentral-physical-server'].productCode,
+      connectwiseProductName: defaultNcentralProductMappings['ncentral-physical-server'].productName,
+      unitPrice: defaultNcentralProductMappings['ncentral-physical-server'].unitPrice?.amount,
+    },
+  },
+  {
+    vendorProductKey: 'ncentral-virtual-server',
+    vendorProductName: 'N-central Managed Virtual Server',
+    searchTerms: ['ncentral virtual server managed server', 'managed virtual server vm'],
+    requiredTerms: ['server'],
+    excludedTerms: ['physical', 'workstation', 'laptop', 'desktop'],
+    priority: 2,
+    defaultTarget: {
+      connectwiseProductCode: defaultNcentralProductMappings['ncentral-virtual-server'].productCode,
+      connectwiseProductName: defaultNcentralProductMappings['ncentral-virtual-server'].productName,
+      unitPrice: defaultNcentralProductMappings['ncentral-virtual-server'].unitPrice?.amount,
+    },
+  },
+  {
+    vendorProductKey: 'ncentral-workstation',
+    vendorProductName: 'N-central Managed Workstation',
+    searchTerms: ['ncentral workstation laptop desktop managed workstation', 'managed workstation'],
+    requiredTerms: ['workstation'],
+    excludedTerms: ['server', 'virtual', 'physical'],
+    priority: 1,
+    defaultTarget: {
+      connectwiseProductCode: defaultNcentralProductMappings['ncentral-workstation'].productCode,
+      connectwiseProductName: defaultNcentralProductMappings['ncentral-workstation'].productName,
+      unitPrice: defaultNcentralProductMappings['ncentral-workstation'].unitPrice?.amount,
+    },
+  },
+];
+
 export async function listMappingState(database: Queryable, vendorId: IntegrationId): Promise<MappingState> {
   const [accountMappings, accountCandidates, productMappings, productCandidates, unmappedSnapshots, customerOptions] = await Promise.all([
     listAccountMappings(database, vendorId),
@@ -359,7 +402,7 @@ export async function approveSuggestedAccountMappings(
       continue;
     }
 
-    if (candidate.status !== 'approved' || !candidate.customerId || !candidate.agreementId) {
+    if (candidate.status !== 'approved' || !candidate.customerId) {
       continue;
     }
 
@@ -408,8 +451,8 @@ export async function updateAccountMapping(
     return;
   }
 
-  if (!input.customerId || !input.agreementId) {
-    throw new Error('Approving an account mapping requires customerId and agreementId.');
+  if (!input.customerId) {
+    throw new Error('Approving an account mapping requires customerId.');
   }
 
   const sourceName = input.externalAccountName ?? (await loadExternalAccountName(database, vendorId, externalAccountId));
@@ -826,7 +869,7 @@ function compareProductCandidates(left: ProductMappingCandidate, right: ProductM
 }
 
 function productClassPriority(vendorProductKey: string) {
-  return coveProductClasses.find((productClass) => productClass.vendorProductKey === vendorProductKey)?.priority ?? 0;
+  return productClassesForVendorProductKey(vendorProductKey)?.priority ?? 0;
 }
 
 export function normalizeEntityName(value: string) {
@@ -907,7 +950,7 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
        vendor_account_mappings.match_evidence
      from vendor_account_mappings
      inner join customers on customers.id = vendor_account_mappings.customer_id
-     inner join agreements on agreements.id = vendor_account_mappings.agreement_id
+     left join agreements on agreements.id = vendor_account_mappings.agreement_id
      where vendor_account_mappings.vendor_id = $1
      order by vendor_account_mappings.mapping_status, vendor_account_mappings.external_account_name`,
     [vendorId],
@@ -978,6 +1021,7 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
        external_account_id,
        coalesce(
          max(nullif(dimensions->>'coveCustomerName', '')),
+         max(nullif(dimensions->>'ncentralCustomerName', '')),
          max(nullif(dimensions->>'customerName', '')),
          external_account_id
        ) as external_account_name,
@@ -1110,8 +1154,8 @@ async function upsertAccountMapping(
     reviewedBy?: string;
   },
 ) {
-  if (!input.customerId || !input.agreementId) {
-    throw new Error('Account mapping requires customerId and agreementId.');
+  if (!input.customerId) {
+    throw new Error('Account mapping requires customerId.');
   }
 
   await database.query(
@@ -1153,7 +1197,7 @@ async function upsertAccountMapping(
       input.externalAccountId,
       input.externalAccountName,
       input.customerId,
-      input.agreementId,
+      input.agreementId ?? null,
       input.status,
       input.confidence,
       input.matchScore,
@@ -1167,8 +1211,9 @@ async function upsertAccountMapping(
 
 async function loadExternalAccountName(database: Queryable, vendorId: IntegrationId, externalAccountId: string) {
   const result = await database.query<{ external_account_name: string | null }>(
-    `select coalesce(
+     `select coalesce(
        max(nullif(dimensions->>'coveCustomerName', '')),
+       max(nullif(dimensions->>'ncentralCustomerName', '')),
        max(nullif(dimensions->>'customerName', '')),
        external_account_id
      ) as external_account_name
@@ -1184,6 +1229,21 @@ async function loadExternalAccountName(database: Queryable, vendorId: Integratio
 
 async function setMissingVendorProductKeys(database: Queryable, vendorId: IntegrationId) {
   if (vendorId !== 'cove') {
+    if (vendorId !== 'ncentral') {
+      return;
+    }
+
+    await database.query(
+      `update vendor_usage_snapshots
+       set vendor_product_key = case
+         when dimensions->>'ncentralProductType' = 'physical-server' then 'ncentral-physical-server'
+         when dimensions->>'ncentralProductType' = 'virtual-server' then 'ncentral-virtual-server'
+         when dimensions->>'ncentralProductType' = 'workstation' then 'ncentral-workstation'
+         else vendor_product_key
+       end
+       where vendor_id = 'ncentral'
+         and vendor_product_key is null`,
+    );
     return;
   }
 
@@ -1338,7 +1398,17 @@ function productClassesForVendor(vendorId: IntegrationId): ProductClass[] {
     return coveProductClasses;
   }
 
+  if (vendorId === 'ncentral') {
+    return ncentralProductClasses;
+  }
+
   return [];
+}
+
+function productClassesForVendorProductKey(vendorProductKey: string) {
+  return [...coveProductClasses, ...ncentralProductClasses].find(
+    (productClass) => productClass.vendorProductKey === vendorProductKey,
+  );
 }
 
 function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
@@ -1349,8 +1419,8 @@ function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
     externalAccountName: row.external_account_name,
     customerId: row.customer_id,
     customerName: row.customer_name,
-    agreementId: row.agreement_id,
-    agreementName: row.agreement_name,
+    agreementId: row.agreement_id ?? undefined,
+    agreementName: row.agreement_name ?? undefined,
     status: row.mapping_status,
     confidence: row.confidence,
     matchScore: nullableNumber(row.match_score) ?? 0,

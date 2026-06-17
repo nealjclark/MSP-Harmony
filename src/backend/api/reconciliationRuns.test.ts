@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { reconcileVendorFromDatabase } from './reconciliationRuns';
+import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from './reconciliationRuns';
 import type { Queryable } from '../vendor/cove/operations';
 
 const syncRunId = '00000000-0000-0000-0000-000000000001';
@@ -33,6 +33,23 @@ const database: Queryable = {
 
     if (sql.includes('from vendor_product_mappings')) {
       return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from agreement_additions') && sql.includes('connectwise_addition_id')) {
+      return {
+        rows: [
+          {
+            id: 'addition-server',
+            connectwise_addition_id: 'cw-addition-1',
+            product_code: 'COVE-SERVER',
+            product_name: 'Cove Server Backup',
+            quantity: '1',
+            unit_price: '120.50',
+            addition_status: 'Active',
+            updated_at: new Date('2026-06-15T12:00:00Z'),
+          },
+        ] as T[],
+      };
     }
 
     if (sql.includes('from agreement_additions')) {
@@ -72,6 +89,20 @@ async function run() {
         query.sql.includes("agreement_additions.raw_payload->>'additionStatus'") &&
         query.sql.includes("agreement_additions.raw_payload->>'agreementStatus'") &&
         query.sql.includes('inner join agreements'),
+    ),
+    true,
+  );
+
+  const activeAdditions = await listActiveAgreementAdditions(database, '22222222-2222-2222-2222-222222222222');
+  assert.equal(activeAdditions[0]?.connectWiseAdditionId, 'cw-addition-1');
+  assert.equal(activeAdditions[0]?.unitPrice?.amount, 120.5);
+  assert.equal(activeAdditions[0]?.additionStatus, 'Active');
+  assert.equal(
+    queries.some(
+      (query) =>
+        query.sql.includes('connectwise_addition_id') &&
+        query.sql.includes("agreement_additions.raw_payload->>'additionStatus'") &&
+        query.sql.includes('where agreement_additions.agreement_id = $1::uuid'),
     ),
     true,
   );

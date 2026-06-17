@@ -95,31 +95,6 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
       });
     }
 
-    if (rule.allowance?.kind === 'unlimited' && snapshots.length > 0) {
-      lines.push({
-        id: `${agreementKey}|${rule.productCode}|allowance`,
-        vendorId: request.vendorId,
-        clientId,
-        agreementId,
-        productCode: rule.productCode,
-        productName: `${rule.productName} ${rule.allowance.metric}`,
-        lineType: 'usage-add-on',
-        ruleId: rule.id,
-        sourceQuantity: sumMetric(snapshots, rule.allowance.metric),
-        agreementQuantity: 0,
-        proposedQuantity: 0,
-        delta: 0,
-        unit: rule.allowance.unit,
-        financialImpact: { ...zeroUsd },
-        status: 'not-billable',
-        reason: `${rule.productName} has unlimited ${rule.allowance.metric}; no storage add-on is generated.`,
-        evidence: [
-          { label: 'Usage metric', value: rule.allowance.metric },
-          { label: 'Measured usage', value: sumMetric(snapshots, rule.allowance.metric) },
-        ],
-      });
-    }
-
     if (rule.allowance?.kind === 'included' && rule.addOn) {
       const sourceQuantity = sumMetric(snapshots, rule.addOn.metric);
       const proposedAddOnQuantity = calculateAddOnQuantity(snapshots, rule.allowance.metric, rule.allowance.includedQuantity, rule.allowance.scope, rule.addOn.incrementQuantity, rule.addOn.roundOverage);
@@ -127,7 +102,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
       const agreementQuantity = sumAdditions(addOnAdditions);
       const delta = proposedAddOnQuantity - agreementQuantity;
 
-      if (snapshots.length === 0 && addOnAdditions.length === 0) {
+      if ((snapshots.length === 0 && addOnAdditions.length === 0) || (proposedAddOnQuantity === 0 && agreementQuantity === 0)) {
         return;
       }
 

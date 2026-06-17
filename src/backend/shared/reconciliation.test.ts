@@ -23,13 +23,11 @@ assert.equal(serverStorageAddOn?.financialImpact.amount, 75);
 const workstationStorage = result.lines.find(
   (line) => line.productCode === 'COVE-WORKSTATION' && line.lineType === 'usage-add-on',
 );
-assert.equal(workstationStorage?.status, 'not-billable');
-assert.equal(workstationStorage?.proposedQuantity, 0);
-assert.equal(workstationStorage?.financialImpact.amount, 0);
+assert.equal(workstationStorage, undefined);
 
 assert.equal(result.totals.matched, 2);
 assert.equal(result.totals.needsReview, 1);
-assert.equal(result.totals.notBillable, 1);
+assert.equal(result.totals.notBillable, 0);
 assert.equal(result.totals.financialImpact.amount, 75);
 
 console.log('backend reconciliation tests passed');

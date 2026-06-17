@@ -8,6 +8,8 @@ import { syncConnectWiseAgreementReport, testConnectWiseConnection } from '../co
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 import { CoveApiError } from '../vendor/cove/client';
 import { syncCoveUsageSnapshots, testCoveConnection } from '../vendor/cove/operations';
+import { NcentralApiError } from '../vendor/ncentral/client';
+import { syncNcentralUsageSnapshots, testNcentralConnection } from '../vendor/ncentral/operations';
 
 loadDotEnv({ override: false });
 
@@ -48,7 +50,7 @@ export async function testIntegrationHttp(
 ): Promise<HttpResponseInit> {
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
-  if (integrationId !== 'connectwise' && integrationId !== 'cove') {
+  if (integrationId !== 'connectwise' && integrationId !== 'cove' && integrationId !== 'ncentral') {
     return jsonResponse(501, {
       error: `Live test is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
     });
@@ -91,19 +93,32 @@ export async function testIntegrationHttp(
       });
     }
 
-    const result = await testCoveConnection({ provider });
+    if (integrationId === 'cove') {
+      const result = await testCoveConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        partnerId: result.partnerId,
+        username: result.username,
+      });
+    }
+
+    const result = await testNcentralConnection({ provider });
 
     await saveTestResult('success');
 
     return jsonResponse(200, {
       integrationId: result.integrationId,
       testedAt: result.testedAt,
-      partnerId: result.partnerId,
-      username: result.username,
+      filterCount: result.filterCount,
+      sampleFilters: result.sampleFilters,
     });
   } catch (error) {
     await saveTestResult('failure').catch(() => undefined);
-    return integrationErrorResponse(error, `${integrationId === 'cove' ? 'Cove' : 'ConnectWise'} test failed.`);
+    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} test failed.`);
   } finally {
     await repositoryContext.close();
   }
@@ -115,7 +130,7 @@ export async function syncIntegrationHttp(
 ): Promise<HttpResponseInit> {
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
-  if (integrationId !== 'connectwise' && integrationId !== 'cove') {
+  if (integrationId !== 'connectwise' && integrationId !== 'cove' && integrationId !== 'ncentral') {
     return jsonResponse(501, {
       error: `Live sync is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
     });
@@ -124,7 +139,7 @@ export async function syncIntegrationHttp(
   const repositoryContext = createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool || !repositoryContext.repository) {
     return jsonResponse(400, {
-      error: `${integrationId === 'cove' ? 'Cove' : 'ConnectWise'} sync needs PostgreSQL settings before it can store sync data.`,
+      error: `${integrationDisplayName(integrationId)} sync needs PostgreSQL settings before it can store sync data.`,
       missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
     });
   }
@@ -150,19 +165,33 @@ export async function syncIntegrationHttp(
       });
     }
 
-    const result = await syncCoveUsageSnapshots({
+    if (integrationId === 'cove') {
+      const result = await syncCoveUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: safePositiveInteger(body.pageSize, 10000),
+        maxPages: safePositiveInteger(body.maxPages, 1),
+      });
+
+      return jsonResponse(200, {
+        integrationId: 'cove',
+        ...result,
+      });
+    }
+
+    const result = await syncNcentralUsageSnapshots({
       pool: repositoryContext.pool,
       provider,
-      pageSize: safePositiveInteger(body.pageSize, 10000),
-      maxPages: safePositiveInteger(body.maxPages, 1),
+      pageSize: safePositiveInteger(body.pageSize, 500),
+      maxPages: safePositiveInteger(body.maxPages, 100),
     });
 
     return jsonResponse(200, {
-      integrationId: 'cove',
+      integrationId: 'ncentral',
       ...result,
     });
   } catch (error) {
-    return integrationErrorResponse(error, `${integrationId === 'cove' ? 'Cove' : 'ConnectWise'} sync failed.`);
+    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} sync failed.`);
   } finally {
     await repositoryContext.close();
   }
@@ -205,9 +234,23 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof NcentralApiError) {
+    return jsonResponse(502, {
+      error: error.message,
+      status: error.status,
+      responseText: error.responseText,
+    });
+  }
+
   return jsonResponse(400, {
     error: error instanceof Error ? error.message : fallback,
   });
+}
+
+function integrationDisplayName(integrationId: IntegrationId | undefined) {
+  if (integrationId === 'cove') return 'Cove';
+  if (integrationId === 'ncentral') return 'N-central';
+  return 'ConnectWise';
 }
 
 function safePositiveInteger(value: number | undefined, fallback: number) {

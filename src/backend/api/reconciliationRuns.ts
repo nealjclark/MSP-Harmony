@@ -3,6 +3,7 @@ import type {
   AgreementAddition,
   DimensionMap,
   DimensionValue,
+  MoneyAmount,
   QuantityRule,
   ReconciliationLine,
   ReconciliationResult,
@@ -17,6 +18,7 @@ import {
 } from './reconciliationAdjustments';
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
+import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -43,10 +45,12 @@ type AdditionRow = {
   id: string;
   customer_id: string;
   agreement_id: string;
+  connectwise_addition_id?: string;
   product_code: string;
   product_name: string;
   quantity: string | number;
   unit_price: string | number | null;
+  addition_status?: string;
   updated_at: Date | string | null;
 };
 
@@ -118,6 +122,17 @@ export type DatabaseReconciliationResult = Omit<ReconciliationResult, 'lines'> &
   productOptions: ReconciliationProductOption[];
 };
 
+export type ActiveAgreementAddition = {
+  id: string;
+  connectWiseAdditionId: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice?: MoneyAmount;
+  additionStatus: string;
+  updatedAt?: string;
+};
+
 export async function reconcileVendorFromDatabase(
   database: Queryable,
   vendorId: string,
@@ -173,6 +188,36 @@ export async function reconcileVendorFromDatabase(
   };
 }
 
+export async function listActiveAgreementAdditions(
+  database: Queryable,
+  agreementId: string,
+): Promise<ActiveAgreementAddition[]> {
+  const result = await database.query<AdditionRow>(
+    `select
+       agreement_additions.id,
+       agreement_additions.connectwise_addition_id,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       agreement_additions.quantity,
+       agreement_additions.unit_price,
+       agreement_additions.addition_status,
+       agreement_additions.updated_at
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.agreement_id = $1::uuid
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     order by agreement_additions.product_name, agreement_additions.product_code, agreement_additions.connectwise_addition_id`,
+    [agreementId],
+  );
+
+  return result.rows.map(mapActiveAgreementAdditionRow);
+}
+
 function totalsForLines(lines: ReconciliationLine[]) {
   return lines.reduce(
     (summary, line) => {
@@ -197,6 +242,10 @@ function totalsForLines(lines: ReconciliationLine[]) {
 async function loadRuleSet(database: Queryable, vendorId: string): Promise<VendorRuleSet> {
   if (vendorId === 'cove') {
     return loadCoveRuleSet(database);
+  }
+
+  if (vendorId === 'ncentral') {
+    return loadNcentralRuleSet(database);
   }
 
   const ruleSet = getVendorRuleSet(vendorId);
@@ -506,6 +555,25 @@ function mapAdditionRow(row: AdditionRow): AgreementAddition {
             amount: numericValue(row.unit_price),
             currency: 'USD',
           },
+    updatedAt: isoDate(row.updated_at),
+  };
+}
+
+function mapActiveAgreementAdditionRow(row: AdditionRow): ActiveAgreementAddition {
+  return {
+    id: row.id,
+    connectWiseAdditionId: row.connectwise_addition_id ?? row.id,
+    productCode: row.product_code,
+    productName: row.product_name,
+    quantity: numericValue(row.quantity),
+    unitPrice:
+      row.unit_price === null
+        ? undefined
+        : {
+            amount: numericValue(row.unit_price),
+            currency: 'USD',
+          },
+    additionStatus: row.addition_status ?? 'Active',
     updatedAt: isoDate(row.updated_at),
   };
 }

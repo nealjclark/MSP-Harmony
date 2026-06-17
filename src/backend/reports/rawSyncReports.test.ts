@@ -25,12 +25,13 @@ async function run() {
       }
 
       if (sql.includes('from sync_runs') && sql.includes('where integration_id = $1')) {
-        assert.deepEqual(values, ['sentinelone', 25]);
+        assert.ok(values?.[0] === 'sentinelone' || values?.[0] === 'microsoft-365');
+        assert.equal(values?.[1], 25);
 
         return {
           rows: [
             {
-              id: 'sentinel-sync-1',
+              id: values?.[0] === 'sentinelone' ? 'sentinel-sync-1' : `${values?.[0]}-sync-1`,
               started_at: new Date('2026-06-15T13:00:00Z'),
               completed_at: new Date('2026-06-15T13:01:00Z'),
               status: 'complete',
@@ -152,6 +153,9 @@ async function run() {
 
   const genericRuns = await listRawSyncRuns(database, 'sentinelone');
   assert.equal(genericRuns[0]?.id, 'sentinel-sync-1');
+
+  const microsoftRuns = await listRawSyncRuns(database, 'microsoft-365');
+  assert.equal(microsoftRuns[0]?.id, 'microsoft-365-sync-1');
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');
