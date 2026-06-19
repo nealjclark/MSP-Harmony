@@ -58,7 +58,8 @@ export function buildNcentralRuleSet(
         billableUnit: productType === 'workstation' ? 'workstation' : 'server',
         dimensions: { ncentralProductType: productType },
         unitPrice: mapping.unitPrice,
-        notes: `${mapping.productName} is counted from its configured N-central product filter.`,
+        requiresExistingAgreementProduct: true,
+        notes: `${mapping.productName} is counted from its configured N-central product filter when the agreement already has this product.`,
       };
     }),
   };

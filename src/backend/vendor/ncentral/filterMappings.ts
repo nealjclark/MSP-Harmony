@@ -83,15 +83,6 @@ const defaultFilterMappings: Array<Omit<UpsertNcentralFilterMappingInput, 'id'>>
     active: true,
   },
   {
-    filterName: 'Agent Check-In greater than 30 days',
-    mappingType: 'overlay',
-    displayName: 'Stale 30+ days offline',
-    tagKey: 'stale-30-days',
-    priority: 100,
-    status: 'approved',
-    active: true,
-  },
-  {
     filterName: 'Billing - DoNotBill Devices',
     mappingType: 'overlay',
     displayName: 'Do not bill',
@@ -103,6 +94,8 @@ const defaultFilterMappings: Array<Omit<UpsertNcentralFilterMappingInput, 'id'>>
 ];
 
 export async function ensureDefaultNcentralFilterMappings(database: Queryable) {
+  await ensureNcentralFilterMappingStorage(database);
+
   for (const mapping of defaultFilterMappings) {
     await database.query(
       `insert into ncentral_filter_mappings (
@@ -123,7 +116,6 @@ export async function ensureDefaultNcentralFilterMappings(database: Queryable) {
          from ncentral_filter_mappings
          where mapping_type = $3
            and filter_name = $2
-           and coalesce(filter_id, '') = coalesce($1, '')
            and coalesce(vendor_product_key, '') = coalesce($4, '')
            and coalesce(tag_key, '') = coalesce($6, '')
        )`,
@@ -172,6 +164,7 @@ export async function upsertNcentralFilterMapping(
   input: UpsertNcentralFilterMappingInput,
 ): Promise<NcentralFilterMapping> {
   validateFilterMapping(input);
+  await ensureNcentralFilterMappingStorage(database);
 
   if (input.id) {
     const result = await database.query<NcentralFilterMappingRow>(
@@ -279,6 +272,8 @@ export async function updateNcentralMappingResolvedFilterId(
   filterId: string,
   rawPayload: unknown,
 ) {
+  await ensureNcentralFilterMappingStorage(database);
+
   await database.query(
     `update ncentral_filter_mappings
      set filter_id = $2,
@@ -287,6 +282,80 @@ export async function updateNcentralMappingResolvedFilterId(
      where id = $1
        and (filter_id is null or filter_id <> $2)`,
     [mappingId, filterId, JSON.stringify(rawPayload ?? {})],
+  );
+}
+
+async function ensureNcentralFilterMappingStorage(database: Queryable) {
+  await database.query(`
+    create table if not exists ncentral_filter_mappings (
+      id uuid primary key default gen_random_uuid(),
+      filter_id text,
+      filter_name text not null,
+      mapping_type text not null,
+      vendor_product_key text,
+      display_name text not null,
+      tag_key text,
+      priority integer not null default 100,
+      mapping_status text not null default 'approved',
+      active boolean not null default true,
+      raw_payload jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  await database.query(`alter table ncentral_filter_mappings add column if not exists filter_id text`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists filter_name text not null default ''`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists mapping_type text not null default 'overlay'`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists vendor_product_key text`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists display_name text not null default ''`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists tag_key text`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists priority integer not null default 100`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists mapping_status text not null default 'approved'`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists active boolean not null default true`);
+  await database.query(`alter table ncentral_filter_mappings add column if not exists raw_payload jsonb not null default '{}'::jsonb`);
+
+  await cleanupNcentralFilterMappings(database);
+
+  await database.query(`
+    create index if not exists idx_ncentral_filter_mappings_active
+      on ncentral_filter_mappings(mapping_type, vendor_product_key, tag_key)
+      where active
+  `);
+  await database.query(`drop index if exists ux_ncentral_filter_mappings_identity`);
+  await database.query(`
+    create unique index if not exists ux_ncentral_filter_mappings_identity
+      on ncentral_filter_mappings(
+        mapping_type,
+        filter_name,
+        coalesce(vendor_product_key, ''),
+        coalesce(tag_key, '')
+      )
+  `);
+}
+
+async function cleanupNcentralFilterMappings(database: Queryable) {
+  await database.query(
+    `delete from ncentral_filter_mappings
+     where tag_key = 'stale-30-days'
+        or filter_name = 'Agent Check-In greater than 30 days'
+        or display_name = 'Stale 30+ days offline'`,
+  );
+
+  await database.query(
+    `with ranked as (
+       select
+         id,
+         row_number() over (
+           partition by mapping_type, filter_name, coalesce(vendor_product_key, ''), coalesce(tag_key, '')
+           order by active desc, (filter_id is not null) desc, updated_at desc, id
+         ) as row_number
+       from ncentral_filter_mappings
+     )
+     delete from ncentral_filter_mappings
+     using ranked
+     where ncentral_filter_mappings.id = ranked.id
+       and ranked.row_number > 1`,
   );
 }
 

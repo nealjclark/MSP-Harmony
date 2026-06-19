@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ConnectWiseClient, connectWiseCredentialsFromSettings } from './client';
+import { ConnectWiseApiError, ConnectWiseClient, connectWiseCredentialsFromSettings } from './client';
 import type { IntegrationRuntimeSettings } from '../config/settingsProvider';
 import type { IntegrationSettingsDefinition, IntegrationSettingsValidation } from '../../shared/integrationSettings';
 
@@ -80,6 +80,23 @@ async function run() {
       }),
     /mspharmony-connectwise-public-key/,
   );
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: 'ApiFindCondition', message: 'Enum value supplied was invalid' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  await assert.rejects(
+    () => client.listAgreements({ conditions: 'AgreementStatus Not Like "Canceled"' }),
+    (error: unknown) => {
+      assert.equal(error instanceof ConnectWiseApiError, true);
+      assert.match((error as Error).message, /HTTP 400/);
+      assert.match((error as Error).message, /Enum value supplied was invalid/);
+      return true;
+    },
+  );
+  globalThis.fetch = originalFetch;
 
   console.log('connectwise client tests passed');
 }

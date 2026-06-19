@@ -80,6 +80,7 @@ async function run() {
   assert.equal(addOnLine?.status, 'needs-review');
   assert.equal(addOnLine?.writeAction, 'create-addition');
   assert.equal(queries.some((query) => query.sql.includes('vendor_usage_snapshots')), true);
+  assert.equal(queries.some((query) => query.sql.includes('vendor_account_mappings')), true);
   assert.equal(queries.some((query) => query.sql.includes('approved_product_mappings')), true);
   assert.equal(queries.some((query) => query.sql.includes('vendor_usage_overrides')), true);
   assert.equal(queries.some((query) => query.sql.includes('agreement_additions')), true);

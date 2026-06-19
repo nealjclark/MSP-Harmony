@@ -147,6 +147,7 @@ async function run() {
   assert.equal(details?.rows[1]?.CoveCustomer, 'Unmapped Cove Client');
   assert.equal(details?.rows[1]?.Mapped, false);
   assert.equal(queries.some((query) => query.sql.includes('vendor_usage_snapshots')), true);
+  assert.equal(queries.some((query) => query.sql.includes('vendor_account_mappings')), true);
 
   assert.equal(isRawSyncIntegrationId('pax8'), true);
   assert.equal(isRawSyncIntegrationId('unknown'), false);

@@ -40,10 +40,10 @@ export type ConnectWiseAgreementReportSyncResult = ConnectWiseCompanySyncResult 
 };
 
 const REPORT_CUSTOMER_CONDITION = '(status/name like "Active" OR Status/Name like "Special Info") AND isVendorFlag=False';
-const REPORT_AGREEMENT_CONDITION =
-  'AgreementStatus NOT Like "Expired" AND AgreementStatus Not Like "Cancelled" AND AgreementStatus Not Like "Canceled" AND AgreementStatus Not Like "Inactive"';
-const REPORT_ADDITION_CONDITION =
-  'AgreementStatus not like "Expired" AND AgreementStatus not like "Cancelled" AND AgreementStatus not like "Canceled" AND AgreementStatus Not Like "Inactive" AND AdditionStatus Not Like "Expired" AND AdditionStatus Not Like "Cancelled" AND AdditionStatus Not Like "Canceled" AND AdditionStatus Not Like "Inactive"';
+export const REPORT_AGREEMENT_CONDITION =
+  'AgreementStatus NOT Like "Expired" AND AgreementStatus Not Like "Cancelled" AND AgreementStatus Not Like "Inactive"';
+export const REPORT_ADDITION_CONDITION =
+  'AgreementStatus not like "Expired" AND AgreementStatus not like "Cancelled" AND AgreementStatus Not Like "Inactive" AND AdditionStatus Not Like "Expired" AND AdditionStatus Not Like "Cancelled" AND AdditionStatus Not Like "Inactive"';
 const INACTIVE_STATUS_PATTERN = /expired|cancelled|canceled|inactive/i;
 
 export async function testConnectWiseConnection(

@@ -109,13 +109,13 @@ const database: Queryable = {
             updated_at: '2026-06-16T00:00:00.000Z',
           } as T,
           {
-            id: 'filter-stale',
+            id: 'filter-donotbill',
             filter_id: '20',
-            filter_name: 'Agent Check-In greater than 30 days',
+            filter_name: 'Billing - DoNotBill Devices',
             mapping_type: 'overlay',
             vendor_product_key: null,
-            display_name: 'Stale 30+ days',
-            tag_key: 'stale-30-days',
+            display_name: 'Do not bill',
+            tag_key: 'do-not-bill',
             priority: 100,
             mapping_status: 'approved',
             active: true,
@@ -153,7 +153,7 @@ async function run() {
       return [
         { filterId: '10', filterName: 'Billing - Servers - Physical', raw: { filterId: '10' } },
         { filterId: '11', filterName: 'Billing - Workstations and Laptops', raw: { filterId: '11' } },
-        { filterId: '20', filterName: 'Agent Check-In greater than 30 days', raw: { filterId: '20' } },
+        { filterId: '20', filterName: 'Billing - DoNotBill Devices', raw: { filterId: '20' } },
       ];
     },
     async listDevicesByFilter(filterId: string) {
@@ -232,7 +232,7 @@ async function run() {
   assert.equal(syncResult.mappedSnapshots, 1);
   assert.equal(syncResult.unmappedSnapshots, 1);
   assert.equal(syncResult.productSnapshots['ncentral-physical-server'], 1);
-  assert.equal(syncResult.overlayMatches['stale-30-days'], 1);
+  assert.equal(syncResult.overlayMatches['do-not-bill'], 1);
   assert.equal(syncResult.detailEnrichedSnapshots, 1);
 
   const mappedServer = insertedSnapshots[0];
@@ -241,7 +241,7 @@ async function run() {
   assert.equal(mappedServer?.[3], '200');
   assert.equal(mappedServer?.[4], 'ncentral-physical-server');
   assert.equal(mappedServer?.[5], 'CW-MANAGED-SERVER');
-  assert.deepEqual(JSON.parse(String(mappedServer?.[8])).overlayTags, ['stale-30-days']);
+  assert.deepEqual(JSON.parse(String(mappedServer?.[8])).overlayTags, ['do-not-bill']);
   assert.equal(JSON.parse(String(mappedServer?.[8])).lastApplianceCheckinTime, '2026-06-16T12:00:00Z');
 
   const ruleSet = await loadNcentralRuleSet(database);

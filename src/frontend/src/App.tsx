@@ -401,7 +401,7 @@ type ProductCatalogSearchResponse = {
 };
 
 type DimensionValue = string | number | boolean | null | undefined;
-type DimensionMap = Record<string, DimensionValue>;
+type DimensionMap = Record<string, DimensionValue | Array<string | number | boolean>>;
 
 type UsageOverride = {
   id: string;
@@ -595,7 +595,7 @@ const syncRuns = [
 ];
 
 const workflow = [
-  { label: 'Cove data', value: 'Latest sync', icon: Database, state: 'done' },
+  { label: 'Vendor data', value: 'Latest sync', icon: Database, state: 'done' },
   { label: 'ConnectWise', value: 'Additions', icon: FileUp, state: 'done' },
   { label: 'Map products', value: '58 checks', icon: Link2, state: 'active' },
   { label: 'Client review', value: '6 groups', icon: Users, state: 'ready' },
@@ -632,7 +632,8 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
   },
 ];
 
-const vendors = ['All', 'Microsoft', 'SentinelOne', 'Pax8', 'Datto', 'Cove Backup'];
+const reconciliationVendorIds: IntegrationId[] = ['cove', 'ncentral'];
+const reconciliationVendors = ['All', 'Cove Data Protection', 'N-able N-central'];
 const noAgreementSyncValue = '__no_agreement_sync__';
 
 const integrationSettingsStates: IntegrationSettingsState[] = [];
@@ -1267,6 +1268,7 @@ function numberField(record: Record<string, unknown>, key: string) {
 }
 
 function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[] {
+  const sourceName = integrationName(run.vendorId);
   return run.lines.map((line) => {
     const customer = line.customerName ?? `Customer ${shortId(line.clientId)}`;
     const agreement = line.agreementName ?? `Agreement ${shortId(line.agreementId)}`;
@@ -1291,7 +1293,7 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       accountId: line.connectWiseCompanyId,
       customer,
       agreement,
-      vendor: integrationName(run.vendorId),
+      vendor: sourceName,
       product: line.productName,
       family: line.lineType === 'usage-add-on' ? 'Usage add-on' : 'Base count',
       serviceCode: line.productCode,
@@ -1307,9 +1309,9 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       reason: line.reason,
       status: line.status,
       recommendation: actionLabel,
-      lastSeen: run.syncRunId ? `Cove sync ${shortId(run.syncRunId)}` : 'No completed Cove sync',
+      lastSeen: run.syncRunId ? `${sourceName} sync ${shortId(run.syncRunId)}` : `No completed ${sourceName} sync`,
       audit: [
-        `Cove proposed quantity: ${line.proposedQuantity.toLocaleString()} ${line.unit}.`,
+        `${sourceName} proposed quantity: ${line.proposedQuantity.toLocaleString()} ${line.unit}.`,
         line.sourceQuantity !== line.proposedQuantity
           ? `Measured source usage: ${line.sourceQuantity.toLocaleString()}.`
           : undefined,
@@ -1332,6 +1334,7 @@ function App() {
   const [expandedClientNames, setExpandedClientNames] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [vendorFilter, setVendorFilter] = useState('All');
+  const [selectedReconciliationIntegrationId, setSelectedReconciliationIntegrationId] = useState<IntegrationId>('cove');
   const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
   const [productFilter, setProductFilter] = useState('All products');
   const [autoPost, setAutoPost] = useState(false);
@@ -1521,12 +1524,13 @@ function App() {
     return state;
   };
 
-  const loadCoveReconciliation = async () => {
+  const loadVendorReconciliation = async (integrationId: IntegrationId) => {
+    const sourceName = integrationName(integrationId);
     setReconciliationLoadState('loading');
-    setReconciliationMessage('Comparing latest Cove sync against ConnectWise additions...');
+    setReconciliationMessage(`Comparing latest ${sourceName} sync against ConnectWise additions...`);
 
     try {
-      const run = await fetchReconciliationRun('cove');
+      const run = await fetchReconciliationRun(integrationId);
       const nextIssues = reconcileIssuesFromRun(run);
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue = nextReviewIssues[0] ?? nextIssues[0];
@@ -1536,12 +1540,12 @@ function App() {
       setReconciliationLoadState('ready');
       setReconciliationMessage(
         nextReviewIssues.length > 0
-          ? `Found ${nextReviewIssues.length.toLocaleString()} Cove discrepanc${
+          ? `Found ${nextReviewIssues.length.toLocaleString()} ${sourceName} discrepanc${
               nextReviewIssues.length === 1 ? 'y' : 'ies'
-            } across ${nextIssues.length.toLocaleString()} product checks from ${(run.snapshotCount ?? 0).toLocaleString()} synced snapshots.`
+            } across ${nextIssues.length.toLocaleString()} product checks from ${(run.snapshotCount ?? 0).toLocaleString()} mapped snapshots.`
           : run.syncRunId
-            ? `No Cove discrepancies found in the latest sync (${(run.snapshotCount ?? 0).toLocaleString()} snapshots, ${nextIssues.length.toLocaleString()} product checks).`
-            : 'No completed Cove sync is available yet.',
+            ? `No ${sourceName} discrepancies found in the latest sync (${(run.snapshotCount ?? 0).toLocaleString()} mapped snapshots, ${nextIssues.length.toLocaleString()} product checks).`
+            : `No completed ${sourceName} sync is available yet.`,
       );
       return run;
     } catch (error) {
@@ -1549,7 +1553,7 @@ function App() {
       setReconciliationProductOptions([]);
       setExpandedClientNames([]);
       setReconciliationLoadState('failed');
-      setReconciliationMessage(error instanceof Error ? error.message : 'Unable to load Cove reconciliation.');
+      setReconciliationMessage(error instanceof Error ? error.message : `Unable to load ${sourceName} reconciliation.`);
       return null;
     }
   };
@@ -1569,7 +1573,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void loadCoveReconciliation();
+    void loadVendorReconciliation(selectedReconciliationIntegrationId);
   }, []);
 
   useEffect(() => {
@@ -1848,8 +1852,11 @@ function App() {
       if (integrationId === 'cove' && selectedRawSyncIntegrationId === 'cove') {
         await loadRawSyncRuns('cove');
       }
-      if (integrationId === 'cove') {
-        await loadCoveReconciliation();
+      if (integrationId === 'ncentral' && selectedRawSyncIntegrationId === 'ncentral') {
+        await loadRawSyncRuns('ncentral');
+      }
+      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+        await loadVendorReconciliation(integrationId);
       }
     } catch (error) {
       setIntegrationActionMessages((messages) => ({
@@ -1995,8 +2002,8 @@ function App() {
       await createUsageOverrideRequest(integrationId, payload);
       await loadUsageOverrides(integrationId);
       setMappingMessage('Saved usage override.');
-      if (integrationId === 'cove') {
-        await loadCoveReconciliation();
+      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+        await loadVendorReconciliation(integrationId);
       }
       return true;
     } catch (error) {
@@ -2015,8 +2022,8 @@ function App() {
       await deactivateUsageOverrideRequest(integrationId, overrideId);
       await loadUsageOverrides(integrationId);
       setMappingMessage('Usage override removed.');
-      if (integrationId === 'cove') {
-        await loadCoveReconciliation();
+      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+        await loadVendorReconciliation(integrationId);
       }
     } catch (error) {
       setMappingLoadState('failed');
@@ -2042,7 +2049,7 @@ function App() {
         reason,
       });
       setManualOverrideMessage('Less Count adjustment saved.');
-      await loadCoveReconciliation();
+      await loadVendorReconciliation(issue.vendorId);
       setManualOverrideIssue(null);
       return true;
     } catch (error) {
@@ -2083,7 +2090,7 @@ function App() {
         reason: `Remapped from ${device.productName} in reconciliation review.`,
       });
       setManualOverrideMessage('Device remap saved.');
-      await loadCoveReconciliation();
+      await loadVendorReconciliation(issue.vendorId);
       setManualOverrideIssue(null);
       return true;
     } catch (error) {
@@ -2173,11 +2180,17 @@ function App() {
               onManualOverride={setManualOverrideIssue}
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
-              onRefreshReconciliation={loadCoveReconciliation}
+              onRefreshReconciliation={() => loadVendorReconciliation(selectedReconciliationIntegrationId)}
+              onReconciliationSourceChange={(integrationId) => {
+                setSelectedReconciliationIntegrationId(integrationId);
+                setVendorFilter('All');
+                void loadVendorReconciliation(integrationId);
+              }}
               pendingCount={pendingCount}
               query={query}
               reconciliationLoadState={reconciliationLoadState}
               reconciliationMessage={reconciliationMessage}
+              selectedReconciliationIntegrationId={selectedReconciliationIntegrationId}
               setExpandedClientNames={setExpandedClientNames}
               setNeedsReviewOnly={setNeedsReviewOnly}
               setQuery={setQuery}
@@ -2357,10 +2370,12 @@ function ReconcileView(props: {
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
   onRefreshReconciliation: () => Promise<ReconciliationRunResponse | null>;
+  onReconciliationSourceChange: (integrationId: IntegrationId) => void;
   pendingCount: number;
   query: string;
   reconciliationLoadState: 'loading' | 'ready' | 'failed';
   reconciliationMessage: string;
+  selectedReconciliationIntegrationId: IntegrationId;
   setExpandedClientNames: (value: string[] | ((currentNames: string[]) => string[])) => void;
   setNeedsReviewOnly: (value: boolean) => void;
   setQuery: (value: string) => void;
@@ -2381,10 +2396,12 @@ function ReconcileView(props: {
     onOpenAgreementAdditions,
     onOpenTicket,
     onRefreshReconciliation,
+    onReconciliationSourceChange,
     pendingCount,
     query,
     reconciliationLoadState,
     reconciliationMessage,
+    selectedReconciliationIntegrationId,
     setExpandedClientNames,
     setNeedsReviewOnly,
     setQuery,
@@ -2396,6 +2413,7 @@ function ReconcileView(props: {
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
   const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
   const filteredReviewCount = filteredIssues.filter(isReviewableIssue).length;
+  const selectedSourceName = integrationName(selectedReconciliationIntegrationId);
   const workflowSteps = workflow.map((step) => {
     if (step.label === 'Map products') return { ...step, value: `${filteredIssues.length} checks` };
     if (step.label === 'Client review') return { ...step, value: `${clientGroups.length} groups` };
@@ -2409,14 +2427,27 @@ function ReconcileView(props: {
           <span className={`live-dot ${reconciliationLoadState}`} />
           <strong>
             {reconciliationLoadState === 'failed'
-              ? 'Cove reconciliation issue'
+              ? `${selectedSourceName} reconciliation issue`
               : reconciliationLoadState === 'loading'
-                ? 'Comparing Cove'
-                : 'Cove vs ConnectWise'}
+                ? `Comparing ${selectedSourceName}`
+                : `${selectedSourceName} vs ConnectWise`}
           </strong>
           <span>{reconciliationMessage}</span>
         </div>
         <div className="integrations-live-meta">
+          <div className="segmented-control compact-source-control" role="group" aria-label="Reconciliation source">
+            {reconciliationVendorIds.map((integrationId) => (
+              <button
+                className={selectedReconciliationIntegrationId === integrationId ? 'active' : ''}
+                disabled={reconciliationLoadState === 'loading'}
+                key={integrationId}
+                onClick={() => onReconciliationSourceChange(integrationId)}
+                type="button"
+              >
+                {integrationName(integrationId)}
+              </button>
+            ))}
+          </div>
           <span>{pendingCount.toLocaleString()} open</span>
           <button
             className="button secondary compact"
@@ -2465,7 +2496,7 @@ function ReconcileView(props: {
         </label>
 
         <div className="segmented-control" role="group" aria-label="Vendor filter">
-          {vendors.map((vendor) => (
+          {reconciliationVendors.map((vendor) => (
             <button
               className={vendorFilter === vendor ? 'active' : ''}
               key={vendor}
@@ -2742,22 +2773,40 @@ function VendorDataModal(props: { onClose: () => void; selection: VendorDataSele
             </div>
           ) : null}
 
-          {selection.devices.map((device) => (
-            <article className="vendor-device-row" key={device.id}>
-              <div className="vendor-device-hostname">
-                <span>Hostname</span>
-                <strong>{deviceDisplayName(device)}</strong>
-              </div>
-              <div className="vendor-device-detail">
-                <span>Device Details</span>
-                <strong title={deviceDetailSummary(device)}>{deviceDetailSummary(device)}</strong>
-                <em>
-                  {device.productName} / qty {device.quantity.toLocaleString()} /{' '}
-                  {formatDateTime(device.observedAt) ?? 'Unknown date'}
-                </em>
-              </div>
-            </article>
-          ))}
+          {selection.devices.length > 0 ? (
+            <div className="vendor-device-table-scroll">
+              <table className="vendor-device-table">
+                <thead>
+                  <tr>
+                    <th>Device Name</th>
+                    <th>Type</th>
+                    <th>Product</th>
+                    <th>OS</th>
+                    <th>Last Check-In</th>
+                    <th>Tags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selection.devices.map((device) => (
+                    <tr key={device.id}>
+                      <td className="vendor-device-name-cell">
+                        <strong title={deviceDisplayName(device)}>{deviceDisplayName(device)}</strong>
+                        <span>{deviceIdentityLabel(device)}</span>
+                      </td>
+                      <td>{deviceTypeLabel(device)}</td>
+                      <td>
+                        <strong title={device.productName}>{device.productName}</strong>
+                        {deviceProductCodeLabel(device) ? <span>{deviceProductCodeLabel(device)}</span> : null}
+                      </td>
+                      <td>{deviceOsLabel(device)}</td>
+                      <td>{formatDateTime(deviceLastCheckIn(device)) ?? '-'}</td>
+                      <td>{deviceTagLabel(device)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       </section>
     </div>
@@ -4088,6 +4137,66 @@ function deviceDetailSummary(device: ReconciliationDevice) {
   return details.length > 0 ? details.join(' / ') : device.productCode;
 }
 
+function deviceIdentityLabel(device: ReconciliationDevice) {
+  const dimensions = device.dimensions;
+  const id =
+    dimensions.ncentralDeviceId ??
+    dimensions.deviceId ??
+    dimensions.serialNumber ??
+    dimensions.accountId ??
+    dimensions.externalId;
+
+  return typeof id === 'undefined' || id === null || id === '' ? device.id : `ID ${String(id)}`;
+}
+
+function deviceTypeLabel(device: ReconciliationDevice) {
+  const dimensions = device.dimensions;
+  const productType = humanizeIdentifier(dimensions.ncentralProductType ?? dimensions.protectedSystemType);
+  const deviceClass = humanizeIdentifier(dimensions.deviceClass ?? dimensions.physicality);
+
+  if (productType && deviceClass && productType.toLowerCase() !== deviceClass.toLowerCase()) {
+    return `${productType} / ${deviceClass}`;
+  }
+
+  return productType || deviceClass || deviceDetailSummary(device);
+}
+
+function deviceProductCodeLabel(device: ReconciliationDevice) {
+  return device.productCode === device.productName ? '' : device.productCode;
+}
+
+function deviceOsLabel(device: ReconciliationDevice) {
+  const value = device.dimensions.operatingSystem ?? device.dimensions.os;
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '-';
+}
+
+function deviceLastCheckIn(device: ReconciliationDevice) {
+  const value = device.dimensions.lastApplianceCheckinTime ?? device.dimensions.lastCheckIn;
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+}
+
+function deviceTagLabel(device: ReconciliationDevice) {
+  const tags = device.dimensions.overlayTags;
+  if (Array.isArray(tags)) {
+    return tags.length > 0 ? tags.join(', ') : '-';
+  }
+
+  return typeof tags === 'string' && tags.trim() ? tags : '-';
+}
+
+function humanizeIdentifier(value: DimensionMap[string]) {
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    return '';
+  }
+
+  return String(value)
+    .replace(/^ncentral-/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
 function NcentralFilterMappingPanel(props: {
   busyAction: string | null;
   filters: NcentralFilter[];
@@ -4149,7 +4258,7 @@ function NcentralFilterMappingPanel(props: {
           <h3>Product filters</h3>
           <div className="ncentral-filter-list">
             {productMappings.map((mapping) => (
-              <NcentralFilterMappingRow busyAction={busyAction} key={mapping.id} mapping={mapping} onSave={onSave} />
+              <NcentralFilterMappingRow busyAction={busyAction} filters={filters} key={mapping.id} mapping={mapping} onSave={onSave} />
             ))}
           </div>
         </div>
@@ -4158,7 +4267,7 @@ function NcentralFilterMappingPanel(props: {
           <h3>Overlay tags</h3>
           <div className="ncentral-filter-list">
             {overlayMappings.map((mapping) => (
-              <NcentralFilterMappingRow busyAction={busyAction} key={mapping.id} mapping={mapping} onSave={onSave} />
+              <NcentralFilterMappingRow busyAction={busyAction} filters={filters} key={mapping.id} mapping={mapping} onSave={onSave} />
             ))}
           </div>
         </div>
@@ -4227,30 +4336,133 @@ function NcentralFilterMappingPanel(props: {
 
 function NcentralFilterMappingRow(props: {
   busyAction: string | null;
+  filters: NcentralFilter[];
   mapping: NcentralFilterMapping;
   onSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
 }) {
-  const { busyAction, mapping, onSave } = props;
+  const { busyAction, filters, mapping, onSave } = props;
   const actionKey = `ncentral-filter:${mapping.id}`;
+  const [editing, setEditing] = useState(false);
+  const [filterId, setFilterId] = useState(mapping.filterId ?? '');
+  const [filterName, setFilterName] = useState(mapping.filterName);
+  const [displayName, setDisplayName] = useState(mapping.displayName);
+  const [priority, setPriority] = useState(mapping.priority);
+  const [vendorProductKey, setVendorProductKey] = useState(mapping.vendorProductKey ?? '');
+  const [tagKey, setTagKey] = useState(mapping.tagKey ?? '');
+
+  const selectFilter = (value: string) => {
+    const filter = filters.find((item) => item.filterId === value);
+    setFilterId(filter?.filterId ?? '');
+    setFilterName(filter?.filterName ?? '');
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setFilterId(mapping.filterId ?? '');
+    setFilterName(mapping.filterName);
+    setDisplayName(mapping.displayName);
+    setPriority(mapping.priority);
+    setVendorProductKey(mapping.vendorProductKey ?? '');
+    setTagKey(mapping.tagKey ?? '');
+  };
+
+  const saveEdit = async () => {
+    await onSave({
+      ...mapping,
+      filterId: filterId || undefined,
+      filterName,
+      displayName,
+      priority,
+      vendorProductKey: mapping.mappingType === 'product' ? vendorProductKey : undefined,
+      tagKey: mapping.mappingType === 'overlay' ? tagKey : undefined,
+    });
+    setEditing(false);
+  };
 
   return (
-    <article className="ncentral-filter-row">
-      <div>
-        <strong>{mapping.displayName}</strong>
-        <span>{mapping.filterName}</span>
+    <article className={editing ? 'ncentral-filter-row editing' : 'ncentral-filter-row'}>
+      <div className="ncentral-filter-row-main">
+        <div>
+          <strong>{mapping.displayName}</strong>
+          <span>{mapping.filterName}</span>
+          <small>{mapping.filterId ? `Filter ID ${mapping.filterId}` : 'Filter resolves by exact name'}</small>
+        </div>
+        <span className={`status-pill ${mapping.active ? 'approved' : 'needs-review'}`}>
+          {mapping.active ? 'Active' : 'Inactive'}
+        </span>
+        <em>{mapping.mappingType === 'product' ? mapping.vendorProductKey : mapping.tagKey}</em>
+        <div className="ncentral-filter-row-actions">
+          <button className="button secondary compact" disabled={busyAction === actionKey} onClick={() => setEditing(true)} type="button">
+            <Pencil size={15} />
+            Edit
+          </button>
+          <button
+            className="button secondary compact"
+            disabled={busyAction === actionKey}
+            onClick={() => void onSave({ ...mapping, active: !mapping.active })}
+            type="button"
+          >
+            {mapping.active ? 'Disable' : 'Enable'}
+          </button>
+        </div>
       </div>
-      <span className={`status-pill ${mapping.active ? 'approved' : 'needs-review'}`}>
-        {mapping.active ? 'Active' : 'Inactive'}
-      </span>
-      <em>{mapping.mappingType === 'product' ? mapping.vendorProductKey : mapping.tagKey}</em>
-      <button
-        className="button secondary compact"
-        disabled={busyAction === actionKey}
-        onClick={() => void onSave({ ...mapping, active: !mapping.active })}
-        type="button"
-      >
-        {mapping.active ? 'Disable' : 'Enable'}
-      </button>
+
+      {editing ? (
+        <div className="ncentral-filter-edit-panel">
+          <label>
+            <span>Discovered filter</span>
+            <select onChange={(event) => selectFilter(event.target.value)} value={filterId}>
+              <option value="">Manual filter name</option>
+              {filters.map((filter) => (
+                <option key={filter.filterId} value={filter.filterId}>
+                  {filter.filterName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Filter name</span>
+            <input onChange={(event) => setFilterName(event.target.value)} value={filterName} />
+          </label>
+          <label>
+            <span>Display name</span>
+            <input onChange={(event) => setDisplayName(event.target.value)} value={displayName} />
+          </label>
+          {mapping.mappingType === 'product' ? (
+            <label>
+              <span>Product key</span>
+              <input onChange={(event) => setVendorProductKey(event.target.value)} value={vendorProductKey} />
+            </label>
+          ) : (
+            <label>
+              <span>Tag key</span>
+              <input onChange={(event) => setTagKey(event.target.value)} value={tagKey} />
+            </label>
+          )}
+          <label>
+            <span>Priority</span>
+            <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
+          </label>
+          <div className="ncentral-filter-edit-actions">
+            <button
+              className="button primary compact"
+              disabled={
+                busyAction === actionKey ||
+                !filterName.trim() ||
+                !displayName.trim() ||
+                (mapping.mappingType === 'product' ? !vendorProductKey.trim() : !tagKey.trim())
+              }
+              onClick={() => void saveEdit()}
+              type="button"
+            >
+              Save
+            </button>
+            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
     </article>
   );
 }

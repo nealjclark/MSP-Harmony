@@ -61,6 +61,9 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     const snapshots = groupedSnapshots.get(agreementKey) ?? [];
     const proposedBaseQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     const baseAdditions = findAdditions(request.agreementAdditions, clientId, agreementId, targetProductCodes(rule));
+    if (rule.requiresExistingAgreementProduct && baseAdditions.length === 0) {
+      return;
+    }
     const baseAgreementQuantity = sumAdditions(baseAdditions);
     const baseDelta = proposedBaseQuantity - baseAgreementQuantity;
 

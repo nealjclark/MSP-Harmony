@@ -521,7 +521,6 @@ function dimensionsForDevice(input: {
     productFilterNames,
     productConflictKeys,
     overlayTags,
-    stale30Days: overlayTags.includes('stale-30-days'),
     doNotBill: overlayTags.includes('do-not-bill'),
   };
 }

@@ -308,10 +308,10 @@ CREATE INDEX IF NOT EXISTS idx_vendor_usage_overrides_scope
 CREATE INDEX IF NOT EXISTS idx_ncentral_filter_mappings_active
   ON ncentral_filter_mappings(mapping_type, vendor_product_key, tag_key)
   WHERE active;
+DROP INDEX IF EXISTS ux_ncentral_filter_mappings_identity;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_ncentral_filter_mappings_identity
   ON ncentral_filter_mappings(
     mapping_type,
-    coalesce(filter_id, ''),
     filter_name,
     coalesce(vendor_product_key, ''),
     coalesce(tag_key, '')

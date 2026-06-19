@@ -4,7 +4,13 @@ import type {
   IntegrationSettingsDefinition,
   IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
-import { assertConnectWiseReady, isInactiveAddition, isInactiveAgreement } from './operations';
+import {
+  REPORT_ADDITION_CONDITION,
+  REPORT_AGREEMENT_CONDITION,
+  assertConnectWiseReady,
+  isInactiveAddition,
+  isInactiveAgreement,
+} from './operations';
 
 const degradedButConfigured = {
   definition: { integrationId: 'connectwise' } as IntegrationSettingsDefinition,
@@ -47,5 +53,7 @@ assert.equal(isInactiveAddition({ id: 1386, additionStatus: 'Cancelled' }), true
 assert.equal(isInactiveAddition({ id: 2968, AdditionStatus: 'Canceled' } as { id: number; AdditionStatus: string }), true);
 assert.equal(isInactiveAddition({ id: 2969, additionStatus: 'Active', agreementStatus: 'Expired' }), true);
 assert.equal(isInactiveAddition({ id: 2970, additionStatus: 'Active', agreementStatus: 'Active' }), false);
+assert.equal(REPORT_AGREEMENT_CONDITION.includes('"Canceled"'), false);
+assert.equal(REPORT_ADDITION_CONDITION.includes('"Canceled"'), false);
 
 console.log('connectwise operations tests passed');

@@ -78,6 +78,7 @@ export type QuantityRule = {
   unitPrice?: MoneyAmount;
   allowance?: UsageAllowance;
   addOn?: UsageAddOnPolicy;
+  requiresExistingAgreementProduct?: boolean;
   notes: string;
 };
 

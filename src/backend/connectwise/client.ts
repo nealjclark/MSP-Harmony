@@ -164,10 +164,13 @@ export class ConnectWiseClient {
 
     if (!response.ok) {
       const responseText = await response.text();
+      const responseDetails = responseText.trim().slice(0, 500);
       throw new ConnectWiseApiError(
-        `ConnectWise API request failed with HTTP ${response.status}.`,
+        responseDetails.length > 0
+          ? `ConnectWise API request failed with HTTP ${response.status}: ${responseDetails}`
+          : `ConnectWise API request failed with HTTP ${response.status}.`,
         response.status,
-        responseText.slice(0, 500),
+        responseDetails,
       );
     }
 

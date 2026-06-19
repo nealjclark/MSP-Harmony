@@ -272,7 +272,17 @@ async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
 
 async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRunId: string | undefined) {
   const result = await database.query<SnapshotRow>(
-    `with approved_product_mappings as (
+    `with approved_account_mappings as (
+       select vendor_id,
+              external_account_id,
+              customer_id,
+              agreement_id
+       from vendor_account_mappings
+       where vendor_id = $1
+         and active = true
+         and mapping_status = 'approved'
+     ),
+     approved_product_mappings as (
        select vendor_id,
               vendor_product_key,
               min(connectwise_product_code) as connectwise_product_code,
@@ -288,8 +298,14 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
      select
        vendor_usage_snapshots.id,
        vendor_usage_snapshots.vendor_id,
-       vendor_usage_snapshots.customer_id,
-       vendor_usage_snapshots.agreement_id,
+       case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+         else vendor_usage_snapshots.customer_id
+       end as customer_id,
+       case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+         else vendor_usage_snapshots.agreement_id
+       end as agreement_id,
        vendor_usage_snapshots.vendor_product_key,
        coalesce(approved_product_mappings.connectwise_product_code, vendor_usage_snapshots.product_code) as product_code,
        coalesce(approved_product_mappings.connectwise_product_name, vendor_usage_snapshots.product_name) as product_name,
@@ -297,14 +313,23 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
        vendor_usage_snapshots.observed_at,
        vendor_usage_snapshots.dimensions
      from vendor_usage_snapshots
+     left join approved_account_mappings
+       on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+      and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
      left join approved_product_mappings
        on approved_product_mappings.vendor_id = vendor_usage_snapshots.vendor_id
       and approved_product_mappings.vendor_product_key = vendor_usage_snapshots.vendor_product_key
      where vendor_usage_snapshots.vendor_id = $1
-       and vendor_usage_snapshots.customer_id is not null
-       and vendor_usage_snapshots.agreement_id is not null
+       and case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+         else vendor_usage_snapshots.customer_id
+       end is not null
+       and case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+         else vendor_usage_snapshots.agreement_id
+       end is not null
        and ($2::uuid is null or vendor_usage_snapshots.sync_run_id = $2::uuid)
-     order by vendor_usage_snapshots.customer_id, vendor_usage_snapshots.agreement_id, product_code, vendor_usage_snapshots.observed_at`,
+     order by customer_id, agreement_id, product_code, vendor_usage_snapshots.observed_at`,
     [vendorId, syncRunId ?? null],
   );
 

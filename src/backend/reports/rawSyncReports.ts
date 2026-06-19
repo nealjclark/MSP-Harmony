@@ -184,25 +184,43 @@ async function getNcentralRawSyncDetails(database: Queryable, syncRunId: string)
   }
 
   const detailResult = await database.query<NcentralSnapshotRow>(
-    `select
+    `with mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.sync_run_id = $1
+         and vendor_usage_snapshots.vendor_id = 'ncentral'
+     )
+     select
        customers.name as customer_name,
        agreements.name as agreement_name,
-       vendor_usage_snapshots.external_account_id,
-       vendor_usage_snapshots.vendor_product_key,
-       vendor_usage_snapshots.product_code,
-       vendor_usage_snapshots.product_name,
-       vendor_usage_snapshots.quantity,
-       vendor_usage_snapshots.observed_at,
-       vendor_usage_snapshots.dimensions,
-       vendor_usage_snapshots.raw_payload
-     from vendor_usage_snapshots
-     left join customers on customers.id = vendor_usage_snapshots.customer_id
-     left join agreements on agreements.id = vendor_usage_snapshots.agreement_id
-     where vendor_usage_snapshots.sync_run_id = $1
-       and vendor_usage_snapshots.vendor_id = 'ncentral'
-     order by coalesce(customers.name, vendor_usage_snapshots.dimensions->>'ncentralCustomerName', vendor_usage_snapshots.external_account_id),
-       vendor_usage_snapshots.product_code,
-       vendor_usage_snapshots.dimensions->>'hostname'`,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.vendor_product_key,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       mapped_snapshots.dimensions,
+       mapped_snapshots.raw_payload
+     from mapped_snapshots
+     left join customers on customers.id = mapped_snapshots.effective_customer_id
+     left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     order by coalesce(customers.name, mapped_snapshots.dimensions->>'ncentralCustomerName', mapped_snapshots.external_account_id),
+       mapped_snapshots.product_code,
+       mapped_snapshots.dimensions->>'hostname'`,
     [syncRunId],
   );
   const rows = detailResult.rows.map(mapNcentralSnapshotRow);
@@ -301,24 +319,42 @@ async function getCoveRawSyncDetails(database: Queryable, syncRunId: string): Pr
   }
 
   const detailResult = await database.query<CoveSnapshotRow>(
-    `select
+    `with mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.sync_run_id = $1
+         and vendor_usage_snapshots.vendor_id = 'cove'
+     )
+     select
        customers.name as customer_name,
        agreements.name as agreement_name,
-       vendor_usage_snapshots.external_account_id,
-       vendor_usage_snapshots.product_code,
-       vendor_usage_snapshots.product_name,
-       vendor_usage_snapshots.quantity,
-       vendor_usage_snapshots.observed_at,
-       vendor_usage_snapshots.dimensions,
-       vendor_usage_snapshots.raw_payload
-     from vendor_usage_snapshots
-     left join customers on customers.id = vendor_usage_snapshots.customer_id
-     left join agreements on agreements.id = vendor_usage_snapshots.agreement_id
-     where vendor_usage_snapshots.sync_run_id = $1
-       and vendor_usage_snapshots.vendor_id = 'cove'
-     order by coalesce(customers.name, vendor_usage_snapshots.dimensions->>'coveCustomerName', vendor_usage_snapshots.external_account_id),
-       vendor_usage_snapshots.product_code,
-       vendor_usage_snapshots.dimensions->>'hostname'`,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       mapped_snapshots.dimensions,
+       mapped_snapshots.raw_payload
+     from mapped_snapshots
+     left join customers on customers.id = mapped_snapshots.effective_customer_id
+     left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     order by coalesce(customers.name, mapped_snapshots.dimensions->>'coveCustomerName', mapped_snapshots.external_account_id),
+       mapped_snapshots.product_code,
+       mapped_snapshots.dimensions->>'hostname'`,
     [syncRunId],
   );
   const rows = detailResult.rows.map(mapCoveSnapshotRow);
