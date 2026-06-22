@@ -44,7 +44,7 @@ This is the living execution backlog. The README stays high-level; this file tra
 
 ## Milestone 6: Microsoft + Marketplace
 
-- Add Microsoft 365 Graph and Partner Center settings and sync support.
+- Add Microsoft 365 Graph application settings and sync support.
 - Add Microsoft Azure consumption settings and sync support.
 - Add Pax8 SKU mapping and marketplace import support.
 - Expand mapping and bundle rules only after the first MVP path is stable.

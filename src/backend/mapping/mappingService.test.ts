@@ -248,6 +248,44 @@ async function run() {
     productCandidates.length,
   );
 
+  const appRiverProductCandidateDatabase: Queryable = {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from vendor_usage_snapshots')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
+              vendor_product_name: 'Microsoft 365 Business Premium',
+              row_count: 3,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from agreement_additions')) {
+        return {
+          rows: [
+            {
+              product_code: 'CW-M365-BUSINESS-PREMIUM',
+              product_name: 'Microsoft 365 Business Premium',
+              addition_count: 12,
+              unit_price: '22',
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  const appRiverProductCandidates = await generateProductMappingCandidates(
+    appRiverProductCandidateDatabase,
+    'opentext-appriver',
+  );
+  assert.equal(appRiverProductCandidates[0]?.vendorProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
+  assert.equal(appRiverProductCandidates[0]?.target.connectwiseProductCode, 'CW-M365-BUSINESS-PREMIUM');
+  assert.equal(appRiverProductCandidates[0]?.additionCount, 12);
+
   const catalogSearchQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const catalogSearchDatabase: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {

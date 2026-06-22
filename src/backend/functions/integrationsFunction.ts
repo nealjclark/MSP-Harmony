@@ -1,4 +1,4 @@
-import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
+import { app, output, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import type { IntegrationId } from '../../shared/integrationSettings';
 import { listRuntimeIntegrations } from '../api/integrations';
@@ -10,13 +10,38 @@ import { CoveApiError } from '../vendor/cove/client';
 import { syncCoveUsageSnapshots, testCoveConnection } from '../vendor/cove/operations';
 import { NcentralApiError } from '../vendor/ncentral/client';
 import { syncNcentralUsageSnapshots, testNcentralConnection } from '../vendor/ncentral/operations';
+import { AppRiverApiError } from '../vendor/appriver/client';
+import {
+  processNextAppRiverQueuedCustomer,
+  startAppRiverQueuedSubscriptionSync,
+  testAppRiverConnection,
+} from '../vendor/appriver/operations';
+import { Microsoft365ApiError } from '../vendor/microsoft365/client';
+import {
+  syncMicrosoft365ProductSubscriptionSnapshots,
+  syncMicrosoft365UserLicenseSnapshots,
+  testMicrosoft365Connection,
+} from '../vendor/microsoft365/operations';
 
 loadDotEnv({ override: false });
 
 type SyncBody = {
   pageSize?: number;
   maxPages?: number;
+  subscriptionPageSize?: number;
+  subscriptionMaxPages?: number;
+  dataset?: 'users' | 'licenses';
 };
+
+type AppRiverSyncQueueMessage = {
+  syncRunId: string;
+};
+
+const appRiverSyncQueueName = 'appriver-sync-work';
+const appRiverSyncQueueOutput = output.storageQueue({
+  queueName: appRiverSyncQueueName,
+  connection: 'AzureWebJobsStorage',
+});
 
 export async function listIntegrationsHttp(
   _request: HttpRequest,
@@ -50,7 +75,13 @@ export async function testIntegrationHttp(
 ): Promise<HttpResponseInit> {
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
-  if (integrationId !== 'connectwise' && integrationId !== 'cove' && integrationId !== 'ncentral') {
+  if (
+    integrationId !== 'connectwise' &&
+    integrationId !== 'cove' &&
+    integrationId !== 'ncentral' &&
+    integrationId !== 'opentext-appriver' &&
+    integrationId !== 'microsoft-365'
+  ) {
     return jsonResponse(501, {
       error: `Live test is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
     });
@@ -106,15 +137,42 @@ export async function testIntegrationHttp(
       });
     }
 
-    const result = await testNcentralConnection({ provider });
+    if (integrationId === 'ncentral') {
+      const result = await testNcentralConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        filterCount: result.filterCount,
+        sampleFilters: result.sampleFilters,
+      });
+    }
+
+    if (integrationId === 'opentext-appriver') {
+      const result = await testAppRiverConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        customerCount: result.customerCount,
+        sampleCustomers: result.sampleCustomers,
+        firstCustomerSubscriptionCount: result.firstCustomerSubscriptionCount,
+      });
+    }
+
+    const result = await testMicrosoft365Connection({ provider, pool: repositoryContext.pool });
 
     await saveTestResult('success');
 
     return jsonResponse(200, {
       integrationId: result.integrationId,
       testedAt: result.testedAt,
-      filterCount: result.filterCount,
-      sampleFilters: result.sampleFilters,
+      tenantCount: result.tenantCount,
+      sampleTenants: result.sampleTenants,
     });
   } catch (error) {
     await saveTestResult('failure').catch(() => undefined);
@@ -126,11 +184,17 @@ export async function testIntegrationHttp(
 
 export async function syncIntegrationHttp(
   request: HttpRequest,
-  _context: InvocationContext,
+  context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
-  if (integrationId !== 'connectwise' && integrationId !== 'cove' && integrationId !== 'ncentral') {
+  if (
+    integrationId !== 'connectwise' &&
+    integrationId !== 'cove' &&
+    integrationId !== 'ncentral' &&
+    integrationId !== 'opentext-appriver' &&
+    integrationId !== 'microsoft-365'
+  ) {
     return jsonResponse(501, {
       error: `Live sync is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
     });
@@ -179,19 +243,99 @@ export async function syncIntegrationHttp(
       });
     }
 
-    const result = await syncNcentralUsageSnapshots({
-      pool: repositoryContext.pool,
-      provider,
-      pageSize: safePositiveInteger(body.pageSize, 500),
-      maxPages: safePositiveInteger(body.maxPages, 100),
-    });
+    if (integrationId === 'ncentral') {
+      const result = await syncNcentralUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: safePositiveInteger(body.pageSize, 500),
+        maxPages: safePositiveInteger(body.maxPages, 100),
+      });
+
+      return jsonResponse(200, {
+        integrationId: 'ncentral',
+        ...result,
+      });
+    }
+
+    if (integrationId === 'opentext-appriver') {
+      const result = await startAppRiverQueuedSubscriptionSync({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: safePositiveInteger(body.pageSize, 1000),
+        maxPages: safePositiveInteger(body.maxPages, 100),
+      });
+      if (result.status === 'queued') {
+        enqueueAppRiverSyncWorker(context, result.syncRunId);
+      }
+
+      return jsonResponse(result.status === 'queued' ? 202 : 200, {
+        integrationId: 'opentext-appriver',
+        queued: result.status === 'queued',
+        ...result,
+      });
+    }
+
+    if (body.dataset && body.dataset !== 'users' && body.dataset !== 'licenses') {
+      return jsonResponse(400, {
+        error: 'Microsoft 365 sync dataset must be "users" or "licenses".',
+        supportedDatasets: ['users', 'licenses'],
+      });
+    }
+
+    const dataset = body.dataset ?? 'users';
+    const result =
+      dataset === 'licenses'
+        ? await syncMicrosoft365ProductSubscriptionSnapshots({
+            pool: repositoryContext.pool,
+            provider,
+          })
+        : await syncMicrosoft365UserLicenseSnapshots({
+            pool: repositoryContext.pool,
+            provider,
+            pageSize: safePositiveInteger(body.pageSize, 100),
+            maxPages: safePositiveInteger(body.maxPages, 100),
+          });
 
     return jsonResponse(200, {
-      integrationId: 'ncentral',
+      integrationId: 'microsoft-365',
       ...result,
     });
   } catch (error) {
     return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} sync failed.`);
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function processAppRiverSyncQueueMessage(
+  message: AppRiverSyncQueueMessage | string,
+  context: InvocationContext,
+) {
+  const parsed = parseAppRiverSyncQueueMessage(message);
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    throw new Error(`AppRiver - OpenText queued sync needs PostgreSQL settings before it can process ${parsed.syncRunId}.`);
+  }
+
+  const provider = createIntegrationSettingsProvider({
+    loadLocalEnv: true,
+    metadataReader: repositoryContext.repository,
+  });
+
+  try {
+    const result = await processNextAppRiverQueuedCustomer({
+      pool: repositoryContext.pool,
+      provider,
+      syncRunId: parsed.syncRunId,
+    });
+    context.log(
+      `AppRiver queued sync ${parsed.syncRunId}: ${result.status}${result.processedCustomerId ? ` ${result.processedCustomerId}` : ''}.`,
+    );
+
+    if (result.shouldContinue) {
+      enqueueAppRiverSyncWorker(context, parsed.syncRunId);
+    }
   } finally {
     await repositoryContext.close();
   }
@@ -215,7 +359,15 @@ app.http('syncIntegration', {
   methods: ['POST'],
   authLevel: 'function',
   route: 'integrations/{integrationId}/sync',
+  extraOutputs: [appRiverSyncQueueOutput],
   handler: syncIntegrationHttp,
+});
+
+app.storageQueue<AppRiverSyncQueueMessage | string>('processAppRiverSyncQueueMessage', {
+  queueName: appRiverSyncQueueName,
+  connection: 'AzureWebJobsStorage',
+  extraOutputs: [appRiverSyncQueueOutput],
+  handler: processAppRiverSyncQueueMessage,
 });
 
 function integrationErrorResponse(error: unknown, fallback: string) {
@@ -242,6 +394,24 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof AppRiverApiError) {
+    return jsonResponse(502, {
+      error: error.message,
+      status: error.status,
+      responseText: error.responseText,
+    });
+  }
+
+  if (error instanceof Microsoft365ApiError) {
+    return jsonResponse(502, {
+      error: error.message,
+      status: error.status,
+      responseText: error.responseText,
+      requestId: error.requestId,
+      correlationId: error.correlationId,
+    });
+  }
+
   return jsonResponse(400, {
     error: error instanceof Error ? error.message : fallback,
   });
@@ -250,6 +420,8 @@ function integrationErrorResponse(error: unknown, fallback: string) {
 function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'cove') return 'Cove';
   if (integrationId === 'ncentral') return 'N-central';
+  if (integrationId === 'opentext-appriver') return 'AppRiver - OpenText';
+  if (integrationId === 'microsoft-365') return 'Microsoft 365';
   return 'ConnectWise';
 }
 
@@ -259,4 +431,25 @@ function safePositiveInteger(value: number | undefined, fallback: number) {
   }
 
   return value;
+}
+
+function enqueueAppRiverSyncWorker(context: InvocationContext, syncRunId: string) {
+  context.extraOutputs?.set(appRiverSyncQueueOutput, {
+    syncRunId,
+  } satisfies AppRiverSyncQueueMessage);
+}
+
+function parseAppRiverSyncQueueMessage(message: AppRiverSyncQueueMessage | string): AppRiverSyncQueueMessage {
+  const parsed =
+    typeof message === 'string'
+      ? (JSON.parse(message) as Partial<AppRiverSyncQueueMessage>)
+      : message;
+
+  if (!parsed.syncRunId) {
+    throw new Error('AppRiver queue message is missing syncRunId.');
+  }
+
+  return {
+    syncRunId: parsed.syncRunId,
+  };
 }

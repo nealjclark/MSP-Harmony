@@ -76,7 +76,7 @@ async function run() {
   );
 
   const allSettings = await localProvider.listIntegrationSettings();
-  assert.equal(allSettings.length, 9);
+  assert.equal(allSettings.length, 10);
 
   const envReader = createDefaultSecretReader(
     {

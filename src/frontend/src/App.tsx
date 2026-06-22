@@ -194,10 +194,13 @@ type RawSyncRun = {
   metadata: Record<string, unknown>;
 };
 
+type RawSyncDataset = 'users' | 'licenses';
+
 type RawSyncRow = Record<string, string | number | boolean | null>;
 
 type RawSyncDetailsResponse = {
   integrationId: IntegrationId;
+  dataset?: RawSyncDataset;
   syncRun: RawSyncRun;
   columns: string[];
   rows: RawSyncRow[];
@@ -212,6 +215,7 @@ type RawSyncDetailsResponse = {
 type RawSyncRunsResponse = {
   reportType: ReportSection;
   integrationId: IntegrationId;
+  dataset?: RawSyncDataset;
   runs: RawSyncRun[];
 };
 
@@ -518,10 +522,21 @@ type MappingStateResponse = {
   customerOptions: MappingCustomerOption[];
 };
 
-type IntegrationAction = 'test' | 'sync';
+type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses';
 type IntegrationActionKey = `${IntegrationId}:${IntegrationAction}`;
-const liveIntegrationIds: ReadonlySet<IntegrationId> = new Set(['connectwise', 'cove', 'ncentral']);
-const mappingIntegrationIds: ReadonlySet<IntegrationId> = new Set(['cove', 'ncentral']);
+const liveIntegrationIds: ReadonlySet<IntegrationId> = new Set([
+  'connectwise',
+  'cove',
+  'ncentral',
+  'microsoft-365',
+  'opentext-appriver',
+]);
+const mappingIntegrationIds: ReadonlySet<IntegrationId> = new Set([
+  'cove',
+  'ncentral',
+  'microsoft-365',
+  'opentext-appriver',
+]);
 
 const clientProfiles: Record<string, ClientProfile> = {};
 
@@ -632,8 +647,8 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
   },
 ];
 
-const reconciliationVendorIds: IntegrationId[] = ['cove', 'ncentral'];
-const reconciliationVendors = ['All', 'Cove Data Protection', 'N-able N-central'];
+const reconciliationVendorIds: IntegrationId[] = ['cove', 'ncentral', 'microsoft-365', 'opentext-appriver'];
+const reconciliationVendors = ['All', 'Cove Data Protection', 'N-able N-central', 'Microsoft 365', 'AppRiver - OpenText'];
 const noAgreementSyncValue = '__no_agreement_sync__';
 
 const integrationSettingsStates: IntegrationSettingsState[] = [];
@@ -648,15 +663,44 @@ function hasMappingWorkspace(integrationId: IntegrationId) {
   return mappingIntegrationIds.has(integrationId);
 }
 
+function isImplementedIntegration(integrationId: IntegrationId) {
+  return liveIntegrationIds.has(integrationId);
+}
+
+function sortIntegrationsForDisplay(integrations: Integration[]) {
+  const statusRank: Record<IntegrationStatus, number> = {
+    connected: 0,
+    degraded: 1,
+    'not-configured': 2,
+  };
+
+  return [...integrations].sort((left, right) => {
+    if (left.enabled !== right.enabled) {
+      return left.enabled ? -1 : 1;
+    }
+
+    const statusDifference = statusRank[left.status] - statusRank[right.status];
+    return statusDifference || left.name.localeCompare(right.name);
+  });
+}
+
 function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): Integration[] {
-  const definitions = runtimeIntegrations ?? integrationSettingsRegistry.map((definition) => ({
-    ...definition,
-    nonSecrets: {},
-    secretSource: undefined,
-    keyVaultUrl: undefined,
-    operationalStatus: undefined,
-    validation: demoIntegrationValidations.find((item) => item.integrationId === definition.integrationId),
-  }));
+  const runtimeById = new Map((runtimeIntegrations ?? []).map((integration) => [integration.integrationId, integration]));
+  const definitions = integrationSettingsRegistry.map((definition) => {
+    const runtime = runtimeById.get(definition.integrationId);
+
+    return {
+      ...runtime,
+      ...definition,
+      nonSecrets: runtime?.nonSecrets ?? {},
+      secretSource: runtime?.secretSource,
+      keyVaultUrl: runtime?.keyVaultUrl,
+      operationalStatus: runtime?.operationalStatus,
+      validation:
+        runtime?.validation ??
+        demoIntegrationValidations.find((item) => item.integrationId === definition.integrationId),
+    };
+  });
 
   return definitions.map((definition) => {
     const validation = definition.validation;
@@ -923,8 +967,15 @@ async function fetchRuntimeIntegrations() {
   } satisfies RuntimeIntegrationsResponse;
 }
 
-async function fetchRawSyncRuns(integrationId: IntegrationId) {
-  const response = await fetch(`/api/reports/raw-sync-runs?integrationId=${encodeURIComponent(integrationId)}`);
+async function fetchRawSyncRuns(integrationId: IntegrationId, dataset?: RawSyncDataset) {
+  const params = new URLSearchParams({
+    integrationId,
+  });
+  if (integrationId === 'microsoft-365' && dataset) {
+    params.set('dataset', dataset);
+  }
+
+  const response = await fetch(`/api/reports/raw-sync-runs?${params.toString()}`);
   const body = await responseJson(response);
   const runs = Array.isArray(body.runs) ? (body.runs as RawSyncRun[]) : [];
 
@@ -935,14 +986,20 @@ async function fetchRawSyncRuns(integrationId: IntegrationId) {
   return {
     reportType: 'raw-sync',
     integrationId,
+    dataset: typeof body.dataset === 'string' ? (body.dataset as RawSyncDataset) : undefined,
     runs,
   } satisfies RawSyncRunsResponse;
 }
 
-async function fetchRawSyncDetails(integrationId: IntegrationId, syncRunId: string) {
-  const response = await fetch(
-    `/api/reports/raw-sync-runs/${encodeURIComponent(syncRunId)}/details?integrationId=${encodeURIComponent(integrationId)}`,
-  );
+async function fetchRawSyncDetails(integrationId: IntegrationId, syncRunId: string, dataset?: RawSyncDataset) {
+  const params = new URLSearchParams({
+    integrationId,
+  });
+  if (integrationId === 'microsoft-365' && dataset) {
+    params.set('dataset', dataset);
+  }
+
+  const response = await fetch(`/api/reports/raw-sync-runs/${encodeURIComponent(syncRunId)}/details?${params.toString()}`);
   const body = await responseJson(response);
 
   if (!response.ok) {
@@ -1185,7 +1242,7 @@ async function responseJson(response: Response) {
   return (await response.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
-function syncRequestBodyForIntegration(integrationId: IntegrationId) {
+function syncRequestBodyForIntegration(integrationId: IntegrationId, dataset?: RawSyncDataset) {
   if (integrationId === 'cove') {
     return {
       pageSize: 10000,
@@ -1197,6 +1254,23 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId) {
     return {
       pageSize: 500,
       maxPages: 100,
+    };
+  }
+
+  if (integrationId === 'microsoft-365') {
+    return {
+      dataset: dataset ?? 'users',
+      pageSize: 100,
+      maxPages: 25,
+    };
+  }
+
+  if (integrationId === 'opentext-appriver') {
+    return {
+      pageSize: 1000,
+      maxPages: 100,
+      subscriptionPageSize: 100,
+      subscriptionMaxPages: 25,
     };
   }
 
@@ -1220,6 +1294,17 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
   if (integrationId === 'ncentral') {
     const filterCount = numberField(body, 'filterCount')?.toLocaleString() ?? '0';
     return `Connection OK. N-central returned ${filterCount} filters.`;
+  }
+
+  if (integrationId === 'microsoft-365') {
+    const tenantCount = numberField(body, 'tenantCount')?.toLocaleString() ?? '0';
+    return `Connection OK. Microsoft Graph discovered ${tenantCount} customer tenants and read licenses from the first tenant.`;
+  }
+
+  if (integrationId === 'opentext-appriver') {
+    const customerCount = numberField(body, 'customerCount')?.toLocaleString() ?? '0';
+    const firstCustomerSubscriptionCount = numberField(body, 'firstCustomerSubscriptionCount')?.toLocaleString() ?? '0';
+    return `Connection OK. AppRiver returned ${customerCount} customers and ${firstCustomerSubscriptionCount} subscriptions for the first customer.`;
   }
 
   return 'Connection OK.';
@@ -1255,6 +1340,42 @@ function formatIntegrationSyncSuccess(integrationId: IntegrationId, body: Record
     const unmapped = numberField(body, 'unmappedSnapshots')?.toLocaleString() ?? '0';
     const enriched = numberField(body, 'detailEnrichedSnapshots')?.toLocaleString() ?? '0';
     return `Sync complete. Stored ${recordsWritten} of ${recordsRead} N-central devices (${mapped} mapped, ${unmapped} unmapped, ${enriched} check-ins enriched).`;
+  }
+
+  if (integrationId === 'microsoft-365') {
+    const dataset = body.dataset === 'licenses' ? 'licenses' : 'users';
+    const recordsWritten = numberField(body, 'recordsWritten')?.toLocaleString() ?? '0';
+    const recordsRead = numberField(body, 'recordsRead')?.toLocaleString() ?? '0';
+    const tenantsRead = numberField(body, 'tenantsRead')?.toLocaleString() ?? '0';
+    if (dataset === 'licenses') {
+      const companySubscriptionsRead = numberField(body, 'companySubscriptionsRead')?.toLocaleString() ?? '0';
+      const failedTenants = numberField(body, 'failedTenants')?.toLocaleString() ?? '0';
+      const failedProductSubscriptionTenants = numberField(body, 'failedProductSubscriptionTenants')?.toLocaleString() ?? '0';
+      return `License sync complete. Stored ${recordsWritten} Microsoft 365 product subscription rows across ${tenantsRead} tenants (${recordsRead} SKU/subscription records read, ${companySubscriptionsRead} directory subscriptions, ${failedTenants} SKU failures, ${failedProductSubscriptionTenants} subscription-detail failures).`;
+    }
+
+    const usersRead = numberField(body, 'usersRead')?.toLocaleString() ?? '0';
+    const mapped = numberField(body, 'mappedSnapshots')?.toLocaleString() ?? '0';
+    const unmapped = numberField(body, 'unmappedSnapshots')?.toLocaleString() ?? '0';
+    const failedTenants = numberField(body, 'failedTenants')?.toLocaleString() ?? '0';
+    return `User sync complete. Stored ${recordsWritten} of ${recordsRead} Microsoft 365 assigned license rows across ${tenantsRead} tenants and ${usersRead} users (${mapped} mapped, ${unmapped} unmapped, ${failedTenants} tenant failures).`;
+  }
+
+  if (integrationId === 'opentext-appriver') {
+    if (body.status === 'queued' || body.queued === true) {
+      const customersRead = numberField(body, 'customersRead')?.toLocaleString() ?? '0';
+      const queuedCustomers = numberField(body, 'queuedCustomers')?.toLocaleString() ?? '0';
+      const skippedPartnerCustomers = numberField(body, 'skippedPartnerCustomers')?.toLocaleString() ?? '0';
+      return `Queued AppRiver sync. Gathered ${customersRead} customers and queued ${queuedCustomers} for serial processing (${skippedPartnerCustomers} partner customers skipped).`;
+    }
+
+    const recordsWritten = numberField(body, 'recordsWritten')?.toLocaleString() ?? '0';
+    const recordsRead = numberField(body, 'recordsRead')?.toLocaleString() ?? '0';
+    const customersRead = numberField(body, 'customersRead')?.toLocaleString() ?? '0';
+    const mapped = numberField(body, 'mappedSnapshots')?.toLocaleString() ?? '0';
+    const unmapped = numberField(body, 'unmappedSnapshots')?.toLocaleString() ?? '0';
+    const failedSubscriptions = numberField(body, 'failedSubscriptions')?.toLocaleString() ?? '0';
+    return `Sync complete. Stored ${recordsWritten} of ${recordsRead} AppRiver subscription rows across ${customersRead} customers (${mapped} mapped, ${unmapped} unmapped, ${failedSubscriptions} subscription failures).`;
   }
 
   const recordsWritten = numberField(body, 'recordsWritten')?.toLocaleString() ?? '0';
@@ -1360,6 +1481,7 @@ function App() {
   const [busyIntegrationAction, setBusyIntegrationAction] = useState<IntegrationActionKey | null>(null);
   const [reportSection, setReportSection] = useState<ReportSection>('raw-sync');
   const [selectedRawSyncIntegrationId, setSelectedRawSyncIntegrationId] = useState<IntegrationId | ''>('');
+  const [selectedRawSyncDataset, setSelectedRawSyncDataset] = useState<RawSyncDataset>('users');
   const [rawSyncRuns, setRawSyncRuns] = useState<RawSyncRun[]>([]);
   const [selectedRawSyncRunId, setSelectedRawSyncRunId] = useState<string>('');
   const [rawSyncDetails, setRawSyncDetails] = useState<RawSyncDetailsResponse | null>(null);
@@ -1417,7 +1539,7 @@ function App() {
     }
   };
 
-  const loadRawSyncRuns = async (integrationId: IntegrationId) => {
+  const loadRawSyncRuns = async (integrationId: IntegrationId, dataset: RawSyncDataset = 'users') => {
     setRawSyncLoadState('loading');
     setRawSyncMessage('Loading raw sync dates...');
     setRawSyncRuns([]);
@@ -1426,7 +1548,7 @@ function App() {
     setRawSyncColumnFilters({});
 
     try {
-      const response = await fetchRawSyncRuns(integrationId);
+      const response = await fetchRawSyncRuns(integrationId, dataset);
       setRawSyncRuns(response.runs);
       setRawSyncLoadState('ready');
       setRawSyncMessage(
@@ -1445,14 +1567,14 @@ function App() {
     }
   };
 
-  const loadRawSyncDetails = async (integrationId: IntegrationId, syncRunId: string) => {
+  const loadRawSyncDetails = async (integrationId: IntegrationId, syncRunId: string, dataset: RawSyncDataset = 'users') => {
     setRawSyncLoadState('loading');
     setRawSyncMessage('Loading raw sync details...');
     setRawSyncDetails(null);
     setRawSyncColumnFilters({});
 
     try {
-      const details = await fetchRawSyncDetails(integrationId, syncRunId);
+      const details = await fetchRawSyncDetails(integrationId, syncRunId, dataset);
       setRawSyncDetails(details);
       setRawSyncLoadState('ready');
       setRawSyncMessage(`Loaded ${details.summary.rowCount.toLocaleString()} raw sync rows.`);
@@ -1592,16 +1714,16 @@ function App() {
       return;
     }
 
-    void loadRawSyncRuns(selectedRawSyncIntegrationId);
-  }, [selectedRawSyncIntegrationId, view]);
+    void loadRawSyncRuns(selectedRawSyncIntegrationId, selectedRawSyncDataset);
+  }, [selectedRawSyncDataset, selectedRawSyncIntegrationId, view]);
 
   useEffect(() => {
     if (view !== 'reports' || !selectedRawSyncIntegrationId || !selectedRawSyncRunId) {
       return;
     }
 
-    void loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId);
-  }, [selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
+    void loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
+  }, [selectedRawSyncDataset, selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
 
   useEffect(() => {
     if (view !== 'mappings') {
@@ -1773,9 +1895,9 @@ function App() {
           : 'No secret values were changed.';
       setIntegrationSaveMessage(`Saved. ${secretMessage} ${storage}`);
       const latest = await refreshRuntimeIntegrations();
-      const refreshedIntegration = latest?.integrations.find((integration) => integration.integrationId === payload.integrationId);
+      const refreshedIntegration = buildIntegrations(latest?.integrations).find((integration) => integration.id === payload.integrationId);
       if (refreshedIntegration) {
-        setSelectedIntegration(buildIntegrations([refreshedIntegration])[0] ?? null);
+        setSelectedIntegration(refreshedIntegration);
       }
     } catch (error) {
       setIntegrationSaveMessage(error instanceof Error ? `Save failed: ${error.message}` : 'Save failed.');
@@ -1817,12 +1939,22 @@ function App() {
     }
   };
 
-  const syncIntegration = async (integrationId: IntegrationId) => {
-    const actionKey: IntegrationActionKey = `${integrationId}:sync`;
+  const syncIntegration = async (integrationId: IntegrationId, dataset?: RawSyncDataset) => {
+    const actionKey: IntegrationActionKey =
+      integrationId === 'microsoft-365' && dataset === 'licenses'
+        ? `${integrationId}:sync-licenses`
+        : integrationId === 'microsoft-365'
+          ? `${integrationId}:sync-users`
+          : `${integrationId}:sync`;
     setBusyIntegrationAction(actionKey);
     setIntegrationActionMessages((messages) => ({
       ...messages,
-      [integrationId]: 'Starting sync...',
+      [integrationId]:
+        integrationId === 'microsoft-365' && dataset === 'licenses'
+          ? 'Starting Microsoft 365 license sync...'
+          : integrationId === 'microsoft-365'
+            ? 'Starting Microsoft 365 user sync...'
+            : 'Starting sync...',
     }));
 
     try {
@@ -1831,9 +1963,10 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(syncRequestBodyForIntegration(integrationId)),
+        body: JSON.stringify(syncRequestBodyForIntegration(integrationId, dataset)),
       });
       const body = await responseJson(response);
+      const queuedSync = body.status === 'queued' || body.queued === true;
 
       if (!response.ok) {
         throw new Error(String(body.error ?? `Sync failed with HTTP ${response.status}.`));
@@ -1844,18 +1977,10 @@ function App() {
         [integrationId]: formatIntegrationSyncSuccess(integrationId, body),
       }));
       await refreshRuntimeIntegrations();
-      if (integrationId === 'connectwise') {
-        if (selectedRawSyncIntegrationId === 'connectwise') {
-          await loadRawSyncRuns('connectwise');
-        }
+      if (!queuedSync && selectedRawSyncIntegrationId === integrationId) {
+        await loadRawSyncRuns(integrationId, selectedRawSyncDataset);
       }
-      if (integrationId === 'cove' && selectedRawSyncIntegrationId === 'cove') {
-        await loadRawSyncRuns('cove');
-      }
-      if (integrationId === 'ncentral' && selectedRawSyncIntegrationId === 'ncentral') {
-        await loadRawSyncRuns('ncentral');
-      }
-      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (!queuedSync && integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
         await loadVendorReconciliation(integrationId);
       }
     } catch (error) {
@@ -1889,7 +2014,7 @@ function App() {
       setMappingMessage(summary);
       await loadMappings(selectedMappingIntegrationId);
       if (selectedRawSyncIntegrationId === selectedMappingIntegrationId && selectedRawSyncRunId) {
-        await loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId);
+        await loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
       }
     } catch (error) {
       setMappingLoadState('failed');
@@ -2264,14 +2389,22 @@ function App() {
               }
               onIntegrationChange={(integrationId) => {
                 setSelectedRawSyncIntegrationId(integrationId);
+                setSelectedRawSyncDataset('users');
                 setRawSyncRuns([]);
                 setSelectedRawSyncRunId('');
                 setRawSyncDetails(null);
                 setRawSyncColumnFilters({});
                 setRawSyncMessage(integrationId ? 'Loading raw sync dates...' : 'Select an integration to view saved raw sync rows.');
               }}
+              onDatasetChange={(dataset) => {
+                setSelectedRawSyncDataset(dataset);
+                setRawSyncDetails(null);
+                setRawSyncColumnFilters({});
+                setRawSyncMessage(selectedRawSyncRunId ? 'Loading raw sync details...' : 'Select a sync date to load raw rows.');
+              }}
               onSyncRunChange={setSelectedRawSyncRunId}
               runs={rawSyncRuns}
+              selectedDataset={selectedRawSyncDataset}
               selectedIntegrationId={selectedRawSyncIntegrationId}
               selectedSyncRunId={selectedRawSyncRunId}
             />
@@ -3147,7 +3280,7 @@ function IntegrationsView(props: {
   onConfigure: (integration: Integration) => void;
   onOpenMappings: (integrationId: IntegrationId) => void;
   onRefresh: () => Promise<RuntimeIntegrationsResponse | null>;
-  onSync: (integrationId: IntegrationId) => void;
+  onSync: (integrationId: IntegrationId, dataset?: RawSyncDataset) => void;
   onTest: (integrationId: IntegrationId) => void;
 }) {
   const {
@@ -3165,6 +3298,15 @@ function IntegrationsView(props: {
   } = props;
   const connectedCount = integrations.filter((integration) => integration.status === 'connected').length;
   const degradedCount = integrations.filter((integration) => integration.status === 'degraded').length;
+  const activeIntegrations = sortIntegrationsForDisplay(
+    integrations.filter((integration) => isImplementedIntegration(integration.id) && integration.enabled),
+  );
+  const availableIntegrations = sortIntegrationsForDisplay(
+    integrations.filter((integration) => isImplementedIntegration(integration.id) && !integration.enabled),
+  );
+  const comingSoonIntegrations = sortIntegrationsForDisplay(
+    integrations.filter((integration) => !isImplementedIntegration(integration.id)),
+  );
 
   return (
     <section className="integrations-page" aria-label="Vendor API integrations">
@@ -3186,138 +3328,213 @@ function IntegrationsView(props: {
         </div>
       </div>
 
-      {integrations.map((integration) => (
-        <article className="integration-card" key={integration.id}>
-          <div className="integration-main">
-            <div className="integration-title-row">
-              <h2>{integration.name}</h2>
-              <span className="integration-chip">{integration.category}</span>
-              <span className={`integration-status ${integration.status}`}>{integrationStatusLabel(integration.status)}</span>
-              <span className="auth-chip">
-                <KeyRound size={13} />
-                {integration.auth}
-              </span>
-            </div>
-            <p>{integration.description}</p>
+      <div className="integration-list" aria-label="Enabled integrations">
+        {activeIntegrations.map((integration) => (
+          <IntegrationCard
+            actionMessage={actionMessages[integration.id]}
+            busyAction={busyAction}
+            integration={integration}
+            key={integration.id}
+            onConfigure={onConfigure}
+            onOpenMappings={onOpenMappings}
+            onSync={onSync}
+            onTest={onTest}
+          />
+        ))}
+      </div>
 
-            <div className="integration-stats" aria-label={`${integration.name} integration status`}>
-              <IntegrationStat label="Last sync" value={integration.lastSync ?? 'Never'} />
-              <IntegrationStat label="Last test" value={integration.lastTest ?? 'Never'} />
-              <IntegrationStat label="Frequency" value={integration.frequency ?? 'Manual'} />
-              <IntegrationStat label="Records" value={integration.records ?? '0'} />
+      {availableIntegrations.length > 0 ? (
+        <details className="integration-drawer" open>
+          <summary>
+            <div>
+              <strong>Available Integrations</strong>
+              <span>{availableIntegrations.length} ready to configure</span>
             </div>
+            <ChevronRight className="drawer-chevron" size={18} />
+          </summary>
+          <div className="integration-drawer-body">
+            {availableIntegrations.map((integration) => (
+              <IntegrationCard
+                actionMessage={actionMessages[integration.id]}
+                busyAction={busyAction}
+                integration={integration}
+                key={integration.id}
+                onConfigure={onConfigure}
+                onOpenMappings={onOpenMappings}
+                onSync={onSync}
+                onTest={onTest}
+              />
+            ))}
+          </div>
+        </details>
+      ) : null}
 
-            <div className="scope-list runtime-list" aria-label={`${integration.name} runtime details`}>
+      {comingSoonIntegrations.length > 0 ? (
+        <details className="integration-drawer">
+          <summary>
+            <div>
+              <strong>Coming Soon Integrations</strong>
+              <span>{comingSoonIntegrations.length} disabled roadmap integrations</span>
+            </div>
+            <ChevronRight className="drawer-chevron" size={18} />
+          </summary>
+          <div className="integration-drawer-body">
+            {comingSoonIntegrations.map((integration) => (
+              <IntegrationCard comingSoon integration={integration} key={integration.id} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function IntegrationCard(props: {
+  actionMessage?: string;
+  busyAction?: IntegrationActionKey | null;
+  comingSoon?: boolean;
+  integration: Integration;
+  onConfigure?: (integration: Integration) => void;
+  onOpenMappings?: (integrationId: IntegrationId) => void;
+  onSync?: (integrationId: IntegrationId, dataset?: RawSyncDataset) => void;
+  onTest?: (integrationId: IntegrationId) => void;
+}) {
+  const { actionMessage, busyAction, comingSoon = false, integration, onConfigure, onOpenMappings, onSync, onTest } = props;
+  const displayName = comingSoon ? `${integration.name} (Coming Soon)` : integration.name;
+  const actionKeyPrefix = integration.id;
+  const microsoft365SyncBusy =
+    busyAction === `${actionKeyPrefix}:sync-users` || busyAction === `${actionKeyPrefix}:sync-licenses`;
+
+  return (
+    <article aria-disabled={comingSoon || undefined} className={comingSoon ? 'integration-card coming-soon' : 'integration-card'}>
+      <div className="integration-main">
+        <div className="integration-title-row">
+          <h2>{displayName}</h2>
+          <span className={comingSoon ? 'integration-chip coming-soon-chip' : 'integration-chip'}>{integration.category}</span>
+          <span className={comingSoon ? 'integration-status disabled' : `integration-status ${integration.status}`}>
+            {comingSoon ? 'Disabled' : integrationStatusLabel(integration.status)}
+          </span>
+          <span className="auth-chip">
+            <KeyRound size={13} />
+            {integration.auth}
+          </span>
+        </div>
+        <p>{integration.description}</p>
+
+        <div className="integration-stats" aria-label={`${integration.name} integration status`}>
+          <IntegrationStat label="Last sync" value={comingSoon ? 'Unavailable' : integration.lastSync ?? 'Never'} />
+          <IntegrationStat label="Last test" value={comingSoon ? 'Unavailable' : integration.lastTest ?? 'Never'} />
+          <IntegrationStat label="Frequency" value={comingSoon ? 'TBD' : integration.frequency ?? 'Manual'} />
+          <IntegrationStat label="Records" value={comingSoon ? '0' : integration.records ?? '0'} />
+        </div>
+
+        <div className="scope-list runtime-list" aria-label={`${integration.name} runtime details`}>
+          {comingSoon ? (
+            <span>Not implemented yet</span>
+          ) : (
+            <>
               <span>Secrets: {integration.secretSource === 'key-vault' ? 'Key Vault' : 'Environment'}</span>
               {integration.lastSyncStatus ? <span>Last sync: {integration.lastSyncStatus}</span> : null}
-            </div>
+            </>
+          )}
+        </div>
 
-            <div className="scope-list" aria-label={`${integration.name} scopes`}>
-              {integration.scopes.map((scope) => (
-                <span key={scope}>{scope}</span>
-              ))}
-            </div>
+        <div className="scope-list" aria-label={`${integration.name} scopes`}>
+          {integration.scopes.map((scope) => (
+            <span key={scope}>{scope}</span>
+          ))}
+        </div>
 
-            {integration.missingSecrets.length + integration.missingNonSecrets.length > 0 ? (
-              <div className="scope-list warning-list" aria-label={`${integration.name} missing settings`}>
-                {[...integration.missingSecrets, ...integration.missingNonSecrets].map((setting) => (
-                  <span key={setting}>Missing {setting}</span>
-                ))}
-              </div>
-            ) : null}
+        {!comingSoon && integration.missingSecrets.length + integration.missingNonSecrets.length > 0 ? (
+          <div className="scope-list warning-list" aria-label={`${integration.name} missing settings`}>
+            {[...integration.missingSecrets, ...integration.missingNonSecrets].map((setting) => (
+              <span key={setting}>Missing {setting}</span>
+            ))}
+          </div>
+        ) : null}
 
-            <div className="integration-actions">
-              {integration.enabled ? (
+        <div className="integration-actions">
+          {comingSoon ? (
+            <button className="button secondary compact" disabled type="button">
+              Coming Soon
+            </button>
+          ) : (
+            <>
+              {hasLiveIntegrationActions(integration.id) ? (
                 <>
-                  {hasLiveIntegrationActions(integration.id) ? (
+                  {integration.id === 'microsoft-365' ? (
                     <>
                       <button
                         className="button secondary compact"
-                        disabled={busyAction === `${integration.id}:sync`}
-                        onClick={() => onSync(integration.id)}
+                        disabled={microsoft365SyncBusy}
+                        onClick={() => onSync?.(integration.id, 'users')}
                         type="button"
                       >
                         <RefreshCcw size={16} />
-                        {busyAction === `${integration.id}:sync` ? 'Syncing' : 'Sync now'}
+                        {busyAction === `${actionKeyPrefix}:sync-users` ? 'Syncing users' : 'Sync Users'}
                       </button>
                       <button
                         className="button secondary compact"
-                        disabled={busyAction === `${integration.id}:test`}
-                        onClick={() => onTest(integration.id)}
+                        disabled={microsoft365SyncBusy}
+                        onClick={() => onSync?.(integration.id, 'licenses')}
                         type="button"
                       >
-                        <Plug size={16} />
-                        {busyAction === `${integration.id}:test` ? 'Testing' : 'Test connection'}
+                        <RefreshCcw size={16} />
+                        {busyAction === `${actionKeyPrefix}:sync-licenses` ? 'Syncing licenses' : 'Sync Licenses'}
                       </button>
                     </>
-                  ) : null}
-                  <button className="button secondary compact" onClick={() => onConfigure(integration)} type="button">
-                    <KeyRound size={16} />
-                    Configure
-                  </button>
-                  {hasMappingWorkspace(integration.id) ? (
-                    <button className="button secondary compact" onClick={() => onOpenMappings(integration.id)} type="button">
-                      <Link2 size={16} />
-                      Mapping
-                    </button>
-                  ) : null}
-                  <button className="button ghost compact" type="button">
-                    <ExternalLink size={16} />
-                    API Docs
-                  </button>
-                </>
-              ) : (
-                <>
-                  {hasLiveIntegrationActions(integration.id) ? (
-                    <>
-                      <button
-                        className="button secondary compact"
-                        disabled={busyAction === `${integration.id}:sync`}
-                        onClick={() => onSync(integration.id)}
-                        type="button"
-                      >
-                        <RefreshCcw size={16} />
-                        {busyAction === `${integration.id}:sync` ? 'Syncing' : 'Sync now'}
-                      </button>
+                  ) : (
                     <button
                       className="button secondary compact"
-                      disabled={busyAction === `${integration.id}:test`}
-                      onClick={() => onTest(integration.id)}
+                      disabled={busyAction === `${actionKeyPrefix}:sync`}
+                      onClick={() => onSync?.(integration.id)}
                       type="button"
                     >
-                      <Plug size={16} />
-                      {busyAction === `${integration.id}:test` ? 'Testing' : 'Test connection'}
+                      <RefreshCcw size={16} />
+                      {busyAction === `${actionKeyPrefix}:sync` ? 'Syncing' : 'Sync now'}
                     </button>
-                    </>
-                  ) : null}
-                  <button className="button secondary compact" onClick={() => onConfigure(integration)} type="button">
-                    <KeyRound size={16} />
-                    Configure to enable
+                  )}
+                  <button
+                    className="button secondary compact"
+                    disabled={busyAction === `${actionKeyPrefix}:test`}
+                    onClick={() => onTest?.(integration.id)}
+                    type="button"
+                  >
+                    <Plug size={16} />
+                    {busyAction === `${actionKeyPrefix}:test` ? 'Testing' : 'Test connection'}
                   </button>
-                  {hasMappingWorkspace(integration.id) ? (
-                    <button className="button secondary compact" onClick={() => onOpenMappings(integration.id)} type="button">
-                      <Link2 size={16} />
-                      Mapping
-                    </button>
-                  ) : null}
                 </>
-              )}
-            </div>
-            {actionMessages[integration.id] ? (
-              <p className="config-note integration-action-message">{actionMessages[integration.id]}</p>
-            ) : null}
-          </div>
+              ) : null}
+              <button className="button secondary compact" onClick={() => onConfigure?.(integration)} type="button">
+                <KeyRound size={16} />
+                {integration.enabled ? 'Configure' : 'Configure to enable'}
+              </button>
+              {hasMappingWorkspace(integration.id) ? (
+                <button className="button secondary compact" onClick={() => onOpenMappings?.(integration.id)} type="button">
+                  <Link2 size={16} />
+                  Mapping
+                </button>
+              ) : null}
+              {integration.enabled ? (
+                <button className="button ghost compact" type="button">
+                  <ExternalLink size={16} />
+                  API Docs
+                </button>
+              ) : null}
+            </>
+          )}
+        </div>
+        {actionMessage ? <p className="config-note integration-action-message">{actionMessage}</p> : null}
+      </div>
 
-          <span
-            aria-label={`${integrationStatusLabel(integration.status)} ${integration.name}`}
-            className={integration.enabled ? 'toggle-switch on' : 'toggle-switch'}
-            role="status"
-          >
-            <span />
-          </span>
-        </article>
-      ))}
-    </section>
+      <span
+        aria-label={`${comingSoon ? 'Disabled' : integrationStatusLabel(integration.status)} ${displayName}`}
+        className={comingSoon ? 'toggle-switch disabled' : integration.enabled ? 'toggle-switch on' : 'toggle-switch'}
+        role="status"
+      >
+        <span />
+      </span>
+    </article>
   );
 }
 
@@ -4730,9 +4947,11 @@ function ReportsView(props: {
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   onColumnFilterChange: (column: string, value: string) => void;
+  onDatasetChange: (dataset: RawSyncDataset) => void;
   onIntegrationChange: (integrationId: IntegrationId | '') => void;
   onSyncRunChange: (syncRunId: string) => void;
   runs: RawSyncRun[];
+  selectedDataset: RawSyncDataset;
   selectedIntegrationId: IntegrationId | '';
   selectedSyncRunId: string;
 }) {
@@ -4743,9 +4962,11 @@ function ReportsView(props: {
     loadMessage,
     loadState,
     onColumnFilterChange,
+    onDatasetChange,
     onIntegrationChange,
     onSyncRunChange,
     runs,
+    selectedDataset,
     selectedIntegrationId,
     selectedSyncRunId,
   } = props;
@@ -4791,6 +5012,20 @@ function ReportsView(props: {
             ))}
           </select>
         </label>
+
+        {selectedIntegrationId === 'microsoft-365' ? (
+          <label className="config-field report-select">
+            <span>Dataset</span>
+            <select
+              disabled={loadState === 'loading'}
+              onChange={(event) => onDatasetChange(event.target.value as RawSyncDataset)}
+              value={selectedDataset}
+            >
+              <option value="users">M365 Users</option>
+              <option value="licenses">M365 Licenses</option>
+            </select>
+          </label>
+        ) : null}
 
         <label className="config-field report-select">
           <span>SyncDate</span>

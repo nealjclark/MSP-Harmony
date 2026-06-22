@@ -213,6 +213,64 @@ CREATE TABLE IF NOT EXISTS vendor_usage_snapshots (
   raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS microsoft365_subscription_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid REFERENCES sync_runs(id),
+  customer_id uuid REFERENCES customers(id),
+  agreement_id uuid REFERENCES agreements(id),
+  external_account_id text NOT NULL,
+  tenant_name text,
+  tenant_default_domain_name text,
+  sku_id text,
+  sku_part_number text,
+  sku_name text,
+  capability_status text,
+  subscription_status text,
+  subscription_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  commerce_subscription_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  subscription_count integer NOT NULL DEFAULT 0,
+  total_units integer,
+  assigned_units integer,
+  unassigned_units integer,
+  enabled_units integer,
+  suspended_units integer,
+  warning_units integer,
+  locked_out_units integer,
+  next_lifecycle_at timestamptz,
+  billing_type text,
+  billing_cycle text,
+  billing_term text,
+  is_trial boolean,
+  observed_at timestamptz NOT NULL,
+  dimensions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS appriver_sync_work_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  external_customer_id text NOT NULL,
+  customer_name text,
+  customer_type text,
+  status text NOT NULL DEFAULT 'queued',
+  attempts integer NOT NULL DEFAULT 0,
+  records_read integer NOT NULL DEFAULT 0,
+  records_written integer NOT NULL DEFAULT 0,
+  subscriptions_read integer NOT NULL DEFAULT 0,
+  mapped_snapshots integer NOT NULL DEFAULT 0,
+  unmapped_snapshots integer NOT NULL DEFAULT 0,
+  failed_subscriptions integer NOT NULL DEFAULT 0,
+  started_at timestamptz,
+  completed_at timestamptz,
+  error_message text,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  result_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (sync_run_id, external_customer_id)
+);
+
 CREATE TABLE IF NOT EXISTS invoice_imports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -348,6 +406,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_vendor_product_mappings_target
 ALTER TABLE vendor_usage_snapshots ADD COLUMN IF NOT EXISTS vendor_product_key text;
 CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_mapping
   ON vendor_usage_snapshots(vendor_id, external_account_id, vendor_product_key);
+CREATE INDEX IF NOT EXISTS idx_microsoft365_subscription_snapshots_sync
+  ON microsoft365_subscription_snapshots(sync_run_id);
+CREATE INDEX IF NOT EXISTS idx_microsoft365_subscription_snapshots_tenant
+  ON microsoft365_subscription_snapshots(external_account_id);
+CREATE INDEX IF NOT EXISTS idx_microsoft365_subscription_snapshots_sku
+  ON microsoft365_subscription_snapshots(sku_part_number, sku_id);
+CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_next
+  ON appriver_sync_work_items(sync_run_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_customer
+  ON appriver_sync_work_items(external_customer_id);
 
 ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_id text;
 ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_name text NOT NULL DEFAULT '';

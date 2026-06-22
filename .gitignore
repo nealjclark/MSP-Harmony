@@ -5,6 +5,7 @@ infra/azure/postgres.json
 .env
 .env.*
 !.env.example
+.runtime/
 local.settings.json
 .DS_Store
 *.log

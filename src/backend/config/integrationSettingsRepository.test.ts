@@ -51,6 +51,9 @@ async function run() {
   const coveStatus = await repository.loadOperationalStatus('cove');
   assert.equal(coveStatus?.storedRecordCount, 34);
 
+  const appRiverStatus = await repository.loadOperationalStatus('opentext-appriver');
+  assert.equal(appRiverStatus?.storedRecordCount, 34);
+
   console.log('integration settings repository tests passed');
 }
 

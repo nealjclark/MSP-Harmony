@@ -74,11 +74,19 @@ export async function listRawSyncRunsHttp(
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const integrationId = request.query.get('integrationId') ?? undefined;
+  const dataset = request.query.get('dataset') ?? undefined;
 
   if (!isRawSyncIntegrationId(integrationId)) {
     return jsonResponse(400, {
       error: 'Raw sync report requires a supported integrationId.',
       supportedIntegrationIds: listIntegrationSettingsDefinitions().map((definition) => definition.integrationId),
+    });
+  }
+
+  if (dataset && (integrationId !== 'microsoft-365' || (dataset !== 'users' && dataset !== 'licenses'))) {
+    return jsonResponse(400, {
+      error: 'Raw sync report dataset is not supported for this integration.',
+      supportedDatasets: integrationId === 'microsoft-365' ? ['users', 'licenses'] : [],
     });
   }
 
@@ -92,11 +100,14 @@ export async function listRawSyncRunsHttp(
   }
 
   try {
-    const runs = await listRawSyncRuns(repositoryContext.pool, integrationId);
+    const runs = await listRawSyncRuns(repositoryContext.pool, integrationId, {
+      dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
+    });
 
     return jsonResponse(200, {
       reportType: 'raw-sync',
       integrationId,
+      dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
       runs,
     });
   } catch (error) {
@@ -113,12 +124,20 @@ export async function getRawSyncDetailsHttp(
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const integrationId = request.query.get('integrationId') ?? undefined;
+  const dataset = request.query.get('dataset') ?? undefined;
   const syncRunId = request.params.syncRunId;
 
   if (!isRawSyncIntegrationId(integrationId)) {
     return jsonResponse(400, {
       error: 'Raw sync report requires a supported integrationId.',
       supportedIntegrationIds: listIntegrationSettingsDefinitions().map((definition) => definition.integrationId),
+    });
+  }
+
+  if (dataset && (integrationId !== 'microsoft-365' || (dataset !== 'users' && dataset !== 'licenses'))) {
+    return jsonResponse(400, {
+      error: 'Raw sync report dataset is not supported for this integration.',
+      supportedDatasets: integrationId === 'microsoft-365' ? ['users', 'licenses'] : [],
     });
   }
 
@@ -132,7 +151,11 @@ export async function getRawSyncDetailsHttp(
   }
 
   try {
-    const details = syncRunId ? await getRawSyncDetails(repositoryContext.pool, integrationId, syncRunId) : undefined;
+    const details = syncRunId
+      ? await getRawSyncDetails(repositoryContext.pool, integrationId, syncRunId, {
+          dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
+        })
+      : undefined;
 
     if (!details) {
       return jsonResponse(404, {

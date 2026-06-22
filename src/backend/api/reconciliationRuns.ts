@@ -19,6 +19,8 @@ import {
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
+import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
+import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -246,6 +248,14 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
 
   if (vendorId === 'ncentral') {
     return loadNcentralRuleSet(database);
+  }
+
+  if (vendorId === 'microsoft-365') {
+    return loadMicrosoft365RuleSet(database);
+  }
+
+  if (vendorId === 'opentext-appriver') {
+    return loadAppRiverRuleSet(database);
   }
 
   const ruleSet = getVendorRuleSet(vendorId);

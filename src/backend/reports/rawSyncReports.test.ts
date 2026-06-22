@@ -44,6 +44,57 @@ async function run() {
         };
       }
 
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'microsoft-365'")) {
+        return {
+          rows: [
+            {
+              id: 'microsoft-365-sync-1',
+              started_at: new Date('2026-06-15T14:00:00Z'),
+              completed_at: new Date('2026-06-15T14:01:00Z'),
+              status: 'complete',
+              records_read: 1,
+              records_written: 1,
+              error_message: null,
+              metadata: { entity: 'license-snapshots', mappedSnapshots: 1 },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'opentext-appriver'") && sql.includes('order by started_at')) {
+        return {
+          rows: [
+            {
+              id: 'appriver-sync-1',
+              started_at: new Date('2026-06-15T15:00:00Z'),
+              completed_at: new Date('2026-06-15T15:01:00Z'),
+              status: 'complete',
+              records_read: 2,
+              records_written: 2,
+              error_message: null,
+              metadata: { entity: 'subscription-snapshots', mappedSnapshots: 1, unmappedSnapshots: 1 },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'opentext-appriver'") && sql.includes('where id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'appriver-sync-1',
+              started_at: new Date('2026-06-15T15:00:00Z'),
+              completed_at: new Date('2026-06-15T15:01:00Z'),
+              status: 'complete',
+              records_read: 2,
+              records_written: 2,
+              error_message: null,
+              metadata: { entity: 'subscription-snapshots', mappedSnapshots: 1, unmappedSnapshots: 1 },
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('from sync_runs') && sql.includes('and integration_id = $2')) {
         assert.deepEqual(values, ['sentinel-sync-1', 'sentinelone']);
 
@@ -75,6 +126,130 @@ async function run() {
               records_written: 2,
               error_message: null,
               metadata: { entity: 'usage-snapshots', mappedSnapshots: 1, unmappedSnapshots: 1 },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes("vendor_usage_snapshots.vendor_id = 'microsoft-365'")) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: 'tenant-1',
+              vendor_product_key: 'SPB',
+              product_code: 'CW-M365-BUSINESS-PREMIUM',
+              product_name: 'Microsoft 365 Business Premium',
+              quantity: '1',
+              observed_at: new Date('2026-06-15T14:01:00Z'),
+              dimensions: {
+                tenantName: 'Mapped Client Tenant',
+                tenantId: 'tenant-1',
+                userPrincipalName: 'licensed.user@mapped.example',
+                displayName: 'Licensed User',
+                userState: 'active',
+                skuName: 'Microsoft 365 Business Premium',
+                skuId: 'sku-spb',
+                consumedUnits: 1,
+                servicePlans: [
+                  {
+                    serviceName: 'EXCHANGE_S_STANDARD',
+                    capabilityStatus: 'Assigned',
+                  },
+                ],
+              },
+              raw_payload: { productSku: { skuPartNumber: 'SPB' } },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from microsoft365_subscription_snapshots')) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: 'tenant-1',
+              tenant_name: 'Mapped Client Tenant',
+              tenant_default_domain_name: 'mapped.example',
+              sku_id: 'sku-spb',
+              sku_part_number: 'SPB',
+              sku_name: 'Microsoft 365 Business Premium',
+              capability_status: 'Enabled',
+              subscription_status: 'Enabled',
+              subscription_ids: ['subscription-id-1'],
+              commerce_subscription_ids: ['commerce-subscription-1'],
+              subscription_count: 1,
+              total_units: 3,
+              assigned_units: 1,
+              unassigned_units: 2,
+              enabled_units: 3,
+              suspended_units: 0,
+              warning_units: 0,
+              locked_out_units: 0,
+              next_lifecycle_at: new Date('2027-01-01T00:00:00Z'),
+              billing_type: null,
+              billing_cycle: null,
+              billing_term: null,
+              is_trial: false,
+              observed_at: new Date('2026-06-15T14:01:00Z'),
+              dimensions: { billingTypeSource: 'not-returned-by-graph' },
+              raw_payload: { subscribedSku: { skuPartNumber: 'SPB' } },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes("vendor_usage_snapshots.vendor_id = 'opentext-appriver'")) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: 'customer-1',
+              vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
+              product_code: 'CW-M365-BUSINESS-PREMIUM',
+              product_name: 'Microsoft 365 Business Premium',
+              quantity: '3',
+              observed_at: new Date('2026-06-15T15:01:00Z'),
+              dimensions: {
+                customerName: 'Mapped Client',
+                appRiverCustomerId: 'customer-1',
+                domain: 'mapped.example',
+                totalLicenses: 3,
+                assignedLicenses: 1,
+                unassignedLicenses: 2,
+                subscriptionTerm: 'Annual',
+                billingFrequency: 'Monthly',
+                commitmentEndDate: '2027-01-01T00:00:00Z',
+                isTrial: false,
+                subscriptionKey: 'sub-1',
+              },
+              raw_payload: { subscription: { SubscriptionKey: 'sub-1' } },
+            },
+            {
+              customer_name: null,
+              agreement_name: null,
+              external_account_id: 'customer-2',
+              vendor_product_key: 'Exchange Online Plan 1|Monthly|Monthly',
+              product_code: 'EXCHANGE-ONLINE-PLAN-1-MONTHLY-MONTHLY',
+              product_name: 'Exchange Online Plan 1',
+              quantity: '1',
+              observed_at: new Date('2026-06-15T15:01:00Z'),
+              dimensions: {
+                customerName: 'Unmapped Client',
+                appRiverCustomerId: 'customer-2',
+                domain: 'unmapped.example',
+                totalLicenses: 1,
+                assignedLicenses: 1,
+                unassignedLicenses: 0,
+                subscriptionTerm: 'Monthly',
+                billingFrequency: 'Monthly',
+                subscriptionKey: 'sub-2',
+              },
+              raw_payload: { subscription: { SubscriptionKey: 'sub-2' } },
             },
           ] as T[],
         };
@@ -157,6 +332,42 @@ async function run() {
 
   const microsoftRuns = await listRawSyncRuns(database, 'microsoft-365');
   assert.equal(microsoftRuns[0]?.id, 'microsoft-365-sync-1');
+
+  const microsoftDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1');
+  assert.equal(microsoftDetails?.integrationId, 'microsoft-365');
+  assert.equal(microsoftDetails?.summary.rowCount, 1);
+  assert.equal(microsoftDetails?.summary.companyCount, 1);
+  assert.equal(microsoftDetails?.summary.productCount, 1);
+  assert.equal(microsoftDetails?.rows[0]?.UserPrincipalName, 'licensed.user@mapped.example');
+  assert.equal(microsoftDetails?.rows[0]?.ProductKey, 'SPB');
+  assert.equal(microsoftDetails?.rows[0]?.ServicePlans, 'EXCHANGE_S_STANDARD');
+
+  const microsoftLicenseDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1', {
+    dataset: 'licenses',
+  });
+  assert.equal(microsoftLicenseDetails?.integrationId, 'microsoft-365');
+  assert.equal(microsoftLicenseDetails?.dataset, 'licenses');
+  assert.equal(microsoftLicenseDetails?.summary.rowCount, 1);
+  assert.equal(microsoftLicenseDetails?.rows[0]?.SkuPartNumber, 'SPB');
+  assert.equal(microsoftLicenseDetails?.rows[0]?.TotalUnits, 3);
+  assert.equal(microsoftLicenseDetails?.rows[0]?.AssignedUnits, 1);
+  assert.equal(microsoftLicenseDetails?.rows[0]?.UnassignedUnits, 2);
+  assert.equal(microsoftLicenseDetails?.rows[0]?.NextLifecycleAt, '2027-01-01T00:00:00.000Z');
+
+  const appRiverRuns = await listRawSyncRuns(database, 'opentext-appriver');
+  assert.equal(appRiverRuns[0]?.id, 'appriver-sync-1');
+
+  const appRiverDetails = await getRawSyncDetails(database, 'opentext-appriver', 'appriver-sync-1');
+  assert.equal(appRiverDetails?.integrationId, 'opentext-appriver');
+  assert.equal(appRiverDetails?.summary.rowCount, 2);
+  assert.equal(appRiverDetails?.summary.companyCount, 2);
+  assert.equal(appRiverDetails?.summary.productCount, 2);
+  assert.equal(appRiverDetails?.rows[0]?.AppRiverCustomer, 'Mapped Client');
+  assert.equal(appRiverDetails?.rows[0]?.ProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
+  assert.equal(appRiverDetails?.rows[0]?.Quantity, 3);
+  assert.equal(appRiverDetails?.rows[0]?.AssignedLicenses, 1);
+  assert.equal(appRiverDetails?.rows[1]?.Mapped, false);
+  assert.equal(appRiverDetails?.rows[1]?.AppRiverCustomer, 'Unmapped Client');
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');

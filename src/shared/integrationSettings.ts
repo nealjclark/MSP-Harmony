@@ -6,6 +6,7 @@ export type IntegrationId =
   | 'proofpoint'
   | 'datto'
   | 'microsoft-365'
+  | 'opentext-appriver'
   | 'microsoft-azure'
   | 'pax8';
 
@@ -165,17 +166,42 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Microsoft 365',
     category: 'Productivity',
     authMode: 'oauth2',
-    description: 'License counts through Microsoft Graph and Partner Center.',
+    description: 'Assigned user license counts through Microsoft Graph application permissions.',
     endpoint: 'https://graph.microsoft.com',
-    requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-microsoft365-client-secret', 'MICROSOFT365_CLIENT_SECRET')],
-    requiredNonSecrets: [
-      nonSecret('endpoint', 'Graph Endpoint', 'MICROSOFT365_ENDPOINT', 'https://graph.microsoft.com'),
-      nonSecret('tenantId', 'Tenant ID', 'MICROSOFT365_TENANT_ID'),
-      nonSecret('clientId', 'Client ID', 'MICROSOFT365_CLIENT_ID'),
+    requiredSecrets: [
+      secret('clientSecret', 'Application Client Secret', 'mspharmony-microsoft365-client-secret', 'MICROSOFT365_CLIENT_SECRET'),
     ],
-    scopes: ['Directory.Read.All', 'Organization.Read.All', 'PartnerCenter.Read.All'],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Microsoft Graph Endpoint', 'MICROSOFT365_ENDPOINT', 'https://graph.microsoft.com'),
+      nonSecret('clientId', 'Application (Client) ID', 'MICROSOFT365_CLIENT_ID'),
+      nonSecret('tenantId', 'Partner/Home Tenant ID', 'MICROSOFT365_TENANT_ID'),
+    ],
+    scopes: [
+      'Application: Directory.Read.All',
+      'Application: User.Read.All',
+      'Application: LicenseAssignment.Read.All',
+    ],
     syncFrequency: 'daily',
     webhookSupported: true,
+  },
+  {
+    integrationId: 'opentext-appriver',
+    displayName: 'AppRiver - OpenText',
+    category: 'Marketplace',
+    authMode: 'oauth2',
+    description: 'SecureCloud reseller subscriptions and Microsoft 365 license quantities from AppRiver.',
+    endpoint: 'https://unityapi.webrootcloudav.com',
+    requiredSecrets: [
+      secret('clientSecret', 'API Client Secret', 'mspharmony-opentext-appriver-client-secret', 'OPENTEXT_APPRIVER_CLIENT_SECRET'),
+      secret('refreshToken', 'Rotating Refresh Token', 'mspharmony-opentext-appriver-refresh-token', 'OPENTEXT_APPRIVER_REFRESH_TOKEN'),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'SecureCloud API Endpoint', 'OPENTEXT_APPRIVER_ENDPOINT', 'https://unityapi.webrootcloudav.com'),
+      nonSecret('clientId', 'API Client ID', 'OPENTEXT_APPRIVER_CLIENT_ID'),
+    ],
+    scopes: ['SecureCloud.Customers', 'SecureCloud.Usage'],
+    syncFrequency: 'daily',
+    webhookSupported: false,
   },
   {
     integrationId: 'microsoft-azure',

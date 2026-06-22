@@ -75,4 +75,44 @@ assert.equal(connectedNcentral.configuredStatus, 'connected');
 assert.deepEqual(connectedNcentral.missingSecrets, []);
 assert.deepEqual(connectedNcentral.missingNonSecrets, []);
 
+const microsoft365 = getIntegrationSettingsDefinition('microsoft-365');
+assert.ok(microsoft365);
+
+const connectedMicrosoft365 = validateIntegrationSettings(microsoft365, {
+  integrationId: 'microsoft-365',
+  nonSecrets: {
+    endpoint: 'https://graph.microsoft.com',
+    clientId: 'microsoft-app-id',
+    tenantId: 'partner-tenant',
+  },
+  availableKeyVaultSecrets: [
+    'mspharmony-microsoft365-client-secret',
+  ],
+  lastTestResult: 'success',
+});
+
+assert.equal(connectedMicrosoft365.configuredStatus, 'connected');
+assert.deepEqual(connectedMicrosoft365.missingSecrets, []);
+assert.deepEqual(connectedMicrosoft365.missingNonSecrets, []);
+
+const appRiver = getIntegrationSettingsDefinition('opentext-appriver');
+assert.ok(appRiver);
+
+const connectedAppRiver = validateIntegrationSettings(appRiver, {
+  integrationId: 'opentext-appriver',
+  nonSecrets: {
+    endpoint: 'https://unityapi.webrootcloudav.com',
+    clientId: 'appriver-client-id',
+  },
+  availableKeyVaultSecrets: [
+    'mspharmony-opentext-appriver-client-secret',
+    'mspharmony-opentext-appriver-refresh-token',
+  ],
+  lastTestResult: 'success',
+});
+
+assert.equal(connectedAppRiver.configuredStatus, 'connected');
+assert.deepEqual(connectedAppRiver.missingSecrets, []);
+assert.deepEqual(connectedAppRiver.missingNonSecrets, []);
+
 console.log('integration settings tests passed');
