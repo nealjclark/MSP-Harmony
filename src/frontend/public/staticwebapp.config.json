@@ -2,11 +2,11 @@
   "routes": [
     {
       "route": "/api/*",
-      "allowedRoles": ["Admin", "Approver", "Analyst"]
+      "allowedRoles": ["authenticated"]
     },
     {
       "route": "/*",
-      "allowedRoles": ["Admin", "Approver", "Analyst"]
+      "allowedRoles": ["authenticated"]
     }
   ],
   "navigationFallback": {

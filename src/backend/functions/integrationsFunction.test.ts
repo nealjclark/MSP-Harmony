@@ -7,6 +7,7 @@ const adminHeaders = new Headers({
 });
 
 const envKeys = [
+  'BOOTSTRAP_ADMIN_EMAILS',
   'DATABASE_URL',
   'DATABASE_HOST',
   'DATABASE_NAME',
@@ -29,7 +30,9 @@ const envKeys = [
 
 async function run() {
   const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.BOOTSTRAP_ADMIN_EMAILS = 'admin@example.com';
   for (const key of envKeys) {
+    if (key === 'BOOTSTRAP_ADMIN_EMAILS') continue;
     process.env[key] = '';
   }
 

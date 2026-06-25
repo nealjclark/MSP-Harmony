@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readAuthPrincipal, requireRole } from './auth';
 
 async function run() {
-  const anonymous = requireRole({ headers: new Headers() } as never, 'Analyst');
+  const anonymous = await requireRole({ headers: new Headers() } as never, 'Analyst');
   assert.equal(anonymous.response?.status, 401);
 
   const analystRequest = {
@@ -11,8 +11,8 @@ async function run() {
       'x-ms-client-principal-role': 'Analyst',
     }),
   } as never;
-  assert.equal(requireRole(analystRequest, 'Analyst').principal?.name, 'analyst@example.com');
-  assert.equal(requireRole(analystRequest, 'Admin').response?.status, 403);
+  assert.equal((await requireRole(analystRequest, 'Analyst')).principal?.name, 'analyst@example.com');
+  assert.equal((await requireRole(analystRequest, 'Admin')).response?.status, 403);
 
   const principalPayload = Buffer.from(
     JSON.stringify({

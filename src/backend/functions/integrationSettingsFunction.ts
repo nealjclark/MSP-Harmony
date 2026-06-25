@@ -19,7 +19,7 @@ export async function updateIntegrationSettingsHttp(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = request.params.integrationId as IntegrationId | undefined;

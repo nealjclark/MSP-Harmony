@@ -13,7 +13,7 @@ export async function listAgreementReportSyncRunsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const repositoryContext = createOptionalPostgresSettingsRepository();
@@ -45,7 +45,7 @@ export async function getAgreementReportDetailsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const syncRunId = request.params.syncRunId;
@@ -81,7 +81,7 @@ export async function listRawSyncRunsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = request.query.get('integrationId') ?? undefined;
@@ -134,7 +134,7 @@ export async function getRawSyncDetailsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = request.query.get('integrationId') ?? undefined;
@@ -207,7 +207,7 @@ export async function getProductProfitabilityReportHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const repositoryContext = createOptionalPostgresSettingsRepository();

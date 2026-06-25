@@ -24,7 +24,7 @@ export async function runVendorReconciliationHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -70,7 +70,7 @@ export async function listAgreementAdditionsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const agreementId = request.params.agreementId;
@@ -114,7 +114,7 @@ export async function createReconciliationAdjustmentHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Approver');
+  const auth = await requireRole(request, 'Approver');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -162,7 +162,7 @@ export async function deactivateReconciliationAdjustmentHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Approver');
+  const auth = await requireRole(request, 'Approver');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);

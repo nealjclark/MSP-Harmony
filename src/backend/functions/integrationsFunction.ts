@@ -66,7 +66,7 @@ export async function listIntegrationsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const repositoryContext = createOptionalPostgresSettingsRepository();
@@ -95,7 +95,7 @@ export async function testIntegrationHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = request.params.integrationId as IntegrationId | undefined;
@@ -211,7 +211,7 @@ export async function syncIntegrationHttp(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = request.params.integrationId as IntegrationId | undefined;

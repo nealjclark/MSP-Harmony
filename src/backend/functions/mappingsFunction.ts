@@ -76,7 +76,7 @@ export async function listMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -107,7 +107,7 @@ export async function automapMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -142,7 +142,7 @@ export async function updateAccountMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -194,7 +194,7 @@ export async function updateProductMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -245,7 +245,7 @@ export async function listProductMappingCustomersHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -283,7 +283,7 @@ export async function upsertProductBundleHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -325,7 +325,7 @@ export async function deactivateProductBundleHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -365,7 +365,7 @@ export async function searchProductCatalogHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -426,7 +426,7 @@ export async function applyMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -457,7 +457,7 @@ export async function approveSuggestedMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -493,7 +493,7 @@ export async function listUsageOverridesHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -527,7 +527,7 @@ export async function createUsageOverrideHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -571,7 +571,7 @@ export async function deactivateUsageOverrideHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -611,7 +611,7 @@ export async function listNcentralFiltersHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -650,7 +650,7 @@ export async function listNcentralFilterMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Analyst');
+  const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
@@ -684,7 +684,7 @@ export async function upsertNcentralFilterMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = requireRole(request, 'Admin');
+  const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);

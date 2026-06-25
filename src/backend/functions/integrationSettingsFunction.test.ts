@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { updateIntegrationSettingsHttp } from './integrationSettingsFunction';
 
 const originalKeyVaultUrl = process.env.KEY_VAULT_URL;
+const originalBootstrapAdminEmails = process.env.BOOTSTRAP_ADMIN_EMAILS;
 const adminHeaders = new Headers({
   'x-ms-client-principal-name': 'admin@example.com',
   'x-ms-client-principal-role': 'Admin',
@@ -9,6 +10,7 @@ const adminHeaders = new Headers({
 
 async function run() {
   process.env.KEY_VAULT_URL = '';
+  process.env.BOOTSTRAP_ADMIN_EMAILS = 'admin@example.com';
 
   const unauthenticatedResponse = await updateIntegrationSettingsHttp(
     {
@@ -35,13 +37,23 @@ async function run() {
 
   assert.equal(missingKeyVaultResponse.status, 500);
 
-  process.env.KEY_VAULT_URL = originalKeyVaultUrl;
+  restoreEnv('KEY_VAULT_URL', originalKeyVaultUrl);
+  restoreEnv('BOOTSTRAP_ADMIN_EMAILS', originalBootstrapAdminEmails);
 
   console.log('integration settings function tests passed');
 }
 
 run().catch((error: unknown) => {
-  process.env.KEY_VAULT_URL = originalKeyVaultUrl;
+  restoreEnv('KEY_VAULT_URL', originalKeyVaultUrl);
+  restoreEnv('BOOTSTRAP_ADMIN_EMAILS', originalBootstrapAdminEmails);
   console.error(error);
   process.exitCode = 1;
 });
+
+function restoreEnv(key: string, value: string | undefined) {
+  if (typeof value === 'undefined') {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}

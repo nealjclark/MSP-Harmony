@@ -190,6 +190,20 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS app_users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  aad_user_id text,
+  email text NOT NULL,
+  display_name text,
+  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'Analyst')),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  last_seen_at timestamptz,
+  created_by text,
+  updated_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   integration_id text NOT NULL,
@@ -377,6 +391,9 @@ CREATE INDEX IF NOT EXISTS idx_additions_agreement_id ON agreement_additions(agr
 CREATE INDEX IF NOT EXISTS idx_addition_history_addition_id ON addition_history(agreement_addition_id);
 CREATE INDEX IF NOT EXISTS idx_addition_history_sync_run_id ON addition_history(sync_run_id);
 CREATE INDEX IF NOT EXISTS idx_sync_runs_integration_status ON sync_runs(integration_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_app_users_email_lower ON app_users(lower(email));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_app_users_aad_user_id ON app_users(aad_user_id) WHERE aad_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_app_users_status_role ON app_users(status, role);
 CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_vendor_observed ON vendor_usage_snapshots(vendor_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_vendor_account_mappings_vendor ON vendor_account_mappings(vendor_id, external_account_id) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_mappings_vendor ON vendor_product_mappings(vendor_id, vendor_product_key) WHERE active;

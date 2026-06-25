@@ -1,9 +1,13 @@
 import type { HttpRequest, HttpResponseInit } from '@azure/functions';
+import { Pool } from 'pg';
+import { getDatabaseSettings, toPoolConfig } from '../database/config';
 
 export type AppRole = 'Admin' | 'Approver' | 'Analyst';
 
 export type AuthPrincipal = {
+  appUserId?: string;
   id?: string;
+  email?: string;
   name: string;
   roles: AppRole[];
 };
@@ -21,14 +25,15 @@ const roleRank: Record<AppRole, number> = {
 };
 
 const appRoles: AppRole[] = ['Admin', 'Approver', 'Analyst'];
+let authPool: Pool | undefined;
 
-export function requireRole(
+export async function requireRole(
   request: HttpRequest,
   minimumRole: AppRole,
-): { principal: AuthPrincipal; response?: undefined } | { principal?: undefined; response: HttpResponseInit } {
-  const principal = readAuthPrincipal(request);
+): Promise<{ principal: AuthPrincipal; response?: undefined } | { principal?: undefined; response: HttpResponseInit }> {
+  const headerPrincipal = readAuthPrincipal(request);
 
-  if (!principal) {
+  if (!headerPrincipal) {
     return {
       response: authJsonResponse(401, {
         error: 'Authentication is required.',
@@ -36,10 +41,16 @@ export function requireRole(
     };
   }
 
+  const principal = await resolveApplicationPrincipal(headerPrincipal);
+
   if (!hasMinimumRole(principal, minimumRole)) {
     return {
       response: authJsonResponse(403, {
         error: `The ${minimumRole} role is required for this action.`,
+        user: {
+          email: principal.email,
+          name: principal.name,
+        },
       }),
     };
   }
@@ -73,6 +84,7 @@ export function readAuthPrincipal(request: HttpRequest): AuthPrincipal | undefin
 
   return {
     id: principalId,
+    email: normalizeEmail(principalName),
     name: principalName || principalId || 'unknown',
     roles: uniqueRoles,
   };
@@ -101,4 +113,151 @@ function authJsonResponse(status: number, body: unknown): HttpResponseInit {
     status,
     jsonBody: body,
   };
+}
+
+async function resolveApplicationPrincipal(headerPrincipal: AuthPrincipal): Promise<AuthPrincipal> {
+  const bootstrapRole = bootstrapRoleFor(headerPrincipal.email ?? headerPrincipal.name);
+  if (bootstrapRole) {
+    const appUserId = await upsertBootstrapUser(headerPrincipal, bootstrapRole).catch(() => undefined);
+    return {
+      ...headerPrincipal,
+      appUserId,
+      roles: [bootstrapRole],
+    };
+  }
+
+  const databasePrincipal = await readDatabasePrincipal(headerPrincipal).catch((error: unknown) => {
+    if (isMissingAppUsersTable(error)) {
+      return undefined;
+    }
+
+    throw error;
+  });
+
+  if (databasePrincipal) {
+    return databasePrincipal;
+  }
+
+  if (!hasDatabaseSettings()) {
+    return headerPrincipal;
+  }
+
+  return {
+    ...headerPrincipal,
+    roles: [],
+  };
+}
+
+async function readDatabasePrincipal(headerPrincipal: AuthPrincipal): Promise<AuthPrincipal | undefined> {
+  if (!hasDatabaseSettings()) {
+    return undefined;
+  }
+
+  const pool = getAuthPool();
+  const result = await pool.query<{
+    id: string;
+    aad_user_id: string | null;
+    email: string;
+    display_name: string | null;
+    role: AppRole;
+    status: string;
+  }>(
+    `select id, aad_user_id, email, display_name, role, status
+     from app_users
+     where status = 'active'
+       and (
+         ($1::text is not null and aad_user_id = $1)
+         or lower(email) = lower($2)
+       )
+     limit 1`,
+    [headerPrincipal.id ?? null, headerPrincipal.email ?? headerPrincipal.name],
+  );
+
+  const user = result.rows[0];
+  if (!user) {
+    return undefined;
+  }
+
+  await pool.query(
+    `update app_users
+     set aad_user_id = coalesce(aad_user_id, $1),
+         display_name = coalesce(nullif(display_name, ''), $2),
+         last_seen_at = now(),
+         updated_at = now()
+     where id = $3`,
+    [headerPrincipal.id ?? null, headerPrincipal.name, user.id],
+  );
+
+  return {
+    appUserId: user.id,
+    id: user.aad_user_id ?? headerPrincipal.id,
+    email: user.email,
+    name: user.display_name || user.email,
+    roles: [user.role],
+  };
+}
+
+async function upsertBootstrapUser(headerPrincipal: AuthPrincipal, role: AppRole) {
+  if (!hasDatabaseSettings()) {
+    return undefined;
+  }
+
+  const email = headerPrincipal.email ?? normalizeEmail(headerPrincipal.name);
+  if (!email) {
+    return undefined;
+  }
+
+  const pool = getAuthPool();
+  const result = await pool.query<{ id: string }>(
+    `insert into app_users (aad_user_id, email, display_name, role, status, created_by, updated_by, last_seen_at)
+     values ($1, lower($2), $3, $4, 'active', 'bootstrap', 'bootstrap', now())
+     on conflict (lower(email))
+     do update set
+       aad_user_id = coalesce(app_users.aad_user_id, excluded.aad_user_id),
+       display_name = coalesce(nullif(app_users.display_name, ''), excluded.display_name),
+       role = case when app_users.role = 'Admin' then app_users.role else excluded.role end,
+       status = 'active',
+       updated_by = 'bootstrap',
+       updated_at = now(),
+       last_seen_at = now()
+     returning id`,
+    [headerPrincipal.id ?? null, email, headerPrincipal.name, role],
+  );
+
+  return result.rows[0]?.id;
+}
+
+function getAuthPool() {
+  if (!authPool) {
+    authPool = new Pool(toPoolConfig(getDatabaseSettings()));
+  }
+
+  return authPool;
+}
+
+function hasDatabaseSettings() {
+  return getDatabaseSettings().missing.length === 0;
+}
+
+function bootstrapRoleFor(value: string | undefined): AppRole | undefined {
+  const email = normalizeEmail(value);
+  if (!email) {
+    return undefined;
+  }
+
+  const bootstrapEmails = (process.env.BOOTSTRAP_ADMIN_EMAILS ?? process.env.ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((entry) => normalizeEmail(entry))
+    .filter(Boolean);
+
+  return bootstrapEmails.includes(email) ? 'Admin' : undefined;
+}
+
+function normalizeEmail(value: string | undefined) {
+  const trimmed = value?.trim().toLowerCase();
+  return trimmed && trimmed.includes('@') ? trimmed : undefined;
+}
+
+function isMissingAppUsersTable(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
 }
