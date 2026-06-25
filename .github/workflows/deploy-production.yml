@@ -1,0 +1,119 @@
+name: Deploy production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+env:
+  AZURE_CLIENT_ID: 15304531-197f-49c8-bc85-fe474880d0ae
+  AZURE_TENANT_ID: 30a502d2-8570-4207-9b98-ec48dd176588
+  AZURE_SUBSCRIPTION_ID: bf250497-bf94-44b9-837e-d300a66d6d29
+  AZURE_RESOURCE_GROUP: MSP-Harmony
+  FUNCTION_APP_NAME: func-mspharmony-flex
+  STATIC_WEB_APP_NAME: swa-mspharmony
+  NODE_VERSION: 24.x
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Prepare Function App package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf .deploy
+          mkdir -p .deploy/functionapp
+
+          cp host.json package.json package-lock.json .deploy/functionapp/
+          cp -R dist .deploy/functionapp/dist
+
+          pushd .deploy/functionapp
+          npm ci --omit=dev --ignore-scripts
+          zip -qr ../functionapp.zip .
+          popd
+
+          test -f .deploy/functionapp.zip
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Flex Function App
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az functionapp deployment source config-zip \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$FUNCTION_APP_NAME" \
+            --src .deploy/functionapp.zip \
+            --timeout 600
+
+          function_count="$(az functionapp function list \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$FUNCTION_APP_NAME" \
+            --query 'length(@)' \
+            --output tsv)"
+
+          if [ "$function_count" -lt 1 ]; then
+            echo "No functions were indexed after deployment."
+            exit 1
+          fi
+
+          echo "Indexed functions: $function_count"
+
+      - name: Deploy Static Web App
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          swa_token="$(az staticwebapp secrets list \
+            --name "$STATIC_WEB_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.apiKey' \
+            --output tsv)"
+
+          if [ -z "$swa_token" ]; then
+            echo "Static Web Apps deployment token was empty."
+            exit 1
+          fi
+
+          SWA_CLI_DEPLOYMENT_TOKEN="$swa_token" \
+            npx -y @azure/static-web-apps-cli@2.0.9 deploy src/frontend/dist \
+              --env production \
+              --app-name "$STATIC_WEB_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --subscription-id "$AZURE_SUBSCRIPTION_ID"
