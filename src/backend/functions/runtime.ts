@@ -1,7 +1,8 @@
 import type { HttpResponseInit } from '@azure/functions';
 import { Pool } from 'pg';
 import { PostgresIntegrationSettingsRepository } from '../config/integrationSettingsRepository';
-import { getDatabaseSettings, toPoolConfig } from '../database/config';
+import { getDatabaseSettings } from '../database/config';
+import { getSharedDatabasePool } from '../database/pool';
 
 export type OptionalPostgresSettingsRepository = {
   missingDatabaseSettings: string[];
@@ -10,7 +11,7 @@ export type OptionalPostgresSettingsRepository = {
   close: () => Promise<void>;
 };
 
-export function createOptionalPostgresSettingsRepository(): OptionalPostgresSettingsRepository {
+export async function createOptionalPostgresSettingsRepository(): Promise<OptionalPostgresSettingsRepository> {
   const settings = getDatabaseSettings();
 
   if (settings.missing.length > 0) {
@@ -20,15 +21,13 @@ export function createOptionalPostgresSettingsRepository(): OptionalPostgresSett
     };
   }
 
-  const pool = new Pool(toPoolConfig(settings));
+  const pool = await getSharedDatabasePool();
 
   return {
     missingDatabaseSettings: [],
     pool,
     repository: new PostgresIntegrationSettingsRepository(pool),
-    close: async () => {
-      await pool.end();
-    },
+    close: async () => {},
   };
 }
 

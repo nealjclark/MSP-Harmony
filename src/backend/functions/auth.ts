@@ -1,6 +1,7 @@
 import type { HttpRequest, HttpResponseInit } from '@azure/functions';
 import { Pool } from 'pg';
-import { getDatabaseSettings, toPoolConfig } from '../database/config';
+import { getDatabaseSettings } from '../database/config';
+import { getSharedDatabasePool } from '../database/pool';
 
 export type AppRole = 'Admin' | 'Approver' | 'Analyst';
 
@@ -26,6 +27,7 @@ const roleRank: Record<AppRole, number> = {
 
 const appRoles: AppRole[] = ['Admin', 'Approver', 'Analyst'];
 let authPool: Pool | undefined;
+let authPoolPromise: Promise<Pool> | undefined;
 
 export async function requireRole(
   request: HttpRequest,
@@ -153,7 +155,7 @@ async function readDatabasePrincipal(headerPrincipal: AuthPrincipal): Promise<Au
     return undefined;
   }
 
-  const pool = getAuthPool();
+  const pool = await getAuthPool();
   const result = await pool.query<{
     id: string;
     aad_user_id: string | null;
@@ -207,7 +209,7 @@ async function upsertBootstrapUser(headerPrincipal: AuthPrincipal, role: AppRole
     return undefined;
   }
 
-  const pool = getAuthPool();
+  const pool = await getAuthPool();
   const result = await pool.query<{ id: string }>(
     `insert into app_users (aad_user_id, email, display_name, role, status, created_by, updated_by, last_seen_at)
      values ($1, lower($2), $3, $4, 'active', 'bootstrap', 'bootstrap', now())
@@ -227,12 +229,19 @@ async function upsertBootstrapUser(headerPrincipal: AuthPrincipal, role: AppRole
   return result.rows[0]?.id;
 }
 
-function getAuthPool() {
-  if (!authPool) {
-    authPool = new Pool(toPoolConfig(getDatabaseSettings()));
+async function getAuthPool() {
+  if (authPool) {
+    return authPool;
   }
 
-  return authPool;
+  if (!authPoolPromise) {
+    authPoolPromise = getSharedDatabasePool().then((pool) => {
+      authPool = pool;
+      return pool;
+    });
+  }
+
+  return authPoolPromise;
 }
 
 function hasDatabaseSettings() {

@@ -16,7 +16,7 @@ export async function listAgreementReportSyncRunsHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -49,7 +49,7 @@ export async function getAgreementReportDetailsHttp(
   if (auth.response) return auth.response;
 
   const syncRunId = request.params.syncRunId;
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -101,7 +101,7 @@ export async function listRawSyncRunsHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -169,7 +169,7 @@ export async function getRawSyncDetailsHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -210,7 +210,7 @@ export async function getProductProfitabilityReportHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
     return jsonResponse(400, {

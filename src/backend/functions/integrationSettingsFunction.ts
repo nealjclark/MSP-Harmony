@@ -46,7 +46,7 @@ export async function updateIntegrationSettingsHttp(
 
   const actor = auth.principal.name;
   const role: IntegrationSettingsRole = 'Admin';
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   try {
     const existingSettings = await createIntegrationSettingsProvider({

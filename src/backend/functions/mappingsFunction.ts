@@ -84,7 +84,7 @@ export async function listMappingsHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Mapping review needs PostgreSQL settings before it can load mappings.',
@@ -115,7 +115,7 @@ export async function automapMappingsHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Automapping needs PostgreSQL settings before it can save mappings.',
@@ -159,7 +159,7 @@ export async function updateAccountMappingHttp(
     return jsonResponse(400, { error: 'Account mapping update requires a valid status.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Account mapping update needs PostgreSQL settings before it can save mappings.',
@@ -211,7 +211,7 @@ export async function updateProductMappingHttp(
     return jsonResponse(400, { error: 'Product mapping update requires a valid status.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Product mapping update needs PostgreSQL settings before it can save mappings.',
@@ -257,7 +257,7 @@ export async function listProductMappingCustomersHttp(
     return jsonResponse(400, { error: 'Product customer review requires vendorProductKey.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Product customer review needs PostgreSQL settings before it can load customers.',
@@ -292,7 +292,7 @@ export async function upsertProductBundleHttp(
   }
 
   const body = (await request.json().catch(() => ({}))) as ProductBundleBody;
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Product bundle mapping needs PostgreSQL settings before it can save bundles.',
@@ -337,7 +337,7 @@ export async function deactivateProductBundleHttp(
     return jsonResponse(400, { error: 'Product bundle deactivation requires bundleKey.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Product bundle deactivation needs PostgreSQL settings before it can save bundles.',
@@ -373,7 +373,7 @@ export async function searchProductCatalogHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Product catalog search needs PostgreSQL settings before it can load products.',
@@ -434,7 +434,7 @@ export async function applyMappingsHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Applying mappings needs PostgreSQL settings before it can update snapshots.',
@@ -465,7 +465,7 @@ export async function approveSuggestedMappingsHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Approving suggested mappings needs PostgreSQL settings before it can save mappings.',
@@ -501,7 +501,7 @@ export async function listUsageOverridesHttp(
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Usage overrides need PostgreSQL settings before they can load.',
@@ -536,7 +536,7 @@ export async function createUsageOverrideHttp(
   }
 
   const body = (await request.json().catch(() => ({}))) as UsageOverrideBody;
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Usage override creation needs PostgreSQL settings before it can save.',
@@ -583,7 +583,7 @@ export async function deactivateUsageOverrideHttp(
     return jsonResponse(400, { error: 'Usage override deactivation requires overrideId.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Usage override deactivation needs PostgreSQL settings before it can save.',
@@ -619,7 +619,7 @@ export async function listNcentralFiltersHttp(
     return jsonResponse(400, { error: 'Live filter listing is only available for N-central.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   const provider = createIntegrationSettingsProvider({
     loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
@@ -658,7 +658,7 @@ export async function listNcentralFilterMappingsHttp(
     return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'N-central filter mappings need PostgreSQL settings before they can load.',
@@ -693,7 +693,7 @@ export async function upsertNcentralFilterMappingHttp(
   }
 
   const body = (await request.json().catch(() => ({}))) as NcentralFilterMappingBody;
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'N-central filter mapping updates need PostgreSQL settings before they can save.',

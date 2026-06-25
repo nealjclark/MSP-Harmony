@@ -34,7 +34,7 @@ export async function runVendorReconciliationHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Reconciliation needs PostgreSQL settings before it can load mapped snapshots.',
@@ -81,7 +81,7 @@ export async function listAgreementAdditionsHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Agreement additions need PostgreSQL settings before they can load.',
@@ -124,7 +124,7 @@ export async function createReconciliationAdjustmentHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Reconciliation adjustment creation needs PostgreSQL settings before it can save.',
@@ -176,7 +176,7 @@ export async function deactivateReconciliationAdjustmentHttp(
     return jsonResponse(400, { error: 'Reconciliation adjustment deactivation requires adjustmentId.' });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
       error: 'Reconciliation adjustment deactivation needs PostgreSQL settings before it can save.',

@@ -69,7 +69,7 @@ export async function listIntegrationsHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   try {
     const integrations = await listRuntimeIntegrations({
@@ -112,7 +112,7 @@ export async function testIntegrationHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   const provider = createIntegrationSettingsProvider({
     loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
@@ -228,7 +228,7 @@ export async function syncIntegrationHttp(
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool || !repositoryContext.repository) {
     return jsonResponse(400, {
       error: `${integrationDisplayName(integrationId)} sync needs PostgreSQL settings before it can store sync data.`,
@@ -270,7 +270,7 @@ export async function processIntegrationSyncQueueMessage(
   context: InvocationContext,
 ) {
   const parsed = parseIntegrationSyncQueueMessage(message);
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool || !repositoryContext.repository) {
     throw new Error(`${integrationDisplayName(parsed.integrationId)} queued sync needs PostgreSQL settings before it can process.`);
@@ -360,7 +360,7 @@ export async function processAppRiverSyncQueueMessage(
   context: InvocationContext,
 ) {
   const parsed = parseAppRiverSyncQueueMessage(message);
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool || !repositoryContext.repository) {
     throw new Error(`AppRiver - OpenText queued sync needs PostgreSQL settings before it can process ${parsed.syncRunId}.`);

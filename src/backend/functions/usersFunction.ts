@@ -16,7 +16,7 @@ export async function listUsersHttp(request: HttpRequest, _context: InvocationCo
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
   }
@@ -40,7 +40,7 @@ export async function createUserHttp(request: HttpRequest, _context: InvocationC
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
   }
@@ -79,7 +79,7 @@ export async function updateUserHttp(request: HttpRequest, _context: InvocationC
     });
   }
 
-  const repositoryContext = createOptionalPostgresSettingsRepository();
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
   }
