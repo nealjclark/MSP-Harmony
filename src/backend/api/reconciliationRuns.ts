@@ -16,11 +16,13 @@ import {
   type ReconciliationAdjustment,
   type ReconciliationLineWithAdjustments,
 } from './reconciliationAdjustments';
+import type { IntegrationId } from '../../shared/integrationSettings';
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
+import { listProductBundles, type ProductBundle } from '../mapping/mappingService';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -35,6 +37,7 @@ type SnapshotRow = {
   vendor_id: string;
   customer_id: string;
   agreement_id: string;
+  external_account_id: string | null;
   vendor_product_key: string | null;
   product_code: string;
   product_name: string;
@@ -54,6 +57,7 @@ type AdditionRow = {
   unit_price: string | number | null;
   addition_status?: string;
   updated_at: Date | string | null;
+  raw_payload?: unknown;
 };
 
 type LineLabelRow = {
@@ -131,6 +135,26 @@ export type ActiveAgreementAddition = {
   productName: string;
   quantity: number;
   unitPrice?: MoneyAmount;
+  unitCost?: number;
+  lessIncluded?: number;
+  billedQuantity?: number;
+  billCustomer?: string;
+  effectiveDate?: string;
+  taxableFlag?: string;
+  invoiceDescription?: string;
+  purchaseItemFlag?: string;
+  specialOrderFlag?: string;
+  uom?: string;
+  extPrice?: number;
+  extCost?: number;
+  sequenceNumber?: number;
+  margin?: number;
+  prorateCost?: number;
+  proratePrice?: number;
+  extendedProrateCost?: number;
+  extendedProratePrice?: number;
+  prorateCurrentPeriodFlag?: string;
+  description?: string;
   additionStatus: string;
   updatedAt?: string;
 };
@@ -162,12 +186,17 @@ export async function reconcileVendorFromDatabase(
   }
 
   const loadedSnapshots = await loadUsageSnapshots(database, vendorId, syncRunId);
-  const snapshots = applyUsageOverrides(
+  const overriddenSnapshots = applyUsageOverrides(
     loadedSnapshots,
     await loadUsageOverrides(database, vendorId, loadedSnapshots),
     ruleSet,
   );
-  const agreementAdditions = await loadAgreementAdditions(database, snapshots);
+  const agreementAdditions = await loadAgreementAdditions(database, overriddenSnapshots);
+  const snapshots = applyProductBundles(
+    overriddenSnapshots,
+    await listProductBundles(database, vendorId as IntegrationId),
+    agreementAdditions,
+  );
   const result = reconcileVendorUsage({
     vendorId,
     rules: ruleSet.rules,
@@ -203,8 +232,9 @@ export async function listActiveAgreementAdditions(
        agreement_additions.quantity,
        agreement_additions.unit_price,
        agreement_additions.addition_status,
-       agreement_additions.updated_at
-     from agreement_additions
+       agreement_additions.updated_at,
+       agreement_additions.raw_payload
+      from agreement_additions
      inner join agreements
        on agreements.id = agreement_additions.agreement_id
      where agreement_additions.agreement_id = $1::uuid
@@ -314,8 +344,9 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
        end as customer_id,
        case
          when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
-         else vendor_usage_snapshots.agreement_id
+       else vendor_usage_snapshots.agreement_id
        end as agreement_id,
+       vendor_usage_snapshots.external_account_id,
        vendor_usage_snapshots.vendor_product_key,
        coalesce(approved_product_mappings.connectwise_product_code, vendor_usage_snapshots.product_code) as product_code,
        coalesce(approved_product_mappings.connectwise_product_name, vendor_usage_snapshots.product_name) as product_name,
@@ -421,6 +452,101 @@ function applyUsageOverrides(
   });
 }
 
+function applyProductBundles(
+  snapshots: UsageSnapshot[],
+  bundles: ProductBundle[],
+  agreementAdditions: AgreementAddition[],
+): UsageSnapshot[] {
+  const activeBundles = bundles.filter(
+    (bundle) => bundle.active && bundle.status === 'approved' && bundle.components.length > 0,
+  );
+  if (activeBundles.length === 0 || snapshots.length === 0) {
+    return snapshots;
+  }
+
+  const bundledSnapshots: UsageSnapshot[] = [];
+  const bundledSourceSnapshotIds = new Set<string>();
+
+  for (const bundle of activeBundles) {
+    const componentKeys = new Set(bundle.components.map((component) => component.vendorProductKey));
+    const groups = new Map<
+      string,
+      {
+        clientId: string;
+        agreementId: string;
+        externalAccountId: string;
+        observedAt: string;
+        componentTotals: Map<string, number>;
+        sourceSnapshotIds: string[];
+      }
+    >();
+
+    for (const snapshot of snapshots) {
+      if (!snapshot.vendorProductKey || !componentKeys.has(snapshot.vendorProductKey)) {
+        continue;
+      }
+
+      const externalAccountId = snapshotExternalAccountId(snapshot);
+      const groupKey = `${snapshot.clientId}|${snapshot.agreementId}|${externalAccountId}`;
+      const group =
+        groups.get(groupKey) ??
+        {
+          clientId: snapshot.clientId,
+          agreementId: snapshot.agreementId,
+          externalAccountId,
+          observedAt: snapshot.observedAt,
+          componentTotals: new Map<string, number>(),
+          sourceSnapshotIds: [],
+        };
+      group.componentTotals.set(
+        snapshot.vendorProductKey,
+        (group.componentTotals.get(snapshot.vendorProductKey) ?? 0) + snapshot.quantity,
+      );
+      group.sourceSnapshotIds.push(snapshot.id);
+      if (snapshot.observedAt > group.observedAt) {
+        group.observedAt = snapshot.observedAt;
+      }
+      groups.set(groupKey, group);
+    }
+
+    for (const [groupKey, group] of groups.entries()) {
+      if (!hasAgreementAddition(agreementAdditions, group.clientId, group.agreementId, bundle.target.connectwiseProductCode)) {
+        continue;
+      }
+
+      const quantity = Math.max(...group.componentTotals.values(), 0);
+      bundledSnapshots.push({
+        id: `${bundle.id}:${groupKey}`,
+        vendorId: bundle.vendorId,
+        clientId: group.clientId,
+        agreementId: group.agreementId,
+        vendorProductKey: bundle.bundleKey,
+        productCode: bundle.target.connectwiseProductCode,
+        productName: bundle.target.connectwiseProductName,
+        quantity,
+        observedAt: group.observedAt,
+        dimensions: {
+          subscriptionSource: 'appriver-securecloud-subscription',
+          appRiverBundle: true,
+          appRiverBundleKey: bundle.bundleKey,
+          appRiverBundleName: bundle.bundleName,
+          appRiverBundleQuantityStrategy: bundle.quantityStrategy,
+          appRiverBundleComponentCount: bundle.components.length,
+          appRiverBundleComponentQuantities: componentQuantitySummary(group.componentTotals),
+          appRiverBundleSourceSnapshotIds: group.sourceSnapshotIds.join(','),
+          appRiverCustomerId: group.externalAccountId,
+        },
+      });
+      group.sourceSnapshotIds.forEach((snapshotId) => bundledSourceSnapshotIds.add(snapshotId));
+    }
+  }
+
+  return [
+    ...snapshots.filter((snapshot) => !bundledSourceSnapshotIds.has(snapshot.id)),
+    ...bundledSnapshots,
+  ];
+}
+
 async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnapshot[]) {
   const agreementIds = [...new Set(snapshots.map((snapshot) => snapshot.agreementId))];
   if (agreementIds.length === 0) {
@@ -522,20 +648,26 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
 
 function productOptionsForRuleSet(ruleSet: VendorRuleSet): ReconciliationProductOption[] {
   return ruleSet.rules
-    .filter((rule): rule is QuantityRule & { vendorProductKey: string } => Boolean(rule.vendorProductKey))
-    .map((rule) => ({
-      vendorProductKey: rule.vendorProductKey,
+    .flatMap((rule) => ruleVendorProductKeys(rule).map((vendorProductKey) => ({
+      vendorProductKey,
       productCode: rule.productCode,
       productName: rule.productName,
-    }));
+    })));
 }
 
 function snapshotMatchesRule(snapshot: UsageSnapshot, rule: QuantityRule) {
-  if (rule.vendorProductKey && snapshot.vendorProductKey) {
-    return snapshot.vendorProductKey === rule.vendorProductKey;
+  const vendorProductKeys = ruleVendorProductKeys(rule);
+  if (vendorProductKeys.length > 0 && snapshot.vendorProductKey) {
+    return vendorProductKeys.includes(snapshot.vendorProductKey);
   }
 
   return targetProductCodes(rule).includes(snapshot.productCode);
+}
+
+function ruleVendorProductKeys(rule: QuantityRule) {
+  return [
+    ...new Set([rule.vendorProductKey, ...(rule.vendorProductKeys ?? [])].filter((key): key is string => Boolean(key))),
+  ];
 }
 
 function targetProductCodes(target: { productCode: string; targetProductCodes?: string[] }) {
@@ -556,6 +688,7 @@ function mapSnapshotRow(row: SnapshotRow): UsageSnapshot {
     dimensions: {
       ...recordFromJson(row.dimensions),
       snapshotId: row.id,
+      externalAccountId: row.external_account_id ?? undefined,
     },
   };
 }
@@ -595,6 +728,8 @@ function mapAdditionRow(row: AdditionRow): AgreementAddition {
 }
 
 function mapActiveAgreementAdditionRow(row: AdditionRow): ActiveAgreementAddition {
+  const raw = recordFromJson(row.raw_payload);
+
   return {
     id: row.id,
     connectWiseAdditionId: row.connectwise_addition_id ?? row.id,
@@ -608,6 +743,26 @@ function mapActiveAgreementAdditionRow(row: AdditionRow): ActiveAgreementAdditio
             amount: numericValue(row.unit_price),
             currency: 'USD',
           },
+    unitCost: optionalNumericValue(raw.unitCost),
+    lessIncluded: optionalNumericValue(raw.lessIncluded),
+    billedQuantity: optionalNumericValue(raw.billedQuantity),
+    billCustomer: optionalStringValue(raw.billCustomer),
+    effectiveDate: optionalStringValue(raw.effectiveDate),
+    taxableFlag: optionalStringValue(raw.taxableFlag),
+    invoiceDescription: optionalStringValue(raw.invoiceDescription),
+    purchaseItemFlag: optionalStringValue(raw.purchaseItemFlag),
+    specialOrderFlag: optionalStringValue(raw.specialOrderFlag),
+    uom: optionalStringValue(raw.uom),
+    extPrice: optionalNumericValue(raw.extPrice),
+    extCost: optionalNumericValue(raw.extCost),
+    sequenceNumber: optionalNumericValue(raw.sequenceNumber),
+    margin: optionalNumericValue(raw.margin),
+    prorateCost: optionalNumericValue(raw.prorateCost),
+    proratePrice: optionalNumericValue(raw.proratePrice),
+    extendedProrateCost: optionalNumericValue(raw.extendedProrateCost),
+    extendedProratePrice: optionalNumericValue(raw.extendedProratePrice),
+    prorateCurrentPeriodFlag: optionalStringValue(raw.prorateCurrentPeriodFlag),
+    description: optionalStringValue(raw.description),
     additionStatus: row.addition_status ?? 'Active',
     updatedAt: isoDate(row.updated_at),
   };
@@ -641,6 +796,39 @@ function dimensionValuesEqual(left: DimensionValue, right: DimensionValue) {
   return left === right;
 }
 
+function snapshotExternalAccountId(snapshot: UsageSnapshot) {
+  const externalAccountId =
+    snapshot.dimensions.appRiverCustomerId ??
+    snapshot.dimensions.externalAccountId ??
+    snapshot.dimensions.accountId ??
+    snapshot.clientId;
+
+  return typeof externalAccountId === 'string' || typeof externalAccountId === 'number'
+    ? String(externalAccountId)
+    : snapshot.clientId;
+}
+
+function hasAgreementAddition(
+  additions: AgreementAddition[],
+  clientId: string,
+  agreementId: string,
+  productCode: string,
+) {
+  return additions.some(
+    (addition) =>
+      addition.clientId === clientId &&
+      addition.agreementId === agreementId &&
+      addition.productCode === productCode,
+  );
+}
+
+function componentQuantitySummary(componentTotals: Map<string, number>) {
+  return [...componentTotals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([vendorProductKey, quantity]) => `${vendorProductKey}:${quantity}`)
+    .join('; ');
+}
+
 function recordFromJson(value: unknown) {
   if (!value) {
     return {};
@@ -669,6 +857,27 @@ function numericValue(value: string | number) {
 
   const parsed = Number.parseFloat(String(value));
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function optionalNumericValue(value: string | number | boolean | null | undefined) {
+  if (typeof value === 'undefined' || value === null || value === '') {
+    return undefined;
+  }
+
+  if (typeof value === 'boolean') {
+    return undefined;
+  }
+
+  const parsed = numericValue(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function optionalStringValue(value: string | number | boolean | null | undefined) {
+  if (typeof value === 'undefined' || value === null || value === '') {
+    return undefined;
+  }
+
+  return String(value);
 }
 
 function isoDate(value: Date | string | null) {

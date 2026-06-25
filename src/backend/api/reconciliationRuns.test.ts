@@ -114,6 +114,29 @@ async function run() {
   assert.equal(serverLine?.sourceQuantity, 1);
   assert.equal(serverLine?.agreementQuantity, 1);
 
+  const appRiverBundleResult = await reconcileVendorFromDatabase(appRiverBundleDatabase, 'opentext-appriver', { syncRunId });
+  const bundleLine = appRiverBundleResult.lines.find((line) => line.productCode === 'CW-ZIX-ADVANCED');
+  assert.equal(bundleLine?.sourceQuantity, 10);
+  assert.equal(bundleLine?.agreementQuantity, 8);
+  assert.equal(bundleLine?.proposedQuantity, 10);
+  assert.equal(bundleLine?.delta, 2);
+  assert.equal(bundleLine?.devices.length, 1);
+  assert.equal(bundleLine?.devices[0]?.vendorProductKey, 'zix-advanced-email-suite');
+  assert.equal(bundleLine?.devices[0]?.dimensions.appRiverBundle, true);
+  assert.equal(appRiverBundleResult.snapshotCount, 1);
+
+  const appRiverBundleWithoutAdditionResult = await reconcileVendorFromDatabase(appRiverBundleWithoutAdditionDatabase, 'opentext-appriver', { syncRunId });
+  const bundleLineWithoutAddition = appRiverBundleWithoutAdditionResult.lines.find((line) => line.productCode === 'CW-ZIX-ADVANCED');
+  assert.equal(bundleLineWithoutAddition, undefined);
+  assert.equal(appRiverBundleWithoutAdditionResult.snapshotCount, 2);
+
+  const appRiverAliasResult = await reconcileVendorFromDatabase(appRiverAliasDatabase, 'opentext-appriver', { syncRunId });
+  const standardLine = appRiverAliasResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
+  assert.equal(standardLine?.sourceQuantity, 6);
+  assert.equal(standardLine?.agreementQuantity, 6);
+  assert.equal(standardLine?.status, 'matched');
+  assert.equal(standardLine?.devices[0]?.vendorProductKey, 'Microsoft 365 Business Standard|Monthly|Monthly');
+
   console.log('database reconciliation tests passed');
 }
 
@@ -182,6 +205,187 @@ const overrideDatabase: Queryable = {
             quantity: '1',
             unit_price: '120',
             updated_at: new Date('2026-06-15T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const appRiverBundleDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return {
+        rows: [
+          {
+            id: 'snapshot-archive',
+            vendor_id: 'opentext-appriver',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            external_account_id: 'appriver-customer-1',
+            vendor_product_key: 'Email Archiving|Monthly|Monthly',
+            product_code: 'EMAIL-ARCHIVING-MONTHLY-MONTHLY',
+            product_name: 'Email Archiving',
+            quantity: '10',
+            observed_at: new Date('2026-06-24T12:00:00Z'),
+            dimensions: {
+              subscriptionSource: 'appriver-securecloud-subscription',
+              appRiverCustomerId: 'appriver-customer-1',
+            },
+          },
+          {
+            id: 'snapshot-threat',
+            vendor_id: 'opentext-appriver',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            external_account_id: 'appriver-customer-1',
+            vendor_product_key: 'Email Threat Protection|Monthly|Monthly',
+            product_code: 'EMAIL-THREAT-PROTECTION-MONTHLY-MONTHLY',
+            product_name: 'Email Threat Protection',
+            quantity: '0',
+            observed_at: new Date('2026-06-24T12:00:00Z'),
+            dimensions: {
+              subscriptionSource: 'appriver-securecloud-subscription',
+              appRiverCustomerId: 'appriver-customer-1',
+            },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_mappings')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_product_bundles')) {
+      return {
+        rows: [
+          {
+            id: 'bundle-1',
+            vendor_id: 'opentext-appriver',
+            bundle_key: 'zix-advanced-email-suite',
+            bundle_name: 'Zix Advanced Email Suite',
+            components: [
+              {
+                vendorProductKey: 'Email Archiving|Monthly|Monthly',
+                vendorProductName: 'Email Archiving',
+              },
+              {
+                vendorProductKey: 'Email Threat Protection|Monthly|Monthly',
+                vendorProductName: 'Email Threat Protection',
+              },
+            ],
+            connectwise_product_code: 'CW-ZIX-ADVANCED',
+            connectwise_product_name: 'Zix Advanced Email Suite',
+            unit_price: '7.5',
+            quantity_strategy: 'max-component-quantity',
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-06-24T12:00:00.000Z',
+            created_at: '2026-06-24T12:00:00.000Z',
+            updated_at: '2026-06-24T12:00:00.000Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-zix',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            product_code: 'CW-ZIX-ADVANCED',
+            product_name: 'Zix Advanced Email Suite',
+            quantity: '8',
+            unit_price: '7.5',
+            updated_at: new Date('2026-06-24T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const appRiverBundleWithoutAdditionDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from agreement_additions')) {
+      return { rows: [] as T[] };
+    }
+
+    return appRiverBundleDatabase.query<T>(sql, values);
+  },
+};
+
+const appRiverAliasDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return {
+        rows: [
+          {
+            id: 'snapshot-business-standard',
+            vendor_id: 'opentext-appriver',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            external_account_id: 'appriver-customer-healthcare',
+            vendor_product_key: 'Microsoft 365 Business Standard|Monthly|Monthly',
+            product_code: 'MICROSOFT-365-BUSINESS-STANDARD-MONTHLY-MONTHLY',
+            product_name: 'Microsoft 365 Business Standard',
+            quantity: '6',
+            observed_at: new Date('2026-06-24T12:00:00Z'),
+            dimensions: {
+              subscriptionSource: 'appriver-securecloud-subscription',
+              appRiverCustomerId: 'appriver-customer-healthcare',
+            },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_mappings')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Microsoft 365 Business Standard (T)|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'Microsoft 365 Business Standard-M',
+            connectwise_product_name: 'Microsoft 365 Business Standard-M',
+            unit_price: '14',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_bundles')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-business-standard',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            product_code: 'Microsoft 365 Business Standard-M',
+            product_name: 'Microsoft 365 Business Standard-M',
+            quantity: '6',
+            unit_price: '14',
+            updated_at: new Date('2026-06-24T12:00:00Z'),
           },
         ] as T[],
       };

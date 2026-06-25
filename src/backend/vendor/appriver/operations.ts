@@ -20,7 +20,7 @@ import {
   type AppRiverSubscription,
   type AppRiverSubscriptionDetail,
 } from './client';
-import { buildAppRiverRuleSet, type AppRiverProductMapping } from './rules';
+import { buildAppRiverRuleSet, type AppRiverProductBundleMapping, type AppRiverProductMapping } from './rules';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -102,6 +102,15 @@ type VendorAccountMappingRow = {
 type VendorProductMappingRow = {
   vendor_product_key: string;
   target_index: string | number;
+  connectwise_product_code: string;
+  connectwise_product_name: string;
+  unit_price: string | number | null;
+};
+
+type VendorProductBundleRow = {
+  bundle_key: string;
+  bundle_name: string;
+  components: unknown;
   connectwise_product_code: string;
   connectwise_product_name: string;
   unit_price: string | number | null;
@@ -516,11 +525,108 @@ export async function loadAppRiverProductMappings(
     };
   }
 
-  return mappings;
+  const targetAliases = await loadAppRiverTargetProductCodeAliases(database, Object.values(mappings));
+  for (const mapping of Object.values(mappings)) {
+    mapping.targetProductCodes = [
+      ...new Set([...(mapping.targetProductCodes ?? []), ...(targetAliases.get(mapping.productName) ?? [])]),
+    ];
+  }
+
+  return withEquivalentAppRiverProductMappings(mappings);
+}
+
+async function loadAppRiverTargetProductCodeAliases(
+  database: Queryable,
+  mappings: AppRiverProductMapping[],
+): Promise<Map<string, string[]>> {
+  const productNames = [...new Set(mappings.map((mapping) => mapping.productName).filter(Boolean))];
+  if (productNames.length === 0) {
+    return new Map();
+  }
+
+  const result = await database.query<{ product_name: string; product_code: string }>(
+    `with target_names as (
+       select unnest($1::text[]) as product_name
+     )
+     select target_names.product_name,
+            products.connectwise_product_code as product_code
+     from target_names
+     inner join products
+       on products.vendor_id = 'connectwise'
+      and products.active = true
+      and products.display_name = target_names.product_name
+      and products.connectwise_product_code is not null
+     union
+     select target_names.product_name,
+            agreement_additions.product_code as product_code
+     from target_names
+     inner join agreement_additions
+       on agreement_additions.product_name = target_names.product_name
+      and agreement_additions.product_code is not null
+      and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+      and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     order by product_name, product_code`,
+    [productNames],
+  );
+
+  const aliases = new Map<string, string[]>();
+  for (const row of result.rows) {
+    aliases.set(row.product_name, [...(aliases.get(row.product_name) ?? []), row.product_code]);
+  }
+
+  return aliases;
+}
+
+export async function loadAppRiverProductBundleMappings(
+  database: Queryable,
+): Promise<AppRiverProductBundleMapping[]> {
+  const result = await database.query<VendorProductBundleRow>(
+    `select bundle_key,
+            bundle_name,
+            components,
+            connectwise_product_code,
+            connectwise_product_name,
+            unit_price
+     from vendor_product_bundles
+     where vendor_id = $1
+       and active = true
+       and mapping_status = 'approved'
+     order by bundle_name, bundle_key`,
+    [appRiverIntegrationId],
+  );
+
+  return result.rows.flatMap((row) => {
+    const componentProductKeys = appRiverBundleComponentKeys(row.components);
+    if (componentProductKeys.length === 0) {
+      return [];
+    }
+
+    return [
+      {
+        bundleKey: row.bundle_key,
+        bundleName: row.bundle_name,
+        componentProductKeys,
+        productCode: row.connectwise_product_code,
+        productName: row.connectwise_product_name,
+        targetProductCodes: [row.connectwise_product_code],
+        unitPrice: nullableMoney(row.unit_price),
+      },
+    ];
+  });
 }
 
 export async function loadAppRiverRuleSet(database: Queryable) {
-  return buildAppRiverRuleSet(await loadAppRiverProductMappings(database));
+  const [productMappings, bundleMappings] = await Promise.all([
+    loadAppRiverProductMappings(database),
+    loadAppRiverProductBundleMappings(database),
+  ]);
+
+  return buildAppRiverRuleSet(productMappings, bundleMappings);
 }
 
 async function processNextAppRiverQueuedCustomerWithLock(input: {
@@ -1228,6 +1334,48 @@ function defaultProductMapping(vendorProductKey: string, detail: AppRiverSubscri
   };
 }
 
+function withEquivalentAppRiverProductMappings(
+  mappings: Record<string, AppRiverProductMapping>,
+): Record<string, AppRiverProductMapping> {
+  const expanded: Record<string, AppRiverProductMapping> = { ...mappings };
+
+  for (const mapping of Object.values(mappings)) {
+    const equivalentKeys = equivalentAppRiverProductKeys(mapping.vendorProductKey).filter((key) => !mappings[key]);
+    const vendorProductKeys = [...new Set([mapping.vendorProductKey, ...(mapping.vendorProductKeys ?? []), ...equivalentKeys])];
+    const expandedMapping = {
+      ...mapping,
+      vendorProductKeys,
+    };
+
+    expanded[mapping.vendorProductKey] = expandedMapping;
+    for (const equivalentKey of equivalentKeys) {
+      expanded[equivalentKey] = {
+        ...expandedMapping,
+        vendorProductKey: equivalentKey,
+      };
+    }
+  }
+
+  return expanded;
+}
+
+function equivalentAppRiverProductKeys(vendorProductKey: string) {
+  const parts = vendorProductKey.split('|');
+  const productName = parts[0]?.trim();
+  if (!productName) {
+    return [];
+  }
+  if (!/^(Microsoft|Office)\s+365\b/i.test(productName) || /\(no\s+Teams\)/i.test(productName)) {
+    return [];
+  }
+
+  const equivalentProductNames = /\s+\(T\)$/i.test(productName)
+    ? [productName.replace(/\s+\(T\)$/i, '')]
+    : [`${productName} (T)`];
+
+  return equivalentProductNames.map((equivalentProductName) => [equivalentProductName, ...parts.slice(1)].join('|'));
+}
+
 function nullableMoney(value: string | number | null | undefined) {
   const amount = typeof value === 'number' ? value : value ? Number.parseFloat(value) : undefined;
   return typeof amount === 'number' && Number.isFinite(amount) ? { amount, currency: 'USD' as const } : undefined;
@@ -1265,6 +1413,30 @@ function recordFromJson(value: unknown): Record<string, unknown> {
   }
 
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function appRiverBundleComponentKeys(value: unknown) {
+  return [
+    ...new Set(
+      arrayFromJson(parseJson(value))
+        .flatMap((item) => {
+          const record = recordFromJson(item);
+          return stringFromUnknown(record.vendorProductKey) ?? [];
+        }),
+    ),
+  ];
+}
+
+function parseJson(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
 }
 
 function arrayFromJson(value: unknown) {

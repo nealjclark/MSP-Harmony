@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { getIntegrationSettingsDefinition, type IntegrationSettingsValidation } from '../../../shared/integrationSettings';
 import type { IntegrationRuntimeSettings, IntegrationSettingsProvider } from '../../config/settingsProvider';
 import {
+  loadAppRiverProductMappings,
   loadAppRiverRuleSet,
   processNextAppRiverQueuedCustomer,
   startAppRiverQueuedSubscriptionSync,
@@ -490,6 +491,38 @@ async function run() {
   assert.equal(businessPremiumRule?.productCode, 'CW-M365-BUSINESS-PREMIUM');
   assert.equal(businessPremiumRule?.dimensions?.subscriptionSource, 'appriver-securecloud-subscription');
 
+  const aliasMappings = await loadAppRiverProductMappings(aliasProductMappingDatabase);
+  const businessStandardAlias = aliasMappings['Microsoft 365 Business Standard|Monthly|Monthly'];
+  assert.equal(businessStandardAlias?.productCode, 'Microsoft 365 Business Standard-M');
+  assert.deepEqual(
+    businessStandardAlias?.vendorProductKeys?.sort(),
+    [
+      'Microsoft 365 Business Standard (T)|Monthly|Monthly',
+      'Microsoft 365 Business Standard|Monthly|Monthly',
+    ],
+  );
+
+  const aliasRuleSet = await loadAppRiverRuleSet(aliasProductMappingDatabase);
+  const businessStandardRule = aliasRuleSet.rules.find((rule) =>
+    rule.vendorProductKeys?.includes('Microsoft 365 Business Standard|Monthly|Monthly'),
+  );
+  assert.equal(businessStandardRule?.productCode, 'Microsoft 365 Business Standard-M');
+  assert.deepEqual(
+    businessStandardRule?.vendorProductKeys?.sort(),
+    [
+      'Microsoft 365 Business Standard (T)|Monthly|Monthly',
+      'Microsoft 365 Business Standard|Monthly|Monthly',
+    ],
+  );
+
+  const exchangeMappings = await loadAppRiverProductMappings(exchangeProductAliasDatabase);
+  const exchangePlan1 = exchangeMappings['Exchange Online (Plan 1)|Annual|Monthly'];
+  assert.equal(exchangePlan1?.productCode, 'Exchange Online Plan 1-AM');
+  assert.deepEqual(
+    exchangePlan1?.targetProductCodes?.sort(),
+    ['Exchange Online Plan 1 - AM', 'Exchange Online Plan 1-AM'],
+  );
+
   console.log('appriver operations tests passed');
 }
 
@@ -497,3 +530,58 @@ run().catch((error: unknown) => {
   console.error(error);
   process.exitCode = 1;
 });
+
+const aliasProductMappingDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_product_mappings')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Microsoft 365 Business Standard (T)|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'Microsoft 365 Business Standard-M',
+            connectwise_product_name: 'Microsoft 365 Business Standard-M',
+            unit_price: '14',
+          } as T,
+        ],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const exchangeProductAliasDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_product_mappings')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Exchange Online (Plan 1)|Annual|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'Exchange Online Plan 1-AM',
+            connectwise_product_name: 'Exchange Online Plan 1 - AM',
+            unit_price: '5.2',
+          } as T,
+        ],
+      };
+    }
+
+    if (sql.includes('with target_names')) {
+      return {
+        rows: [
+          {
+            product_name: 'Exchange Online Plan 1 - AM',
+            product_code: 'Exchange Online Plan 1-AM',
+          },
+          {
+            product_name: 'Exchange Online Plan 1 - AM',
+            product_code: 'Exchange Online Plan 1 - AM',
+          },
+        ] as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};

@@ -31,7 +31,15 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import {
   integrationSettingsRegistry,
   validateIntegrationRegistry,
@@ -47,7 +55,7 @@ type View = 'reconcile' | 'integrations' | 'mappings' | 'reports' | 'imports' | 
 type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'ready' | 'approved' | 'blocked' | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'credentials' | 'sync';
-type ReportSection = 'raw-sync';
+type ReportSection = 'raw-sync' | 'product-profitability';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 
 type ReconcileIssue = {
@@ -63,6 +71,7 @@ type ReconcileIssue = {
   family: string;
   serviceCode: string;
   lineType: 'base-count' | 'usage-add-on';
+  measuredSourceCount: number;
   sourceCount: number;
   invoiceCount: number;
   proposedCount: number;
@@ -110,6 +119,7 @@ type ClientProfile = {
 
 type ClientGroup = {
   customer: string;
+  customerId: string;
   agreementId: string;
   agreement: string;
   accountId: string;
@@ -219,6 +229,42 @@ type RawSyncRunsResponse = {
   runs: RawSyncRun[];
 };
 
+type ProductProfitabilityMonth = {
+  month: string;
+  revenue: number;
+  cost: number;
+  profit: number;
+};
+
+type ProductProfitabilityIntegrationSeries = {
+  integrationId: string;
+  integrationName: string;
+  months: ProductProfitabilityMonth[];
+  totalRevenue: number;
+  totalCost: number;
+  totalProfit: number;
+  productCount: number;
+  missingCostRows: number;
+};
+
+type ProductProfitabilityReportResponse = {
+  reportType: 'product-profitability';
+  generatedAt: string;
+  currency: 'USD';
+  startMonth: string;
+  endMonth: string;
+  months: string[];
+  summary: {
+    integrationCount: number;
+    productCount: number;
+    totalRevenue: number;
+    totalCost: number;
+    totalProfit: number;
+    missingCostRows: number;
+  };
+  integrations: ProductProfitabilityIntegrationSeries[];
+};
+
 type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable';
 
 type ReconciliationDevice = {
@@ -255,6 +301,14 @@ type ReconciliationProductOption = {
   productName: string;
 };
 
+type ReconciliationRunMeta = {
+  syncRunId?: string;
+  generatedAt: string;
+  snapshotCount?: number;
+  agreementAdditionCount?: number;
+  productCheckCount: number;
+};
+
 type AgreementAddition = {
   id: string;
   connectWiseAdditionId: string;
@@ -265,6 +319,26 @@ type AgreementAddition = {
     amount: number;
     currency: string;
   };
+  unitCost?: number;
+  lessIncluded?: number;
+  billedQuantity?: number;
+  billCustomer?: string;
+  effectiveDate?: string;
+  taxableFlag?: string;
+  invoiceDescription?: string;
+  purchaseItemFlag?: string;
+  specialOrderFlag?: string;
+  uom?: string;
+  extPrice?: number;
+  extCost?: number;
+  sequenceNumber?: number;
+  margin?: number;
+  prorateCost?: number;
+  proratePrice?: number;
+  extendedProrateCost?: number;
+  extendedProratePrice?: number;
+  prorateCurrentPeriodFlag?: string;
+  description?: string;
   additionStatus: string;
   updatedAt?: string;
 };
@@ -283,8 +357,20 @@ type AgreementAdditionsSelection = {
 
 type VendorDataSelection = {
   customer: string;
+  vendorId: IntegrationId;
   vendor: string;
-  devices: ReconciliationDevice[];
+  status: 'loading' | 'ready' | 'failed';
+  syncSummary?: string;
+  message?: string;
+  columns: string[];
+  rows: RawSyncRow[];
+};
+
+type VendorDataColumn = {
+  label: string;
+  primary?: boolean;
+  format?: 'date';
+  value: (device: ReconciliationDevice) => DimensionValue | Array<string | number | boolean>;
 };
 
 type ReconciliationLineResponse = {
@@ -392,6 +478,27 @@ type ProductMappingTarget = {
   unitPrice?: number;
 };
 
+type ProductBundleComponent = {
+  vendorProductKey: string;
+  vendorProductName: string;
+};
+
+type ProductBundle = {
+  id: string;
+  vendorId: IntegrationId;
+  bundleKey: string;
+  bundleName: string;
+  components: ProductBundleComponent[];
+  target: ProductMappingTarget;
+  quantityStrategy: 'max-component-quantity';
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 type ProductCatalogTarget = ProductMappingTarget & {
   connectwiseProductId?: string;
   source: 'local' | 'connectwise';
@@ -490,6 +597,7 @@ type ProductMappingCandidate = {
   target: ProductMappingTarget;
   matchScore: number;
   additionCount: number;
+  customerCount?: number;
   reason: string;
   evidence: MappingEvidence[];
 };
@@ -513,13 +621,47 @@ type MappingStateResponse = {
     productMappings: number;
     approvedProductMappings: number;
     productCandidates: number;
+    productBundles: number;
     unmappedSnapshots: number;
   };
   accountMappings: AccountMapping[];
   accountCandidates: AccountMappingCandidate[];
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
+  productBundles: ProductBundle[];
   customerOptions: MappingCustomerOption[];
+};
+
+type ProductMappingCustomerAddition = {
+  id: string;
+  connectWiseAdditionId?: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice?: number;
+  additionStatus: string;
+  updatedAt?: string;
+};
+
+type ProductMappingCustomer = {
+  externalAccountId: string;
+  externalAccountName: string;
+  vendorQuantity: number;
+  observedAt?: string;
+  customerId?: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  agreementStatus?: string;
+  additions: ProductMappingCustomerAddition[];
+};
+
+type ProductMappingCustomerReview = {
+  vendorId: IntegrationId;
+  vendorProductKey: string;
+  vendorProductName: string;
+  customerCount: number;
+  customers: ProductMappingCustomer[];
 };
 
 type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses';
@@ -611,10 +753,10 @@ const syncRuns = [
 
 const workflow = [
   { label: 'Vendor data', value: 'Latest sync', icon: Database, state: 'done' },
-  { label: 'ConnectWise', value: 'Additions', icon: FileUp, state: 'done' },
-  { label: 'Map products', value: '58 checks', icon: Link2, state: 'active' },
+  { label: 'CW Data', value: 'Last sync', icon: FileUp, state: 'done' },
+  { label: 'Discrepancies', value: '0 review', icon: Link2, state: 'active' },
   { label: 'Client review', value: '6 groups', icon: Users, state: 'ready' },
-  { label: 'Approve', value: '$4,361 exposure', icon: ClipboardCheck, state: 'idle' },
+  { label: 'Unresolved exposure', value: '$0', icon: CircleDollarSign, state: 'idle' },
 ];
 
 const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
@@ -644,6 +786,12 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
     label: 'Raw Sync Viewer',
     enabled: true,
     description: 'Inspect saved raw sync rows by integration and sync date',
+  },
+  {
+    id: 'product-profitability',
+    label: 'Product Profitability',
+    enabled: true,
+    description: 'Track net product profit by active integration across the last 12 months',
   },
 ];
 
@@ -743,6 +891,15 @@ function formatCurrency(value: number) {
   return `${prefix}${Math.abs(value).toLocaleString()}`;
 }
 
+function formatCurrencyCompact(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    currency: 'USD',
+    maximumFractionDigits: 1,
+    notation: 'compact',
+    style: 'currency',
+  }).format(value);
+}
+
 function formatMoneyAmount(value?: { amount: number; currency: string }) {
   if (!value) return '-';
   const prefix = value.amount < 0 ? '-$' : '$';
@@ -754,6 +911,10 @@ function formatMoneyAmount(value?: { amount: number; currency: string }) {
 
 function formatCount(value: number) {
   return value.toLocaleString();
+}
+
+function formatMoneyValue(value: number) {
+  return formatMoneyAmount({ amount: value, currency: 'USD' });
 }
 
 function formatAuthMode(value: string) {
@@ -781,6 +942,376 @@ function formatDateTime(value?: string) {
     hour: 'numeric',
     minute: '2-digit',
   });
+}
+
+function formatMonthLabel(value: string, includeYear = false) {
+  const parsed = new Date(`${value}-01T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  const options: Intl.DateTimeFormatOptions = {
+    month: 'short',
+  };
+  if (includeYear) {
+    options.year = '2-digit';
+  }
+
+  return parsed.toLocaleString([], options);
+}
+
+function formatMonthRange(months: string[]) {
+  if (months.length === 0) {
+    return 'No months';
+  }
+
+  const first = months[0];
+  const last = months[months.length - 1];
+  return first === last ? formatMonthLabel(first, true) : `${formatMonthLabel(first, true)} - ${formatMonthLabel(last, true)}`;
+}
+
+function formatSyncSummary(syncDate: string | undefined, count: number | undefined, unit: string) {
+  const dateLabel = syncDate ?? 'No sync date';
+  const countLabel = typeof count === 'number' ? `${count.toLocaleString()} ${unit}` : 'No count';
+  return `${dateLabel} / ${countLabel}`;
+}
+
+function rawSyncDatasetForVendorData(integrationId: IntegrationId): RawSyncDataset | undefined {
+  return integrationId === 'microsoft-365' ? 'users' : undefined;
+}
+
+function formatVendorRawSyncSummary(details: RawSyncDetailsResponse) {
+  const timestamp = formatDateTime(details.syncRun.completedAt ?? details.syncRun.startedAt) ?? 'Unknown sync date';
+  return `${timestamp} / ${details.rows.length.toLocaleString()} raw rows`;
+}
+
+function rawSyncRowsForClient(rows: RawSyncRow[], client: ClientGroup) {
+  const customerIdMatches = rows.filter((row) => String(row.CustomerId ?? '') === client.customerId);
+  if (customerIdMatches.length > 0) {
+    return customerIdMatches;
+  }
+
+  const targetCustomer = normalizeRawSyncCustomerLabel(client.customer);
+  return rows.filter((row) =>
+    rawSyncCustomerLabels(row).some((label) => normalizeRawSyncCustomerLabel(label) === targetCustomer),
+  );
+}
+
+function rawSyncCustomerLabels(row: RawSyncRow) {
+  return [
+    row.Customer,
+    row.AppRiverCustomer,
+    row.NcentralCustomer,
+    row.CoveCustomer,
+    row.TenantName,
+  ]
+    .map(rawSyncStringValue)
+    .filter((value): value is string => Boolean(value));
+}
+
+function rawSyncStringValue(value: string | number | boolean | null | undefined) {
+  return typeof value === 'undefined' || value === null ? undefined : String(value);
+}
+
+function normalizeRawSyncCustomerLabel(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+type ExcelCellValue = string | number;
+
+function exportExcelFile(filename: string, rows: Array<Record<string, ExcelCellValue>>) {
+  if (rows.length === 0) {
+    throw new Error('There is no reconciliation data to export.');
+  }
+
+  const columns = Object.keys(rows[0]);
+  const workbook = createXlsxWorkbook(columns, rows, 'Reconciliation');
+  const blob = new Blob([workbook], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function createXlsxWorkbook(columns: string[], rows: Array<Record<string, ExcelCellValue>>, sheetName: string) {
+  const sheetXml = worksheetXml(columns, rows);
+  return createZipArchive([
+    {
+      name: '[Content_Types].xml',
+      text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`,
+    },
+    {
+      name: '_rels/.rels',
+      text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`,
+    },
+    {
+      name: 'xl/workbook.xml',
+      text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="${escapeXmlAttribute(sheetName)}" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>`,
+    },
+    {
+      name: 'xl/_rels/workbook.xml.rels',
+      text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`,
+    },
+    {
+      name: 'xl/styles.xml',
+      text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="2">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`,
+    },
+    { name: 'xl/worksheets/sheet1.xml', text: sheetXml },
+  ]);
+}
+
+function worksheetXml(columns: string[], rows: Array<Record<string, ExcelCellValue>>) {
+  const lastCell = `${columnName(columns.length)}${rows.length + 1}`;
+  const autoFilterRef = `A1:${lastCell}`;
+  const headerRow = rowXml(1, columns.map((column) => ({ value: column, style: 1 })));
+  const dataRows = rows.map((row, rowIndex) =>
+    rowXml(
+      rowIndex + 2,
+      columns.map((column) => ({ value: row[column] ?? '' })),
+    ),
+  );
+  const widths = columns.map((column, index) => {
+    const maxWidth = Math.min(
+      64,
+      Math.max(
+        column.length,
+        ...rows.map((row) => String(row[column] ?? '').length),
+      ) + 2,
+    );
+    return `<col min="${index + 1}" max="${index + 1}" width="${maxWidth}" customWidth="1"/>`;
+  });
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:${lastCell}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols>${widths.join('')}</cols>
+  <sheetData>${headerRow}${dataRows.join('')}</sheetData>
+  <autoFilter ref="${autoFilterRef}"/>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>`;
+}
+
+function rowXml(rowNumber: number, cells: Array<{ value: ExcelCellValue; style?: number }>) {
+  return `<row r="${rowNumber}">${cells
+    .map((cell, index) => cellXml(`${columnName(index + 1)}${rowNumber}`, cell.value, cell.style))
+    .join('')}</row>`;
+}
+
+function cellXml(reference: string, value: ExcelCellValue, style = 0) {
+  const styleAttribute = style > 0 ? ` s="${style}"` : '';
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `<c r="${reference}"${styleAttribute}><v>${value}</v></c>`;
+  }
+
+  return `<c r="${reference}" t="inlineStr"${styleAttribute}><is><t>${escapeXmlText(String(value))}</t></is></c>`;
+}
+
+function columnName(index: number) {
+  let column = '';
+  let current = index;
+  while (current > 0) {
+    current -= 1;
+    column = String.fromCharCode(65 + (current % 26)) + column;
+    current = Math.floor(current / 26);
+  }
+  return column;
+}
+
+function escapeXmlText(value: string) {
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeXmlAttribute(value: string) {
+  return escapeXmlText(value).replace(/"/g, '&quot;');
+}
+
+function createZipArchive(files: Array<{ name: string; text: string }>) {
+  const encoder = new TextEncoder();
+  const localFileParts: Uint8Array[] = [];
+  const centralDirectoryParts: Uint8Array[] = [];
+  const { date, time } = zipDateTime(new Date());
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.name);
+    const data = encoder.encode(file.text);
+    const checksum = crc32(data);
+    const localHeader = zipLocalHeader(nameBytes, data.length, checksum, time, date);
+    localFileParts.push(localHeader, nameBytes, data);
+    centralDirectoryParts.push(zipCentralDirectoryHeader(nameBytes, data.length, checksum, time, date, offset));
+    offset += localHeader.length + nameBytes.length + data.length;
+  }
+
+  const centralDirectory = concatBytes(centralDirectoryParts);
+  const endRecord = zipEndOfCentralDirectory(files.length, centralDirectory.length, offset);
+  return concatBytes([...localFileParts, centralDirectory, endRecord]);
+}
+
+function zipLocalHeader(nameBytes: Uint8Array, size: number, checksum: number, time: number, date: number) {
+  return bytesFromNumbers([
+    0x50, 0x4b, 0x03, 0x04,
+    ...uint16(20),
+    ...uint16(0x0800),
+    ...uint16(0),
+    ...uint16(time),
+    ...uint16(date),
+    ...uint32(checksum),
+    ...uint32(size),
+    ...uint32(size),
+    ...uint16(nameBytes.length),
+    ...uint16(0),
+  ]);
+}
+
+function zipCentralDirectoryHeader(
+  nameBytes: Uint8Array,
+  size: number,
+  checksum: number,
+  time: number,
+  date: number,
+  offset: number,
+) {
+  return concatBytes([
+    bytesFromNumbers([
+      0x50, 0x4b, 0x01, 0x02,
+      ...uint16(20),
+      ...uint16(20),
+      ...uint16(0x0800),
+      ...uint16(0),
+      ...uint16(time),
+      ...uint16(date),
+      ...uint32(checksum),
+      ...uint32(size),
+      ...uint32(size),
+      ...uint16(nameBytes.length),
+      ...uint16(0),
+      ...uint16(0),
+      ...uint16(0),
+      ...uint16(0),
+      ...uint32(0),
+      ...uint32(offset),
+    ]),
+    nameBytes,
+  ]);
+}
+
+function zipEndOfCentralDirectory(fileCount: number, centralDirectorySize: number, centralDirectoryOffset: number) {
+  return bytesFromNumbers([
+    0x50, 0x4b, 0x05, 0x06,
+    ...uint16(0),
+    ...uint16(0),
+    ...uint16(fileCount),
+    ...uint16(fileCount),
+    ...uint32(centralDirectorySize),
+    ...uint32(centralDirectoryOffset),
+    ...uint16(0),
+  ]);
+}
+
+function zipDateTime(value: Date) {
+  const year = Math.max(1980, value.getFullYear());
+  return {
+    time: (value.getHours() << 11) | (value.getMinutes() << 5) | Math.floor(value.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((value.getMonth() + 1) << 5) | value.getDate(),
+  };
+}
+
+function uint16(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff];
+}
+
+function uint32(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff];
+}
+
+function bytesFromNumbers(values: number[]) {
+  return new Uint8Array(values);
+}
+
+function concatBytes(parts: Uint8Array[]) {
+  const length = parts.reduce((total, part) => total + part.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
+const crc32Table = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function crc32(bytes: Uint8Array) {
+  let checksum = 0xffffffff;
+  for (const byte of bytes) {
+    checksum = crc32Table[(checksum ^ byte) & 0xff] ^ (checksum >>> 8);
+  }
+  return (checksum ^ 0xffffffff) >>> 0;
+}
+
+function exportFileDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function safeFilePart(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'reconciliation';
 }
 
 function formatReportRunLabel(run: RawSyncRun) {
@@ -823,6 +1354,38 @@ const moneyReportColumns = new Set([
 ]);
 
 const dateReportColumns = new Set(['effectiveDate', '_info']);
+const reportDefaultColumnWidth = 180;
+const reportMinimumColumnWidth = 110;
+const reportMaximumColumnWidth = 640;
+const reportColumnKeyboardStep = 24;
+
+type ReportColumnResizeState = {
+  column: string;
+  pointerId: number;
+  startWidth: number;
+  startX: number;
+};
+
+const profitabilityPalette = [
+  '#0d8f80',
+  '#3478a7',
+  '#df604f',
+  '#6b61c9',
+  '#e4a42f',
+  '#2f6f4e',
+  '#9b5c2e',
+  '#44546f',
+  '#b54b72',
+  '#5d7c2c',
+];
+
+function clampReportColumnWidth(width: number) {
+  return Math.min(reportMaximumColumnWidth, Math.max(reportMinimumColumnWidth, Math.round(width)));
+}
+
+function profitabilityPath(points: Array<{ x: number; y: number }>) {
+  return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
+}
 
 function statusLabel(status: IssueStatus) {
   switch (status) {
@@ -852,6 +1415,14 @@ function isReviewableIssue(issue: ReconcileIssue) {
 function issueMatchesSearchAndVendor(issue: ReconcileIssue, query: string, vendorFilter: string) {
   const searchable = `${issue.customer} ${issue.product} ${issue.vendor} ${issue.agreement}`.toLowerCase();
   return searchable.includes(query.toLowerCase()) && (vendorFilter === 'All' || issue.vendor === vendorFilter);
+}
+
+function compareCustomerNames(left: string, right: string) {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function compareIssuesByCustomer(left: ReconcileIssue, right: ReconcileIssue) {
+  return compareCustomerNames(left.customer, right.customer);
 }
 
 function initialView(): View {
@@ -905,42 +1476,45 @@ function groupIssuesByClient(issues: ReconcileIssue[]): ClientGroup[] {
     groups.set(issue.customer, [...existing, issue]);
   });
 
-  return Array.from(groups.entries()).map(([customer, clientIssues]) => {
-    const profile = clientProfiles[customer];
-    const firstIssue = clientIssues[0];
-    const fallbackProfile: ClientProfile = {
-      customer,
-      accountId: firstIssue.accountId ?? 'Unmapped',
-      agreement: firstIssue.agreement,
-      owner: firstIssue.owner,
-      primaryDriver: 'Agreement additions',
-      seats: Math.max(...clientIssues.map((issue) => issue.invoiceCount)),
-      devices: Math.max(...clientIssues.map((issue) => issue.sourceCount)),
-      stackHealth: clientIssues.some((issue) => issue.status === 'blocked') ? 'blocked' : 'watch',
-      dependencyRules: ['Review related agreement additions before approving product-level changes.'],
-      stacks: [
-        {
-          name: firstIssue.family,
-          driver: 'Product count',
-          products: clientIssues.map((issue) => issue.product),
-          summary: 'No saved dependency profile exists yet for this client.',
-        },
-      ],
-    };
-    const clientProfile = profile ?? fallbackProfile;
+  return Array.from(groups.entries())
+    .map(([customer, clientIssues]) => {
+      const profile = clientProfiles[customer];
+      const firstIssue = clientIssues[0];
+      const fallbackProfile: ClientProfile = {
+        customer,
+        accountId: firstIssue.accountId ?? 'Unmapped',
+        agreement: firstIssue.agreement,
+        owner: firstIssue.owner,
+        primaryDriver: 'Agreement additions',
+        seats: Math.max(...clientIssues.map((issue) => issue.invoiceCount)),
+        devices: Math.max(...clientIssues.map((issue) => issue.sourceCount)),
+        stackHealth: clientIssues.some((issue) => issue.status === 'blocked') ? 'blocked' : 'watch',
+        dependencyRules: ['Review related agreement additions before approving product-level changes.'],
+        stacks: [
+          {
+            name: firstIssue.family,
+            driver: 'Product count',
+            products: clientIssues.map((issue) => issue.product),
+            summary: 'No saved dependency profile exists yet for this client.',
+          },
+        ],
+      };
+      const clientProfile = profile ?? fallbackProfile;
 
-    return {
-      ...clientProfile,
-      agreementId: firstIssue.agreementId,
-      issues: clientIssues,
-      vendors: Array.from(new Set(clientIssues.map((issue) => issue.vendor))),
-      exposure: clientIssues.reduce((total, issue) => total + issue.amount, 0),
-      changeCount: clientIssues.length,
-      readyCount: clientIssues.filter((issue) => issue.status === 'ready').length,
-      blockedCount: clientIssues.filter((issue) => issue.status === 'blocked').length,
-      needsReviewCount: clientIssues.filter((issue) => issue.status === 'needs-review').length,
-    };
-  });
+      return {
+        ...clientProfile,
+        customerId: firstIssue.clientId,
+        agreementId: firstIssue.agreementId,
+        issues: clientIssues,
+        vendors: Array.from(new Set(clientIssues.map((issue) => issue.vendor))),
+        exposure: clientIssues.reduce((total, issue) => total + issue.amount, 0),
+        changeCount: clientIssues.length,
+        readyCount: clientIssues.filter((issue) => issue.status === 'ready').length,
+        blockedCount: clientIssues.filter((issue) => issue.status === 'blocked').length,
+        needsReviewCount: clientIssues.filter((issue) => issue.status === 'needs-review').length,
+      };
+    })
+    .sort((left, right) => compareCustomerNames(left.customer, right.customer));
 }
 
 function groupIssuesByVendor(issues: ReconcileIssue[]) {
@@ -991,12 +1565,20 @@ async function fetchRawSyncRuns(integrationId: IntegrationId, dataset?: RawSyncD
   } satisfies RawSyncRunsResponse;
 }
 
-async function fetchRawSyncDetails(integrationId: IntegrationId, syncRunId: string, dataset?: RawSyncDataset) {
+async function fetchRawSyncDetails(
+  integrationId: IntegrationId,
+  syncRunId: string,
+  dataset?: RawSyncDataset,
+  options: { customerId?: string } = {},
+) {
   const params = new URLSearchParams({
     integrationId,
   });
   if (integrationId === 'microsoft-365' && dataset) {
     params.set('dataset', dataset);
+  }
+  if (options.customerId) {
+    params.set('customerId', options.customerId);
   }
 
   const response = await fetch(`/api/reports/raw-sync-runs/${encodeURIComponent(syncRunId)}/details?${params.toString()}`);
@@ -1007,6 +1589,17 @@ async function fetchRawSyncDetails(integrationId: IntegrationId, syncRunId: stri
   }
 
   return body as unknown as RawSyncDetailsResponse;
+}
+
+async function fetchProductProfitabilityReport() {
+  const response = await fetch('/api/reports/product-profitability');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product profitability report load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as ProductProfitabilityReportResponse;
 }
 
 async function fetchAgreementAdditions(agreementId: string) {
@@ -1029,6 +1622,19 @@ async function fetchMappingState(integrationId: IntegrationId) {
   }
 
   return body as unknown as MappingStateResponse;
+}
+
+async function fetchProductMappingCustomers(integrationId: IntegrationId, vendorProductKey: string) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/products/${encodeURIComponent(vendorProductKey)}/customers`,
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product customer review load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as ProductMappingCustomerReview;
 }
 
 async function fetchReconciliationRun(integrationId: IntegrationId) {
@@ -1114,6 +1720,50 @@ async function saveProductMapping(
 
   if (!response.ok) {
     throw new Error(String(body.error ?? `Product mapping save failed with HTTP ${response.status}.`));
+  }
+}
+
+async function saveProductBundleRequest(
+  integrationId: IntegrationId,
+  payload: {
+    bundleKey?: string;
+    bundleName: string;
+    components: ProductBundleComponent[];
+    targetProduct: ProductMappingTarget;
+    active?: boolean;
+  },
+) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/bundles`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ...payload, reviewedBy: 'frontend' }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product bundle save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { vendorId: IntegrationId; bundle: ProductBundle };
+}
+
+async function deactivateProductBundleRequest(integrationId: IntegrationId, bundleKey: string) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/bundles/${encodeURIComponent(bundleKey)}/deactivate`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ reviewedBy: 'frontend' }),
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product bundle deactivation failed with HTTP ${response.status}.`));
   }
 }
 
@@ -1311,6 +1961,24 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
 }
 
 function formatIntegrationSyncSuccess(integrationId: IntegrationId, body: Record<string, unknown>) {
+  if (body.status === 'queued' || body.queued === true) {
+    if (integrationId === 'opentext-appriver') {
+      const customersRead = numberField(body, 'customersRead')?.toLocaleString() ?? '0';
+      const queuedCustomers = numberField(body, 'queuedCustomers')?.toLocaleString() ?? '0';
+      const skippedPartnerCustomers = numberField(body, 'skippedPartnerCustomers')?.toLocaleString() ?? '0';
+      if (customersRead !== '0' || queuedCustomers !== '0' || skippedPartnerCustomers !== '0') {
+        return `Queued AppRiver sync. Gathered ${customersRead} customers and queued ${queuedCustomers} for serial processing (${skippedPartnerCustomers} partner customers skipped).`;
+      }
+    }
+
+    if (integrationId === 'microsoft-365') {
+      const dataset = body.dataset === 'licenses' ? 'license' : 'user';
+      return `Queued Microsoft 365 ${dataset} sync. Results will appear after the background worker finishes.`;
+    }
+
+    return `Queued ${integrationName(integrationId)} sync. Results will appear after the background worker finishes.`;
+  }
+
   if (integrationId === 'connectwise') {
     const recordsWritten =
       numberField(body, 'additionsWritten')?.toLocaleString() ??
@@ -1362,13 +2030,6 @@ function formatIntegrationSyncSuccess(integrationId: IntegrationId, body: Record
   }
 
   if (integrationId === 'opentext-appriver') {
-    if (body.status === 'queued' || body.queued === true) {
-      const customersRead = numberField(body, 'customersRead')?.toLocaleString() ?? '0';
-      const queuedCustomers = numberField(body, 'queuedCustomers')?.toLocaleString() ?? '0';
-      const skippedPartnerCustomers = numberField(body, 'skippedPartnerCustomers')?.toLocaleString() ?? '0';
-      return `Queued AppRiver sync. Gathered ${customersRead} customers and queued ${queuedCustomers} for serial processing (${skippedPartnerCustomers} partner customers skipped).`;
-    }
-
     const recordsWritten = numberField(body, 'recordsWritten')?.toLocaleString() ?? '0';
     const recordsRead = numberField(body, 'recordsRead')?.toLocaleString() ?? '0';
     const customersRead = numberField(body, 'customersRead')?.toLocaleString() ?? '0';
@@ -1419,6 +2080,7 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       family: line.lineType === 'usage-add-on' ? 'Usage add-on' : 'Base count',
       serviceCode: line.productCode,
       lineType: line.lineType,
+      measuredSourceCount: line.sourceQuantity,
       sourceCount: line.proposedQuantity,
       invoiceCount: line.agreementQuantity,
       proposedCount: line.proposedQuantity,
@@ -1445,6 +2107,109 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
   });
 }
 
+function buildReconciliationExportRows(
+  issues: ReconcileIssue[],
+  additionsByAgreement: Map<string, AgreementAddition[]>,
+  selectedSourceName: string,
+) {
+  return [...issues]
+    .sort(
+      (left, right) =>
+        left.customer.localeCompare(right.customer) ||
+        left.agreement.localeCompare(right.agreement) ||
+        left.vendor.localeCompare(right.vendor) ||
+        left.product.localeCompare(right.product),
+    )
+    .map((issue) => {
+      const agreementAdditions = additionsByAgreement.get(issue.agreementId) ?? [];
+      const matchedAdditions = agreementAdditions.filter((addition) => productCodesMatch(addition.productCode, issue.serviceCode));
+      const otherAdditions = agreementAdditions.filter((addition) => !productCodesMatch(addition.productCode, issue.serviceCode));
+      const lessCountAdjustments = issue.adjustments.filter(
+        (adjustment) => adjustment.active && adjustment.adjustmentType === 'less-count',
+      );
+      const manualLessCount = lessCountAdjustments.reduce((total, adjustment) => total + adjustment.quantity, 0);
+      const cwLessIncluded = matchedAdditions.reduce((total, addition) => total + (addition.lessIncluded ?? 0), 0);
+
+      return {
+        'Selected Reconciliation': selectedSourceName,
+        Customer: issue.customer,
+        Agreement: issue.agreement,
+        Vendor: issue.vendor,
+        Product: issue.product,
+        'Product Code': issue.serviceCode,
+        'Line Type': issue.family,
+        Unit: issue.unit,
+        'Vendor Measured Count': issue.measuredSourceCount,
+        'Manual Less Count': manualLessCount,
+        'Manual Less Count Reasons': lessCountAdjustments.map((adjustment) => adjustment.reason).filter(Boolean).join('; '),
+        'Proposed Count After Less Count': issue.proposedCount,
+        'CW Count': issue.invoiceCount,
+        Delta: issue.proposedCount - issue.invoiceCount,
+        'Financial Impact': issue.amount,
+        Status: statusLabel(issue.status),
+        Recommendation: issue.recommendation,
+        Reason: issue.reason,
+        Evidence: issue.audit.join(' | '),
+        'Vendor Device Rows': issue.devices.length,
+        'CW Addition IDs': matchedAdditions.map((addition) => addition.connectWiseAdditionId).join('; '),
+        'CW Addition Products': matchedAdditions.map(formatAgreementAdditionLabel).join('; '),
+        'CW Addition Quantity': sumAgreementAdditionField(matchedAdditions, 'quantity'),
+        'CW Less Included': cwLessIncluded,
+        'CW Billed Quantity': sumAgreementAdditionField(matchedAdditions, 'billedQuantity'),
+        'CW Unit Price': matchedAdditions.map((addition) => formatMoneyAmount(addition.unitPrice)).join('; '),
+        'CW Unit Cost': formatOptionalNumberList(matchedAdditions.map((addition) => addition.unitCost)),
+        'CW Bill Customer': formatOptionalStringList(matchedAdditions.map((addition) => addition.billCustomer)),
+        'CW UOM': formatOptionalStringList(matchedAdditions.map((addition) => addition.uom)),
+        'CW Effective Date': formatOptionalStringList(matchedAdditions.map((addition) => addition.effectiveDate)),
+        'CW Taxable': formatOptionalStringList(matchedAdditions.map((addition) => addition.taxableFlag)),
+        'CW Purchase Item': formatOptionalStringList(matchedAdditions.map((addition) => addition.purchaseItemFlag)),
+        'CW Special Order': formatOptionalStringList(matchedAdditions.map((addition) => addition.specialOrderFlag)),
+        'CW Prorate Current Period': formatOptionalStringList(
+          matchedAdditions.map((addition) => addition.prorateCurrentPeriodFlag),
+        ),
+        'CW Invoice Description': formatOptionalStringList(matchedAdditions.map((addition) => addition.invoiceDescription)),
+        'CW Description': formatOptionalStringList(matchedAdditions.map((addition) => addition.description)),
+        'CW Addition Status': formatOptionalStringList(matchedAdditions.map((addition) => addition.additionStatus)),
+        'CW Addition Updated': formatOptionalStringList(
+          matchedAdditions.map((addition) => formatDateTime(addition.updatedAt) ?? undefined),
+        ),
+        'Other CW Agreement Additions': otherAdditions.map(formatAgreementAdditionLabel).join('; '),
+      };
+    });
+}
+
+function productCodesMatch(left: string, right: string) {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function formatAgreementAdditionLabel(addition: AgreementAddition) {
+  const details = [
+    `qty ${addition.quantity}`,
+    typeof addition.lessIncluded === 'number' ? `less ${addition.lessIncluded}` : undefined,
+    addition.unitPrice ? `price ${formatMoneyAmount(addition.unitPrice)}` : undefined,
+    addition.billCustomer ? `bill ${addition.billCustomer}` : undefined,
+  ].filter(Boolean);
+
+  return `${addition.productName} (${addition.productCode}${addition.connectWiseAdditionId ? ` / ${addition.connectWiseAdditionId}` : ''})${
+    details.length > 0 ? ` - ${details.join(', ')}` : ''
+  }`;
+}
+
+function sumAgreementAdditionField(additions: AgreementAddition[], field: 'quantity' | 'billedQuantity') {
+  return additions.reduce((total, addition) => total + (addition[field] ?? 0), 0);
+}
+
+function formatOptionalStringList(values: Array<string | undefined>) {
+  return values.filter((value): value is string => Boolean(value)).join('; ');
+}
+
+function formatOptionalNumberList(values: Array<number | undefined>) {
+  return values
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    .map((value) => value.toString())
+    .join('; ');
+}
+
 function shortId(value: string) {
   return value.length > 8 ? value.slice(0, 8) : value;
 }
@@ -1455,7 +2220,7 @@ function App() {
   const [expandedClientNames, setExpandedClientNames] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [vendorFilter, setVendorFilter] = useState('All');
-  const [selectedReconciliationIntegrationId, setSelectedReconciliationIntegrationId] = useState<IntegrationId>('cove');
+  const [selectedReconciliationIntegrationId, setSelectedReconciliationIntegrationId] = useState<IntegrationId | ''>('');
   const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
   const [productFilter, setProductFilter] = useState('All products');
   const [autoPost, setAutoPost] = useState(false);
@@ -1488,6 +2253,13 @@ function App() {
   const [rawSyncLoadState, setRawSyncLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [rawSyncMessage, setRawSyncMessage] = useState('Select an integration to view saved raw sync rows.');
   const [rawSyncColumnFilters, setRawSyncColumnFilters] = useState<Record<string, string>>({});
+  const [productProfitabilityReport, setProductProfitabilityReport] =
+    useState<ProductProfitabilityReportResponse | null>(null);
+  const [productProfitabilityLoadState, setProductProfitabilityLoadState] =
+    useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
+    'Load net profit by active integration.',
+  );
   const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<IntegrationId>('cove');
   const [mappingState, setMappingState] = useState<MappingStateResponse | null>(null);
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
@@ -1496,9 +2268,12 @@ function App() {
   const [mappingLoadState, setMappingLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [mappingMessage, setMappingMessage] = useState('Load an integration to review account and product mappings.');
   const [busyMappingAction, setBusyMappingAction] = useState<string | null>(null);
-  const [reconciliationLoadState, setReconciliationLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
-  const [reconciliationMessage, setReconciliationMessage] = useState('Loading Cove reconciliation...');
+  const [reconciliationLoadState, setReconciliationLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [reconciliationMessage, setReconciliationMessage] = useState('Choose a vendor.');
+  const [reconciliationRunMeta, setReconciliationRunMeta] = useState<ReconciliationRunMeta | null>(null);
   const [reconciliationProductOptions, setReconciliationProductOptions] = useState<ReconciliationProductOption[]>([]);
+  const [exportingReconciliationReport, setExportingReconciliationReport] = useState(false);
+  const [agreementAdditionsByAgreement, setAgreementAdditionsByAgreement] = useState<Record<string, AgreementAddition[]>>({});
   const [agreementAdditionsSelection, setAgreementAdditionsSelection] = useState<AgreementAdditionsSelection | null>(null);
   const [agreementAdditions, setAgreementAdditions] = useState<AgreementAddition[]>([]);
   const [agreementAdditionsLoadState, setAgreementAdditionsLoadState] = useState<'loading' | 'ready' | 'failed'>('ready');
@@ -1585,6 +2360,116 @@ function App() {
     }
   };
 
+  const refreshRawSyncReport = async () => {
+    if (!selectedRawSyncIntegrationId) {
+      setRawSyncLoadState('idle');
+      setRawSyncMessage('Select an integration to view saved raw sync rows.');
+      return;
+    }
+
+    const selectedSyncRunId = selectedRawSyncRunId;
+    setRawSyncLoadState('loading');
+    setRawSyncMessage(selectedSyncRunId ? 'Refreshing selected sync...' : 'Refreshing sync dates...');
+
+    try {
+      const response = await fetchRawSyncRuns(selectedRawSyncIntegrationId, selectedRawSyncDataset);
+      setRawSyncRuns(response.runs);
+
+      if (!selectedSyncRunId) {
+        setRawSyncDetails(null);
+        setRawSyncLoadState('ready');
+        setRawSyncMessage(
+          response.runs.length > 0
+            ? 'Select a sync date to load raw rows.'
+            : `No raw sync runs found for ${integrationName(selectedRawSyncIntegrationId)} yet.`,
+        );
+        return;
+      }
+
+      const selectedStillExists = response.runs.some((run) => run.id === selectedSyncRunId);
+      if (!selectedStillExists) {
+        setSelectedRawSyncRunId('');
+        setRawSyncDetails(null);
+        setRawSyncColumnFilters({});
+        setRawSyncLoadState('ready');
+        setRawSyncMessage('The selected sync run is no longer available. Select another sync date.');
+        return;
+      }
+
+      const details = await fetchRawSyncDetails(selectedRawSyncIntegrationId, selectedSyncRunId, selectedRawSyncDataset);
+      setRawSyncDetails(details);
+      setRawSyncColumnFilters({});
+      setRawSyncLoadState('ready');
+      setRawSyncMessage(`Refreshed ${details.summary.rowCount.toLocaleString()} raw sync rows.`);
+    } catch (error) {
+      setRawSyncLoadState('failed');
+      setRawSyncMessage(error instanceof Error ? error.message : 'Unable to refresh raw sync status.');
+    }
+  };
+
+  const loadProductProfitabilityReport = async () => {
+    setProductProfitabilityLoadState('loading');
+    setProductProfitabilityMessage('Loading product profitability...');
+
+    try {
+      const report = await fetchProductProfitabilityReport();
+      setProductProfitabilityReport(report);
+      setProductProfitabilityLoadState('ready');
+      setProductProfitabilityMessage(
+        report.integrations.length > 0
+          ? `Loaded ${report.summary.integrationCount.toLocaleString()} active integrations across ${report.months.length.toLocaleString()} months.`
+          : 'No active integrations have profitability data yet.',
+      );
+      return report;
+    } catch (error) {
+      setProductProfitabilityReport(null);
+      setProductProfitabilityLoadState('failed');
+      setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to load product profitability.');
+      return null;
+    }
+  };
+
+  const loadCustomerVendorData = async (
+    client: ClientGroup,
+    vendorId: IntegrationId,
+    vendor: string,
+  ): Promise<VendorDataSelection> => {
+    const dataset = rawSyncDatasetForVendorData(vendorId);
+    let syncRunId =
+      vendorId === selectedReconciliationIntegrationId
+        ? reconciliationRunMeta?.syncRunId
+        : undefined;
+
+    if (!syncRunId) {
+      const runsResponse = await fetchRawSyncRuns(vendorId, dataset);
+      syncRunId = runsResponse.runs[0]?.id;
+    }
+
+    if (!syncRunId) {
+      throw new Error(`No completed ${integrationName(vendorId)} raw sync is available yet.`);
+    }
+
+    const details = await fetchRawSyncDetails(vendorId, syncRunId, dataset, {
+      customerId: client.customerId,
+    });
+    const rows = rawSyncRowsForClient(details.rows, client);
+    const columns = details.columns.filter((column) => column !== 'CustomerId');
+
+    return {
+      customer: client.customer,
+      vendorId,
+      vendor,
+      status: 'ready',
+      syncSummary: formatVendorRawSyncSummary(details),
+      message:
+        rows.length > 0
+          ? `${rows.length.toLocaleString()} raw sync rows loaded for ${client.customer}.`
+          : `No raw sync rows found for ${client.customer} in this sync run.`,
+      columns,
+      rows,
+    };
+  };
+
   const loadMappings = async (integrationId: IntegrationId) => {
     setMappingLoadState('loading');
     setMappingMessage('Loading mapping state...');
@@ -1594,7 +2479,7 @@ function App() {
       setMappingState(state);
       setMappingLoadState('ready');
       setMappingMessage(
-        `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings and ${state.summary.productMappings.toLocaleString()} product mappings.`,
+        `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings, ${state.summary.productMappings.toLocaleString()} product mappings, and ${(state.summary.productBundles ?? 0).toLocaleString()} product bundles.`,
       );
       return state;
     } catch (error) {
@@ -1655,23 +2540,30 @@ function App() {
       const run = await fetchReconciliationRun(integrationId);
       const nextIssues = reconcileIssuesFromRun(run);
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
-      const firstSelectedIssue = nextReviewIssues[0] ?? nextIssues[0];
+      const firstSelectedIssue =
+        [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
       setIssues(nextIssues);
+      setReconciliationRunMeta({
+        syncRunId: run.syncRunId,
+        generatedAt: run.generatedAt,
+        snapshotCount: run.snapshotCount,
+        agreementAdditionCount: run.agreementAdditionCount,
+        productCheckCount: nextIssues.length,
+      });
       setReconciliationProductOptions(run.productOptions ?? []);
       setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
       setReconciliationLoadState('ready');
       setReconciliationMessage(
         nextReviewIssues.length > 0
-          ? `Found ${nextReviewIssues.length.toLocaleString()} ${sourceName} discrepanc${
-              nextReviewIssues.length === 1 ? 'y' : 'ies'
-            } across ${nextIssues.length.toLocaleString()} product checks from ${(run.snapshotCount ?? 0).toLocaleString()} mapped snapshots.`
+          ? `${nextReviewIssues.length.toLocaleString()} discrepancies ready for review.`
           : run.syncRunId
-            ? `No ${sourceName} discrepancies found in the latest sync (${(run.snapshotCount ?? 0).toLocaleString()} mapped snapshots, ${nextIssues.length.toLocaleString()} product checks).`
+            ? `No ${sourceName} discrepancies found in the latest sync.`
             : `No completed ${sourceName} sync is available yet.`,
       );
       return run;
     } catch (error) {
       setIssues([]);
+      setReconciliationRunMeta(null);
       setReconciliationProductOptions([]);
       setExpandedClientNames([]);
       setReconciliationLoadState('failed');
@@ -1695,10 +2587,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void loadVendorReconciliation(selectedReconciliationIntegrationId);
-  }, []);
-
-  useEffect(() => {
     const handlePopState = () => {
       setView(viewFromLocation(window.location));
     };
@@ -1710,20 +2598,28 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (view !== 'reports' || !selectedRawSyncIntegrationId) {
+    if (view !== 'reports' || reportSection !== 'raw-sync' || !selectedRawSyncIntegrationId) {
       return;
     }
 
     void loadRawSyncRuns(selectedRawSyncIntegrationId, selectedRawSyncDataset);
-  }, [selectedRawSyncDataset, selectedRawSyncIntegrationId, view]);
+  }, [reportSection, selectedRawSyncDataset, selectedRawSyncIntegrationId, view]);
 
   useEffect(() => {
-    if (view !== 'reports' || !selectedRawSyncIntegrationId || !selectedRawSyncRunId) {
+    if (view !== 'reports' || reportSection !== 'raw-sync' || !selectedRawSyncIntegrationId || !selectedRawSyncRunId) {
       return;
     }
 
     void loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
-  }, [selectedRawSyncDataset, selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
+  }, [reportSection, selectedRawSyncDataset, selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
+
+  useEffect(() => {
+    if (view !== 'reports' || reportSection !== 'product-profitability') {
+      return;
+    }
+
+    void loadProductProfitabilityReport();
+  }, [reportSection, view]);
 
   useEffect(() => {
     if (view !== 'mappings') {
@@ -1744,6 +2640,16 @@ function App() {
   const clientGroups = useMemo(() => groupIssuesByClient(filteredIssues), [filteredIssues]);
   const integrations = useMemo(() => buildIntegrations(runtimeIntegrations ?? undefined), [runtimeIntegrations]);
   const pendingCount = issues.filter(isReviewableIssue).length;
+  const selectedReconciliationIntegration = integrations.find((integration) => integration.id === selectedReconciliationIntegrationId);
+  const connectWiseIntegration = integrations.find((integration) => integration.id === 'connectwise');
+  const vendorDataSummary = formatSyncSummary(
+    selectedReconciliationIntegration?.lastSync,
+    reconciliationRunMeta?.snapshotCount,
+    'snapshots',
+  );
+  const connectWiseSyncSummary = connectWiseIntegration?.lastSync
+    ? `Last sync ${connectWiseIntegration.lastSync}`
+    : 'No sync date';
   const totalExposure = issues
     .filter(isReviewableIssue)
     .reduce((total, issue) => total + issue.amount, 0);
@@ -1785,6 +2691,45 @@ function App() {
     );
   };
 
+  const exportSelectedReconciliationReport = async () => {
+    if (!selectedReconciliationIntegrationId || issues.length === 0) {
+      window.alert('Choose a vendor with reconciliation data before exporting a report.');
+      return;
+    }
+
+    setExportingReconciliationReport(true);
+
+    try {
+      const sourceName = integrationName(selectedReconciliationIntegrationId);
+      const agreementIds = [...new Set(issues.map((issue) => issue.agreementId))];
+      const nextCache: Record<string, AgreementAddition[]> = {};
+      const additionEntries = await Promise.all(
+        agreementIds.map(async (agreementId) => {
+          const cached = agreementAdditionsByAgreement[agreementId];
+          if (cached) {
+            return [agreementId, cached] as const;
+          }
+
+          const response = await fetchAgreementAdditions(agreementId);
+          nextCache[agreementId] = response.additions;
+          return [agreementId, response.additions] as const;
+        }),
+      );
+
+      if (Object.keys(nextCache).length > 0) {
+        setAgreementAdditionsByAgreement((current) => ({ ...current, ...nextCache }));
+      }
+
+      const allSelectedReconciliationIssues = issues;
+      const rows = buildReconciliationExportRows(allSelectedReconciliationIssues, new Map(additionEntries), sourceName);
+      exportExcelFile(`msp-harmony-${safeFilePart(sourceName)}-reconciliation-${exportFileDate()}.xlsx`, rows);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Unable to export reconciliation report.');
+    } finally {
+      setExportingReconciliationReport(false);
+    }
+  };
+
   const openTicketModal = (client: ClientGroup) => {
     const fullClient =
       groupIssuesByClient(issues.filter((issue) => issue.customer === client.customer && isReviewableIssue(issue)))[0] ??
@@ -1810,21 +2755,25 @@ function App() {
     setAgreementAdditionsSelection(selection);
     setAgreementAdditions([]);
     setAgreementAdditionsLoadState('loading');
-    setAgreementAdditionsMessage('Loading active agreement additions...');
+    setAgreementAdditionsMessage('Loading CW data...');
 
     try {
       const response = await fetchAgreementAdditions(client.agreementId);
       setAgreementAdditions(response.additions);
+      setAgreementAdditionsByAgreement((current) => ({
+        ...current,
+        [client.agreementId]: response.additions,
+      }));
       setAgreementAdditionsLoadState('ready');
       setAgreementAdditionsMessage(
         response.additions.length > 0
-          ? `Loaded ${response.additions.length.toLocaleString()} active additions.`
-          : 'No active additions found for this agreement.',
+          ? `Loaded ${response.additions.length.toLocaleString()} active CW additions.`
+          : 'No active CW additions found for this agreement.',
       );
     } catch (error) {
       setAgreementAdditions([]);
       setAgreementAdditionsLoadState('failed');
-      setAgreementAdditionsMessage(error instanceof Error ? error.message : 'Unable to load agreement additions.');
+      setAgreementAdditionsMessage(error instanceof Error ? error.message : 'Unable to load CW data.');
     }
   };
 
@@ -2104,6 +3053,54 @@ function App() {
     }
   };
 
+  const saveProductBundle = async (
+    integrationId: IntegrationId,
+    payload: {
+      bundleKey?: string;
+      bundleName: string;
+      components: ProductBundleComponent[];
+      targetProduct: ProductMappingTarget;
+    },
+  ) => {
+    setBusyMappingAction(payload.bundleKey ? `bundle:${payload.bundleKey}` : 'bundle:new');
+    try {
+      await saveProductBundleRequest(integrationId, {
+        ...payload,
+        active: true,
+      });
+      await loadMappings(integrationId);
+      setMappingMessage(`Saved bundle mapping for ${payload.bundleName}.`);
+      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+        await loadVendorReconciliation(integrationId);
+      }
+      return true;
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Product bundle save failed.');
+      return false;
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const deactivateProductBundle = async (integrationId: IntegrationId, bundleKey: string) => {
+    const actionKey = `bundle:${bundleKey}`;
+    setBusyMappingAction(actionKey);
+    try {
+      await deactivateProductBundleRequest(integrationId, bundleKey);
+      await loadMappings(integrationId);
+      setMappingMessage('Product bundle disabled.');
+      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+        await loadVendorReconciliation(integrationId);
+      }
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Product bundle deactivation failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
   const saveNcentralFilterMapping = async (payload: Partial<NcentralFilterMapping>) => {
     setBusyMappingAction(payload.id ? `ncentral-filter:${payload.id}` : 'ncentral-filter:new');
     setMappingMessage('Saving N-central filter mapping...');
@@ -2292,20 +3289,28 @@ function App() {
           </div>
         </header>
 
-        <main className="content">
+        <main className={view === 'reconcile' ? 'content reconcile-content' : 'content'}>
           {view === 'reconcile' && (
             <ReconcileView
               approveClient={approveClient}
               approveIssue={approveIssue}
               clientGroups={clientGroups}
+              connectWiseSyncSummary={connectWiseSyncSummary}
+              exportingReport={exportingReconciliationReport}
               expandedClientNames={expandedClientNames}
               filteredIssues={filteredIssues}
               issues={issues}
               needsReviewOnly={needsReviewOnly}
+              onExportReport={exportSelectedReconciliationReport}
               onManualOverride={setManualOverrideIssue}
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
-              onRefreshReconciliation={() => loadVendorReconciliation(selectedReconciliationIntegrationId)}
+              onLoadVendorData={loadCustomerVendorData}
+              onRefreshReconciliation={() =>
+                selectedReconciliationIntegrationId
+                  ? loadVendorReconciliation(selectedReconciliationIntegrationId)
+                  : Promise.resolve(null)
+              }
               onReconciliationSourceChange={(integrationId) => {
                 setSelectedReconciliationIntegrationId(integrationId);
                 setVendorFilter('All');
@@ -2322,6 +3327,7 @@ function App() {
               setVendorFilter={setVendorFilter}
               skipIssue={skipIssue}
               totalExposure={totalExposure}
+              vendorDataSummary={vendorDataSummary}
               vendorFilter={vendorFilter}
             />
           )}
@@ -2366,6 +3372,8 @@ function App() {
                 setMappingMessage('Loading mapping state...');
               }}
               onProductTargetsSave={saveProductTargets}
+              onProductBundleDeactivate={deactivateProductBundle}
+              onProductBundleSave={saveProductBundle}
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
               onUsageOverrideCreate={saveUsageOverride}
@@ -2374,7 +3382,7 @@ function App() {
               usageOverrides={usageOverrides}
             />
           )}
-          {view === 'reports' && (
+          {view === 'reports' && reportSection === 'raw-sync' && (
             <ReportsView
               columnFilters={rawSyncColumnFilters}
               details={rawSyncDetails}
@@ -2402,11 +3410,20 @@ function App() {
                 setRawSyncColumnFilters({});
                 setRawSyncMessage(selectedRawSyncRunId ? 'Loading raw sync details...' : 'Select a sync date to load raw rows.');
               }}
+              onRefresh={refreshRawSyncReport}
               onSyncRunChange={setSelectedRawSyncRunId}
               runs={rawSyncRuns}
               selectedDataset={selectedRawSyncDataset}
               selectedIntegrationId={selectedRawSyncIntegrationId}
               selectedSyncRunId={selectedRawSyncRunId}
+            />
+          )}
+          {view === 'reports' && reportSection === 'product-profitability' && (
+            <ProductProfitabilityReportView
+              loadMessage={productProfitabilityMessage}
+              loadState={productProfitabilityLoadState}
+              onRefresh={loadProductProfitabilityReport}
+              report={productProfitabilityReport}
             />
           )}
           {view === 'imports' && <ImportsView />}
@@ -2441,6 +3458,7 @@ function App() {
           message={agreementAdditionsMessage}
           onClose={closeAgreementAdditionsModal}
           selection={agreementAdditionsSelection}
+          syncSummary={connectWiseSyncSummary}
         />
       )}
       {selectedIntegration && (
@@ -2495,10 +3513,14 @@ function ReconcileView(props: {
   approveClient: (customer: string) => void;
   approveIssue: (issueId: string) => void;
   clientGroups: ClientGroup[];
+  connectWiseSyncSummary: string;
+  exportingReport: boolean;
   expandedClientNames: string[];
   filteredIssues: ReconcileIssue[];
   issues: ReconcileIssue[];
   needsReviewOnly: boolean;
+  onExportReport: () => Promise<void>;
+  onLoadVendorData: (client: ClientGroup, vendorId: IntegrationId, vendor: string) => Promise<VendorDataSelection>;
   onManualOverride: (issue: ReconcileIssue) => void;
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
@@ -2506,25 +3528,30 @@ function ReconcileView(props: {
   onReconciliationSourceChange: (integrationId: IntegrationId) => void;
   pendingCount: number;
   query: string;
-  reconciliationLoadState: 'loading' | 'ready' | 'failed';
+  reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reconciliationMessage: string;
-  selectedReconciliationIntegrationId: IntegrationId;
+  selectedReconciliationIntegrationId: IntegrationId | '';
   setExpandedClientNames: (value: string[] | ((currentNames: string[]) => string[])) => void;
   setNeedsReviewOnly: (value: boolean) => void;
   setQuery: (value: string) => void;
   setVendorFilter: (value: string) => void;
   skipIssue: (issueId: string) => void;
   totalExposure: number;
+  vendorDataSummary: string;
   vendorFilter: string;
 }) {
   const {
     approveClient,
     approveIssue,
     clientGroups,
+    connectWiseSyncSummary,
+    exportingReport,
     expandedClientNames,
     filteredIssues,
     issues,
     needsReviewOnly,
+    onExportReport,
+    onLoadVendorData,
     onManualOverride,
     onOpenAgreementAdditions,
     onOpenTicket,
@@ -2541,21 +3568,54 @@ function ReconcileView(props: {
     setVendorFilter,
     skipIssue,
     totalExposure,
+    vendorDataSummary,
     vendorFilter,
   } = props;
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
   const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
   const filteredReviewCount = filteredIssues.filter(isReviewableIssue).length;
-  const selectedSourceName = integrationName(selectedReconciliationIntegrationId);
+  const selectedSourceName = selectedReconciliationIntegrationId
+    ? integrationName(selectedReconciliationIntegrationId)
+    : 'Choose a vendor';
   const workflowSteps = workflow.map((step) => {
-    if (step.label === 'Map products') return { ...step, value: `${filteredIssues.length} checks` };
+    if (step.label === 'Vendor data') return { ...step, value: vendorDataSummary };
+    if (step.label === 'CW Data') return { ...step, value: connectWiseSyncSummary };
+    if (step.label === 'Discrepancies') return { ...step, value: `${pendingCount.toLocaleString()} review` };
     if (step.label === 'Client review') return { ...step, value: `${clientGroups.length} groups` };
-    if (step.label === 'Approve') return { ...step, value: `${formatCurrency(totalExposure)} exposure` };
+    if (step.label === 'Unresolved exposure') return { ...step, value: formatCurrency(totalExposure) };
     return step;
   });
+  const openVendorData = async (client: ClientGroup, vendorId: IntegrationId, vendor: string) => {
+    setVendorDataSelection({
+      customer: client.customer,
+      vendorId,
+      vendor,
+      status: 'loading',
+      syncSummary: vendorDataSummary,
+      message: `Loading all raw sync rows for ${client.customer}...`,
+      columns: [],
+      rows: [],
+    });
+
+    try {
+      setVendorDataSelection(await onLoadVendorData(client, vendorId, vendor));
+    } catch (error) {
+      setVendorDataSelection({
+        customer: client.customer,
+        vendorId,
+        vendor,
+        status: 'failed',
+        syncSummary: vendorDataSummary,
+        message: error instanceof Error ? error.message : 'Unable to load vendor data.',
+        columns: [],
+        rows: [],
+      });
+    }
+  };
+
   return (
     <>
-      <section className="integrations-live-bar" aria-label="Live reconciliation status">
+      <section className="integrations-live-bar reconciliation-live-bar" aria-label="Live reconciliation status">
         <div>
           <span className={`live-dot ${reconciliationLoadState}`} />
           <strong>
@@ -2563,9 +3623,13 @@ function ReconcileView(props: {
               ? `${selectedSourceName} reconciliation issue`
               : reconciliationLoadState === 'loading'
                 ? `Comparing ${selectedSourceName}`
-                : `${selectedSourceName} vs ConnectWise`}
+                : selectedReconciliationIntegrationId
+                  ? `${selectedSourceName} vs ConnectWise`
+                  : selectedSourceName}
           </strong>
-          <span>{reconciliationMessage}</span>
+          {reconciliationLoadState !== 'ready' || !selectedReconciliationIntegrationId ? (
+            <span>{reconciliationMessage}</span>
+          ) : null}
         </div>
         <div className="integrations-live-meta">
           <div className="segmented-control compact-source-control" role="group" aria-label="Reconciliation source">
@@ -2584,7 +3648,7 @@ function ReconcileView(props: {
           <span>{pendingCount.toLocaleString()} open</span>
           <button
             className="button secondary compact"
-            disabled={reconciliationLoadState === 'loading'}
+            disabled={reconciliationLoadState === 'loading' || !selectedReconciliationIntegrationId}
             onClick={() => void onRefreshReconciliation()}
             type="button"
           >
@@ -2592,10 +3656,6 @@ function ReconcileView(props: {
             Refresh
           </button>
         </div>
-      </section>
-
-      <section className="metric-grid reconcile-metric-grid" aria-label="Billing reconciliation summary">
-        <MetricCard icon={CircleDollarSign} label="Unresolved exposure" tone="money" value={formatCurrency(totalExposure)} />
       </section>
 
       <section className="workflow-band" aria-label="Reconciliation workflow">
@@ -2616,49 +3676,63 @@ function ReconcileView(props: {
         })}
       </section>
 
-      <section className="toolbar" aria-label="Queue filters">
-        <label className="search-field">
-          <Search size={18} />
-          <input
-            aria-label="Search customers, products, vendors, and agreements"
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search client, product, agreement"
-            type="search"
-            value={query}
-          />
-        </label>
-
-        <div className="segmented-control" role="group" aria-label="Vendor filter">
-          {reconciliationVendors.map((vendor) => (
-            <button
-              className={vendorFilter === vendor ? 'active' : ''}
-              key={vendor}
-              onClick={() => setVendorFilter(vendor)}
-              type="button"
-            >
-              {vendor}
-            </button>
-          ))}
-        </div>
-
-        <label className="switch-control">
-          <input
-            checked={needsReviewOnly}
-            onChange={(event) => setNeedsReviewOnly(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Needs review</span>
-        </label>
-      </section>
-
       <section className="workspace-grid">
         <div className="work-surface client-surface">
+          <section className="toolbar" aria-label="Queue filters">
+            <label className="search-field">
+              <Search size={18} />
+              <input
+                aria-label="Search customers, products, vendors, and agreements"
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search client, product, agreement"
+                type="search"
+                value={query}
+              />
+            </label>
+
+            <div className="segmented-control" role="group" aria-label="Vendor filter">
+              {reconciliationVendors.map((vendor) => (
+                <button
+                  className={vendorFilter === vendor ? 'active' : ''}
+                  key={vendor}
+                  onClick={() => setVendorFilter(vendor)}
+                  type="button"
+                >
+                  {vendor}
+                </button>
+              ))}
+            </div>
+
+            <label className="switch-control">
+              <input
+                checked={needsReviewOnly}
+                onChange={(event) => setNeedsReviewOnly(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Needs review</span>
+            </label>
+          </section>
+
           <div className="surface-header">
             <div>
               <span className="section-kicker">Client review groups</span>
               <h2>{filteredReviewCount} review items across {clientGroups.length} clients</h2>
             </div>
             <div className="review-group-actions">
+              <button
+                className="button secondary compact"
+                disabled={
+                  exportingReport ||
+                  reconciliationLoadState === 'loading' ||
+                  !selectedReconciliationIntegrationId ||
+                  issues.length === 0
+                }
+                onClick={() => void onExportReport()}
+                type="button"
+              >
+                <Download size={16} />
+                {exportingReport ? 'Exporting' : 'Export report'}
+              </button>
               <button
                 className="button secondary compact"
                 disabled={clientGroups.length === 0}
@@ -2682,9 +3756,17 @@ function ReconcileView(props: {
             {clientGroups.length === 0 && (
               <div className="empty-state">
                 <Search size={20} />
-                <strong>{pendingCount === 0 ? 'No Cove discrepancies to review.' : 'No client groups match these filters.'}</strong>
+                <strong>
+                  {!selectedReconciliationIntegrationId
+                    ? 'Choose a vendor to run reconciliation.'
+                    : pendingCount === 0
+                      ? `No ${selectedSourceName} discrepancies to review.`
+                      : 'No client groups match these filters.'}
+                </strong>
                 <span>
-                  {pendingCount === 0
+                  {!selectedReconciliationIntegrationId
+                    ? 'Pick a vendor above when you are ready to compare vendor counts with CW data.'
+                    : pendingCount === 0
                     ? reconciliationMessage
                     : 'Adjust the vendor, status, or exposure filters to bring product checks back.'}
                 </span>
@@ -2753,7 +3835,7 @@ function ReconcileView(props: {
                         const hiddenCount = Math.max(0, allVendorIssues.length - vendorIssues.length);
                         const matchedCount = allVendorIssues.filter((issue) => issue.status === 'matched').length;
                         const visibleVendorIssues = isExpanded ? allVendorIssues : vendorIssues;
-                        const vendorDevices = vendorDevicesFromIssues(allVendorIssues);
+                        const vendorId = allVendorIssues[0]?.vendorId ?? selectedReconciliationIntegrationId;
 
                         return (
                           <section className="vendor-license-group" key={vendor}>
@@ -2762,13 +3844,12 @@ function ReconcileView(props: {
                               <div className="vendor-license-header-meta">
                                 <button
                                   className="vendor-data-link"
-                                  onClick={() =>
-                                    setVendorDataSelection({
-                                      customer: client.customer,
-                                      vendor,
-                                      devices: vendorDevices,
-                                    })
-                                  }
+                                  disabled={!vendorId}
+                                  onClick={() => {
+                                    if (vendorId) {
+                                      void openVendorData(client, vendorId, vendor);
+                                    }
+                                  }}
                                   type="button"
                                 >
                                   <Database size={14} />
@@ -2881,6 +3962,7 @@ function ReconcileView(props: {
 
 function VendorDataModal(props: { onClose: () => void; selection: VendorDataSelection }) {
   const { onClose, selection } = props;
+  const minTableWidth = Math.max(980, selection.columns.length * 150);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -2891,49 +3973,50 @@ function VendorDataModal(props: { onClose: () => void; selection: VendorDataSele
               <Database size={18} />
               Vendor Data
             </h2>
-            <p>{selection.customer} / {selection.vendor}</p>
+            <p>
+              {selection.customer} / {selection.vendor}
+              {selection.syncSummary ? ` / ${selection.syncSummary}` : ''}
+            </p>
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={20} />
           </button>
         </div>
 
-        <div className="vendor-device-list" aria-label={`${selection.vendor} raw device data for ${selection.customer}`}>
-          {selection.devices.length === 0 ? (
+        <div className="vendor-device-list" aria-label={`${selection.vendor} raw sync data for ${selection.customer}`}>
+          {selection.status !== 'ready' ? (
             <div className="empty-state">
               <Database size={20} />
-              <strong>No vendor device rows were attached to this customer.</strong>
+              <strong>{selection.status === 'loading' ? 'Loading vendor data.' : 'Unable to load vendor data.'}</strong>
+              {selection.message ? <span>{selection.message}</span> : null}
             </div>
           ) : null}
 
-          {selection.devices.length > 0 ? (
+          {selection.status === 'ready' && selection.rows.length === 0 ? (
+            <div className="empty-state">
+              <Database size={20} />
+              <strong>No raw sync rows found for this customer.</strong>
+              {selection.message ? <span>{selection.message}</span> : null}
+            </div>
+          ) : null}
+
+          {selection.status === 'ready' && selection.rows.length > 0 ? (
             <div className="vendor-device-table-scroll">
-              <table className="vendor-device-table">
+              <table className="vendor-raw-sync-table" style={{ minWidth: `${minTableWidth}px` }}>
                 <thead>
                   <tr>
-                    <th>Device Name</th>
-                    <th>Type</th>
-                    <th>Product</th>
-                    <th>OS</th>
-                    <th>Last Check-In</th>
-                    <th>Tags</th>
+                    {selection.columns.map((column) => (
+                      <th key={column}>{column}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {selection.devices.map((device) => (
-                    <tr key={device.id}>
-                      <td className="vendor-device-name-cell">
-                        <strong title={deviceDisplayName(device)}>{deviceDisplayName(device)}</strong>
-                        <span>{deviceIdentityLabel(device)}</span>
-                      </td>
-                      <td>{deviceTypeLabel(device)}</td>
-                      <td>
-                        <strong title={device.productName}>{device.productName}</strong>
-                        {deviceProductCodeLabel(device) ? <span>{deviceProductCodeLabel(device)}</span> : null}
-                      </td>
-                      <td>{deviceOsLabel(device)}</td>
-                      <td>{formatDateTime(deviceLastCheckIn(device)) ?? '-'}</td>
-                      <td>{deviceTagLabel(device)}</td>
+                  {selection.rows.map((row, index) => (
+                    <tr key={`${String(row.id ?? row.SubscriptionKey ?? row.ProductKey ?? 'row')}-${index}`}>
+                      {selection.columns.map((column) => {
+                        const value = formatReportCell(column, row[column]);
+                        return <td key={column} title={value}>{value}</td>;
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -2952,8 +4035,9 @@ function AgreementAdditionsModal(props: {
   message: string;
   onClose: () => void;
   selection: AgreementAdditionsSelection;
+  syncSummary: string;
 }) {
-  const { additions, loadState, message, onClose, selection } = props;
+  const { additions, loadState, message, onClose, selection, syncSummary } = props;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -2962,9 +4046,9 @@ function AgreementAdditionsModal(props: {
           <div>
             <h2 id="agreement-additions-title">
               <FileSpreadsheet size={18} />
-              Agreement Additions
+              CW Data
             </h2>
-            <p>{selection.customer} / {selection.agreement}</p>
+            <p>{selection.customer} / {selection.agreement} / {syncSummary}</p>
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={20} />
@@ -2979,7 +4063,7 @@ function AgreementAdditionsModal(props: {
         {additions.length === 0 ? (
           <div className="empty-state agreement-additions-empty">
             <FileSpreadsheet size={20} />
-            <strong>{loadState === 'loading' ? 'Loading active additions...' : 'No active additions to show.'}</strong>
+            <strong>{loadState === 'loading' ? 'Loading CW data...' : 'No active CW additions to show.'}</strong>
           </div>
         ) : (
           <div className="agreement-additions-table-scroll">
@@ -3011,6 +4095,137 @@ function AgreementAdditionsModal(props: {
             </table>
           </div>
         )}
+      </section>
+    </div>
+  );
+}
+
+function ProductCustomerReviewModal(props: {
+  loadState: 'loading' | 'ready' | 'failed';
+  message: string;
+  onClose: () => void;
+  onSelectCustomer: (externalAccountId: string) => void;
+  review: ProductMappingCustomerReview;
+  selectedCustomerId: string;
+}) {
+  const { loadState, message, onClose, onSelectCustomer, review, selectedCustomerId } = props;
+  const selectedCustomer =
+    review.customers.find((customer) => customer.externalAccountId === selectedCustomerId) ??
+    review.customers[0];
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="product-customer-review-modal" role="dialog" aria-modal="true" aria-labelledby="product-customer-review-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="product-customer-review-title">
+              <Users size={18} />
+              Product Customers
+            </h2>
+            <p>{review.vendorProductName} / {review.vendorProductKey}</p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className={`agreement-additions-status ${loadState}`}>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <span>{message}</span>
+        </div>
+
+        <div className="product-customer-review-layout">
+          <nav className="product-customer-nav" aria-label="Customers with vendor product">
+            <div className="product-customer-nav-header">
+              <strong>{review.customerCount.toLocaleString()} customers</strong>
+            </div>
+            {review.customers.length === 0 ? (
+              <div className="empty-state product-customer-empty">
+                <Users size={20} />
+                <strong>{loadState === 'loading' ? 'Loading customers...' : 'No customers found.'}</strong>
+              </div>
+            ) : null}
+            {review.customers.map((customer) => (
+              <button
+                className={customer.externalAccountId === selectedCustomer?.externalAccountId ? 'product-customer-nav-item selected' : 'product-customer-nav-item'}
+                key={customer.externalAccountId}
+                onClick={() => onSelectCustomer(customer.externalAccountId)}
+                type="button"
+              >
+                <strong>{customer.externalAccountName}</strong>
+                <span>
+                  {customer.vendorQuantity.toLocaleString()} vendor
+                  {' / '}
+                  {customer.additions.length.toLocaleString()} CW additions
+                </span>
+              </button>
+            ))}
+          </nav>
+
+          <section className="product-customer-detail" aria-label="Mapped customer agreement additions">
+            {!selectedCustomer ? (
+              <div className="empty-state product-customer-empty">
+                <FileSpreadsheet size={20} />
+                <strong>{loadState === 'loading' ? 'Loading mapped agreement additions...' : 'Select a customer.'}</strong>
+              </div>
+            ) : (
+              <>
+                <div className="product-customer-detail-header">
+                  <div>
+                    <span className="section-kicker">Mapped customer</span>
+                    <h3>{selectedCustomer.customerName ?? selectedCustomer.externalAccountName}</h3>
+                    <p>
+                      {selectedCustomer.agreementName ?? 'No approved mapped agreement'}
+                      {selectedCustomer.agreementStatus ? ` / ${selectedCustomer.agreementStatus}` : ''}
+                    </p>
+                  </div>
+                  <div className="product-customer-detail-metrics">
+                    <IntegrationStat label="Vendor qty" value={selectedCustomer.vendorQuantity.toLocaleString()} />
+                    <IntegrationStat label="CW additions" value={selectedCustomer.additions.length.toLocaleString()} />
+                    <IntegrationStat label="Seen" value={formatDateTime(selectedCustomer.observedAt) ?? '-'} />
+                  </div>
+                </div>
+
+                {selectedCustomer.additions.length === 0 ? (
+                  <div className="empty-state product-customer-empty">
+                    <FileSpreadsheet size={20} />
+                    <strong>No active ConnectWise additions on the mapped agreement.</strong>
+                    <span>{selectedCustomer.agreementName ? 'The mapped agreement exists, but no active additions were found.' : 'Map this vendor customer to its monthly agreement to review additions.'}</span>
+                  </div>
+                ) : (
+                  <div className="agreement-additions-table-scroll product-customer-additions-scroll">
+                    <table className="agreement-additions-table">
+                      <thead>
+                        <tr>
+                          <th>Product</th>
+                          <th>Code</th>
+                          <th>CW ID</th>
+                          <th>Qty</th>
+                          <th>Unit Price</th>
+                          <th>Status</th>
+                          <th>Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedCustomer.additions.map((addition) => (
+                          <tr key={addition.id}>
+                            <td>{addition.productName}</td>
+                            <td>{addition.productCode}</td>
+                            <td>{addition.connectWiseAdditionId ?? '-'}</td>
+                            <td>{addition.quantity.toLocaleString()}</td>
+                            <td>{typeof addition.unitPrice === 'number' ? formatMoneyValue(addition.unitPrice) : '-'}</td>
+                            <td>{addition.additionStatus}</td>
+                            <td>{formatDateTime(addition.updatedAt) ?? '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        </div>
       </section>
     </div>
   );
@@ -3579,6 +4794,16 @@ function MappingsView(props: {
     vendorProductKey: string,
     targetProducts: ProductMappingTarget[],
   ) => Promise<void>;
+  onProductBundleDeactivate: (integrationId: IntegrationId, bundleKey: string) => Promise<void>;
+  onProductBundleSave: (
+    integrationId: IntegrationId,
+    payload: {
+      bundleKey?: string;
+      bundleName: string;
+      components: ProductBundleComponent[];
+      targetProduct: ProductMappingTarget;
+    },
+  ) => Promise<boolean>;
   onRefresh: () => Promise<MappingStateResponse | null>;
   onNcentralFilterMappingSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
   onUsageOverrideCreate: (integrationId: IntegrationId, payload: CreateUsageOverridePayload) => Promise<boolean>;
@@ -3600,6 +4825,8 @@ function MappingsView(props: {
     onAutomap,
     onIntegrationChange,
     onProductTargetsSave,
+    onProductBundleDeactivate,
+    onProductBundleSave,
     onRefresh,
     onNcentralFilterMappingSave,
     onUsageOverrideCreate,
@@ -3618,6 +4845,18 @@ function MappingsView(props: {
   const [productCatalogResults, setProductCatalogResults] = useState<Record<string, ProductCatalogTarget[]>>({});
   const [productCatalogMessages, setProductCatalogMessages] = useState<Record<string, string>>({});
   const [productCatalogLoading, setProductCatalogLoading] = useState<Record<string, boolean>>({});
+  const [productCustomerReview, setProductCustomerReview] = useState<ProductMappingCustomerReview | null>(null);
+  const [productCustomerReviewLoadState, setProductCustomerReviewLoadState] = useState<'loading' | 'ready' | 'failed'>('ready');
+  const [productCustomerReviewMessage, setProductCustomerReviewMessage] = useState('');
+  const [selectedProductCustomerId, setSelectedProductCustomerId] = useState('');
+  const [editingBundleKey, setEditingBundleKey] = useState<string | null>(null);
+  const [bundleName, setBundleName] = useState('');
+  const [bundleComponentKeys, setBundleComponentKeys] = useState<string[]>([]);
+  const [bundleTarget, setBundleTarget] = useState<ProductMappingTarget | null>(null);
+  const [bundleCatalogQuery, setBundleCatalogQuery] = useState('');
+  const [bundleCatalogResults, setBundleCatalogResults] = useState<ProductCatalogTarget[]>([]);
+  const [bundleCatalogMessage, setBundleCatalogMessage] = useState('');
+  const [bundleCatalogLoading, setBundleCatalogLoading] = useState(false);
   const [overrideCustomerId, setOverrideCustomerId] = useState('');
   const [overrideAgreementId, setOverrideAgreementId] = useState('');
   const [overrideSourceProductKey, setOverrideSourceProductKey] = useState('cove-workstation');
@@ -3633,6 +4872,22 @@ function MappingsView(props: {
   ];
   const productGroups = useMemo(() => buildProductGroups(productRows), [productRows]);
   const productSelectionDefaults = useMemo(() => buildProductSelectionDefaults(productGroups), [productGroups]);
+  const productBundles = mappingState?.productBundles ?? [];
+  const bundleProductOptions = useMemo(
+    () =>
+      productGroups
+        .map((group) => ({
+          vendorProductKey: group.vendorProductKey,
+          vendorProductName: group.vendorProductName,
+          rowCount: Math.max(...group.rows.map((row) => row.additionCount), 0),
+        }))
+        .sort(
+          (left, right) =>
+            left.vendorProductName.localeCompare(right.vendorProductName) ||
+            left.vendorProductKey.localeCompare(right.vendorProductKey),
+        ),
+    [productGroups],
+  );
   const customerOptions = mappingState?.customerOptions ?? [];
   const selectedOverrideCustomer = customerOptions.find((option) => option.customerId === overrideCustomerId);
   const overrideAgreementOptions = selectedOverrideCustomer?.agreements ?? [];
@@ -3641,6 +4896,21 @@ function MappingsView(props: {
   const suggestedAccountCount = accountCandidates.filter(
     (candidate) => candidate.status === 'approved' && candidate.customerId,
   ).length;
+  const bundleActionKey = editingBundleKey ? `bundle:${editingBundleKey}` : 'bundle:new';
+  const bundleTargetOptions = dedupeProductTargets(
+    bundleTarget ? [bundleTarget, ...bundleCatalogResults] : bundleCatalogResults,
+  );
+
+  const resetBundleForm = () => {
+    setEditingBundleKey(null);
+    setBundleName('');
+    setBundleComponentKeys([]);
+    setBundleTarget(null);
+    setBundleCatalogQuery('');
+    setBundleCatalogResults([]);
+    setBundleCatalogMessage('');
+    setBundleCatalogLoading(false);
+  };
 
   useEffect(() => {
     setProductTargetSelections({});
@@ -3649,6 +4919,11 @@ function MappingsView(props: {
     setProductCatalogResults({});
     setProductCatalogMessages({});
     setProductCatalogLoading({});
+    setProductCustomerReview(null);
+    setProductCustomerReviewLoadState('ready');
+    setProductCustomerReviewMessage('');
+    setSelectedProductCustomerId('');
+    resetBundleForm();
   }, [mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
 
   const openAccountEditor = (row: AccountMappingCandidate) => {
@@ -3697,6 +4972,39 @@ function MappingsView(props: {
   const productSelectionFor = (vendorProductKey: string) =>
     productTargetSelections[vendorProductKey] ?? productSelectionDefaults[vendorProductKey] ?? [];
 
+  const openProductCustomerReview = async (group: ProductMappingGroup) => {
+    setProductCustomerReview({
+      vendorId: group.vendorId,
+      vendorProductKey: group.vendorProductKey,
+      vendorProductName: group.vendorProductName,
+      customerCount: group.customerCount,
+      customers: [],
+    });
+    setSelectedProductCustomerId('');
+    setProductCustomerReviewLoadState('loading');
+    setProductCustomerReviewMessage('Loading customers and mapped agreement additions...');
+
+    try {
+      const review = await fetchProductMappingCustomers(group.vendorId, group.vendorProductKey);
+      setProductCustomerReview(review);
+      setSelectedProductCustomerId(review.customers[0]?.externalAccountId ?? '');
+      setProductCustomerReviewLoadState('ready');
+      setProductCustomerReviewMessage(
+        `Loaded ${review.customerCount.toLocaleString()} customer${review.customerCount === 1 ? '' : 's'} with this vendor product.`,
+      );
+    } catch (error) {
+      setProductCustomerReviewLoadState('failed');
+      setProductCustomerReviewMessage(error instanceof Error ? error.message : 'Unable to load product customer review.');
+    }
+  };
+
+  const closeProductCustomerReview = () => {
+    setProductCustomerReview(null);
+    setProductCustomerReviewLoadState('ready');
+    setProductCustomerReviewMessage('');
+    setSelectedProductCustomerId('');
+  };
+
   const toggleProductTarget = (vendorProductKey: string, target: ProductMappingTarget) => {
     const targetCode = target.connectwiseProductCode;
     setProductTargetOverrides((current) => ({
@@ -3714,6 +5022,87 @@ function MappingsView(props: {
         [vendorProductKey]: next,
       };
     });
+  };
+
+  const toggleBundleComponent = (vendorProductKey: string) => {
+    setBundleComponentKeys((current) =>
+      current.includes(vendorProductKey)
+        ? current.filter((currentKey) => currentKey !== vendorProductKey)
+        : [...current, vendorProductKey],
+    );
+  };
+
+  const editBundle = (bundle: ProductBundle) => {
+    setEditingBundleKey(bundle.bundleKey);
+    setBundleName(bundle.bundleName);
+    setBundleComponentKeys(bundle.components.map((component) => component.vendorProductKey));
+    setBundleTarget(bundle.target);
+    setBundleCatalogQuery(bundle.target.connectwiseProductCode);
+    setBundleCatalogResults([]);
+    setBundleCatalogMessage('');
+  };
+
+  const runBundleCatalogSearch = async () => {
+    const query = bundleCatalogQuery.trim();
+    if (!query) {
+      setBundleCatalogMessage('Enter a product code or name to search ConnectWise.');
+      return;
+    }
+
+    setBundleCatalogLoading(true);
+    setBundleCatalogMessage('');
+    try {
+      const response = await searchProductCatalog(selectedIntegrationId, query);
+      setBundleCatalogResults(response.targets);
+      setBundleCatalogMessage(
+        response.warning ?? `${response.targets.length} catalog item${response.targets.length === 1 ? '' : 's'} found.`,
+      );
+    } catch (error) {
+      setBundleCatalogResults([]);
+      setBundleCatalogMessage(error instanceof Error ? error.message : 'Product catalog search failed.');
+    } finally {
+      setBundleCatalogLoading(false);
+    }
+  };
+
+  const saveBundle = async () => {
+    const components = bundleComponentKeys.flatMap((vendorProductKey) => {
+      const option = bundleProductOptions.find((candidate) => candidate.vendorProductKey === vendorProductKey);
+      return option
+        ? [
+            {
+              vendorProductKey: option.vendorProductKey,
+              vendorProductName: option.vendorProductName,
+            },
+          ]
+        : [];
+    });
+
+    if (!bundleName.trim()) {
+      setBundleCatalogMessage('Bundle name is required.');
+      return;
+    }
+
+    if (components.length < 2) {
+      setBundleCatalogMessage('Choose at least two vendor products.');
+      return;
+    }
+
+    if (!bundleTarget) {
+      setBundleCatalogMessage('Choose a ConnectWise bundle product.');
+      return;
+    }
+
+    const saved = await onProductBundleSave(selectedIntegrationId, {
+      bundleKey: editingBundleKey ?? undefined,
+      bundleName: bundleName.trim(),
+      components,
+      targetProduct: bundleTarget,
+    });
+
+    if (saved) {
+      resetBundleForm();
+    }
   };
 
   const runProductCatalogSearch = async (integrationId: IntegrationId, vendorProductKey: string) => {
@@ -3963,7 +5352,7 @@ function MappingsView(props: {
           <div className="surface-header">
             <div>
               <span className="section-kicker">Product mapping</span>
-              <h2>{productGroups.length.toLocaleString()} Cove product groups</h2>
+              <h2>{productGroups.length.toLocaleString()} {selectedIntegrationName} product groups</h2>
             </div>
           </div>
 
@@ -3980,7 +5369,7 @@ function MappingsView(props: {
               <div className="empty-state">
                 <Package size={20} />
                 <strong>No product mappings found.</strong>
-                <span>Cove server, workstation, and storage add-on candidates appear after ConnectWise products are synced.</span>
+                <span>Product candidates appear after vendor usage and ConnectWise products are synced.</span>
               </div>
             ) : null}
 
@@ -4019,6 +5408,16 @@ function MappingsView(props: {
                   <div>
                     <strong>{group.vendorProductName}</strong>
                     <span>{group.vendorProductKey}</span>
+                    <button
+                      className="product-customer-count-button"
+                      disabled={group.customerCount === 0 || productCustomerReviewLoadState === 'loading'}
+                      onClick={() => void openProductCustomerReview(group)}
+                      title={group.customerCount === 0 ? 'No synced customers currently have this vendor product.' : 'Review customers and mapped agreement additions'}
+                      type="button"
+                    >
+                      <Users size={14} />
+                      {group.customerCount.toLocaleString()} customer{group.customerCount === 1 ? '' : 's'}
+                    </button>
                   </div>
                   <ArrowRight size={16} />
                   <div className="product-target-list">
@@ -4117,6 +5516,164 @@ function MappingsView(props: {
           </div>
         </div>
       </section>
+
+      {selectedIntegrationId === 'opentext-appriver' ? (
+        <section className="work-surface product-bundle-surface" aria-label="AppRiver product bundles">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">Bundles</span>
+              <h2>{productBundles.filter((bundle) => bundle.active).length.toLocaleString()} active AppRiver bundles</h2>
+            </div>
+            {editingBundleKey ? (
+              <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={resetBundleForm} type="button">
+                Cancel edit
+              </button>
+            ) : null}
+          </div>
+
+          <div className="product-bundle-form">
+            <label>
+              <span>{editingBundleKey ? 'Editing bundle' : 'Bundle name'}</span>
+              <input
+                onChange={(event) => setBundleName(event.target.value)}
+                placeholder="Zix Advanced Email Suite"
+                value={bundleName}
+              />
+            </label>
+
+            <div className="product-bundle-components" aria-label="Vendor bundle products">
+              {bundleProductOptions.map((option) => (
+                <label className="product-bundle-component-option" key={option.vendorProductKey}>
+                  <input
+                    checked={bundleComponentKeys.includes(option.vendorProductKey)}
+                    onChange={() => toggleBundleComponent(option.vendorProductKey)}
+                    type="checkbox"
+                  />
+                  <span>
+                    <strong>{option.vendorProductName}</strong>
+                    <em>{option.vendorProductKey}</em>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <div className="product-bundle-target">
+              <label>
+                <span>ConnectWise product</span>
+                <div className="product-catalog-search-row">
+                  <input
+                    onChange={(event) => setBundleCatalogQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void runBundleCatalogSearch();
+                      }
+                    }}
+                    placeholder="Bundle product code or name"
+                    value={bundleCatalogQuery}
+                  />
+                  <button
+                    className="button secondary compact"
+                    disabled={bundleCatalogLoading}
+                    onClick={() => void runBundleCatalogSearch()}
+                    type="button"
+                  >
+                    <Search size={14} />
+                    {bundleCatalogLoading ? 'Searching' : 'Search'}
+                  </button>
+                </div>
+              </label>
+              {bundleCatalogMessage ? <span className="product-catalog-message">{bundleCatalogMessage}</span> : null}
+              <div className="product-bundle-target-list">
+                {bundleTargetOptions.map((target) => (
+                  <label className="product-target-option" key={target.connectwiseProductCode}>
+                    <input
+                      checked={bundleTarget?.connectwiseProductCode === target.connectwiseProductCode}
+                      onChange={() => setBundleTarget(target)}
+                      type="radio"
+                    />
+                    <span>
+                      <strong>{target.connectwiseProductName}</strong>
+                      <em>{target.connectwiseProductCode}</em>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="product-bundle-actions">
+              <button
+                className="button primary compact"
+                disabled={
+                  Boolean(busyAction) ||
+                  !bundleName.trim() ||
+                  bundleComponentKeys.length < 2 ||
+                  !bundleTarget
+                }
+                onClick={() => void saveBundle()}
+                type="button"
+              >
+                <Package size={16} />
+                {busyAction === bundleActionKey
+                  ? 'Saving'
+                  : editingBundleKey
+                    ? 'Update bundle'
+                    : 'Save bundle'}
+              </button>
+              {editingBundleKey ? (
+                <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={resetBundleForm} type="button">
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="product-bundle-list">
+            {productBundles.length === 0 ? (
+              <div className="empty-state">
+                <Package size={20} />
+                <strong>No AppRiver bundles saved.</strong>
+              </div>
+            ) : null}
+            {productBundles.map((bundle) => (
+              <article className="product-bundle-row" key={bundle.bundleKey}>
+                <div>
+                  <strong>{bundle.bundleName}</strong>
+                  <span>{bundle.bundleKey}</span>
+                </div>
+                <ArrowRight size={16} />
+                <div>
+                  <strong>{bundle.target.connectwiseProductName}</strong>
+                  <span>{bundle.target.connectwiseProductCode}</span>
+                </div>
+                <span className={`status-pill ${bundle.active ? 'approved' : 'blocked'}`}>
+                  {bundle.active ? 'Active' : 'Disabled'}
+                </span>
+                <span>{bundle.components.length.toLocaleString()} products</span>
+                <div className="product-bundle-row-actions">
+                  <button
+                    className="button secondary compact"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => editBundle(bundle)}
+                    type="button"
+                  >
+                    <Pencil size={15} />
+                    Edit
+                  </button>
+                  <button
+                    className="button secondary compact"
+                    disabled={!bundle.active || busyAction === `bundle:${bundle.bundleKey}`}
+                    onClick={() => void onProductBundleDeactivate(selectedIntegrationId, bundle.bundleKey)}
+                    type="button"
+                  >
+                    Disable
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="work-surface usage-overrides-surface" aria-label="Usage overrides">
         <div className="surface-header">
@@ -4249,6 +5806,17 @@ function MappingsView(props: {
           ))}
         </div>
       </section>
+
+      {productCustomerReview ? (
+        <ProductCustomerReviewModal
+          loadState={productCustomerReviewLoadState}
+          message={productCustomerReviewMessage}
+          onClose={closeProductCustomerReview}
+          onSelectCustomer={setSelectedProductCustomerId}
+          review={productCustomerReview}
+          selectedCustomerId={selectedProductCustomerId}
+        />
+      ) : null}
     </section>
   );
 }
@@ -4304,6 +5872,97 @@ function vendorDevicesFromIssues(issues: ReconcileIssue[]) {
       deviceDisplayName(left).localeCompare(deviceDisplayName(right)) ||
       left.id.localeCompare(right.id),
   );
+}
+
+const ncentralVendorDataColumns: VendorDataColumn[] = [
+  { label: 'Device Name', primary: true, value: deviceDisplayName },
+  { label: 'ID', value: deviceIdentityLabel },
+  { label: 'Type', value: deviceTypeLabel },
+  { label: 'Product', value: (device) => device.productName },
+  { label: 'OS', value: deviceOsLabel },
+  { label: 'Last Check-In', format: 'date', value: deviceLastCheckIn },
+  { label: 'Tags', value: deviceTagLabel },
+];
+
+const appRiverVendorDataColumns: VendorDataColumn[] = [
+  { label: 'Subscription', primary: true, value: (device) => device.dimensions.productName ?? device.productName },
+  { label: 'Product Code', value: (device) => device.dimensions.productCode ?? device.productCode },
+  { label: 'Quantity', value: (device) => device.dimensions.subscriptionQuantity ?? device.quantity },
+  { label: 'Assigned', value: (device) => device.dimensions.assignedLicenses },
+  { label: 'Unassigned', value: (device) => device.dimensions.unassignedLicenses },
+  { label: 'Term', value: (device) => device.dimensions.subscriptionTerm },
+  { label: 'Billing', value: (device) => device.dimensions.billingFrequency },
+  { label: 'Domain', value: (device) => device.dimensions.domain },
+  { label: 'Commitment End', format: 'date', value: (device) => device.dimensions.commitmentEndDate },
+  { label: 'Expiration', format: 'date', value: (device) => device.dimensions.expirationDate },
+];
+
+const coveVendorDataColumns: VendorDataColumn[] = [
+  { label: 'System', primary: true, value: deviceDisplayName },
+  { label: 'Type', value: deviceTypeLabel },
+  { label: 'Product', value: (device) => device.productName },
+  { label: 'Selected GB', value: (device) => device.dimensions.selectedStorageGb },
+  { label: 'Used GB', value: (device) => device.dimensions.usedStorageGb },
+  { label: 'Last Complete', format: 'date', value: (device) => device.dimensions.lastComplete },
+  { label: 'Account', value: (device) => device.dimensions.accountId },
+];
+
+const microsoft365VendorDataColumns: VendorDataColumn[] = [
+  { label: 'User', primary: true, value: deviceDisplayName },
+  { label: 'SKU', value: (device) => device.dimensions.skuPartNumber ?? device.dimensions.skuName ?? device.productName },
+  { label: 'Product', value: (device) => device.productName },
+  { label: 'Tenant', value: (device) => device.dimensions.tenantName },
+  { label: 'State', value: (device) => device.dimensions.userState ?? device.dimensions.accountEnabled },
+  { label: 'Consumed', value: (device) => device.dimensions.consumedUnits },
+  { label: 'Enabled', value: (device) => device.dimensions.enabledUnits },
+  { label: 'Observed', format: 'date', value: (device) => device.observedAt },
+];
+
+const genericVendorDataColumns: VendorDataColumn[] = [
+  { label: 'Name', primary: true, value: deviceDisplayName },
+  { label: 'Product', value: (device) => device.productName },
+  { label: 'Code', value: (device) => device.productCode },
+  { label: 'Quantity', value: (device) => device.quantity },
+  { label: 'Observed', format: 'date', value: (device) => device.observedAt },
+];
+
+function vendorDataColumns(selection: VendorDataSelection) {
+  if (selection.vendorId === 'opentext-appriver') return appRiverVendorDataColumns;
+  if (selection.vendorId === 'microsoft-365') return microsoft365VendorDataColumns;
+  if (selection.vendorId === 'cove') return coveVendorDataColumns;
+  if (selection.vendorId === 'ncentral') return ncentralVendorDataColumns;
+  return genericVendorDataColumns;
+}
+
+function formatVendorDataColumnValue(column: VendorDataColumn, device: ReconciliationDevice): string {
+  const value = column.value(device);
+
+  if (column.format === 'date') {
+    const formatted = formatDateTime(typeof value === 'string' || typeof value === 'number' ? String(value) : undefined);
+    return formatted ?? formatVendorDataValue(value);
+  }
+
+  return formatVendorDataValue(value);
+}
+
+function formatVendorDataValue(value: DimensionValue | Array<string | number | boolean>): string {
+  if (value === null || typeof value === 'undefined' || value === '') {
+    return '-';
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.map((entry) => formatVendorDataValue(entry)).join(', ') : '-';
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'True' : 'False';
+  }
+
+  if (typeof value === 'number') {
+    return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
+
+  return value;
 }
 
 function deviceIdentityFilter(device: ReconciliationDevice): DimensionMap {
@@ -4690,6 +6349,7 @@ type ProductMappingGroup = {
   vendorId: IntegrationId;
   vendorProductKey: string;
   vendorProductName: string;
+  customerCount: number;
   rows: ProductMappingRow[];
 };
 
@@ -4730,6 +6390,17 @@ function dedupeProductRows(rows: ProductMappingRow[]) {
   return [...byCode.values()];
 }
 
+function dedupeProductTargets(targets: ProductMappingTarget[]) {
+  const byCode = new Map<string, ProductMappingTarget>();
+  for (const target of targets) {
+    if (!byCode.has(target.connectwiseProductCode)) {
+      byCode.set(target.connectwiseProductCode, target);
+    }
+  }
+
+  return [...byCode.values()];
+}
+
 function productRowSourceLabel(row: ProductMappingRow) {
   if (row.reason === 'Selected from ConnectWise product catalog.') {
     return 'catalog item';
@@ -4748,8 +6419,10 @@ function buildProductGroups(rows: ProductMappingRow[]): ProductMappingGroup[] {
         vendorId: row.vendorId,
         vendorProductKey: row.vendorProductKey,
         vendorProductName: row.vendorProductName,
+        customerCount: 0,
         rows: [],
       };
+    group.customerCount = Math.max(group.customerCount, row.customerCount ?? 0);
     const existingIndex = group.rows.findIndex(
       (item) => item.target.connectwiseProductCode === row.target.connectwiseProductCode,
     );
@@ -4779,12 +6452,17 @@ function buildProductGroups(rows: ProductMappingRow[]): ProductMappingGroup[] {
 
 function buildProductSelectionDefaults(groups: ProductMappingGroup[]) {
   return Object.fromEntries(
-    groups.map((group) => [
-      group.vendorProductKey,
-      group.rows
+    groups.map((group) => {
+      const approvedTargets = group.rows
         .filter((row) => 'active' in row && row.active && row.status === 'approved')
-        .map((row) => row.target.connectwiseProductCode),
-    ]),
+        .map((row) => row.target.connectwiseProductCode);
+      const fallbackTarget = approvedTargets.length > 0 ? undefined : group.rows[0]?.target.connectwiseProductCode;
+
+      return [
+        group.vendorProductKey,
+        approvedTargets.length > 0 ? approvedTargets : fallbackTarget ? [fallbackTarget] : [],
+      ];
+    }),
   );
 }
 
@@ -4940,6 +6618,201 @@ function IntegrationModal(props: {
   );
 }
 
+function ProductProfitabilityReportView(props: {
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onRefresh: () => Promise<ProductProfitabilityReportResponse | null>;
+  report: ProductProfitabilityReportResponse | null;
+}) {
+  const { loadMessage, loadState, onRefresh, report } = props;
+  const months = report?.months ?? [];
+  const integrations = report?.integrations ?? [];
+  const chartWidth = 920;
+  const chartHeight = 360;
+  const plot = {
+    left: 72,
+    right: 24,
+    top: 24,
+    bottom: 54,
+  };
+  const plotWidth = chartWidth - plot.left - plot.right;
+  const plotHeight = chartHeight - plot.top - plot.bottom;
+  const values = integrations.flatMap((integration) => integration.months.map((month) => month.profit));
+  const rawMin = values.length > 0 ? Math.min(0, ...values) : 0;
+  const rawMax = values.length > 0 ? Math.max(0, ...values) : 1;
+  const rawRange = rawMax - rawMin || 1;
+  const valueMin = rawMin - rawRange * 0.08;
+  const valueMax = rawMax + rawRange * 0.08;
+  const valueRange = valueMax - valueMin || 1;
+  const xForMonth = (index: number) =>
+    plot.left + (months.length <= 1 ? plotWidth / 2 : (index / (months.length - 1)) * plotWidth);
+  const yForValue = (value: number) => plot.top + ((valueMax - value) / valueRange) * plotHeight;
+  const yTicks = Array.from({ length: 5 }, (_, index) => valueMax - (valueRange * index) / 4);
+  const zeroY = yForValue(0);
+  const chartLines = integrations.map((integration, index) => {
+    const color = profitabilityPalette[index % profitabilityPalette.length];
+    const points = months.map((month, monthIndex) => {
+      const monthValue = integration.months.find((item) => item.month === month)?.profit ?? 0;
+      return {
+        month,
+        value: monthValue,
+        x: xForMonth(monthIndex),
+        y: yForValue(monthValue),
+      };
+    });
+
+    return {
+      color,
+      integration,
+      path: profitabilityPath(points),
+      points,
+    };
+  });
+
+  return (
+    <section className="reports-page product-profitability-page" aria-label="Product profitability report">
+      <div className="integrations-live-bar report-reminder">
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <strong>{loadState === 'failed' ? 'Report issue' : loadState === 'loading' ? 'Loading' : 'Product profitability'}</strong>
+          <span>{loadMessage}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>{report ? formatMonthRange(report.months) : 'Most recent 12 months'}</span>
+          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
+            <RefreshCcw size={16} />
+            {loadState === 'loading' ? 'Refreshing' : 'Refresh'}
+          </button>
+        </div>
+      </div>
+
+      <section className="metric-grid report-metrics" aria-label="Product profitability summary">
+        <MetricCard icon={CircleDollarSign} label="Net profit" tone="money" value={formatMoneyValue(report?.summary.totalProfit ?? 0)} />
+        <MetricCard icon={BarChart3} label="Revenue" tone="ready" value={formatMoneyValue(report?.summary.totalRevenue ?? 0)} />
+        <MetricCard icon={Activity} label="Cost" tone="warn" value={formatMoneyValue(report?.summary.totalCost ?? 0)} />
+        <MetricCard icon={Plug} label="Active integrations" tone="approved" value={formatCount(report?.summary.integrationCount ?? 0)} />
+      </section>
+
+      <section className="work-surface report-surface profitability-surface">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">{report ? formatMonthRange(report.months) : 'Profit trend'}</span>
+            <h2>Month-to-month net profit by integration</h2>
+          </div>
+          <span className="status-pill approved">{formatCount(report?.summary.productCount ?? 0)} products</span>
+        </div>
+
+        {!report || integrations.length === 0 ? (
+          <div className="empty-state report-empty">
+            <FileSpreadsheet size={20} />
+            <strong>No profitability data loaded.</strong>
+            <span>Active integrations need mapped products and ConnectWise addition history with price or cost data.</span>
+          </div>
+        ) : (
+          <>
+            <div className="profitability-chart-wrap">
+              <svg
+                aria-label="Monthly net profit by integration"
+                className="profitability-chart"
+                role="img"
+                viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+              >
+                {yTicks.map((tick) => {
+                  const y = yForValue(tick);
+                  return (
+                    <g className="profitability-grid-line" key={tick.toFixed(2)}>
+                      <line x1={plot.left} x2={chartWidth - plot.right} y1={y} y2={y} />
+                      <text x={plot.left - 10} y={y + 4}>
+                        {formatCurrencyCompact(tick)}
+                      </text>
+                    </g>
+                  );
+                })}
+                <line className="profitability-zero-line" x1={plot.left} x2={chartWidth - plot.right} y1={zeroY} y2={zeroY} />
+                {months.map((month, index) => {
+                  const showLabel = index === 0 || index === months.length - 1 || index % 2 === 1;
+                  const x = xForMonth(index);
+                  return (
+                    <g className="profitability-month-tick" key={month}>
+                      <line x1={x} x2={x} y1={plot.top} y2={plot.top + plotHeight} />
+                      {showLabel ? (
+                        <text x={x} y={chartHeight - 18}>
+                          {formatMonthLabel(month, index === 0 || index === months.length - 1)}
+                        </text>
+                      ) : null}
+                    </g>
+                  );
+                })}
+                {chartLines.map((line) => (
+                  <path
+                    className="profitability-line"
+                    d={line.path}
+                    key={line.integration.integrationId}
+                    stroke={line.color}
+                  />
+                ))}
+                {chartLines.flatMap((line) =>
+                  line.points.map((point) => (
+                    <circle
+                      className="profitability-point"
+                      cx={point.x}
+                      cy={point.y}
+                      fill={line.color}
+                      key={`${line.integration.integrationId}-${point.month}`}
+                      r={3.5}
+                    >
+                      <title>
+                        {line.integration.integrationName} / {formatMonthLabel(point.month, true)} / {formatMoneyValue(point.value)}
+                      </title>
+                    </circle>
+                  )),
+                )}
+              </svg>
+            </div>
+
+            <div className="profitability-legend" aria-label="Chart legend">
+              {chartLines.map((line) => (
+                <div className="profitability-legend-item" key={line.integration.integrationId}>
+                  <span className="profitability-legend-swatch" style={{ backgroundColor: line.color }} />
+                  <strong>{line.integration.integrationName}</strong>
+                  <span>{formatMoneyValue(line.integration.totalProfit)}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="profitability-table-scroll">
+              <table className="profitability-table">
+                <thead>
+                  <tr>
+                    <th>Integration</th>
+                    <th>Revenue</th>
+                    <th>Cost</th>
+                    <th>Net profit</th>
+                    <th>Products</th>
+                    <th>Missing cost rows</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {integrations.map((integration) => (
+                    <tr key={integration.integrationId}>
+                      <td>{integration.integrationName}</td>
+                      <td>{formatMoneyValue(integration.totalRevenue)}</td>
+                      <td>{formatMoneyValue(integration.totalCost)}</td>
+                      <td>{formatMoneyValue(integration.totalProfit)}</td>
+                      <td>{formatCount(integration.productCount)}</td>
+                      <td>{formatCount(integration.missingCostRows)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+    </section>
+  );
+}
+
 function ReportsView(props: {
   columnFilters: Record<string, string>;
   details: RawSyncDetailsResponse | null;
@@ -4949,6 +6822,7 @@ function ReportsView(props: {
   onColumnFilterChange: (column: string, value: string) => void;
   onDatasetChange: (dataset: RawSyncDataset) => void;
   onIntegrationChange: (integrationId: IntegrationId | '') => void;
+  onRefresh: () => Promise<void>;
   onSyncRunChange: (syncRunId: string) => void;
   runs: RawSyncRun[];
   selectedDataset: RawSyncDataset;
@@ -4964,6 +6838,7 @@ function ReportsView(props: {
     onColumnFilterChange,
     onDatasetChange,
     onIntegrationChange,
+    onRefresh,
     onSyncRunChange,
     runs,
     selectedDataset,
@@ -4973,6 +6848,14 @@ function ReportsView(props: {
   const selectedRun = runs.find((run) => run.id === selectedSyncRunId);
   const rows = details?.rows ?? [];
   const columns = details?.columns ?? [];
+  const columnsKey = columns.join('\u001f');
+  const [reportColumnWidths, setReportColumnWidths] = useState<Record<string, number>>({});
+  const [reportColumnResize, setReportColumnResize] = useState<ReportColumnResizeState | null>(null);
+  const reportColumnWidth = (column: string) => reportColumnWidths[column] ?? reportDefaultColumnWidth;
+  const reportTableMinWidth = Math.max(
+    720,
+    columns.reduce((totalWidth, column) => totalWidth + reportColumnWidth(column), 0),
+  );
   const activeColumnFilters = Object.entries(columnFilters)
     .map(([column, value]) => [column, value.trim().toLowerCase()] as const)
     .filter(([, value]) => value.length > 0);
@@ -4984,6 +6867,83 @@ function ReportsView(props: {
           ),
         )
       : rows;
+
+  useEffect(() => {
+    const availableColumns = new Set(columns);
+    setReportColumnWidths((currentWidths) => {
+      const nextWidths = Object.fromEntries(
+        Object.entries(currentWidths).filter(([column]) => availableColumns.has(column)),
+      );
+      return Object.keys(nextWidths).length === Object.keys(currentWidths).length ? currentWidths : nextWidths;
+    });
+    setReportColumnResize((currentResize) =>
+      currentResize && availableColumns.has(currentResize.column) ? currentResize : null,
+    );
+  }, [columnsKey]);
+
+  const setReportColumnWidth = (column: string, width: number) => {
+    const nextWidth = clampReportColumnWidth(width);
+    setReportColumnWidths((currentWidths) =>
+      currentWidths[column] === nextWidth ? currentWidths : { ...currentWidths, [column]: nextWidth },
+    );
+  };
+
+  const startReportColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setReportColumnResize({
+      column,
+      pointerId: event.pointerId,
+      startWidth: reportColumnWidth(column),
+      startX: event.clientX,
+    });
+  };
+
+  const moveReportColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!reportColumnResize || reportColumnResize.column !== column || reportColumnResize.pointerId !== event.pointerId) {
+      return;
+    }
+
+    setReportColumnWidth(column, reportColumnResize.startWidth + event.clientX - reportColumnResize.startX);
+  };
+
+  const stopReportColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!reportColumnResize || reportColumnResize.column !== column || reportColumnResize.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setReportColumnResize(null);
+  };
+
+  const resetReportColumnWidth = (column: string) => {
+    setReportColumnWidths((currentWidths) => {
+      if (typeof currentWidths[column] === 'undefined') {
+        return currentWidths;
+      }
+
+      const { [column]: _removed, ...nextWidths } = currentWidths;
+      return nextWidths;
+    });
+  };
+
+  const handleReportColumnResizeKeyDown = (column: string, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      setReportColumnWidth(column, reportColumnWidth(column) + direction * reportColumnKeyboardStep);
+      return;
+    }
+
+    if (event.key === 'Home') {
+      event.preventDefault();
+      resetReportColumnWidth(column);
+    }
+  };
+
   return (
     <section className="reports-page" aria-label="Reporting">
       <div className="integrations-live-bar report-reminder">
@@ -4994,6 +6954,15 @@ function ReportsView(props: {
         </div>
         <div className="integrations-live-meta">
           <span>Select an integration, then choose a sync date to inspect captured rows.</span>
+          <button
+            className="button secondary compact"
+            disabled={!selectedIntegrationId || loadState === 'loading'}
+            onClick={() => void onRefresh()}
+            type="button"
+          >
+            <RefreshCcw size={16} />
+            {loadState === 'loading' ? 'Refreshing' : 'Refresh'}
+          </button>
         </div>
       </div>
 
@@ -5076,13 +7045,21 @@ function ReportsView(props: {
           </div>
         ) : (
           <div className="report-table-scroll">
-            <table className="report-detail-table">
+            <table
+              className={reportColumnResize ? 'report-detail-table resizing' : 'report-detail-table'}
+              style={{ minWidth: `${reportTableMinWidth}px` }}
+            >
+              <colgroup>
+                {columns.map((column) => (
+                  <col key={column} style={{ width: `${reportColumnWidth(column)}px` }} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
                   {columns.map((column) => (
                     <th key={column}>
                       <div className="report-column-header">
-                        <span>{column}</span>
+                        <span title={column}>{column}</span>
                         <input
                           aria-label={`Filter ${column}`}
                           onChange={(event) => onColumnFilterChange(column, event.target.value)}
@@ -5091,6 +7068,22 @@ function ReportsView(props: {
                           value={columnFilters[column] ?? ''}
                         />
                       </div>
+                      <button
+                        aria-label={`Resize ${column} column`}
+                        className={
+                          reportColumnResize?.column === column
+                            ? 'report-column-resizer active'
+                            : 'report-column-resizer'
+                        }
+                        onDoubleClick={() => resetReportColumnWidth(column)}
+                        onKeyDown={(event) => handleReportColumnResizeKeyDown(column, event)}
+                        onPointerCancel={(event) => stopReportColumnResize(column, event)}
+                        onPointerDown={(event) => startReportColumnResize(column, event)}
+                        onPointerMove={(event) => moveReportColumnResize(column, event)}
+                        onPointerUp={(event) => stopReportColumnResize(column, event)}
+                        title="Drag to resize"
+                        type="button"
+                      />
                     </th>
                   ))}
                 </tr>

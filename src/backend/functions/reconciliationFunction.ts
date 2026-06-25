@@ -7,6 +7,7 @@ import {
   type CreateReconciliationAdjustmentInput,
 } from '../api/reconciliationAdjustments';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
+import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -23,6 +24,9 @@ export async function runVendorReconciliationHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return jsonResponse(400, {
@@ -57,7 +61,7 @@ export async function runVendorReconciliationHttp(
 
 app.http('runVendorReconciliation', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reconciliation/{vendorId}/run',
   handler: runVendorReconciliationHttp,
 });
@@ -66,6 +70,9 @@ export async function listAgreementAdditionsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const agreementId = request.params.agreementId;
 
   if (!agreementId || !isUuid(agreementId)) {
@@ -98,7 +105,7 @@ export async function listAgreementAdditionsHttp(
 
 app.http('listAgreementAdditions', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reconciliation/agreements/{agreementId}/additions',
   handler: listAgreementAdditionsHttp,
 });
@@ -107,6 +114,9 @@ export async function createReconciliationAdjustmentHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return jsonResponse(400, {
@@ -136,7 +146,7 @@ export async function createReconciliationAdjustmentHttp(
         adjustmentType: body.adjustmentType,
         quantity: Number(body.quantity),
         reason: body.reason,
-        reviewedBy: body.reviewedBy,
+        reviewedBy: auth.principal.name,
       }),
     });
   } catch (error) {
@@ -152,6 +162,9 @@ export async function deactivateReconciliationAdjustmentHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const adjustmentId = request.params.adjustmentId;
   if (!integrationId) {
@@ -171,13 +184,11 @@ export async function deactivateReconciliationAdjustmentHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { reviewedBy?: string };
-
   try {
     return jsonResponse(
       200,
       await deactivateReconciliationAdjustment(repositoryContext.pool, integrationId, adjustmentId, {
-        reviewedBy: body.reviewedBy,
+        reviewedBy: auth.principal.name,
       }),
     );
   } catch (error) {
@@ -191,14 +202,14 @@ export async function deactivateReconciliationAdjustmentHttp(
 
 app.http('createReconciliationAdjustment', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reconciliation/{vendorId}/adjustments',
   handler: createReconciliationAdjustmentHttp,
 });
 
 app.http('deactivateReconciliationAdjustment', {
   methods: ['DELETE', 'POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reconciliation/{vendorId}/adjustments/{adjustmentId}/deactivate',
   handler: deactivateReconciliationAdjustmentHttp,
 });

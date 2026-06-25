@@ -2,15 +2,20 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { config as loadDotEnv } from 'dotenv';
 import { listIntegrationSettingsDefinitions } from '../../shared/integrationSettings';
 import { getAgreementReportDetails, listAgreementReportSyncRuns } from '../reports/agreementReports';
+import { getProductProfitabilityReport } from '../reports/productProfitabilityReports';
 import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../reports/rawSyncReports';
+import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
 
 export async function listAgreementReportSyncRunsHttp(
-  _request: HttpRequest,
+  request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const repositoryContext = createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
@@ -40,6 +45,9 @@ export async function getAgreementReportDetailsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const syncRunId = request.params.syncRunId;
   const repositoryContext = createOptionalPostgresSettingsRepository();
 
@@ -73,6 +81,9 @@ export async function listRawSyncRunsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = request.query.get('integrationId') ?? undefined;
   const dataset = request.query.get('dataset') ?? undefined;
 
@@ -123,8 +134,13 @@ export async function getRawSyncDetailsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = request.query.get('integrationId') ?? undefined;
   const dataset = request.query.get('dataset') ?? undefined;
+  const customerId = request.query.get('customerId') ?? undefined;
+  const includeSensitive = booleanQueryValue(request.query.get('includeSensitive') ?? request.query.get('includePii'));
   const syncRunId = request.params.syncRunId;
 
   if (!isRawSyncIntegrationId(integrationId)) {
@@ -141,6 +157,18 @@ export async function getRawSyncDetailsHttp(
     });
   }
 
+  if (customerId && !isUuid(customerId)) {
+    return jsonResponse(400, {
+      error: 'Raw sync report customerId must be a UUID.',
+    });
+  }
+
+  if (includeSensitive && integrationId === 'microsoft-365' && !auth.principal.roles.includes('Admin')) {
+    return jsonResponse(403, {
+      error: 'The Admin role is required to include sensitive Microsoft 365 report fields.',
+    });
+  }
+
   const repositoryContext = createOptionalPostgresSettingsRepository();
 
   if (!repositoryContext.pool) {
@@ -154,6 +182,8 @@ export async function getRawSyncDetailsHttp(
     const details = syncRunId
       ? await getRawSyncDetails(repositoryContext.pool, integrationId, syncRunId, {
           dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
+          customerId,
+          includeSensitive: integrationId === 'microsoft-365' ? includeSensitive : undefined,
         })
       : undefined;
 
@@ -173,30 +203,74 @@ export async function getRawSyncDetailsHttp(
   }
 }
 
+export async function getProductProfitabilityReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Product profitability reporting needs PostgreSQL settings before it can load profitability data.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const report = await getProductProfitabilityReport(repositoryContext.pool);
+
+    return jsonResponse(200, report);
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load product profitability report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function booleanQueryValue(value: string | null) {
+  return typeof value === 'string' && ['1', 'true', 'yes'].includes(value.trim().toLowerCase());
+}
+
 app.http('listAgreementReportSyncRuns', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reports/agreement-sync-runs',
   handler: listAgreementReportSyncRunsHttp,
 });
 
 app.http('getAgreementReportDetails', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reports/agreement-sync-runs/{syncRunId}/details',
   handler: getAgreementReportDetailsHttp,
 });
 
 app.http('listRawSyncRuns', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reports/raw-sync-runs',
   handler: listRawSyncRunsHttp,
 });
 
 app.http('getRawSyncDetails', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'reports/raw-sync-runs/{syncRunId}/details',
   handler: getRawSyncDetailsHttp,
+});
+
+app.http('getProductProfitabilityReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/product-profitability',
+  handler: getProductProfitabilityReportHttp,
 });

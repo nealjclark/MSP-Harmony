@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { syncIntegrationHttp, testIntegrationHttp } from './integrationsFunction';
 
+const adminHeaders = new Headers({
+  'x-ms-client-principal-name': 'admin@example.com',
+  'x-ms-client-principal-role': 'Admin',
+});
+
 const envKeys = [
   'DATABASE_URL',
   'DATABASE_HOST',
@@ -32,6 +37,7 @@ async function run() {
     const unsupportedTestResponse = await testIntegrationHttp(
       {
         params: { integrationId: 'sentinelone' },
+        headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
@@ -41,6 +47,7 @@ async function run() {
     const coveTestResponse = await testIntegrationHttp(
       {
         params: { integrationId: 'cove' },
+        headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
@@ -50,6 +57,7 @@ async function run() {
     const microsoft365TestResponse = await testIntegrationHttp(
       {
         params: { integrationId: 'microsoft-365' },
+        headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
@@ -63,6 +71,7 @@ async function run() {
     const appRiverTestResponse = await testIntegrationHttp(
       {
         params: { integrationId: 'opentext-appriver' },
+        headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
@@ -76,6 +85,7 @@ async function run() {
     const coveSyncResponse = await syncIntegrationHttp(
       {
         params: { integrationId: 'cove' },
+        headers: adminHeaders,
         async json() {
           return {};
         },
@@ -85,6 +95,36 @@ async function run() {
 
     assert.equal(coveSyncResponse.status, 400);
     assert.match(String((coveSyncResponse.jsonBody as { error?: string }).error), /Cove sync needs PostgreSQL/);
+
+    process.env.DATABASE_URL = 'postgres://user:pass@localhost:5432/mspharmony';
+    const queuedMessages: unknown[] = [];
+    const queuedMicrosoft365SyncResponse = await syncIntegrationHttp(
+      {
+        params: { integrationId: 'microsoft-365' },
+        headers: adminHeaders,
+        async json() {
+          return { dataset: 'licenses' };
+        },
+      } as never,
+      {
+        log() {},
+        extraOutputs: {
+          set(_output: unknown, value: unknown) {
+            queuedMessages.push(value);
+          },
+        },
+      } as never,
+    );
+    assert.equal(queuedMicrosoft365SyncResponse.status, 202);
+    assert.equal((queuedMicrosoft365SyncResponse.jsonBody as { status?: string }).status, 'queued');
+    assert.deepEqual(queuedMessages[0], {
+      integrationId: 'microsoft-365',
+      requestedBy: 'admin@example.com',
+      requestedAt: (queuedMessages[0] as { requestedAt: string }).requestedAt,
+      dataset: 'licenses',
+      pageSize: 100,
+      maxPages: 100,
+    });
   } finally {
     for (const key of envKeys) {
       const originalValue = originalEnv[key];

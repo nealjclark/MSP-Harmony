@@ -4,6 +4,7 @@ import type { IntegrationId } from '../../shared/integrationSettings';
 import { updateIntegrationSettingsFromInterface } from '../api/integrationSettings';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import type { IntegrationSettingsRole } from '../config/settingsUpdater';
+import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -18,6 +19,9 @@ export async function updateIntegrationSettingsHttp(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = request.params.integrationId as IntegrationId | undefined;
   const keyVaultUrl = process.env.KEY_VAULT_URL;
 
@@ -40,8 +44,8 @@ export async function updateIntegrationSettingsHttp(
     });
   }
 
-  const actor = request.headers.get('x-ms-client-principal-name') ?? 'platform-admin';
-  const role = integrationSettingsRoleFromHeader(request.headers.get('x-ms-client-principal-role'));
+  const actor = auth.principal.name;
+  const role: IntegrationSettingsRole = 'Admin';
   const repositoryContext = createOptionalPostgresSettingsRepository();
 
   try {
@@ -94,14 +98,7 @@ export async function updateIntegrationSettingsHttp(
 
 app.http('updateIntegrationSettings', {
   methods: ['PUT'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'integrations/{integrationId}/settings',
   handler: updateIntegrationSettingsHttp,
 });
-
-function integrationSettingsRoleFromHeader(value: string | null): IntegrationSettingsRole {
-  if (!value) return 'Admin';
-  if (value.split(',').map((role) => role.trim()).includes('Admin')) return 'Admin';
-  if (value.split(',').map((role) => role.trim()).includes('Approver')) return 'Approver';
-  return 'Analyst';
-}

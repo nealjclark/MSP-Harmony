@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { automapMappingsHttp, listMappingsHttp, updateAccountMappingHttp } from './mappingsFunction';
 
 const envKeys = ['DATABASE_URL', 'DATABASE_HOST', 'DATABASE_NAME', 'DATABASE_USER', 'DATABASE_PASSWORD'] as const;
+const adminHeaders = new Headers({
+  'x-ms-client-principal-name': 'admin@example.com',
+  'x-ms-client-principal-role': 'Admin',
+});
 
 async function run() {
   const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
@@ -13,6 +17,7 @@ async function run() {
     const unsupportedResponse = await listMappingsHttp(
       {
         params: { vendorId: 'unknown' },
+        headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
@@ -21,6 +26,7 @@ async function run() {
     const missingDatabaseResponse = await automapMappingsHttp(
       {
         params: { vendorId: 'cove' },
+        headers: adminHeaders,
         async json() {
           return {};
         },
@@ -33,6 +39,7 @@ async function run() {
     const invalidStatusResponse = await updateAccountMappingHttp(
       {
         params: { vendorId: 'cove', externalAccountId: '101' },
+        headers: adminHeaders,
         async json() {
           return { status: 'bogus' };
         },

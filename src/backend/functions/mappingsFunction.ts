@@ -11,13 +11,17 @@ import { assertConnectWiseReady } from '../connectwise/operations';
 import {
   applyApprovedMappings,
   approveSuggestedAccountMappings,
+  deactivateProductBundle,
+  listProductMappingCustomers,
   listMappingState,
   runAccountAutomap,
   searchConnectWiseProductCatalog,
   updateAccountMapping,
   updateProductMapping,
+  upsertProductBundle,
   upsertConnectWiseCatalogProducts,
   type ProductCatalogSearchResult,
+  type ProductBundleComponent,
   type MappingStatus,
   type ProductMappingTarget,
 } from '../mapping/mappingService';
@@ -34,6 +38,7 @@ import {
   upsertNcentralFilterMapping,
   type UpsertNcentralFilterMappingInput,
 } from '../vendor/ncentral/filterMappings';
+import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -52,6 +57,15 @@ type ProductMappingBody = {
   reviewedBy?: string;
 };
 
+type ProductBundleBody = {
+  bundleKey?: string;
+  bundleName?: string;
+  components?: ProductBundleComponent[];
+  targetProduct?: ProductMappingTarget;
+  reviewedBy?: string;
+  active?: boolean;
+};
+
 type UsageOverrideBody = CreateUsageOverrideInput & {
   reviewedBy?: string;
 };
@@ -62,6 +76,9 @@ export async function listMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -90,6 +107,9 @@ export async function automapMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -103,11 +123,9 @@ export async function automapMappingsHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { actor?: string };
-
   try {
     const result = await runAccountAutomap(repositoryContext.pool, integrationId, {
-      actor: typeof body.actor === 'string' ? body.actor : undefined,
+      actor: auth.principal.name,
     });
 
     return jsonResponse(200, result);
@@ -124,6 +142,9 @@ export async function updateAccountMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const externalAccountId = request.params.externalAccountId;
   if (!integrationId) {
@@ -152,7 +173,7 @@ export async function updateAccountMappingHttp(
       customerId: body.customerId,
       agreementId: body.agreementId,
       externalAccountName: body.externalAccountName,
-      reviewedBy: body.reviewedBy,
+      reviewedBy: auth.principal.name,
     });
 
     return jsonResponse(200, {
@@ -173,6 +194,9 @@ export async function updateProductMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const vendorProductKey = request.params.vendorProductKey;
   if (!integrationId) {
@@ -199,7 +223,7 @@ export async function updateProductMappingHttp(
     await updateProductMapping(repositoryContext.pool, integrationId, vendorProductKey, {
       status: body.status,
       targetProducts: body.targetProducts,
-      reviewedBy: body.reviewedBy,
+      reviewedBy: auth.principal.name,
     });
 
     return jsonResponse(200, {
@@ -217,10 +241,133 @@ export async function updateProductMappingHttp(
   }
 }
 
+export async function listProductMappingCustomersHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const vendorProductKey = request.params.vendorProductKey;
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!vendorProductKey) {
+    return jsonResponse(400, { error: 'Product customer review requires vendorProductKey.' });
+  }
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Product customer review needs PostgreSQL settings before it can load customers.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(
+      200,
+      await listProductMappingCustomers(repositoryContext.pool, integrationId, vendorProductKey),
+    );
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load product customer review.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertProductBundleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+
+  const body = (await request.json().catch(() => ({}))) as ProductBundleBody;
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Product bundle mapping needs PostgreSQL settings before it can save bundles.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      vendorId: integrationId,
+      bundle: await upsertProductBundle(repositoryContext.pool, integrationId, {
+        bundleKey: body.bundleKey,
+        bundleName: body.bundleName,
+        components: body.components,
+        targetProduct: body.targetProduct,
+        active: body.active,
+        reviewedBy: auth.principal.name,
+      }),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save product bundle mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deactivateProductBundleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const bundleKey = request.params.bundleKey;
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!bundleKey) {
+    return jsonResponse(400, { error: 'Product bundle deactivation requires bundleKey.' });
+  }
+
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Product bundle deactivation needs PostgreSQL settings before it can save bundles.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(
+      200,
+      await deactivateProductBundle(repositoryContext.pool, integrationId, bundleKey, {
+        reviewedBy: auth.principal.name,
+      }),
+    );
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to deactivate product bundle mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function searchProductCatalogHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -279,6 +426,9 @@ export async function applyMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -307,6 +457,9 @@ export async function approveSuggestedMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -320,13 +473,11 @@ export async function approveSuggestedMappingsHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { actor?: string };
-
   try {
     return jsonResponse(
       200,
       await approveSuggestedAccountMappings(repositoryContext.pool, integrationId, {
-        actor: typeof body.actor === 'string' ? body.actor : undefined,
+        actor: auth.principal.name,
       }),
     );
   } catch (error) {
@@ -342,6 +493,9 @@ export async function listUsageOverridesHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -373,6 +527,9 @@ export async function createUsageOverrideHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -398,7 +555,7 @@ export async function createUsageOverrideHttp(
         dimensionFilters: body.dimensionFilters,
         targetDimensions: body.targetDimensions,
         reason: body.reason,
-        reviewedBy: body.reviewedBy,
+        reviewedBy: auth.principal.name,
       }),
     });
   } catch (error) {
@@ -414,6 +571,9 @@ export async function deactivateUsageOverrideHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const overrideId = request.params.overrideId;
   if (!integrationId) {
@@ -423,7 +583,6 @@ export async function deactivateUsageOverrideHttp(
     return jsonResponse(400, { error: 'Usage override deactivation requires overrideId.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { reviewedBy?: string };
   const repositoryContext = createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -436,7 +595,7 @@ export async function deactivateUsageOverrideHttp(
     return jsonResponse(
       200,
       await deactivateUsageOverride(repositoryContext.pool, integrationId, overrideId, {
-        reviewedBy: body.reviewedBy,
+        reviewedBy: auth.principal.name,
       }),
     );
   } catch (error) {
@@ -452,6 +611,9 @@ export async function listNcentralFiltersHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (integrationId !== 'ncentral') {
     return jsonResponse(400, { error: 'Live filter listing is only available for N-central.' });
@@ -488,6 +650,9 @@ export async function listNcentralFilterMappingsHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (integrationId !== 'ncentral') {
     return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
@@ -519,6 +684,9 @@ export async function upsertNcentralFilterMappingHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (integrationId !== 'ncentral') {
     return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
@@ -549,91 +717,112 @@ export async function upsertNcentralFilterMappingHttp(
 
 app.http('listMappings', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}',
   handler: listMappingsHttp,
 });
 
 app.http('automapMappings', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/automap',
   handler: automapMappingsHttp,
 });
 
 app.http('updateAccountMapping', {
   methods: ['PUT'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/accounts/{externalAccountId}',
   handler: updateAccountMappingHttp,
 });
 
 app.http('updateProductMapping', {
   methods: ['PUT'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/products/{vendorProductKey}',
   handler: updateProductMappingHttp,
 });
 
+app.http('listProductMappingCustomers', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/products/{vendorProductKey}/customers',
+  handler: listProductMappingCustomersHttp,
+});
+
+app.http('upsertProductBundle', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/bundles',
+  handler: upsertProductBundleHttp,
+});
+
+app.http('deactivateProductBundle', {
+  methods: ['DELETE', 'POST'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/bundles/{bundleKey}/deactivate',
+  handler: deactivateProductBundleHttp,
+});
+
 app.http('searchProductCatalog', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/product-catalog',
   handler: searchProductCatalogHttp,
 });
 
 app.http('applyMappings', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/apply',
   handler: applyMappingsHttp,
 });
 
 app.http('approveSuggestedMappings', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/approve-suggested',
   handler: approveSuggestedMappingsHttp,
 });
 
 app.http('listUsageOverrides', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/overrides',
   handler: listUsageOverridesHttp,
 });
 
 app.http('createUsageOverride', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/overrides',
   handler: createUsageOverrideHttp,
 });
 
 app.http('deactivateUsageOverride', {
   methods: ['DELETE', 'POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/overrides/{overrideId}/deactivate',
   handler: deactivateUsageOverrideHttp,
 });
 
 app.http('listNcentralFilters', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/ncentral-filters',
   handler: listNcentralFiltersHttp,
 });
 
 app.http('listNcentralFilterMappings', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/filter-mappings',
   handler: listNcentralFilterMappingsHttp,
 });
 
 app.http('upsertNcentralFilterMapping', {
   methods: ['POST', 'PUT'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'mappings/{vendorId}/filter-mappings',
   handler: upsertNcentralFilterMappingHttp,
 });

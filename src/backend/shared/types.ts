@@ -69,6 +69,7 @@ export type QuantityRule = {
   id: string;
   vendorId: string;
   vendorProductKey?: string;
+  vendorProductKeys?: string[];
   productCode: string;
   targetProductCodes?: string[];
   productName: string;

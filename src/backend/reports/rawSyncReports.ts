@@ -23,6 +23,12 @@ export type RawSyncDetails = {
   };
 };
 
+export type RawSyncDetailsOptions = {
+  dataset?: RawSyncDataset;
+  customerId?: string;
+  includeSensitive?: boolean;
+};
+
 type SyncRunRow = {
   id: string;
   started_at: Date | string;
@@ -40,6 +46,7 @@ const microsoft365LicenseSyncEntity = 'm365-licenses';
 const appRiverSyncEntity = 'subscription-snapshots';
 
 type CoveSnapshotRow = {
+  customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
   external_account_id: string | null;
@@ -52,6 +59,7 @@ type CoveSnapshotRow = {
 };
 
 type NcentralSnapshotRow = {
+  customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
   external_account_id: string | null;
@@ -65,6 +73,7 @@ type NcentralSnapshotRow = {
 };
 
 type Microsoft365SnapshotRow = {
+  customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
   external_account_id: string | null;
@@ -78,6 +87,7 @@ type Microsoft365SnapshotRow = {
 };
 
 type Microsoft365SubscriptionSnapshotRow = {
+  customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
   external_account_id: string;
@@ -109,6 +119,7 @@ type Microsoft365SubscriptionSnapshotRow = {
 };
 
 type AppRiverSnapshotRow = {
+  customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
   external_account_id: string | null;
@@ -315,7 +326,7 @@ export async function getRawSyncDetails(
   database: Queryable,
   integrationId: RawSyncIntegrationId,
   syncRunId: string,
-  options: { dataset?: RawSyncDataset } = {},
+  options: RawSyncDetailsOptions = {},
 ): Promise<RawSyncDetails | undefined> {
   if (integrationId === 'connectwise') {
     const details = await getAgreementReportDetails(database, syncRunId);
@@ -328,27 +339,31 @@ export async function getRawSyncDetails(
   }
 
   if (integrationId === 'cove') {
-    return getCoveRawSyncDetails(database, syncRunId);
+    return getCoveRawSyncDetails(database, syncRunId, options);
   }
 
   if (integrationId === 'ncentral') {
-    return getNcentralRawSyncDetails(database, syncRunId);
+    return getNcentralRawSyncDetails(database, syncRunId, options);
   }
 
   if (integrationId === 'microsoft-365') {
     return options.dataset === 'licenses'
-      ? getMicrosoft365LicenseRawSyncDetails(database, syncRunId)
-      : getMicrosoft365UserRawSyncDetails(database, syncRunId);
+      ? getMicrosoft365LicenseRawSyncDetails(database, syncRunId, options)
+      : getMicrosoft365UserRawSyncDetails(database, syncRunId, options);
   }
 
   if (integrationId === 'opentext-appriver') {
-    return getAppRiverRawSyncDetails(database, syncRunId);
+    return getAppRiverRawSyncDetails(database, syncRunId, options);
   }
 
   return getGenericRawSyncDetails(database, integrationId, syncRunId);
 }
 
-async function getMicrosoft365UserRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+async function getMicrosoft365UserRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
      from sync_runs
@@ -386,6 +401,7 @@ async function getMicrosoft365UserRawSyncDetails(database: Queryable, syncRunId:
          and vendor_usage_snapshots.vendor_id = 'microsoft-365'
      )
      select
+       mapped_snapshots.effective_customer_id as customer_id,
        customers.name as customer_name,
        agreements.name as agreement_name,
        mapped_snapshots.external_account_id,
@@ -399,12 +415,17 @@ async function getMicrosoft365UserRawSyncDetails(database: Queryable, syncRunId:
      from mapped_snapshots
      left join customers on customers.id = mapped_snapshots.effective_customer_id
      left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
      order by coalesce(customers.name, mapped_snapshots.dimensions->>'tenantName', mapped_snapshots.external_account_id),
        mapped_snapshots.dimensions->>'userPrincipalName',
        mapped_snapshots.vendor_product_key`,
-    [syncRunId],
+    [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapMicrosoft365SnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapMicrosoft365SnapshotRow(row, {
+      includeSensitive: options.includeSensitive === true,
+    }),
+  );
 
   return {
     integrationId: 'microsoft-365',
@@ -421,7 +442,11 @@ async function getMicrosoft365UserRawSyncDetails(database: Queryable, syncRunId:
   };
 }
 
-async function getMicrosoft365LicenseRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+async function getMicrosoft365LicenseRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
      from sync_runs
@@ -458,6 +483,7 @@ async function getMicrosoft365LicenseRawSyncDetails(database: Queryable, syncRun
        where microsoft365_subscription_snapshots.sync_run_id = $1
      )
      select
+       mapped_snapshots.effective_customer_id as customer_id,
        customers.name as customer_name,
        agreements.name as agreement_name,
        mapped_snapshots.external_account_id,
@@ -489,12 +515,17 @@ async function getMicrosoft365LicenseRawSyncDetails(database: Queryable, syncRun
      from mapped_snapshots
      left join customers on customers.id = mapped_snapshots.effective_customer_id
      left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
      order by coalesce(customers.name, mapped_snapshots.tenant_name, mapped_snapshots.external_account_id),
        mapped_snapshots.sku_part_number,
        mapped_snapshots.sku_id`,
-    [syncRunId],
+    [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapMicrosoft365LicenseSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapMicrosoft365LicenseSnapshotRow(row, {
+      includeSensitive: options.includeSensitive === true,
+    }),
+  );
 
   return {
     integrationId: 'microsoft-365',
@@ -511,16 +542,21 @@ async function getMicrosoft365LicenseRawSyncDetails(database: Queryable, syncRun
   };
 }
 
-function mapMicrosoft365SnapshotRow(row: Microsoft365SnapshotRow): RawSyncDetail {
+function mapMicrosoft365SnapshotRow(
+  row: Microsoft365SnapshotRow,
+  options: { includeSensitive?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
+  const includeSensitive = options.includeSensitive === true;
 
   return {
+    CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
     TenantName: stringValue(dimensions.tenantName),
     TenantId: stringValue(dimensions.tenantId) ?? row.external_account_id,
-    UserPrincipalName: stringValue(dimensions.userPrincipalName),
-    DisplayName: stringValue(dimensions.displayName),
+    UserPrincipalName: includeSensitive ? stringValue(dimensions.userPrincipalName) : redactedValue(dimensions.userPrincipalName),
+    DisplayName: includeSensitive ? stringValue(dimensions.displayName) : redactedValue(dimensions.displayName),
     UserState: stringValue(dimensions.userState),
     ProductKey: row.vendor_product_key,
     SkuName: stringValue(dimensions.skuName),
@@ -533,17 +569,23 @@ function mapMicrosoft365SnapshotRow(row: Microsoft365SnapshotRow): RawSyncDetail
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeSensitive ? compactJson(row.raw_payload) : null,
   };
 }
 
-function mapMicrosoft365LicenseSnapshotRow(row: Microsoft365SubscriptionSnapshotRow): RawSyncDetail {
+function mapMicrosoft365LicenseSnapshotRow(
+  row: Microsoft365SubscriptionSnapshotRow,
+  options: { includeSensitive?: boolean } = {},
+): RawSyncDetail {
+  const includeSensitive = options.includeSensitive === true;
+
   return {
+    CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
     TenantName: row.tenant_name,
     TenantId: row.external_account_id,
-    TenantDefaultDomain: row.tenant_default_domain_name,
+    TenantDefaultDomain: includeSensitive ? row.tenant_default_domain_name : redactedValue(row.tenant_default_domain_name),
     SkuPartNumber: row.sku_part_number,
     SkuName: row.sku_name,
     SkuId: row.sku_id,
@@ -566,11 +608,15 @@ function mapMicrosoft365LicenseSnapshotRow(row: Microsoft365SubscriptionSnapshot
     BillingTerm: row.billing_term,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeSensitive ? compactJson(row.raw_payload) : null,
   };
 }
 
-async function getAppRiverRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+async function getAppRiverRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
      from sync_runs
@@ -608,6 +654,7 @@ async function getAppRiverRawSyncDetails(database: Queryable, syncRunId: string)
          and vendor_usage_snapshots.vendor_id = 'opentext-appriver'
      )
      select
+       mapped_snapshots.effective_customer_id as customer_id,
        customers.name as customer_name,
        agreements.name as agreement_name,
        mapped_snapshots.external_account_id,
@@ -621,10 +668,11 @@ async function getAppRiverRawSyncDetails(database: Queryable, syncRunId: string)
      from mapped_snapshots
      left join customers on customers.id = mapped_snapshots.effective_customer_id
      left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
      order by coalesce(customers.name, mapped_snapshots.dimensions->>'customerName', mapped_snapshots.external_account_id),
        mapped_snapshots.vendor_product_key,
        mapped_snapshots.dimensions->>'subscriptionKey'`,
-    [syncRunId],
+    [syncRunId, options.customerId ?? null],
   );
   const rows = detailResult.rows.map(mapAppRiverSnapshotRow);
 
@@ -646,6 +694,7 @@ function mapAppRiverSnapshotRow(row: AppRiverSnapshotRow): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
 
   return {
+    CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
     AppRiverCustomer: stringValue(dimensions.customerName) ?? stringValue(dimensions.appRiverCustomerName),
@@ -671,7 +720,11 @@ function mapAppRiverSnapshotRow(row: AppRiverSnapshotRow): RawSyncDetail {
   };
 }
 
-async function getNcentralRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+async function getNcentralRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
      from sync_runs
@@ -709,6 +762,7 @@ async function getNcentralRawSyncDetails(database: Queryable, syncRunId: string)
          and vendor_usage_snapshots.vendor_id = 'ncentral'
      )
      select
+       mapped_snapshots.effective_customer_id as customer_id,
        customers.name as customer_name,
        agreements.name as agreement_name,
        mapped_snapshots.external_account_id,
@@ -722,10 +776,11 @@ async function getNcentralRawSyncDetails(database: Queryable, syncRunId: string)
      from mapped_snapshots
      left join customers on customers.id = mapped_snapshots.effective_customer_id
      left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
      order by coalesce(customers.name, mapped_snapshots.dimensions->>'ncentralCustomerName', mapped_snapshots.external_account_id),
        mapped_snapshots.product_code,
        mapped_snapshots.dimensions->>'hostname'`,
-    [syncRunId],
+    [syncRunId, options.customerId ?? null],
   );
   const rows = detailResult.rows.map(mapNcentralSnapshotRow);
 
@@ -747,6 +802,7 @@ function mapNcentralSnapshotRow(row: NcentralSnapshotRow): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
 
   return {
+    CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
     NcentralCustomer: stringValue(dimensions.ncentralCustomerName),
@@ -806,7 +862,11 @@ async function getGenericRawSyncDetails(
   };
 }
 
-async function getCoveRawSyncDetails(database: Queryable, syncRunId: string): Promise<RawSyncDetails | undefined> {
+async function getCoveRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
      from sync_runs
@@ -844,6 +904,7 @@ async function getCoveRawSyncDetails(database: Queryable, syncRunId: string): Pr
          and vendor_usage_snapshots.vendor_id = 'cove'
      )
      select
+       mapped_snapshots.effective_customer_id as customer_id,
        customers.name as customer_name,
        agreements.name as agreement_name,
        mapped_snapshots.external_account_id,
@@ -856,10 +917,11 @@ async function getCoveRawSyncDetails(database: Queryable, syncRunId: string): Pr
      from mapped_snapshots
      left join customers on customers.id = mapped_snapshots.effective_customer_id
      left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
      order by coalesce(customers.name, mapped_snapshots.dimensions->>'coveCustomerName', mapped_snapshots.external_account_id),
        mapped_snapshots.product_code,
        mapped_snapshots.dimensions->>'hostname'`,
-    [syncRunId],
+    [syncRunId, options.customerId ?? null],
   );
   const rows = detailResult.rows.map(mapCoveSnapshotRow);
 
@@ -881,6 +943,7 @@ function mapCoveSnapshotRow(row: CoveSnapshotRow): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
 
   return {
+    CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
     CoveCustomer: stringValue(dimensions.coveCustomerName),
@@ -1050,4 +1113,8 @@ function servicePlanSummary(value: unknown) {
     })
     .filter((item): item is string => Boolean(item))
     .join(', ');
+}
+
+function redactedValue(value: unknown) {
+  return stringValue(value) ? '[redacted]' : null;
 }

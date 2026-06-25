@@ -3,12 +3,15 @@ import {
   approveSuggestedAccountMappings,
   buildAccountMappingCandidates,
   generateProductMappingCandidates,
+  listProductMappingCustomers,
+  listMappingState,
   normalizeEntityName,
   runAccountAutomap,
   searchConnectWiseProductCatalog,
   scoreEntityName,
   updateAccountMapping,
   updateProductMapping,
+  upsertProductBundle,
   type ConnectWiseCustomerCandidate,
   type Queryable,
   type VendorAccountSource,
@@ -203,7 +206,7 @@ async function run() {
   const crossProductDeactivate = queries.find(
     (query) => query.sql.includes('vendor_product_key <> $2') && query.sql.includes('connectwise_product_code = any'),
   );
-  assert.deepEqual(crossProductDeactivate?.values?.[2], ['CW-SERVER', 'CW-SECONDARY']);
+  assert.equal(crossProductDeactivate, undefined);
 
   const insertQueries = queries.filter((query) => query.sql.includes('insert into vendor_product_mappings'));
   assert.equal(insertQueries.length, 2);
@@ -212,8 +215,90 @@ async function run() {
   assert.equal(insertQueries[1]?.values?.[6], 'approved');
   assert.equal(insertQueries[1]?.values?.[9], true);
 
+  const bundleQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const bundleDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      bundleQueries.push({ sql, values });
+      if (sql.includes('from products') && sql.includes('agreement_additions.product_code')) {
+        return {
+          rows: [
+            {
+              connectwise_product_code: values?.[0],
+              connectwise_product_name: 'Zix Advanced Email Suite',
+              unit_price: '7.5',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('insert into vendor_product_bundles')) {
+        return {
+          rows: [
+            {
+              id: 'bundle-1',
+              vendor_id: values?.[0],
+              bundle_key: values?.[1],
+              bundle_name: values?.[2],
+              components: JSON.parse(String(values?.[3])),
+              connectwise_product_code: values?.[4],
+              connectwise_product_name: values?.[5],
+              unit_price: values?.[6],
+              quantity_strategy: values?.[7],
+              mapping_status: 'approved',
+              active: values?.[8],
+              reviewed_by: values?.[9],
+              reviewed_at: '2026-06-24T12:00:00.000Z',
+              created_at: '2026-06-24T12:00:00.000Z',
+              updated_at: '2026-06-24T12:00:00.000Z',
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  const bundle = await upsertProductBundle(bundleDatabase, 'opentext-appriver', {
+    bundleName: 'Zix Advanced Email Suite',
+    reviewedBy: 'reviewer@example.com',
+    components: [
+      {
+        vendorProductKey: 'Email Archiving|Monthly|Monthly',
+        vendorProductName: 'Email Archiving',
+      },
+      {
+        vendorProductKey: 'Email Threat Protection|Monthly|Monthly',
+        vendorProductName: 'Email Threat Protection',
+      },
+    ],
+    targetProduct: {
+      connectwiseProductCode: 'CW-ZIX-ADVANCED',
+      connectwiseProductName: 'Zix Advanced Email Suite',
+    },
+  });
+
+  assert.equal(bundle.bundleKey, 'zix-advanced-email-suite');
+  assert.equal(bundle.components.length, 2);
+  assert.equal(bundle.target.connectwiseProductCode, 'CW-ZIX-ADVANCED');
+  const bundleInsertQuery = bundleQueries.find((query) => query.sql.includes('insert into vendor_product_bundles'));
+  assert.equal(bundleInsertQuery?.values?.[8], true);
+  assert.equal(bundleInsertQuery?.values?.[9], 'reviewer@example.com');
+
   const productCandidateDatabase: Queryable = {
-    async query<T = unknown>() {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from vendor_usage_snapshots')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'cove-server-storage-addon',
+              vendor_product_name: 'Cove Backup Protection - Svr - Add 1TB',
+              row_count: 2,
+              customer_count: 2,
+            },
+          ] as T[],
+        };
+      }
+
       return {
         rows: [
           {
@@ -253,13 +338,14 @@ async function run() {
       if (sql.includes('from vendor_usage_snapshots')) {
         return {
           rows: [
-            {
-              vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
-              vendor_product_name: 'Microsoft 365 Business Premium',
-              row_count: 3,
-            },
-          ] as T[],
-        };
+          {
+            vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
+            vendor_product_name: 'Microsoft 365 Business Premium',
+            row_count: 3,
+            customer_count: 3,
+          },
+        ] as T[],
+      };
       }
 
       if (sql.includes('from agreement_additions')) {
@@ -285,6 +371,38 @@ async function run() {
   assert.equal(appRiverProductCandidates[0]?.vendorProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
   assert.equal(appRiverProductCandidates[0]?.target.connectwiseProductCode, 'CW-M365-BUSINESS-PREMIUM');
   assert.equal(appRiverProductCandidates[0]?.additionCount, 12);
+  assert.equal(appRiverProductCandidates[0]?.customerCount, 3);
+
+  const appRiverCopilotMappingState = await listMappingState(appRiverCopilotMappingStateDatabase(), 'opentext-appriver');
+  assert.equal(
+    appRiverCopilotMappingState.productMappings.some(
+      (mapping) =>
+        mapping.vendorProductKey === 'Microsoft 365 Copilot (Annual term required) (Add-on)|Annual|Annual' &&
+        mapping.target.connectwiseProductCode === 'MS Copilot for Microsoft 365 - AM -Add-On',
+    ),
+    true,
+  );
+  assert.equal(
+    appRiverCopilotMappingState.productCandidates.some(
+      (candidate) =>
+        candidate.vendorProductKey === 'Microsoft 365 Copilot (Annual term required) (Add-on)|Annual|Monthly' &&
+        candidate.target.connectwiseProductCode === 'MS Copilot for Microsoft 365 - AM -Add-On',
+    ),
+    true,
+  );
+
+  const appRiverProductCustomers = await listProductMappingCustomers(
+    appRiverProductCustomerReviewDatabase(),
+    'opentext-appriver',
+    'Microsoft 365 Copilot (Annual term required) (Add-on)|Annual|Monthly',
+  );
+  assert.equal(appRiverProductCustomers.customerCount, 2);
+  assert.equal(appRiverProductCustomers.customers[0]?.externalAccountName, 'Mapped Legal');
+  assert.equal(appRiverProductCustomers.customers[0]?.agreementName, 'Mapped Legal Monthly Service Agreement');
+  assert.equal(appRiverProductCustomers.customers[0]?.additions.length, 2);
+  assert.equal(appRiverProductCustomers.customers[0]?.additions[0]?.productCode, 'MS Copilot for Microsoft 365 - AM -Add-On');
+  assert.equal(appRiverProductCustomers.customers[1]?.externalAccountName, 'Unmapped Legal');
+  assert.equal(appRiverProductCustomers.customers[1]?.additions.length, 0);
 
   const catalogSearchQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const catalogSearchDatabase: Queryable = {
@@ -362,6 +480,149 @@ function mappingWorkflowDatabase(existingMappings: unknown[]) {
   return {
     database: workflowDatabase,
     queries: workflowQueries,
+  };
+}
+
+function appRiverCopilotMappingStateDatabase(): Queryable {
+  return {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from vendor_account_mappings')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_product_mappings') && sql.includes('left join agreement_additions')) {
+        return {
+          rows: [
+            {
+              id: 'copilot-annual-annual-mapping',
+              vendor_id: 'opentext-appriver',
+              vendor_product_key: 'Microsoft 365 Copilot (Annual term required) (Add-on)|Annual|Annual',
+              target_index: 0,
+              connectwise_product_code: 'MS Copilot for Microsoft 365 - AM -Add-On',
+              connectwise_product_name: 'MS Copilot for Microsoft 365 - AM -Add-On',
+              unit_price: null,
+              addition_count: 6,
+              mapping_status: 'approved',
+              confidence: 'manual',
+              match_score: 100,
+              mapping_source: 'manual',
+              active: true,
+              reviewed_by: 'reviewer@example.com',
+              reviewed_at: '2026-06-24T16:01:16.992Z',
+              match_evidence: [],
+              customer_count: 1,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('group by external_account_id')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('group by vendor_product_key')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'Microsoft 365 Copilot (Annual term required) (Add-on)|Annual|Monthly',
+              vendor_product_name: 'Microsoft 365 Copilot (Annual term required) (Add-on)',
+              row_count: 5,
+              customer_count: 5,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('select count(*) as count') && sql.includes('from vendor_usage_snapshots')) {
+        return { rows: [{ count: 0 }] as T[] };
+      }
+
+      if (sql.includes('from agreement_additions') && sql.includes('group by product_code, product_name')) {
+        return {
+          rows: [
+            {
+              product_code: 'MS Copilot for Microsoft 365 - AM -Add-On',
+              product_name: 'MS Copilot for Microsoft 365 - AM -Add-On',
+              addition_count: 6,
+              unit_price: null,
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+}
+
+function appRiverProductCustomerReviewDatabase(): Queryable {
+  return {
+    async query<T = unknown>() {
+      return {
+        rows: [
+          {
+            external_account_id: 'mapped-appriver-customer',
+            external_account_name: 'Mapped Legal',
+            vendor_quantity: '1',
+            observed_at: '2026-06-24T14:06:53.439Z',
+            vendor_product_name: 'Microsoft 365 Copilot (Annual term required) (Add-on)',
+            customer_id: 'mapped-customer',
+            customer_name: 'Mapped Legal, LLP',
+            agreement_id: 'mapped-agreement',
+            agreement_name: 'Mapped Legal Monthly Service Agreement',
+            agreement_status: 'Active',
+            addition_id: 'copilot-addition',
+            connectwise_addition_id: '5001',
+            product_code: 'MS Copilot for Microsoft 365 - AM -Add-On',
+            product_name: 'MS Copilot for Microsoft 365 - AM -Add-On',
+            quantity: '1',
+            unit_price: '30',
+            addition_status: 'Active',
+            addition_updated_at: '2026-06-24T16:03:39.000Z',
+          },
+          {
+            external_account_id: 'mapped-appriver-customer',
+            external_account_name: 'Mapped Legal',
+            vendor_quantity: '1',
+            observed_at: '2026-06-24T14:06:53.439Z',
+            vendor_product_name: 'Microsoft 365 Copilot (Annual term required) (Add-on)',
+            customer_id: 'mapped-customer',
+            customer_name: 'Mapped Legal, LLP',
+            agreement_id: 'mapped-agreement',
+            agreement_name: 'Mapped Legal Monthly Service Agreement',
+            agreement_status: 'Active',
+            addition_id: 'business-standard-addition',
+            connectwise_addition_id: '5002',
+            product_code: 'Microsoft 365 Business Standard-M',
+            product_name: 'Microsoft 365 Business Standard-M',
+            quantity: '7',
+            unit_price: '12.5',
+            addition_status: 'Active',
+            addition_updated_at: '2026-06-18T19:40:47.000Z',
+          },
+          {
+            external_account_id: 'unmapped-appriver-customer',
+            external_account_name: 'Unmapped Legal',
+            vendor_quantity: '2',
+            observed_at: '2026-06-24T14:23:43.523Z',
+            vendor_product_name: 'Microsoft 365 Copilot (Annual term required) (Add-on)',
+            customer_id: null,
+            customer_name: null,
+            agreement_id: null,
+            agreement_name: null,
+            agreement_status: null,
+            addition_id: null,
+            connectwise_addition_id: null,
+            product_code: null,
+            product_name: null,
+            quantity: null,
+            unit_price: null,
+            addition_status: null,
+            addition_updated_at: null,
+          },
+        ] as T[],
+      };
+    },
   };
 }
 

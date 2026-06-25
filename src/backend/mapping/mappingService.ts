@@ -67,6 +67,29 @@ export type ProductMappingTarget = {
   unitPrice?: number;
 };
 
+export type ProductBundleQuantityStrategy = 'max-component-quantity';
+
+export type ProductBundleComponent = {
+  vendorProductKey: string;
+  vendorProductName: string;
+};
+
+export type ProductBundle = {
+  id: string;
+  vendorId: IntegrationId;
+  bundleKey: string;
+  bundleName: string;
+  components: ProductBundleComponent[];
+  target: ProductMappingTarget;
+  quantityStrategy: ProductBundleQuantityStrategy;
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 export type ProductCatalogSearchResult = ProductMappingTarget & {
   connectwiseProductId?: string;
   source: 'local' | 'connectwise';
@@ -81,6 +104,7 @@ export type ProductMappingCandidate = {
   target: ProductMappingTarget;
   matchScore: number;
   additionCount: number;
+  customerCount?: number;
   reason: string;
   evidence: Array<{ label: string; value: string | number | boolean }>;
 };
@@ -104,12 +128,14 @@ export type MappingState = {
     productMappings: number;
     approvedProductMappings: number;
     productCandidates: number;
+    productBundles: number;
     unmappedSnapshots: number;
   };
   accountMappings: AccountMapping[];
   accountCandidates: AccountMappingCandidate[];
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
+  productBundles: ProductBundle[];
   customerOptions: ConnectWiseCustomerCandidate[];
 };
 
@@ -131,6 +157,38 @@ export type ApplyMappingsResult = {
   vendorId: IntegrationId;
   accountSnapshotsUpdated: number;
   productSnapshotsUpdated: number;
+};
+
+export type ProductMappingCustomerAddition = {
+  id: string;
+  connectWiseAdditionId?: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice?: number;
+  additionStatus: string;
+  updatedAt?: string;
+};
+
+export type ProductMappingCustomer = {
+  externalAccountId: string;
+  externalAccountName: string;
+  vendorQuantity: number;
+  observedAt?: string;
+  customerId?: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  agreementStatus?: string;
+  additions: ProductMappingCustomerAddition[];
+};
+
+export type ProductMappingCustomerReview = {
+  vendorId: IntegrationId;
+  vendorProductKey: string;
+  vendorProductName: string;
+  customerCount: number;
+  customers: ProductMappingCustomer[];
 };
 
 type AccountMappingRow = {
@@ -189,6 +247,25 @@ type ProductMappingRow = {
   reviewed_by: string | null;
   reviewed_at: Date | string | null;
   match_evidence: unknown;
+  customer_count?: string | number | null;
+};
+
+type ProductBundleRow = {
+  id: string;
+  vendor_id: IntegrationId;
+  bundle_key: string;
+  bundle_name: string;
+  components: unknown;
+  connectwise_product_code: string;
+  connectwise_product_name: string;
+  unit_price: string | number | null;
+  quantity_strategy: ProductBundleQuantityStrategy | string;
+  mapping_status: MappingStatus;
+  active: boolean;
+  reviewed_by: string | null;
+  reviewed_at: Date | string | null;
+  created_at: Date | string | null;
+  updated_at: Date | string | null;
 };
 
 type ConnectWiseProductRow = {
@@ -202,6 +279,28 @@ type VendorProductSourceRow = {
   vendor_product_key: string;
   vendor_product_name: string | null;
   row_count: string | number;
+  customer_count: string | number;
+};
+
+type ProductMappingCustomerReviewRow = {
+  external_account_id: string | null;
+  external_account_name: string | null;
+  vendor_quantity: string | number | null;
+  observed_at: Date | string | null;
+  vendor_product_name: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  agreement_id: string | null;
+  agreement_name: string | null;
+  agreement_status: string | null;
+  addition_id: string | null;
+  connectwise_addition_id: string | null;
+  product_code: string | null;
+  product_name: string | null;
+  quantity: string | number | null;
+  unit_price: string | number | null;
+  addition_status: string | null;
+  addition_updated_at: Date | string | null;
 };
 
 type ProductClass = {
@@ -307,11 +406,20 @@ const ncentralProductClasses: ProductClass[] = [
 ];
 
 export async function listMappingState(database: Queryable, vendorId: IntegrationId): Promise<MappingState> {
-  const [accountMappings, accountCandidates, productMappings, productCandidates, unmappedSnapshots, customerOptions] = await Promise.all([
+  const [
+    accountMappings,
+    accountCandidates,
+    productMappings,
+    productCandidates,
+    productBundles,
+    unmappedSnapshots,
+    customerOptions,
+  ] = await Promise.all([
     listAccountMappings(database, vendorId),
     generateAccountMappingCandidates(database, vendorId),
     listProductMappings(database, vendorId),
     generateProductMappingCandidates(database, vendorId),
+    listProductBundles(database, vendorId),
     countUnmappedSnapshots(database, vendorId),
     loadConnectWiseCustomers(database),
   ]);
@@ -322,13 +430,13 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
       .map((mapping) => mapping.externalAccountId),
   );
   const unmappedCandidates = accountCandidates.filter((candidate) => !mappedAccountIds.has(candidate.externalAccountId));
-  const mappedProductTargets = new Set(
+  const mappedProductKeys = new Set(
     productMappings
       .filter((mapping) => mapping.status === 'approved' && mapping.active)
-      .map((mapping) => mapping.target.connectwiseProductCode),
+      .map((mapping) => mapping.vendorProductKey),
   );
   const unmappedProductCandidates = productCandidates.filter(
-    (candidate) => !mappedProductTargets.has(candidate.target.connectwiseProductCode),
+    (candidate) => !mappedProductKeys.has(candidate.vendorProductKey),
   );
 
   return {
@@ -341,12 +449,14 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
       productMappings: productMappings.length,
       approvedProductMappings: productMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length,
       productCandidates: unmappedProductCandidates.length,
+      productBundles: productBundles.filter((bundle) => bundle.status === 'approved' && bundle.active).length,
       unmappedSnapshots,
     },
     accountMappings,
     accountCandidates: unmappedCandidates,
     productMappings,
     productCandidates: unmappedProductCandidates,
+    productBundles,
     customerOptions,
   };
 }
@@ -507,16 +617,6 @@ export async function updateProductMapping(
     throw new Error('Approving a product mapping requires at least one target product.');
   }
 
-  await database.query(
-    `update vendor_product_mappings
-     set active = false,
-         updated_at = now()
-     where vendor_id = $1
-       and vendor_product_key <> $2
-       and connectwise_product_code = any($3::text[])`,
-    [vendorId, vendorProductKey, targetProducts.map((target) => target.connectwiseProductCode)],
-  );
-
   const status: MappingStatus = input.status;
   const active = status === 'approved';
 
@@ -577,6 +677,255 @@ export async function updateProductMapping(
       ],
     );
   }
+}
+
+export async function listProductBundles(database: Queryable, vendorId: IntegrationId): Promise<ProductBundle[]> {
+  const result = await database.query<ProductBundleRow>(
+    `select
+       id,
+       vendor_id,
+       bundle_key,
+       bundle_name,
+       components,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       quantity_strategy,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at
+     from vendor_product_bundles
+     where vendor_id = $1
+     order by active desc, bundle_name, bundle_key`,
+    [vendorId],
+  );
+
+  return result.rows.map(mapProductBundleRow);
+}
+
+export async function listProductMappingCustomers(
+  database: Queryable,
+  vendorId: IntegrationId,
+  vendorProductKey: string,
+): Promise<ProductMappingCustomerReview> {
+  const result = await database.query<ProductMappingCustomerReviewRow>(
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     product_customers as (
+       select
+         coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text) as source_account_key,
+         max(vendor_usage_snapshots.external_account_id) as external_account_id,
+         coalesce(
+           max(nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
+           max(nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
+           max(nullif(vendor_usage_snapshots.dimensions->>'coveCustomerName', '')),
+           max(nullif(vendor_usage_snapshots.dimensions->>'ncentralCustomerName', '')),
+           max(snapshot_customers.name),
+           max(vendor_usage_snapshots.external_account_id),
+           max(vendor_usage_snapshots.customer_id::text)
+         ) as external_account_name,
+         sum(vendor_usage_snapshots.quantity) as vendor_quantity,
+         max(vendor_usage_snapshots.observed_at) as observed_at,
+         coalesce(
+           max(nullif(vendor_usage_snapshots.dimensions->>'productName', '')),
+           max(nullif(vendor_usage_snapshots.product_name, '')),
+           $2
+         ) as vendor_product_name
+       from vendor_usage_snapshots
+       left join customers snapshot_customers
+         on snapshot_customers.id = vendor_usage_snapshots.customer_id
+       where vendor_usage_snapshots.vendor_id = $1
+         and vendor_usage_snapshots.vendor_product_key = $2
+         and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+         and coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text) is not null
+       group by coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text)
+     )
+     select
+       product_customers.external_account_id,
+       product_customers.external_account_name,
+       product_customers.vendor_quantity,
+       product_customers.observed_at,
+       product_customers.vendor_product_name,
+       vendor_account_mappings.customer_id,
+       customers.name as customer_name,
+       vendor_account_mappings.agreement_id,
+       agreements.name as agreement_name,
+       agreements.status as agreement_status,
+       agreement_additions.id as addition_id,
+       agreement_additions.connectwise_addition_id,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       agreement_additions.quantity,
+       agreement_additions.unit_price,
+       agreement_additions.addition_status,
+       agreement_additions.updated_at as addition_updated_at
+     from product_customers
+     left join vendor_account_mappings
+       on vendor_account_mappings.vendor_id = $1
+      and vendor_account_mappings.external_account_id = product_customers.external_account_id
+      and vendor_account_mappings.active = true
+      and vendor_account_mappings.mapping_status = 'approved'
+     left join customers
+       on customers.id = vendor_account_mappings.customer_id
+     left join agreements
+       on agreements.id = vendor_account_mappings.agreement_id
+     left join agreement_additions
+       on agreement_additions.agreement_id = vendor_account_mappings.agreement_id
+      and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+      and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     order by
+       product_customers.external_account_name,
+       product_customers.external_account_id,
+       agreement_additions.product_name,
+       agreement_additions.product_code,
+       agreement_additions.connectwise_addition_id`,
+    [vendorId, vendorProductKey],
+  );
+
+  return mapProductMappingCustomerReview(vendorId, vendorProductKey, result.rows);
+}
+
+export async function upsertProductBundle(
+  database: Queryable,
+  vendorId: IntegrationId,
+  input: {
+    bundleKey?: string;
+    bundleName?: string;
+    components?: ProductBundleComponent[];
+    targetProduct?: ProductMappingTarget;
+    quantityStrategy?: ProductBundleQuantityStrategy;
+    active?: boolean;
+    reviewedBy?: string;
+  },
+): Promise<ProductBundle> {
+  const bundleName = input.bundleName?.trim();
+  if (!bundleName) {
+    throw new Error('Bundle mapping requires a bundle name.');
+  }
+
+  const bundleKey = normalizeBundleKey(input.bundleKey || bundleName);
+  if (!bundleKey) {
+    throw new Error('Bundle mapping requires a bundle key.');
+  }
+
+  const components = normalizeBundleComponents(input.components ?? []);
+  if (components.length < 2) {
+    throw new Error('Bundle mapping requires at least two vendor products.');
+  }
+
+  const target = input.targetProduct;
+  if (!target?.connectwiseProductCode?.trim() || !target.connectwiseProductName?.trim()) {
+    throw new Error('Bundle mapping requires a ConnectWise product target.');
+  }
+  const existingTarget = await loadExistingConnectWiseProductTarget(database, target);
+  if (!existingTarget) {
+    throw new Error(
+      'Bundle mappings can only target an existing ConnectWise product. Search and select an existing ConnectWise catalog product before saving.',
+    );
+  }
+
+  const result = await database.query<ProductBundleRow>(
+    `insert into vendor_product_bundles (
+       vendor_id,
+       bundle_key,
+       bundle_name,
+       components,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       quantity_strategy,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       updated_at
+     )
+     values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, 'approved', $9, $10, now(), now())
+     on conflict (vendor_id, bundle_key)
+     do update set
+       bundle_name = excluded.bundle_name,
+       components = excluded.components,
+       connectwise_product_code = excluded.connectwise_product_code,
+       connectwise_product_name = excluded.connectwise_product_name,
+       unit_price = excluded.unit_price,
+       quantity_strategy = excluded.quantity_strategy,
+       mapping_status = excluded.mapping_status,
+       active = excluded.active,
+       reviewed_by = excluded.reviewed_by,
+       reviewed_at = excluded.reviewed_at,
+       updated_at = now()
+     returning
+       id,
+       vendor_id,
+       bundle_key,
+       bundle_name,
+       components,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       quantity_strategy,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at`,
+    [
+      vendorId,
+      bundleKey,
+      bundleName,
+      JSON.stringify(components),
+      existingTarget.connectwiseProductCode,
+      existingTarget.connectwiseProductName,
+      existingTarget.unitPrice ?? null,
+      input.quantityStrategy ?? 'max-component-quantity',
+      input.active ?? true,
+      input.reviewedBy ?? 'user',
+    ],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('Unable to save product bundle mapping.');
+  }
+
+  return mapProductBundleRow(row);
+}
+
+export async function deactivateProductBundle(
+  database: Queryable,
+  vendorId: IntegrationId,
+  bundleKey: string,
+  options: { reviewedBy?: string } = {},
+): Promise<{ vendorId: IntegrationId; bundleKey: string; active: false }> {
+  await database.query(
+    `update vendor_product_bundles
+     set active = false,
+         reviewed_by = $3,
+         reviewed_at = now(),
+         updated_at = now()
+     where vendor_id = $1
+       and bundle_key = $2`,
+    [vendorId, bundleKey, options.reviewedBy ?? 'user'],
+  );
+
+  return {
+    vendorId,
+    bundleKey,
+    active: false,
+  };
 }
 
 export async function searchConnectWiseProductCatalog(
@@ -824,12 +1173,20 @@ export async function generateProductMappingCandidates(
     return generateDynamicProductMappingCandidates(database, vendorId);
   }
 
-  const products = await loadConnectWiseProducts(database);
+  const [products, sources] = await Promise.all([
+    loadConnectWiseProducts(database),
+    loadVendorProductSources(database, vendorId),
+  ]);
+  const customerCountsByProductKey = new Map(
+    sources.map((source) => [source.vendorProductKey, source.customerCount] as const),
+  );
   const winnersByProductCode = new Map<string, ProductMappingCandidate>();
 
   for (const product of products) {
     const best = classes
-      .map((productClass) => productMappingCandidate(vendorId, productClass, product))
+      .map((productClass) =>
+        productMappingCandidate(vendorId, productClass, product, customerCountsByProductKey.get(productClass.vendorProductKey) ?? 0),
+      )
       .sort(compareProductCandidates)[0];
 
     if (best && best.matchScore >= 30) {
@@ -853,6 +1210,7 @@ export async function generateProductMappingCandidates(
       target: productClass.defaultTarget,
       matchScore: 50,
       additionCount: 0,
+      customerCount: customerCountsByProductKey.get(productClass.vendorProductKey) ?? 0,
       reason: 'Default product mapping is available until a ConnectWise catalog target is reviewed.',
       evidence: [{ label: 'Default target', value: true }],
     });
@@ -883,6 +1241,7 @@ function dynamicProductMappingCandidate(
     vendorProductKey: string;
     vendorProductName: string;
     rowCount: number;
+    customerCount: number;
   },
   products: ConnectWiseProductRow[],
 ): ProductMappingCandidate {
@@ -924,6 +1283,7 @@ function dynamicProductMappingCandidate(
       : defaultTarget,
     matchScore,
     additionCount: targetProduct ? integerValue(targetProduct.addition_count) : 0,
+    customerCount: source.customerCount,
     reason: useBest
       ? 'Candidate generated by comparing synced vendor product keys to ConnectWise additions.'
       : 'Synced vendor product key is available for manual product mapping review.',
@@ -1062,7 +1422,8 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
        vendor_product_mappings.active,
        vendor_product_mappings.reviewed_by,
        vendor_product_mappings.reviewed_at,
-       vendor_product_mappings.match_evidence
+       vendor_product_mappings.match_evidence,
+       max(vendor_product_usage_counts.customer_count) as customer_count
      from vendor_product_mappings
      left join agreement_additions
        on agreement_additions.product_code = vendor_product_mappings.connectwise_product_code
@@ -1076,6 +1437,26 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
           and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
           and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
       )
+     left join (
+       with latest_sync_run as (
+         select id
+         from sync_runs
+         where integration_id = $1
+           and status = 'complete'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       )
+       select vendor_id,
+              vendor_product_key,
+              count(distinct coalesce(external_account_id, customer_id::text))::int as customer_count
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and vendor_product_key is not null
+         and sync_run_id = (select id from latest_sync_run)
+       group by vendor_id, vendor_product_key
+     ) vendor_product_usage_counts
+       on vendor_product_usage_counts.vendor_id = vendor_product_mappings.vendor_id
+      and vendor_product_usage_counts.vendor_product_key = vendor_product_mappings.vendor_product_key
      where vendor_product_mappings.vendor_id = $1
      group by
        vendor_product_mappings.id,
@@ -1131,19 +1512,29 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
 async function loadVendorProductSources(
   database: Queryable,
   vendorId: IntegrationId,
-): Promise<Array<{ vendorProductKey: string; vendorProductName: string; rowCount: number }>> {
+): Promise<Array<{ vendorProductKey: string; vendorProductName: string; rowCount: number; customerCount: number }>> {
   const result = await database.query<VendorProductSourceRow>(
-    `select
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     )
+     select
        vendor_product_key,
        coalesce(
          max(nullif(dimensions->>'productName', '')),
          max(nullif(product_name, '')),
          vendor_product_key
        ) as vendor_product_name,
-       count(*)::int as row_count
+       count(*)::int as row_count,
+       count(distinct coalesce(external_account_id, customer_id::text))::int as customer_count
      from vendor_usage_snapshots
      where vendor_id = $1
        and vendor_product_key is not null
+       and sync_run_id = (select id from latest_sync_run)
      group by vendor_product_key
      order by vendor_product_name`,
     [vendorId],
@@ -1153,6 +1544,7 @@ async function loadVendorProductSources(
     vendorProductKey: row.vendor_product_key,
     vendorProductName: row.vendor_product_name ?? row.vendor_product_key,
     rowCount: integerValue(row.row_count),
+    customerCount: integerValue(row.customer_count),
   }));
 }
 
@@ -1219,6 +1611,12 @@ async function loadPreferredProductCodes(database: Queryable, vendorId: Integrat
      from vendor_product_mappings
      where vendor_id = $1
        and active = true
+       and mapping_status = 'approved'
+     union
+     select connectwise_product_code
+     from vendor_product_bundles
+     where vendor_id = $1
+       and active = true
        and mapping_status = 'approved'`,
     [vendorId],
   );
@@ -1246,6 +1644,52 @@ async function loadConnectWiseProducts(database: Queryable): Promise<ConnectWise
   );
 
   return result.rows;
+}
+
+async function loadExistingConnectWiseProductTarget(
+  database: Queryable,
+  target: ProductMappingTarget,
+): Promise<ProductMappingTarget | undefined> {
+  const result = await database.query<{
+    connectwise_product_code: string;
+    connectwise_product_name: string;
+    unit_price: string | number | null;
+  }>(
+    `select connectwise_product_code,
+            display_name as connectwise_product_name,
+            null::numeric as unit_price
+     from products
+     where vendor_id = 'connectwise'
+       and active = true
+       and connectwise_product_code = $1
+     union all
+     select agreement_additions.product_code as connectwise_product_code,
+            max(agreement_additions.product_name) as connectwise_product_name,
+            max(agreement_additions.unit_price) as unit_price
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.product_code = $1
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     group by agreement_additions.product_code
+     limit 1`,
+    [target.connectwiseProductCode.trim()],
+  );
+  const row = result.rows[0];
+
+  if (!row) {
+    return undefined;
+  }
+
+  return {
+    connectwiseProductCode: row.connectwise_product_code,
+    connectwiseProductName: row.connectwise_product_name,
+    unitPrice: nullableNumber(row.unit_price) ?? target.unitPrice,
+  };
 }
 
 async function countUnmappedSnapshots(database: Queryable, vendorId: IntegrationId) {
@@ -1470,6 +1914,7 @@ function productMappingCandidate(
   vendorId: IntegrationId,
   productClass: ProductClass,
   product: ConnectWiseProductRow,
+  customerCount = 0,
 ): ProductMappingCandidate {
   const searchable = `${product.product_code} ${product.product_name}`;
   const normalized = normalizeEntityName(searchable);
@@ -1497,6 +1942,7 @@ function productMappingCandidate(
     },
     matchScore: score,
     additionCount: integerValue(product.addition_count),
+    customerCount,
     reason: 'Candidate generated from ConnectWise agreement additions.',
     evidence: [
       { label: 'Addition count', value: integerValue(product.addition_count) },
@@ -1567,6 +2013,7 @@ function mapProductMappingRow(row: ProductMappingRow): ProductMapping {
     },
     matchScore: nullableNumber(row.match_score) ?? 0,
     additionCount: integerValue(row.addition_count),
+    customerCount: integerValue(row.customer_count),
     reason: 'Persisted product mapping.',
     evidence: evidenceArray(row.match_evidence),
     targetIndex: row.target_index,
@@ -1575,6 +2022,138 @@ function mapProductMappingRow(row: ProductMappingRow): ProductMapping {
     reviewedBy: row.reviewed_by ?? undefined,
     reviewedAt: isoDate(row.reviewed_at),
   };
+}
+
+function mapProductBundleRow(row: ProductBundleRow): ProductBundle {
+  return {
+    id: row.id,
+    vendorId: row.vendor_id,
+    bundleKey: row.bundle_key,
+    bundleName: row.bundle_name,
+    components: normalizeBundleComponents(componentArray(row.components)),
+    target: {
+      connectwiseProductCode: row.connectwise_product_code,
+      connectwiseProductName: row.connectwise_product_name,
+      unitPrice: nullableNumber(row.unit_price),
+    },
+    quantityStrategy: row.quantity_strategy === 'max-component-quantity' ? row.quantity_strategy : 'max-component-quantity',
+    status: row.mapping_status,
+    active: row.active,
+    reviewedBy: row.reviewed_by ?? undefined,
+    reviewedAt: isoDate(row.reviewed_at),
+    createdAt: isoDate(row.created_at),
+    updatedAt: isoDate(row.updated_at),
+  };
+}
+
+function mapProductMappingCustomerReview(
+  vendorId: IntegrationId,
+  vendorProductKey: string,
+  rows: ProductMappingCustomerReviewRow[],
+): ProductMappingCustomerReview {
+  const customersByKey = new Map<string, ProductMappingCustomer>();
+  const additionIdsByCustomer = new Map<string, Set<string>>();
+  let vendorProductName = vendorProductKey;
+
+  for (const row of rows) {
+    vendorProductName = row.vendor_product_name ?? vendorProductName;
+    const externalAccountId = row.external_account_id ?? row.customer_id ?? row.external_account_name ?? 'unknown-account';
+    const customer =
+      customersByKey.get(externalAccountId) ??
+      {
+        externalAccountId,
+        externalAccountName: row.external_account_name ?? externalAccountId,
+        vendorQuantity: nullableNumber(row.vendor_quantity) ?? 0,
+        observedAt: isoDate(row.observed_at),
+        customerId: row.customer_id ?? undefined,
+        customerName: row.customer_name ?? undefined,
+        agreementId: row.agreement_id ?? undefined,
+        agreementName: row.agreement_name ?? undefined,
+        agreementStatus: row.agreement_status ?? undefined,
+        additions: [],
+      };
+
+    if (row.addition_id) {
+      const seenAdditionIds = additionIdsByCustomer.get(externalAccountId) ?? new Set<string>();
+      if (!seenAdditionIds.has(row.addition_id)) {
+        customer.additions.push({
+          id: row.addition_id,
+          connectWiseAdditionId: row.connectwise_addition_id ?? undefined,
+          productCode: row.product_code ?? '',
+          productName: row.product_name ?? '',
+          quantity: nullableNumber(row.quantity) ?? 0,
+          unitPrice: nullableNumber(row.unit_price),
+          additionStatus: row.addition_status ?? 'Active',
+          updatedAt: isoDate(row.addition_updated_at),
+        });
+        seenAdditionIds.add(row.addition_id);
+        additionIdsByCustomer.set(externalAccountId, seenAdditionIds);
+      }
+    }
+
+    customersByKey.set(externalAccountId, customer);
+  }
+
+  const customers = [...customersByKey.values()].sort(
+    (left, right) =>
+      left.externalAccountName.localeCompare(right.externalAccountName) ||
+      left.externalAccountId.localeCompare(right.externalAccountId),
+  );
+
+  return {
+    vendorId,
+    vendorProductKey,
+    vendorProductName,
+    customerCount: customers.length,
+    customers,
+  };
+}
+
+function normalizeBundleKey(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+}
+
+function normalizeBundleComponents(components: ProductBundleComponent[]) {
+  const byKey = new Map<string, ProductBundleComponent>();
+  for (const component of components) {
+    const vendorProductKey = component.vendorProductKey?.trim();
+    if (!vendorProductKey) {
+      continue;
+    }
+
+    byKey.set(vendorProductKey, {
+      vendorProductKey,
+      vendorProductName: component.vendorProductName?.trim() || vendorProductKey,
+    });
+  }
+
+  return [...byKey.values()].sort((left, right) =>
+    left.vendorProductName.localeCompare(right.vendorProductName) ||
+    left.vendorProductKey.localeCompare(right.vendorProductKey),
+  );
+}
+
+function componentArray(value: unknown): ProductBundleComponent[] {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return [];
+    }
+
+    const record = item as Record<string, unknown>;
+    const vendorProductKey = typeof record.vendorProductKey === 'string' ? record.vendorProductKey : undefined;
+    const vendorProductName = typeof record.vendorProductName === 'string' ? record.vendorProductName : vendorProductKey;
+    return vendorProductKey ? [{ vendorProductKey, vendorProductName: vendorProductName ?? vendorProductKey }] : [];
+  });
 }
 
 function confidenceForScore(score: number, matchedOn: 'name' | 'alias'): MappingConfidence {

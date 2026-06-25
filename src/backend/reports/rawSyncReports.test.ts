@@ -203,55 +203,57 @@ async function run() {
       }
 
       if (sql.includes('from vendor_usage_snapshots') && sql.includes("vendor_usage_snapshots.vendor_id = 'opentext-appriver'")) {
+        const rows = [
+          {
+            customer_name: 'Mapped Client',
+            agreement_name: 'Managed Services',
+            external_account_id: 'customer-1',
+            vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
+            product_code: 'CW-M365-BUSINESS-PREMIUM',
+            product_name: 'Microsoft 365 Business Premium',
+            quantity: '3',
+            observed_at: new Date('2026-06-15T15:01:00Z'),
+            dimensions: {
+              customerName: 'Mapped Client',
+              appRiverCustomerId: 'customer-1',
+              domain: 'mapped.example',
+              totalLicenses: 3,
+              assignedLicenses: 1,
+              unassignedLicenses: 2,
+              subscriptionTerm: 'Annual',
+              billingFrequency: 'Monthly',
+              commitmentEndDate: '2027-01-01T00:00:00Z',
+              isTrial: false,
+              subscriptionKey: 'sub-1',
+            },
+            raw_payload: { subscription: { SubscriptionKey: 'sub-1' } },
+          },
+          {
+            customer_name: null,
+            agreement_name: null,
+            external_account_id: 'customer-2',
+            vendor_product_key: 'Exchange Online Plan 1|Monthly|Monthly',
+            product_code: 'EXCHANGE-ONLINE-PLAN-1-MONTHLY-MONTHLY',
+            product_name: 'Exchange Online Plan 1',
+            quantity: '1',
+            observed_at: new Date('2026-06-15T15:01:00Z'),
+            dimensions: {
+              customerName: 'Unmapped Client',
+              appRiverCustomerId: 'customer-2',
+              domain: 'unmapped.example',
+              totalLicenses: 1,
+              assignedLicenses: 1,
+              unassignedLicenses: 0,
+              subscriptionTerm: 'Monthly',
+              billingFrequency: 'Monthly',
+              subscriptionKey: 'sub-2',
+            },
+            raw_payload: { subscription: { SubscriptionKey: 'sub-2' } },
+          },
+        ];
+
         return {
-          rows: [
-            {
-              customer_name: 'Mapped Client',
-              agreement_name: 'Managed Services',
-              external_account_id: 'customer-1',
-              vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
-              product_code: 'CW-M365-BUSINESS-PREMIUM',
-              product_name: 'Microsoft 365 Business Premium',
-              quantity: '3',
-              observed_at: new Date('2026-06-15T15:01:00Z'),
-              dimensions: {
-                customerName: 'Mapped Client',
-                appRiverCustomerId: 'customer-1',
-                domain: 'mapped.example',
-                totalLicenses: 3,
-                assignedLicenses: 1,
-                unassignedLicenses: 2,
-                subscriptionTerm: 'Annual',
-                billingFrequency: 'Monthly',
-                commitmentEndDate: '2027-01-01T00:00:00Z',
-                isTrial: false,
-                subscriptionKey: 'sub-1',
-              },
-              raw_payload: { subscription: { SubscriptionKey: 'sub-1' } },
-            },
-            {
-              customer_name: null,
-              agreement_name: null,
-              external_account_id: 'customer-2',
-              vendor_product_key: 'Exchange Online Plan 1|Monthly|Monthly',
-              product_code: 'EXCHANGE-ONLINE-PLAN-1-MONTHLY-MONTHLY',
-              product_name: 'Exchange Online Plan 1',
-              quantity: '1',
-              observed_at: new Date('2026-06-15T15:01:00Z'),
-              dimensions: {
-                customerName: 'Unmapped Client',
-                appRiverCustomerId: 'customer-2',
-                domain: 'unmapped.example',
-                totalLicenses: 1,
-                assignedLicenses: 1,
-                unassignedLicenses: 0,
-                subscriptionTerm: 'Monthly',
-                billingFrequency: 'Monthly',
-                subscriptionKey: 'sub-2',
-              },
-              raw_payload: { subscription: { SubscriptionKey: 'sub-2' } },
-            },
-          ] as T[],
+          rows: (values?.[1] ? rows.filter((row) => row.customer_name === 'Mapped Client') : rows) as T[],
         };
       }
 
@@ -338,9 +340,21 @@ async function run() {
   assert.equal(microsoftDetails?.summary.rowCount, 1);
   assert.equal(microsoftDetails?.summary.companyCount, 1);
   assert.equal(microsoftDetails?.summary.productCount, 1);
-  assert.equal(microsoftDetails?.rows[0]?.UserPrincipalName, 'licensed.user@mapped.example');
+  assert.equal(microsoftDetails?.rows[0]?.UserPrincipalName, '[redacted]');
+  assert.equal(microsoftDetails?.rows[0]?.DisplayName, '[redacted]');
+  assert.equal(microsoftDetails?.rows[0]?.RawPayload, null);
   assert.equal(microsoftDetails?.rows[0]?.ProductKey, 'SPB');
   assert.equal(microsoftDetails?.rows[0]?.ServicePlans, 'EXCHANGE_S_STANDARD');
+
+  const sensitiveMicrosoftDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1', {
+    includeSensitive: true,
+  });
+  assert.equal(sensitiveMicrosoftDetails?.rows[0]?.UserPrincipalName, 'licensed.user@mapped.example');
+  assert.equal(sensitiveMicrosoftDetails?.rows[0]?.DisplayName, 'Licensed User');
+  assert.equal(
+    sensitiveMicrosoftDetails?.rows[0]?.RawPayload,
+    JSON.stringify({ productSku: { skuPartNumber: 'SPB' } }),
+  );
 
   const microsoftLicenseDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1', {
     dataset: 'licenses',
@@ -349,6 +363,8 @@ async function run() {
   assert.equal(microsoftLicenseDetails?.dataset, 'licenses');
   assert.equal(microsoftLicenseDetails?.summary.rowCount, 1);
   assert.equal(microsoftLicenseDetails?.rows[0]?.SkuPartNumber, 'SPB');
+  assert.equal(microsoftLicenseDetails?.rows[0]?.TenantDefaultDomain, '[redacted]');
+  assert.equal(microsoftLicenseDetails?.rows[0]?.RawPayload, null);
   assert.equal(microsoftLicenseDetails?.rows[0]?.TotalUnits, 3);
   assert.equal(microsoftLicenseDetails?.rows[0]?.AssignedUnits, 1);
   assert.equal(microsoftLicenseDetails?.rows[0]?.UnassignedUnits, 2);
@@ -368,6 +384,13 @@ async function run() {
   assert.equal(appRiverDetails?.rows[0]?.AssignedLicenses, 1);
   assert.equal(appRiverDetails?.rows[1]?.Mapped, false);
   assert.equal(appRiverDetails?.rows[1]?.AppRiverCustomer, 'Unmapped Client');
+
+  const scopedAppRiverDetails = await getRawSyncDetails(database, 'opentext-appriver', 'appriver-sync-1', {
+    customerId: '11111111-1111-4111-8111-111111111111',
+  });
+  assert.equal(scopedAppRiverDetails?.summary.rowCount, 1);
+  assert.equal(scopedAppRiverDetails?.rows[0]?.Customer, 'Mapped Client');
+  assert.equal(scopedAppRiverDetails?.rows[0]?.ProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');

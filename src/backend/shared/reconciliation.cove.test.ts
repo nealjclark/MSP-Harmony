@@ -26,6 +26,26 @@ assert.equal(overCountServer?.status, 'needs-review');
 assert.equal(overCountServer?.delta, 1);
 assert.equal(overCountServer?.proposedQuantity, 2);
 
+const actualAgreementPriceResult = reconcileVendorUsage({
+  vendorId: 'cove',
+  rules: buildCoveRuleSet({
+    'cove-server': {
+      vendorProductKey: 'cove-server',
+      productCode: 'COVE-SERVER',
+      productName: 'Cove Server Backup',
+      unitPrice: { amount: 999, currency: 'USD' },
+    },
+  }).rules,
+  snapshots: [serverSnapshot('actual-price-1', 100), serverSnapshot('actual-price-2', 100)],
+  agreementAdditions: [addition('COVE-SERVER', 1, 42)],
+});
+const actualAgreementPriceLine = actualAgreementPriceResult.lines.find(
+  (line) => line.productCode === 'COVE-SERVER' && line.lineType === 'base-count',
+);
+assert.equal(actualAgreementPriceLine?.delta, 1);
+assert.equal(actualAgreementPriceLine?.unitPrice?.amount, 42);
+assert.equal(actualAgreementPriceLine?.financialImpact.amount, 42);
+
 const underCountResult = reconcileVendor({
   vendorId: 'cove',
   snapshots: coveDemoSnapshots,
@@ -182,7 +202,7 @@ function workstationSnapshot(id: string) {
   };
 }
 
-function addition(productCode: string, quantity: number): AgreementAddition {
+function addition(productCode: string, quantity: number, unitPrice = 75): AgreementAddition {
   return {
     id: `addition-${productCode}`,
     clientId: 'northstar-dental',
@@ -190,7 +210,7 @@ function addition(productCode: string, quantity: number): AgreementAddition {
     productCode,
     productName: productCode,
     quantity,
-    unitPrice: { amount: 75, currency: 'USD' },
+    unitPrice: { amount: unitPrice, currency: 'USD' },
   };
 }
 

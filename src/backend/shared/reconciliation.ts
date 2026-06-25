@@ -68,6 +68,8 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     const baseDelta = proposedBaseQuantity - baseAgreementQuantity;
 
     if (snapshots.length > 0 || baseAdditions.length > 0) {
+      const unitPrice = unitPriceForImpact(baseAdditions, rule.productCode, rule.unitPrice);
+
       lines.push({
         id: `${agreementKey}|${rule.productCode}|base`,
         vendorId: request.vendorId,
@@ -79,11 +81,11 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
         ruleId: rule.id,
         sourceQuantity: proposedBaseQuantity,
         agreementQuantity: baseAgreementQuantity,
-      proposedQuantity: proposedBaseQuantity,
-      delta: baseDelta,
-      unit: rule.billableUnit,
-      unitPrice: rule.unitPrice ?? baseAdditions[0]?.unitPrice,
-      financialImpact: calculateImpact(baseDelta, rule.unitPrice ?? baseAdditions[0]?.unitPrice),
+        proposedQuantity: proposedBaseQuantity,
+        delta: baseDelta,
+        unit: rule.billableUnit,
+        unitPrice,
+        financialImpact: calculateImpact(baseDelta, unitPrice),
         status: statusForDelta(baseDelta),
         writeAction: writeActionForDelta(baseDelta, baseAdditions.length),
         reason:
@@ -93,6 +95,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
         evidence: [
           { label: 'Snapshot rows', value: snapshots.length },
           { label: 'Matched agreement additions', value: baseAdditions.length },
+          ...(unitPrice ? [{ label: 'Unit price', value: unitPrice.amount }] : []),
           { label: 'Rule', value: rule.notes },
         ],
       });
@@ -104,6 +107,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
       const addOnAdditions = findAdditions(request.agreementAdditions, clientId, agreementId, targetProductCodes(rule.addOn));
       const agreementQuantity = sumAdditions(addOnAdditions);
       const delta = proposedAddOnQuantity - agreementQuantity;
+      const unitPrice = unitPriceForImpact(addOnAdditions, rule.addOn.productCode, rule.addOn.unitPrice);
 
       if ((snapshots.length === 0 && addOnAdditions.length === 0) || (proposedAddOnQuantity === 0 && agreementQuantity === 0)) {
         return;
@@ -123,8 +127,8 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
         proposedQuantity: proposedAddOnQuantity,
         delta,
         unit: rule.addOn.unit,
-        unitPrice: rule.addOn.unitPrice,
-        financialImpact: calculateImpact(delta, rule.addOn.unitPrice),
+        unitPrice,
+        financialImpact: calculateImpact(delta, unitPrice),
         status: statusForDelta(delta),
         writeAction: writeActionForDelta(delta, addOnAdditions.length),
         reason:
@@ -136,7 +140,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
           { label: 'Allowance scope', value: rule.allowance.scope },
           { label: 'Matched agreement additions', value: addOnAdditions.length },
           { label: 'Measured usage', value: sourceQuantity },
-          { label: 'Unit price', value: rule.addOn.unitPrice.amount },
+          ...(unitPrice ? [{ label: 'Unit price', value: unitPrice.amount }] : []),
         ],
       });
     }
@@ -180,6 +184,18 @@ function calculateImpact(delta: number, unitPrice?: MoneyAmount): MoneyAmount {
     amount: delta * unitPrice.amount,
     currency: unitPrice.currency,
   };
+}
+
+function unitPriceForImpact(
+  additions: AgreementAddition[],
+  preferredProductCode: string,
+  fallback?: MoneyAmount,
+): MoneyAmount | undefined {
+  return (
+    additions.find((addition) => addition.productCode === preferredProductCode && addition.unitPrice)?.unitPrice ??
+    additions.find((addition) => addition.unitPrice)?.unitPrice ??
+    fallback
+  );
 }
 
 function statusForDelta(delta: number): ReconciliationStatus {
@@ -234,11 +250,18 @@ function targetProductCodes(target: { productCode: string; targetProductCodes?: 
 }
 
 function matchesRuleProduct(snapshot: UsageSnapshot, rule: QuantityRule) {
-  if (rule.vendorProductKey && snapshot.vendorProductKey) {
-    return snapshot.vendorProductKey === rule.vendorProductKey;
+  const vendorProductKeys = ruleVendorProductKeys(rule);
+  if (vendorProductKeys.length > 0 && snapshot.vendorProductKey) {
+    return vendorProductKeys.includes(snapshot.vendorProductKey);
   }
 
   return targetProductCodes(rule).includes(snapshot.productCode);
+}
+
+function ruleVendorProductKeys(rule: QuantityRule) {
+  return [
+    ...new Set([rule.vendorProductKey, ...(rule.vendorProductKeys ?? [])].filter((key): key is string => Boolean(key))),
+  ];
 }
 
 function matchesDimensions(snapshot: UsageSnapshot, dimensions?: DimensionFilter) {

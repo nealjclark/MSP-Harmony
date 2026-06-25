@@ -22,6 +22,7 @@ import {
   syncMicrosoft365UserLicenseSnapshots,
   testMicrosoft365Connection,
 } from '../vendor/microsoft365/operations';
+import { requireRole } from './auth';
 
 loadDotEnv({ override: false });
 
@@ -33,20 +34,41 @@ type SyncBody = {
   dataset?: 'users' | 'licenses';
 };
 
-type AppRiverSyncQueueMessage = {
-  syncRunId: string;
+type SyncableIntegrationId = Extract<
+  IntegrationId,
+  'connectwise' | 'cove' | 'ncentral' | 'opentext-appriver' | 'microsoft-365'
+>;
+
+type IntegrationSyncQueueMessage = SyncBody & {
+  integrationId: SyncableIntegrationId;
+  requestedBy: string;
+  requestedAt: string;
 };
 
+type AppRiverSyncQueueMessage = {
+  syncRunId: string;
+  subscriptionPageSize?: number;
+  subscriptionMaxPages?: number;
+};
+
+const integrationSyncQueueName = 'integration-sync-work';
 const appRiverSyncQueueName = 'appriver-sync-work';
+const integrationSyncQueueOutput = output.storageQueue({
+  queueName: integrationSyncQueueName,
+  connection: 'AzureWebJobsStorage',
+});
 const appRiverSyncQueueOutput = output.storageQueue({
   queueName: appRiverSyncQueueName,
   connection: 'AzureWebJobsStorage',
 });
 
 export async function listIntegrationsHttp(
-  _request: HttpRequest,
+  request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
   const repositoryContext = createOptionalPostgresSettingsRepository();
 
   try {
@@ -73,6 +95,9 @@ export async function testIntegrationHttp(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
   if (
@@ -186,6 +211,9 @@ export async function syncIntegrationHttp(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const auth = requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
   if (
@@ -209,72 +237,8 @@ export async function syncIntegrationHttp(
   }
 
   const body = (await request.json().catch(() => ({}))) as SyncBody;
-  const provider = createIntegrationSettingsProvider({
-    loadLocalEnv: true,
-    metadataReader: repositoryContext.repository,
-  });
 
   try {
-    if (integrationId === 'connectwise') {
-      const result = await syncConnectWiseAgreementReport({
-        pool: repositoryContext.pool,
-        provider,
-        pageSize: safePositiveInteger(body.pageSize, 100),
-        maxPages: safePositiveInteger(body.maxPages, 50),
-      });
-
-      return jsonResponse(200, {
-        integrationId: 'connectwise',
-        ...result,
-      });
-    }
-
-    if (integrationId === 'cove') {
-      const result = await syncCoveUsageSnapshots({
-        pool: repositoryContext.pool,
-        provider,
-        pageSize: safePositiveInteger(body.pageSize, 10000),
-        maxPages: safePositiveInteger(body.maxPages, 1),
-      });
-
-      return jsonResponse(200, {
-        integrationId: 'cove',
-        ...result,
-      });
-    }
-
-    if (integrationId === 'ncentral') {
-      const result = await syncNcentralUsageSnapshots({
-        pool: repositoryContext.pool,
-        provider,
-        pageSize: safePositiveInteger(body.pageSize, 500),
-        maxPages: safePositiveInteger(body.maxPages, 100),
-      });
-
-      return jsonResponse(200, {
-        integrationId: 'ncentral',
-        ...result,
-      });
-    }
-
-    if (integrationId === 'opentext-appriver') {
-      const result = await startAppRiverQueuedSubscriptionSync({
-        pool: repositoryContext.pool,
-        provider,
-        pageSize: safePositiveInteger(body.pageSize, 1000),
-        maxPages: safePositiveInteger(body.maxPages, 100),
-      });
-      if (result.status === 'queued') {
-        enqueueAppRiverSyncWorker(context, result.syncRunId);
-      }
-
-      return jsonResponse(result.status === 'queued' ? 202 : 200, {
-        integrationId: 'opentext-appriver',
-        queued: result.status === 'queued',
-        ...result,
-      });
-    }
-
     if (body.dataset && body.dataset !== 'users' && body.dataset !== 'licenses') {
       return jsonResponse(400, {
         error: 'Microsoft 365 sync dataset must be "users" or "licenses".',
@@ -282,7 +246,97 @@ export async function syncIntegrationHttp(
       });
     }
 
-    const dataset = body.dataset ?? 'users';
+    const queuedAt = new Date().toISOString();
+    const message = buildIntegrationSyncQueueMessage(integrationId, body, auth.principal.name, queuedAt);
+    enqueueIntegrationSyncWorker(context, message);
+
+    return jsonResponse(202, {
+      integrationId,
+      status: 'queued',
+      queued: true,
+      dataset: integrationId === 'microsoft-365' ? message.dataset : undefined,
+      queuedAt,
+      requestedBy: auth.principal.name,
+    });
+  } catch (error) {
+    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} sync failed.`);
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function processIntegrationSyncQueueMessage(
+  message: IntegrationSyncQueueMessage | string,
+  context: InvocationContext,
+) {
+  const parsed = parseIntegrationSyncQueueMessage(message);
+  const repositoryContext = createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    throw new Error(`${integrationDisplayName(parsed.integrationId)} queued sync needs PostgreSQL settings before it can process.`);
+  }
+
+  const provider = createIntegrationSettingsProvider({
+    loadLocalEnv: true,
+    metadataReader: repositoryContext.repository,
+  });
+
+  try {
+    context.log(
+      `Starting queued ${integrationDisplayName(parsed.integrationId)} sync requested by ${parsed.requestedBy}.`,
+    );
+
+    if (parsed.integrationId === 'connectwise') {
+      const result = await syncConnectWiseAgreementReport({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+      });
+      context.log(`ConnectWise queued sync ${result.syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'cove') {
+      const result = await syncCoveUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+      });
+      context.log(`Cove queued sync ${result.syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'ncentral') {
+      const result = await syncNcentralUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+      });
+      context.log(`N-central queued sync ${result.syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'opentext-appriver') {
+      const result = await startAppRiverQueuedSubscriptionSync({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+      });
+      if (result.status === 'queued') {
+        enqueueAppRiverSyncWorker(context, result.syncRunId, {
+          subscriptionPageSize: parsed.subscriptionPageSize,
+          subscriptionMaxPages: parsed.subscriptionMaxPages,
+        });
+      }
+      context.log(`AppRiver queued sync ${result.syncRunId} ${result.status}.`);
+      return;
+    }
+
+    const dataset = parsed.dataset ?? 'users';
     const result =
       dataset === 'licenses'
         ? await syncMicrosoft365ProductSubscriptionSnapshots({
@@ -292,16 +346,10 @@ export async function syncIntegrationHttp(
         : await syncMicrosoft365UserLicenseSnapshots({
             pool: repositoryContext.pool,
             provider,
-            pageSize: safePositiveInteger(body.pageSize, 100),
-            maxPages: safePositiveInteger(body.maxPages, 100),
+            pageSize: parsed.pageSize,
+            maxPages: parsed.maxPages,
           });
-
-    return jsonResponse(200, {
-      integrationId: 'microsoft-365',
-      ...result,
-    });
-  } catch (error) {
-    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} sync failed.`);
+    context.log(`Microsoft 365 ${dataset} queued sync ${result.syncRunId} completed.`);
   } finally {
     await repositoryContext.close();
   }
@@ -328,13 +376,18 @@ export async function processAppRiverSyncQueueMessage(
       pool: repositoryContext.pool,
       provider,
       syncRunId: parsed.syncRunId,
+      subscriptionPageSize: parsed.subscriptionPageSize,
+      subscriptionMaxPages: parsed.subscriptionMaxPages,
     });
     context.log(
       `AppRiver queued sync ${parsed.syncRunId}: ${result.status}${result.processedCustomerId ? ` ${result.processedCustomerId}` : ''}.`,
     );
 
     if (result.shouldContinue) {
-      enqueueAppRiverSyncWorker(context, parsed.syncRunId);
+      enqueueAppRiverSyncWorker(context, parsed.syncRunId, {
+        subscriptionPageSize: parsed.subscriptionPageSize,
+        subscriptionMaxPages: parsed.subscriptionMaxPages,
+      });
     }
   } finally {
     await repositoryContext.close();
@@ -343,24 +396,31 @@ export async function processAppRiverSyncQueueMessage(
 
 app.http('listIntegrations', {
   methods: ['GET'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'integrations',
   handler: listIntegrationsHttp,
 });
 
 app.http('testIntegration', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'integrations/{integrationId}/test',
   handler: testIntegrationHttp,
 });
 
 app.http('syncIntegration', {
   methods: ['POST'],
-  authLevel: 'function',
+  authLevel: 'anonymous',
   route: 'integrations/{integrationId}/sync',
-  extraOutputs: [appRiverSyncQueueOutput],
+  extraOutputs: [integrationSyncQueueOutput],
   handler: syncIntegrationHttp,
+});
+
+app.storageQueue<IntegrationSyncQueueMessage | string>('processIntegrationSyncQueueMessage', {
+  queueName: integrationSyncQueueName,
+  connection: 'AzureWebJobsStorage',
+  extraOutputs: [appRiverSyncQueueOutput],
+  handler: processIntegrationSyncQueueMessage,
 });
 
 app.storageQueue<AppRiverSyncQueueMessage | string>('processAppRiverSyncQueueMessage', {
@@ -373,40 +433,35 @@ app.storageQueue<AppRiverSyncQueueMessage | string>('processAppRiverSyncQueueMes
 function integrationErrorResponse(error: unknown, fallback: string) {
   if (error instanceof ConnectWiseApiError) {
     return jsonResponse(502, {
-      error: error.message,
+      error: fallback,
       status: error.status,
-      responseText: error.responseText,
     });
   }
 
   if (error instanceof CoveApiError) {
     return jsonResponse(502, {
-      error: error.message,
-      responseText: error.responseText,
+      error: fallback,
     });
   }
 
   if (error instanceof NcentralApiError) {
     return jsonResponse(502, {
-      error: error.message,
+      error: fallback,
       status: error.status,
-      responseText: error.responseText,
     });
   }
 
   if (error instanceof AppRiverApiError) {
     return jsonResponse(502, {
-      error: error.message,
+      error: fallback,
       status: error.status,
-      responseText: error.responseText,
     });
   }
 
   if (error instanceof Microsoft365ApiError) {
     return jsonResponse(502, {
-      error: error.message,
+      error: fallback,
       status: error.status,
-      responseText: error.responseText,
       requestId: error.requestId,
       correlationId: error.correlationId,
     });
@@ -433,10 +488,105 @@ function safePositiveInteger(value: number | undefined, fallback: number) {
   return value;
 }
 
-function enqueueAppRiverSyncWorker(context: InvocationContext, syncRunId: string) {
+function buildIntegrationSyncQueueMessage(
+  integrationId: SyncableIntegrationId,
+  body: SyncBody,
+  requestedBy: string,
+  requestedAt: string,
+): IntegrationSyncQueueMessage {
+  if (integrationId === 'connectwise') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 100),
+      maxPages: safePositiveInteger(body.maxPages, 50),
+    };
+  }
+
+  if (integrationId === 'cove') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 10000),
+      maxPages: safePositiveInteger(body.maxPages, 1),
+    };
+  }
+
+  if (integrationId === 'ncentral') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 500),
+      maxPages: safePositiveInteger(body.maxPages, 100),
+    };
+  }
+
+  if (integrationId === 'opentext-appriver') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 1000),
+      maxPages: safePositiveInteger(body.maxPages, 100),
+      subscriptionPageSize: safePositiveInteger(body.subscriptionPageSize, 100),
+      subscriptionMaxPages: safePositiveInteger(body.subscriptionMaxPages, 25),
+    };
+  }
+
+  return {
+    integrationId,
+    requestedBy,
+    requestedAt,
+    dataset: body.dataset ?? 'users',
+    pageSize: safePositiveInteger(body.pageSize, 100),
+    maxPages: safePositiveInteger(body.maxPages, 100),
+  };
+}
+
+function enqueueIntegrationSyncWorker(context: InvocationContext, message: IntegrationSyncQueueMessage) {
+  context.extraOutputs?.set(integrationSyncQueueOutput, message);
+}
+
+function enqueueAppRiverSyncWorker(
+  context: InvocationContext,
+  syncRunId: string,
+  options: Pick<AppRiverSyncQueueMessage, 'subscriptionPageSize' | 'subscriptionMaxPages'> = {},
+) {
   context.extraOutputs?.set(appRiverSyncQueueOutput, {
     syncRunId,
+    ...options,
   } satisfies AppRiverSyncQueueMessage);
+}
+
+function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage | string): IntegrationSyncQueueMessage {
+  const parsed =
+    typeof message === 'string'
+      ? (JSON.parse(message) as Partial<IntegrationSyncQueueMessage>)
+      : message;
+
+  if (
+    parsed.integrationId !== 'connectwise' &&
+    parsed.integrationId !== 'cove' &&
+    parsed.integrationId !== 'ncentral' &&
+    parsed.integrationId !== 'opentext-appriver' &&
+    parsed.integrationId !== 'microsoft-365'
+  ) {
+    throw new Error('Integration sync queue message has an unsupported integrationId.');
+  }
+
+  if (parsed.dataset && parsed.dataset !== 'users' && parsed.dataset !== 'licenses') {
+    throw new Error('Microsoft 365 sync queue message has an unsupported dataset.');
+  }
+
+  return buildIntegrationSyncQueueMessage(
+    parsed.integrationId,
+    parsed,
+    parsed.requestedBy || 'unknown',
+    parsed.requestedAt || new Date().toISOString(),
+  );
 }
 
 function parseAppRiverSyncQueueMessage(message: AppRiverSyncQueueMessage | string): AppRiverSyncQueueMessage {
@@ -451,5 +601,7 @@ function parseAppRiverSyncQueueMessage(message: AppRiverSyncQueueMessage | strin
 
   return {
     syncRunId: parsed.syncRunId,
+    subscriptionPageSize: parsed.subscriptionPageSize,
+    subscriptionMaxPages: parsed.subscriptionMaxPages,
   };
 }
