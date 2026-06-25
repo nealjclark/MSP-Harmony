@@ -139,7 +139,7 @@ async function resolveApplicationPrincipal(headerPrincipal: AuthPrincipal): Prom
   }
 
   if (!hasDatabaseSettings()) {
-    return headerPrincipal;
+    return allowsHeaderRoleAuthFallback() ? headerPrincipal : { ...headerPrincipal, roles: [] };
   }
 
   return {
@@ -251,6 +251,10 @@ function bootstrapRoleFor(value: string | undefined): AppRole | undefined {
     .filter(Boolean);
 
   return bootstrapEmails.includes(email) ? 'Admin' : undefined;
+}
+
+function allowsHeaderRoleAuthFallback() {
+  return ['1', 'true', 'yes'].includes((process.env.ALLOW_HEADER_ROLE_AUTH ?? '').trim().toLowerCase());
 }
 
 function normalizeEmail(value: string | undefined) {

@@ -1,4 +1,15 @@
 {
+  "auth": {
+    "identityProviders": {
+      "azureActiveDirectory": {
+        "registration": {
+          "openIdIssuer": "https://login.microsoftonline.com/30a502d2-8570-4207-9b98-ec48dd176588/v2.0",
+          "clientIdSettingName": "SWA_AUTH_AAD_CLIENT_ID",
+          "clientSecretSettingName": "SWA_AUTH_AAD_CLIENT_SECRET"
+        }
+      }
+    }
+  },
   "routes": [
     {
       "route": "/api/*",

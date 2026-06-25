@@ -32,6 +32,17 @@ Write states:
 - `Approver`: Reviews dry-run plans and approves write batches.
 - `Analyst`: Reviews findings, imports, and history without managing settings or writing changes.
 
+## Authentication Boundary
+
+The production Azure Static Web App must use a custom Microsoft Entra ID provider pinned to tenant `30a502d2-8570-4207-9b98-ec48dd176588`.
+Do not rely on the preconfigured Static Web Apps `aad` provider by itself: Microsoft allows any Microsoft account to authenticate through that provider.
+
+The SWA custom provider reads `SWA_AUTH_AAD_CLIENT_ID` and `SWA_AUTH_AAD_CLIENT_SECRET` from Static Web Apps application settings. The app registration must use single-tenant sign-in and include the production callback URL:
+
+`https://wonderful-bay-0fe59020f.7.azurestaticapps.net/.auth/login/aad/callback`
+
+Backend role checks are resolved from `app_users` or bootstrap admin email settings. If PostgreSQL-backed authorization is unavailable, API access fails closed unless `ALLOW_HEADER_ROLE_AUTH=true` is explicitly set for local development.
+
 ## Audit Behavior
 
 Audit records are append-only. Approval events and ConnectWise write results must record who performed the action, when it happened, the source run or batch, and the payload needed to reconstruct the decision.
