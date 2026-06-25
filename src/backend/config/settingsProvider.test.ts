@@ -49,6 +49,43 @@ async function run() {
   assert.equal(databaseBackedConnectWise.nonSecrets.clientId, 'db-client-id');
   assert.equal(databaseBackedConnectWise.validation.lastTestResult, 'success');
 
+  let skippedSecretReads = 0;
+  const metadataOnlyProvider = createIntegrationSettingsProvider({
+    env: {
+      KEY_VAULT_URL: 'https://mspharmony-dev.vault.azure.net/',
+    },
+    loadSecrets: false,
+    secretReader: {
+      source: 'key-vault',
+      async getSecret() {
+        skippedSecretReads += 1;
+        throw new Error('Secret reader should not be called when loadSecrets is false.');
+      },
+    },
+    metadataReader: {
+      async loadMetadata(integrationId) {
+        if (integrationId !== 'connectwise') return undefined;
+
+        return {
+          nonSecrets: {
+            companyId: 'db-company',
+            clientId: 'db-client-id',
+          },
+          availableKeyVaultSecrets: [
+            'mspharmony-connectwise-public-key',
+            'mspharmony-connectwise-private-key',
+          ],
+          lastTestResult: 'success',
+        };
+      },
+    },
+  });
+  const metadataOnlyConnectWise = await metadataOnlyProvider.getIntegrationSettings('connectwise');
+  assert.equal(skippedSecretReads, 0);
+  assert.deepEqual(metadataOnlyConnectWise.secrets, {});
+  assert.equal(metadataOnlyConnectWise.secretSource, 'key-vault');
+  assert.equal(metadataOnlyConnectWise.validation.configuredStatus, 'connected');
+
   const keyVaultReader: SecretReader = {
     source: 'key-vault',
     async getSecret(name: string) {

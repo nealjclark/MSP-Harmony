@@ -24,6 +24,7 @@ export type IntegrationRuntimeSettings = {
 
 export type IntegrationSettingsMetadata = {
   nonSecrets: Record<string, string | undefined>;
+  availableKeyVaultSecrets?: string[];
   lastTestedAt?: string;
   lastTestResult?: IntegrationTestResult;
 };
@@ -47,6 +48,7 @@ export type IntegrationSettingsProviderOptions = {
   secretReader?: SecretReader;
   metadataReader?: IntegrationSettingsMetadataReader;
   keyVaultUrl?: string;
+  loadSecrets?: boolean;
   loadLocalEnv?: boolean;
   localEnvPath?: string;
 };
@@ -66,6 +68,7 @@ export function createIntegrationSettingsProvider(options: IntegrationSettingsPr
   const env = options.env ?? process.env;
   const keyVaultUrl = options.keyVaultUrl ?? env.KEY_VAULT_URL;
   const secretReader = options.secretReader ?? createDefaultSecretReader(env, keyVaultUrl);
+  const loadSecrets = options.loadSecrets ?? true;
 
   return {
     async getIntegrationSettings(integrationId: IntegrationId) {
@@ -75,12 +78,12 @@ export function createIntegrationSettingsProvider(options: IntegrationSettingsPr
         throw new Error(`Integration "${integrationId}" is not registered.`);
       }
 
-      return loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader);
+      return loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader, loadSecrets);
     },
     async listIntegrationSettings() {
       return Promise.all(
         listIntegrationSettingsDefinitions().map((definition) =>
-          loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader),
+          loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader, loadSecrets),
         ),
       );
     },
@@ -133,6 +136,7 @@ async function loadIntegrationRuntimeSettings(
   env: SettingsEnvironment,
   keyVaultUrl?: string,
   metadataReader?: IntegrationSettingsMetadataReader,
+  loadSecrets = true,
 ): Promise<IntegrationRuntimeSettings> {
   const metadata = await metadataReader?.loadMetadata(definition.integrationId);
   const nonSecretsFromEnvironment = Object.fromEntries(
@@ -145,16 +149,23 @@ async function loadIntegrationRuntimeSettings(
     ...nonSecretsFromEnvironment,
     ...cleanNonSecrets(metadata?.nonSecrets ?? {}),
   };
-  const secretEntries = await Promise.all(
-    definition.requiredSecrets.map(async (setting) => [
-      setting.key,
-      await secretReader.getSecret(setting.keyVaultSecretName, setting.envVar),
-    ] as const),
-  );
+  const secretEntries = loadSecrets
+    ? await Promise.all(
+        definition.requiredSecrets.map(async (setting) => [
+          setting.key,
+          await secretReader.getSecret(setting.keyVaultSecretName, setting.envVar),
+        ] as const),
+      )
+    : [];
   const secrets = Object.fromEntries(secretEntries);
-  const availableKeyVaultSecrets = definition.requiredSecrets
-    .filter((setting) => hasValue(secrets[setting.key]))
-    .map((setting) => setting.keyVaultSecretName);
+  const availableKeyVaultSecrets = loadSecrets
+    ? definition.requiredSecrets
+        .filter((setting) => hasValue(secrets[setting.key]))
+        .map((setting) => setting.keyVaultSecretName)
+    : metadata?.availableKeyVaultSecrets ??
+      definition.requiredSecrets
+        .filter((setting) => hasValue(env[setting.envVar]))
+        .map((setting) => setting.keyVaultSecretName);
   const validation = validateIntegrationSettings(definition, {
     integrationId: definition.integrationId,
     nonSecrets,

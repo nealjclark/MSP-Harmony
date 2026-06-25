@@ -126,6 +126,10 @@ async function resolveApplicationPrincipal(headerPrincipal: AuthPrincipal): Prom
     };
   }
 
+  if (allowsHeaderRoleAuthFallback()) {
+    return headerPrincipal;
+  }
+
   const databasePrincipal = await readDatabasePrincipal(headerPrincipal).catch((error: unknown) => {
     if (isMissingAppUsersTable(error)) {
       return undefined;
@@ -136,10 +140,6 @@ async function resolveApplicationPrincipal(headerPrincipal: AuthPrincipal): Prom
 
   if (databasePrincipal) {
     return databasePrincipal;
-  }
-
-  if (!hasDatabaseSettings()) {
-    return allowsHeaderRoleAuthFallback() ? headerPrincipal : { ...headerPrincipal, roles: [] };
   }
 
   return {
@@ -198,7 +198,7 @@ async function readDatabasePrincipal(headerPrincipal: AuthPrincipal): Promise<Au
 }
 
 async function upsertBootstrapUser(headerPrincipal: AuthPrincipal, role: AppRole) {
-  if (!hasDatabaseSettings()) {
+  if (!hasDatabaseSettings() || bootstrapUpsertDisabled()) {
     return undefined;
   }
 
@@ -255,6 +255,10 @@ function bootstrapRoleFor(value: string | undefined): AppRole | undefined {
 
 function allowsHeaderRoleAuthFallback() {
   return ['1', 'true', 'yes'].includes((process.env.ALLOW_HEADER_ROLE_AUTH ?? '').trim().toLowerCase());
+}
+
+function bootstrapUpsertDisabled() {
+  return ['1', 'true', 'yes'].includes((process.env.AUTH_DISABLE_BOOTSTRAP_UPSERT ?? '').trim().toLowerCase());
 }
 
 function normalizeEmail(value: string | undefined) {

@@ -3,6 +3,8 @@
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true or an Azure Storage connection string",
     "FUNCTIONS_WORKER_RUNTIME": "node",
-    "ALLOW_HEADER_ROLE_AUTH": "false"
+    "ALLOW_HEADER_ROLE_AUTH": "false",
+    "DEV_AUTH_EMAIL": "local.admin@example.com",
+    "DEV_AUTH_ROLE": "Admin"
   }
 }

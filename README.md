@@ -285,6 +285,17 @@ Useful commands:
 - `func start` for backend locally (if using Azure Functions Core Tools)
 - `az staticwebapp create` or GitHub Actions for deploy
 
+### Local development auth
+
+Production sign-in is pinned to the MSP Harmony Entra tenant. For local development, keep `ALLOW_HEADER_ROLE_AUTH=true` in your ignored `local.settings.json`. The Vite dev proxy reads that setting and injects a mock Static Web Apps principal into `/api` calls.
+
+Optional local-only overrides:
+
+- `DEV_AUTH_EMAIL`: defaults to `local.admin@example.com`
+- `DEV_AUTH_ROLE`: defaults to `Admin`
+
+Leave `ALLOW_HEADER_ROLE_AUTH=false` in Azure production settings.
+
 ---
 
 Ready to move forward with the actual scaffold files and Azure deployment templates when you want.

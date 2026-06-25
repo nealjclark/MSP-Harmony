@@ -55,6 +55,7 @@ export async function listRuntimeIntegrations(
   const provider = createIntegrationSettingsProvider({
     loadLocalEnv: true,
     metadataReader: options.metadataReader,
+    loadSecrets: false,
   });
   const settings = await provider.listIntegrationSettings();
 

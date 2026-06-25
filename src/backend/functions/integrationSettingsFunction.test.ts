@@ -3,6 +3,7 @@ import { updateIntegrationSettingsHttp } from './integrationSettingsFunction';
 
 const originalKeyVaultUrl = process.env.KEY_VAULT_URL;
 const originalBootstrapAdminEmails = process.env.BOOTSTRAP_ADMIN_EMAILS;
+const originalAuthDisableBootstrapUpsert = process.env.AUTH_DISABLE_BOOTSTRAP_UPSERT;
 const adminHeaders = new Headers({
   'x-ms-client-principal-name': 'admin@example.com',
   'x-ms-client-principal-role': 'Admin',
@@ -11,6 +12,7 @@ const adminHeaders = new Headers({
 async function run() {
   process.env.KEY_VAULT_URL = '';
   process.env.BOOTSTRAP_ADMIN_EMAILS = 'admin@example.com';
+  process.env.AUTH_DISABLE_BOOTSTRAP_UPSERT = 'true';
 
   const unauthenticatedResponse = await updateIntegrationSettingsHttp(
     {
@@ -39,6 +41,7 @@ async function run() {
 
   restoreEnv('KEY_VAULT_URL', originalKeyVaultUrl);
   restoreEnv('BOOTSTRAP_ADMIN_EMAILS', originalBootstrapAdminEmails);
+  restoreEnv('AUTH_DISABLE_BOOTSTRAP_UPSERT', originalAuthDisableBootstrapUpsert);
 
   console.log('integration settings function tests passed');
 }
@@ -46,6 +49,7 @@ async function run() {
 run().catch((error: unknown) => {
   restoreEnv('KEY_VAULT_URL', originalKeyVaultUrl);
   restoreEnv('BOOTSTRAP_ADMIN_EMAILS', originalBootstrapAdminEmails);
+  restoreEnv('AUTH_DISABLE_BOOTSTRAP_UPSERT', originalAuthDisableBootstrapUpsert);
   console.error(error);
   process.exitCode = 1;
 });

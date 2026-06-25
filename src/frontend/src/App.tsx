@@ -25,8 +25,10 @@ import {
   Plug,
   RefreshCcw,
   Search,
+  Settings,
   SlidersHorizontal,
   Upload,
+  UserPlus,
   Users,
   X,
   Zap,
@@ -51,7 +53,9 @@ import {
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
 
-type View = 'reconcile' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit';
+type View = 'reconcile' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
+type AppRole = 'Admin' | 'Approver' | 'Analyst';
+type ManagedUserStatus = 'active' | 'disabled';
 type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'ready' | 'approved' | 'blocked' | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'credentials' | 'sync';
@@ -191,6 +195,26 @@ type RuntimeIntegrationsResponse = {
   integrations: RuntimeIntegrationSummary[];
   nonSecretStorage: 'database' | 'not-configured';
   missingDatabaseSettings: string[];
+};
+
+type ManagedAppUser = {
+  id: string;
+  aadUserId?: string;
+  email: string;
+  displayName?: string;
+  role: AppRole;
+  status: ManagedUserStatus;
+  lastSeenAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ManagedUsersResponse = {
+  users: ManagedAppUser[];
+  roles: AppRole[];
+  statuses: ManagedUserStatus[];
 };
 
 type RawSyncRun = {
@@ -768,6 +792,10 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'audit', label: 'Audit', icon: History },
 ];
 
+const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
+  { id: 'settings', label: 'Settings', icon: Settings },
+];
+
 const defaultView: View = 'reconcile';
 
 const viewPaths: Record<View, string> = {
@@ -778,6 +806,7 @@ const viewPaths: Record<View, string> = {
   imports: '/imports',
   agreements: '/agreements',
   audit: '/audit',
+  settings: '/settings',
 };
 
 const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean; description: string }> = [
@@ -1444,7 +1473,7 @@ function viewFromPath(pathname: string): View | null {
 }
 
 function isView(value: string | null): value is View {
-  return Boolean(value && navItems.some((item) => item.id === value));
+  return Boolean(value && [...navItems, ...utilityNavItems].some((item) => item.id === value));
 }
 
 function urlForView(view: View) {
@@ -1539,6 +1568,63 @@ async function fetchRuntimeIntegrations() {
     nonSecretStorage: body.nonSecretStorage ?? 'not-configured',
     missingDatabaseSettings: body.missingDatabaseSettings ?? [],
   } satisfies RuntimeIntegrationsResponse;
+}
+
+async function fetchManagedUsers() {
+  const response = await fetch('/api/users');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `User load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as ManagedUsersResponse;
+}
+
+async function createManagedUserRequest(payload: {
+  email: string;
+  displayName: string;
+  role: AppRole;
+  status: ManagedUserStatus;
+}) {
+  const response = await fetch('/api/users', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `User save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { user: ManagedAppUser; created: boolean };
+}
+
+async function updateManagedUserRequest(
+  userId: string,
+  payload: {
+    displayName: string;
+    role: AppRole;
+    status: ManagedUserStatus;
+  },
+) {
+  const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `User update failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { user: ManagedAppUser };
 }
 
 async function fetchRawSyncRuns(integrationId: IntegrationId, dataset?: RawSyncDataset) {
@@ -3236,7 +3322,7 @@ function App() {
           </div>
         </div>
 
-        <nav className="nav-list">
+        <nav className="nav-list nav-list-primary">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -3270,6 +3356,27 @@ function App() {
                   </div>
                 ) : null}
               </div>
+            );
+          })}
+        </nav>
+
+        <nav className="nav-list nav-list-utility" aria-label="Application settings">
+          {utilityNavItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <a
+                aria-current={view === item.id ? 'page' : undefined}
+                className={view === item.id ? 'nav-item active' : 'nav-item'}
+                href={urlForView(item.id)}
+                key={item.id}
+                onClick={(event) => {
+                  event.preventDefault();
+                  navigateToView(item.id);
+                }}
+              >
+                <Icon size={18} />
+                <span>{item.label}</span>
+              </a>
             );
           })}
         </nav>
@@ -3437,6 +3544,7 @@ function App() {
             />
           )}
           {view === 'audit' && <AuditView issues={issues} />}
+          {view === 'settings' && <SettingsView />}
         </main>
       </div>
 
@@ -3504,9 +3612,349 @@ function pageTitle(view: View) {
       return 'Agreement workspace';
     case 'audit':
       return 'Audit history';
+    case 'settings':
+      return 'Settings';
     default:
       return 'Reconciliation command center';
   }
+}
+
+type ManagedUserDraft = {
+  displayName: string;
+  role: AppRole;
+  status: ManagedUserStatus;
+};
+
+function SettingsView() {
+  const [users, setUsers] = useState<ManagedAppUser[]>([]);
+  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Analyst']);
+  const [statuses, setStatuses] = useState<ManagedUserStatus[]>(['active', 'disabled']);
+  const [drafts, setDrafts] = useState<Record<string, ManagedUserDraft>>({});
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [message, setMessage] = useState('Loading users...');
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [newUser, setNewUser] = useState({
+    email: '',
+    displayName: '',
+    role: 'Analyst' as AppRole,
+    status: 'active' as ManagedUserStatus,
+  });
+
+  const activeAdmins = users.filter((user) => user.role === 'Admin' && user.status === 'active').length;
+  const activeUsers = users.filter((user) => user.status === 'active').length;
+  const disabledUsers = users.filter((user) => user.status === 'disabled').length;
+
+  const applyUsersResponse = (response: ManagedUsersResponse) => {
+    setUsers(response.users);
+    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'Analyst']);
+    setStatuses(response.statuses.length > 0 ? response.statuses : ['active', 'disabled']);
+    setDrafts(draftsFromUsers(response.users));
+  };
+
+  const refreshUsers = async () => {
+    setLoadState('loading');
+    setMessage('Refreshing users...');
+
+    try {
+      const response = await fetchManagedUsers();
+      applyUsersResponse(response);
+      setLoadState('ready');
+      setMessage('User access list loaded.');
+    } catch (error) {
+      setLoadState('failed');
+      setMessage(error instanceof Error ? error.message : 'Unable to load users.');
+    }
+  };
+
+  useEffect(() => {
+    void refreshUsers();
+  }, []);
+
+  const createUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSavingKey('new');
+    setMessage('Saving user...');
+
+    try {
+      const result = await createManagedUserRequest(newUser);
+      const nextUsers = upsertUser(users, result.user);
+      setUsers(nextUsers);
+      setDrafts(draftsFromUsers(nextUsers));
+      setNewUser({
+        email: '',
+        displayName: '',
+        role: 'Analyst',
+        status: 'active',
+      });
+      setLoadState('ready');
+      setMessage(result.created ? 'User added.' : 'Existing user updated.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to save user.');
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const saveUser = async (user: ManagedAppUser) => {
+    const draft = drafts[user.id];
+    if (!draft) {
+      return;
+    }
+
+    setSavingKey(user.id);
+    setMessage(`Saving ${user.email}...`);
+
+    try {
+      const result = await updateManagedUserRequest(user.id, draft);
+      const nextUsers = upsertUser(users, result.user);
+      setUsers(nextUsers);
+      setDrafts(draftsFromUsers(nextUsers));
+      setLoadState('ready');
+      setMessage(`${result.user.email} updated.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update user.');
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  return (
+    <section className="settings-page" aria-label="Application settings">
+      <div className="integrations-live-bar">
+        <div>
+          <span className={`live-dot ${loadState}`} />
+          <strong>{loadState === 'ready' ? 'User access' : loadState === 'loading' ? 'Refreshing' : 'Access issue'}</strong>
+          <span>{message}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>{activeUsers.toLocaleString()} active</span>
+          <span>{activeAdmins.toLocaleString()} admins</span>
+          <span>{disabledUsers.toLocaleString()} disabled</span>
+          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void refreshUsers()} type="button">
+            <RefreshCcw size={16} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <form className="settings-user-form" onSubmit={createUser}>
+        <div>
+          <span className="section-kicker">Access control</span>
+          <h2>Add or update a user</h2>
+        </div>
+        <label>
+          <span>Email</span>
+          <input
+            autoComplete="email"
+            onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))}
+            placeholder="person@company.com"
+            required
+            type="email"
+            value={newUser.email}
+          />
+        </label>
+        <label>
+          <span>Name</span>
+          <input
+            autoComplete="name"
+            onChange={(event) => setNewUser((current) => ({ ...current, displayName: event.target.value }))}
+            placeholder="Display name"
+            value={newUser.displayName}
+          />
+        </label>
+        <label>
+          <span>Role</span>
+          <select
+            onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value as AppRole }))}
+            value={newUser.role}
+          >
+            {roles.map((role) => (
+              <option key={role} value={role}>
+                {role}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Status</span>
+          <select
+            onChange={(event) =>
+              setNewUser((current) => ({ ...current, status: event.target.value as ManagedUserStatus }))
+            }
+            value={newUser.status}
+          >
+            {statuses.map((status) => (
+              <option key={status} value={status}>
+                {managedUserStatusLabel(status)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="button primary compact" disabled={savingKey === 'new'} type="submit">
+          <UserPlus size={16} />
+          {savingKey === 'new' ? 'Saving' : 'Add User'}
+        </button>
+      </form>
+
+      <section className="settings-panel" aria-label="Users and roles">
+        <div className="settings-panel-header">
+          <div>
+            <span className="section-kicker">Users</span>
+            <h2>Roles and status</h2>
+          </div>
+          <p>Admins can manage settings, integrations, mappings, syncs, and user access.</p>
+        </div>
+
+        {users.length === 0 && loadState !== 'loading' ? (
+          <div className="empty-state">
+            <Users size={22} />
+            <strong>No application users found.</strong>
+            <span>Add an Admin user before inviting the rest of the team.</span>
+          </div>
+        ) : (
+          <div className="settings-user-table-scroll">
+            <table className="settings-user-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Last seen</th>
+                  <th>Updated</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((user) => {
+                  const draft = drafts[user.id] ?? draftFromUser(user);
+                  const changed = userDraftChanged(user, draft);
+
+                  return (
+                    <tr key={user.id}>
+                      <td>
+                        <div className="settings-user-identity">
+                          <input
+                            onChange={(event) =>
+                              setDrafts((current) => ({
+                                ...current,
+                                [user.id]: {
+                                  ...draft,
+                                  displayName: event.target.value,
+                                },
+                              }))
+                            }
+                            placeholder={user.email}
+                            value={draft.displayName}
+                          />
+                          <span>{user.email}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <select
+                          onChange={(event) =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [user.id]: {
+                                ...draft,
+                                role: event.target.value as AppRole,
+                              },
+                            }))
+                          }
+                          value={draft.role}
+                        >
+                          {roles.map((role) => (
+                            <option key={role} value={role}>
+                              {role}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          onChange={(event) =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [user.id]: {
+                                ...draft,
+                                status: event.target.value as ManagedUserStatus,
+                              },
+                            }))
+                          }
+                          value={draft.status}
+                        >
+                          {statuses.map((status) => (
+                            <option key={status} value={status}>
+                              {managedUserStatusLabel(status)}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{formatDateTime(user.lastSeenAt) ?? 'Never'}</td>
+                      <td>{formatDateTime(user.updatedAt) ?? '-'}</td>
+                      <td>
+                        <button
+                          className="button secondary compact"
+                          disabled={!changed || savingKey === user.id}
+                          onClick={() => void saveUser(user)}
+                          type="button"
+                        >
+                          <Check size={16} />
+                          {savingKey === user.id ? 'Saving' : 'Save'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function draftFromUser(user: ManagedAppUser): ManagedUserDraft {
+  return {
+    displayName: user.displayName ?? '',
+    role: user.role,
+    status: user.status,
+  };
+}
+
+function draftsFromUsers(users: ManagedAppUser[]) {
+  return users.reduce<Record<string, ManagedUserDraft>>((drafts, user) => {
+    drafts[user.id] = draftFromUser(user);
+    return drafts;
+  }, {});
+}
+
+function userDraftChanged(user: ManagedAppUser, draft: ManagedUserDraft) {
+  return (
+    (user.displayName ?? '') !== draft.displayName.trim() ||
+    user.role !== draft.role ||
+    user.status !== draft.status
+  );
+}
+
+function upsertUser(users: ManagedAppUser[], user: ManagedAppUser) {
+  const nextUsers = users.some((existing) => existing.id === user.id)
+    ? users.map((existing) => (existing.id === user.id ? user : existing))
+    : [...users, user];
+
+  return nextUsers.sort(compareManagedUsers);
+}
+
+function compareManagedUsers(left: ManagedAppUser, right: ManagedAppUser) {
+  if (left.status !== right.status) {
+    return left.status === 'active' ? -1 : 1;
+  }
+
+  return left.email.localeCompare(right.email);
+}
+
+function managedUserStatusLabel(status: ManagedUserStatus) {
+  return status === 'active' ? 'Active' : 'Disabled';
 }
 
 function ReconcileView(props: {

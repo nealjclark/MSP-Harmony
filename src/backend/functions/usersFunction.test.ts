@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
-import { automapMappingsHttp, listMappingsHttp, updateAccountMappingHttp } from './mappingsFunction';
+import { listUsersHttp } from './usersFunction';
 
 const envKeys = [
   'BOOTSTRAP_ADMIN_EMAILS',
-  'AUTH_DISABLE_BOOTSTRAP_UPSERT',
   'DATABASE_URL',
   'DATABASE_HOST',
   'DATABASE_NAME',
   'DATABASE_USER',
   'DATABASE_PASSWORD',
 ] as const;
+
 const adminHeaders = new Headers({
   'x-ms-client-principal-name': 'admin@example.com',
   'x-ms-client-principal-role': 'Admin',
@@ -18,46 +18,28 @@ const adminHeaders = new Headers({
 async function run() {
   const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
   process.env.BOOTSTRAP_ADMIN_EMAILS = 'admin@example.com';
-  process.env.AUTH_DISABLE_BOOTSTRAP_UPSERT = 'true';
   for (const key of envKeys) {
-    if (key === 'BOOTSTRAP_ADMIN_EMAILS' || key === 'AUTH_DISABLE_BOOTSTRAP_UPSERT') continue;
+    if (key === 'BOOTSTRAP_ADMIN_EMAILS') continue;
     process.env[key] = '';
   }
 
   try {
-    const unsupportedResponse = await listMappingsHttp(
+    const unauthenticatedResponse = await listUsersHttp(
       {
-        params: { vendorId: 'unknown' },
-        headers: adminHeaders,
+        headers: new Headers(),
       } as never,
       { log() {} } as never,
     );
-    assert.equal(unsupportedResponse.status, 400);
+    assert.equal(unauthenticatedResponse.status, 401);
 
-    const missingDatabaseResponse = await automapMappingsHttp(
+    const missingDatabaseResponse = await listUsersHttp(
       {
-        params: { vendorId: 'cove' },
         headers: adminHeaders,
-        async json() {
-          return {};
-        },
       } as never,
       { log() {} } as never,
     );
-    assert.equal(missingDatabaseResponse.status, 400);
+    assert.equal(missingDatabaseResponse.status, 500);
     assert.match(String((missingDatabaseResponse.jsonBody as { error?: string }).error), /PostgreSQL/);
-
-    const invalidStatusResponse = await updateAccountMappingHttp(
-      {
-        params: { vendorId: 'cove', externalAccountId: '101' },
-        headers: adminHeaders,
-        async json() {
-          return { status: 'bogus' };
-        },
-      } as never,
-      { log() {} } as never,
-    );
-    assert.equal(invalidStatusResponse.status, 400);
   } finally {
     for (const key of envKeys) {
       const originalValue = originalEnv[key];
@@ -69,7 +51,7 @@ async function run() {
     }
   }
 
-  console.log('mapping function tests passed');
+  console.log('users function tests passed');
 }
 
 run().catch((error: unknown) => {

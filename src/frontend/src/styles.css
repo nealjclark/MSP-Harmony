@@ -44,7 +44,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -111,6 +112,10 @@ button {
 .nav-list {
   display: grid;
   gap: 7px;
+}
+
+.nav-list-utility {
+  margin-top: auto;
 }
 
 .nav-group {
@@ -1495,6 +1500,137 @@ h2 {
 .mappings-page {
   display: grid;
   gap: 14px;
+}
+
+.settings-page {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-user-form,
+.settings-panel {
+  border: 1px solid #d7e1eb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(31, 46, 39, 0.05);
+}
+
+.settings-user-form {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) minmax(220px, 1fr) minmax(180px, 0.9fr) 150px 140px auto;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+}
+
+.settings-user-form h2,
+.settings-panel-header h2 {
+  font-size: 1.05rem;
+}
+
+.settings-user-form label,
+.settings-user-identity {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-user-form label span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.settings-user-form input,
+.settings-user-form select,
+.settings-user-table input,
+.settings-user-table select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #d7e1eb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.settings-user-form input,
+.settings-user-table input {
+  padding: 0 10px;
+}
+
+.settings-user-form select,
+.settings-user-table select {
+  padding: 0 8px;
+}
+
+.settings-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #d7e1eb;
+}
+
+.settings-panel-header p {
+  max-width: 520px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.settings-user-table-scroll {
+  overflow: auto;
+}
+
+.settings-user-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.settings-user-table th,
+.settings-user-table td {
+  padding: 11px 12px;
+  border-bottom: 1px solid #e5edf4;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.settings-user-table th {
+  background: #f7fafc;
+  color: #46617d;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.settings-user-table th:nth-child(1),
+.settings-user-table td:nth-child(1) {
+  width: 30%;
+}
+
+.settings-user-table th:nth-child(2),
+.settings-user-table td:nth-child(2),
+.settings-user-table th:nth-child(3),
+.settings-user-table td:nth-child(3) {
+  width: 132px;
+}
+
+.settings-user-table th:nth-child(6),
+.settings-user-table td:nth-child(6) {
+  width: 110px;
+}
+
+.settings-user-table tbody tr:hover td {
+  background: #fbfdf9;
+}
+
+.settings-user-identity span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .mapping-metrics .metric-card {
@@ -3323,6 +3459,7 @@ h2 {
   .agreements-view,
   .mapping-review-grid,
   .integrations-live-bar,
+  .settings-user-form,
   .product-bundle-form,
   .usage-override-form {
     grid-template-columns: 1fr;
@@ -3393,6 +3530,11 @@ h2 {
     flex: 1;
     overflow-x: auto;
     padding-bottom: 2px;
+  }
+
+  .nav-list-utility {
+    flex: 0 0 auto;
+    margin-top: 0;
   }
 
   .nav-item {
@@ -3474,6 +3616,11 @@ h2 {
 
   .integration-stats {
     grid-template-columns: 1fr;
+  }
+
+  .settings-panel-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .mapping-review-row.account,

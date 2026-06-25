@@ -33,6 +33,26 @@ const repository = new PostgresIntegrationSettingsRepository({
       };
     }
 
+    if (sql.includes('from integration_settings')) {
+      return {
+        rows: [
+          {
+            endpoint: 'https://api-na.myconnectwise.net',
+            non_secret_settings: {
+              companyId: 'bmb',
+              clientId: '00000000-0000-0000-0000-000000000000',
+            },
+            required_key_vault_secrets: [
+              'mspharmony-connectwise-public-key',
+              'mspharmony-connectwise-private-key',
+            ],
+            last_tested_at: new Date('2026-06-13T11:00:00.000Z'),
+            last_test_result: 'success',
+          },
+        ] as T[],
+      };
+    }
+
     return { rows: [] as T[] };
   },
 });
@@ -53,6 +73,15 @@ async function run() {
 
   const appRiverStatus = await repository.loadOperationalStatus('opentext-appriver');
   assert.equal(appRiverStatus?.storedRecordCount, 34);
+
+  const metadata = await repository.loadMetadata('connectwise');
+  assert.equal(metadata?.nonSecrets.companyId, 'bmb');
+  assert.deepEqual(metadata?.availableKeyVaultSecrets, [
+    'mspharmony-connectwise-public-key',
+    'mspharmony-connectwise-private-key',
+  ]);
+  assert.equal(metadata?.lastTestedAt, '2026-06-13T11:00:00.000Z');
+  assert.equal(metadata?.lastTestResult, 'success');
 
   console.log('integration settings repository tests passed');
 }

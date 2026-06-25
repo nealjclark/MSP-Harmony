@@ -14,6 +14,7 @@ type Queryable = {
 type IntegrationSettingsRow = {
   endpoint: string | null;
   non_secret_settings: unknown;
+  required_key_vault_secrets: unknown;
   last_tested_at: Date | string | null;
   last_test_result: IntegrationTestResult | null;
 };
@@ -112,7 +113,7 @@ export class PostgresIntegrationSettingsRepository
 
   async loadMetadata(integrationId: IntegrationId): Promise<IntegrationSettingsMetadata | undefined> {
     const result = await this.database.query<IntegrationSettingsRow>(
-      `select endpoint, non_secret_settings, last_tested_at, last_test_result
+      `select endpoint, non_secret_settings, required_key_vault_secrets, last_tested_at, last_test_result
        from integration_settings
        where integration_id = $1`,
       [integrationId],
@@ -128,6 +129,7 @@ export class PostgresIntegrationSettingsRepository
         endpoint: row.endpoint ?? undefined,
         ...recordFromJson(row.non_secret_settings),
       }),
+      availableKeyVaultSecrets: stringArrayFromJson(row.required_key_vault_secrets),
       lastTestedAt: isoDate(row.last_tested_at),
       lastTestResult: row.last_test_result ?? undefined,
     };
@@ -252,6 +254,14 @@ function recordFromJson(value: unknown): Record<string, string | undefined> {
       .filter(([, item]) => typeof item === 'string')
       .map(([key, item]) => [key, item as string]),
   );
+}
+
+function stringArrayFromJson(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 
 function isoDate(value: Date | string | null) {
