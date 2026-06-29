@@ -53,7 +53,7 @@ import {
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
 
-type View = 'reconcile' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
+type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
 type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'ready' | 'approved' | 'blocked' | 'skipped';
@@ -229,6 +229,9 @@ type RawSyncRun = {
 };
 
 type RawSyncDataset = 'users' | 'licenses';
+type DattoSyncTarget = 'datto-saas' | 'datto-saas-bcdr';
+type IntegrationSyncTarget = RawSyncDataset | DattoSyncTarget;
+type DattoMappingDataset = 'saas' | 'bcdr';
 
 type RawSyncRow = Record<string, string | number | boolean | null>;
 
@@ -355,6 +358,93 @@ type CustomerLicenseReportResponse = {
     microsoftUserDetailCount: number;
   };
   products: CustomerLicenseProductSection[];
+};
+
+type DiscrepancyBasis = 'user' | 'device';
+type DiscrepancySeverity = 'matched' | 'warning' | 'critical' | 'unavailable';
+type DiscrepancyFilterValue = 'all' | DiscrepancySeverity;
+
+type DiscrepancyComparisonPair = {
+  id: string;
+  label: string;
+  basis: DiscrepancyBasis;
+  leftVendorId: string;
+  leftVendorName: string;
+  rightVendorId: string;
+  rightVendorName: string;
+  matchingStrategy: 'normalized-hostname' | 'email-upn' | 'aggregate-count';
+  productFamily: string;
+  aggregateOnly: boolean;
+};
+
+type DiscrepancyItem = {
+  id: string;
+  identity: string;
+  displayName: string;
+  vendorId: string;
+  productKey?: string;
+  productName?: string;
+  domain?: string;
+  observedAt?: string;
+  details: Record<string, string | number | boolean | null>;
+};
+
+type DiscrepancyRow = {
+  id: string;
+  customer: {
+    customerId?: string;
+    connectWiseCompanyId?: string;
+    customerName: string;
+  };
+  comparisonPair: DiscrepancyComparisonPair;
+  basis: DiscrepancyBasis;
+  productFamily: string;
+  domain?: string;
+  leftCount: number;
+  rightCount: number;
+  delta: number;
+  status: DiscrepancySeverity;
+  stale: boolean;
+  aggregateOnly: boolean;
+  unavailableReason?: string;
+  missingFromLeft: DiscrepancyItem[];
+  missingFromRight: DiscrepancyItem[];
+  referenceItems: DiscrepancyItem[];
+  syncTimestamps: {
+    left?: string;
+    right?: string;
+  };
+};
+
+type DiscrepancyReportResponse = {
+  reportType: 'discrepancies';
+  generatedAt: string;
+  filters: {
+    customerId?: string;
+    basis?: DiscrepancyBasis;
+    severity?: DiscrepancySeverity;
+    includeMatched: boolean;
+  };
+  summary: {
+    comparisonCount: number;
+    rowCount: number;
+    openDiscrepancyCount: number;
+    warningCount: number;
+    criticalCount: number;
+    unavailableCount: number;
+    matchedCount: number;
+    deviceGapCount: number;
+    userGapCount: number;
+    staleSourceCount: number;
+    customerCount: number;
+  };
+  comparisonPairs: DiscrepancyComparisonPair[];
+  customers: Array<{
+    customerId: string;
+    connectWiseCompanyId?: string;
+    customerName: string;
+  }>;
+  rows: DiscrepancyRow[];
 };
 
 type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable';
@@ -756,18 +846,20 @@ type ProductMappingCustomerReview = {
   customers: ProductMappingCustomer[];
 };
 
-type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses';
+type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-saas-bcdr';
 type IntegrationActionKey = `${IntegrationId}:${IntegrationAction}`;
 const liveIntegrationIds: ReadonlySet<IntegrationId> = new Set([
   'connectwise',
   'cove',
   'ncentral',
+  'datto',
   'microsoft-365',
   'opentext-appriver',
 ]);
 const mappingIntegrationIds: ReadonlySet<IntegrationId> = new Set([
   'cove',
   'ncentral',
+  'datto',
   'microsoft-365',
   'opentext-appriver',
 ]);
@@ -853,6 +945,7 @@ const workflow = [
 
 const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'reconcile', label: 'Reconcile', icon: BarChart3 },
+  { id: 'discrepancies', label: 'Discrepancies', icon: Link2 },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
   { id: 'imports', label: 'Imports', icon: Upload },
@@ -868,6 +961,7 @@ const defaultView: View = 'reconcile';
 
 const viewPaths: Record<View, string> = {
   reconcile: '/reconcile',
+  discrepancies: '/discrepancies',
   integrations: '/integrations',
   mappings: '/mappings',
   reports: '/reports',
@@ -917,6 +1011,15 @@ function hasMappingWorkspace(integrationId: IntegrationId) {
 
 function isImplementedIntegration(integrationId: IntegrationId) {
   return liveIntegrationIds.has(integrationId);
+}
+
+function hasRawSyncReportDataSignal(integration: Integration) {
+  const records = Number.parseFloat((integration.records ?? '').replace(/,/g, ''));
+  return Boolean(integration.lastSync || (Number.isFinite(records) && records > 0));
+}
+
+function hasAvailableRawSyncReport(integration: Integration) {
+  return hasRawSyncReportDataSignal(integration) || (hasLiveIntegrationActions(integration.id) && integration.enabled);
 }
 
 function sortIntegrationsForDisplay(integrations: Integration[]) {
@@ -1534,6 +1637,40 @@ function formatReportCell(column: string, value: string | number | boolean | nul
   return value;
 }
 
+function compareReportCellValues(
+  column: string,
+  leftValue: string | number | boolean | null | undefined,
+  rightValue: string | number | boolean | null | undefined,
+) {
+  const leftBlank = leftValue === null || typeof leftValue === 'undefined' || leftValue === '';
+  const rightBlank = rightValue === null || typeof rightValue === 'undefined' || rightValue === '';
+
+  if (leftBlank || rightBlank) {
+    if (leftBlank && rightBlank) return 0;
+    return leftBlank ? 1 : -1;
+  }
+
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+    return leftValue - rightValue;
+  }
+
+  if (typeof leftValue === 'boolean' && typeof rightValue === 'boolean') {
+    return Number(leftValue) - Number(rightValue);
+  }
+
+  const leftDate = typeof leftValue === 'string' ? Date.parse(leftValue) : Number.NaN;
+  const rightDate = typeof rightValue === 'string' ? Date.parse(rightValue) : Number.NaN;
+
+  if (Number.isFinite(leftDate) && Number.isFinite(rightDate)) {
+    return leftDate - rightDate;
+  }
+
+  return String(formatReportCell(column, leftValue)).localeCompare(String(formatReportCell(column, rightValue)), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
 function formatLicenseReportCell(column: string, value: CustomerLicenseDetailValue | undefined) {
   if (value === null || typeof value === 'undefined') return '';
 
@@ -1590,6 +1727,13 @@ type ReportColumnResizeState = {
   pointerId: number;
   startWidth: number;
   startX: number;
+};
+
+type ReportSortDirection = 'asc' | 'desc';
+
+type ReportSortState = {
+  column: string;
+  direction: ReportSortDirection;
 };
 
 const profitabilityPalette = [
@@ -1883,6 +2027,37 @@ async function fetchProductProfitabilityReport() {
   }
 
   return body as unknown as ProductProfitabilityReportResponse;
+}
+
+async function fetchDiscrepancyReport(options: {
+  basis?: DiscrepancyBasis;
+  severity?: DiscrepancySeverity;
+  customerId?: string;
+  includeMatched?: boolean;
+} = {}) {
+  const params = new URLSearchParams();
+  if (options.basis) {
+    params.set('basis', options.basis);
+  }
+  if (options.severity) {
+    params.set('severity', options.severity);
+  }
+  if (options.customerId) {
+    params.set('customerId', options.customerId);
+  }
+  if (options.includeMatched) {
+    params.set('includeMatched', 'true');
+  }
+
+  const query = params.toString();
+  const response = await fetch(`/api/reports/discrepancies${query ? `?${query}` : ''}`);
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Discrepancy report load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as DiscrepancyReportResponse;
 }
 
 async function fetchCustomerLicenseCustomers() {
@@ -2213,7 +2388,7 @@ async function responseJson(response: Response) {
   return (await response.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
-function syncRequestBodyForIntegration(integrationId: IntegrationId, dataset?: RawSyncDataset) {
+function syncRequestBodyForIntegration(integrationId: IntegrationId, target?: IntegrationSyncTarget) {
   if (integrationId === 'cove') {
     return {
       pageSize: 10000,
@@ -2228,9 +2403,19 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId, dataset?: R
     };
   }
 
+  if (integrationId === 'datto') {
+    return {
+      pageSize: 100,
+      maxPages: 100,
+      seatPageSize: 500,
+      seatMaxPages: 100,
+      includeBcdr: target !== 'datto-saas',
+    };
+  }
+
   if (integrationId === 'microsoft-365') {
     return {
-      dataset: dataset ?? 'users',
+      dataset: target === 'licenses' ? 'licenses' : 'users',
       pageSize: 100,
       maxPages: 25,
     };
@@ -2251,6 +2436,30 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId, dataset?: R
   };
 }
 
+function syncActionKey(integrationId: IntegrationId, target?: IntegrationSyncTarget): IntegrationActionKey {
+  if (integrationId === 'microsoft-365') {
+    return target === 'licenses' ? `${integrationId}:sync-licenses` : `${integrationId}:sync-users`;
+  }
+
+  if (integrationId === 'datto') {
+    return target === 'datto-saas' ? `${integrationId}:sync-datto-saas` : `${integrationId}:sync-datto-saas-bcdr`;
+  }
+
+  return `${integrationId}:sync`;
+}
+
+function syncStartingMessage(integrationId: IntegrationId, target?: IntegrationSyncTarget) {
+  if (integrationId === 'microsoft-365') {
+    return target === 'licenses' ? 'Starting Microsoft 365 license sync...' : 'Starting Microsoft 365 user sync...';
+  }
+
+  if (integrationId === 'datto') {
+    return target === 'datto-saas' ? 'Starting Datto SaaS sync...' : 'Starting Datto SaaS + BCDR sync...';
+  }
+
+  return 'Starting sync...';
+}
+
 function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record<string, unknown>) {
   if (integrationId === 'connectwise') {
     const companyCount = numberField(body, 'companyCount')?.toLocaleString() ?? 'unknown';
@@ -2265,6 +2474,12 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
   if (integrationId === 'ncentral') {
     const filterCount = numberField(body, 'filterCount')?.toLocaleString() ?? '0';
     return `Connection OK. N-central returned ${filterCount} filters.`;
+  }
+
+  if (integrationId === 'datto') {
+    const bcdrAgentCount = numberField(body, 'bcdrAgentCount')?.toLocaleString() ?? '0';
+    const saasDomainCount = numberField(body, 'saasDomainCount')?.toLocaleString() ?? '0';
+    return `Connection OK. Datto returned ${bcdrAgentCount} BCDR agents and ${saasDomainCount} SaaS domains.`;
   }
 
   if (integrationId === 'microsoft-365') {
@@ -2295,6 +2510,12 @@ function formatIntegrationSyncSuccess(integrationId: IntegrationId, body: Record
     if (integrationId === 'microsoft-365') {
       const dataset = body.dataset === 'licenses' ? 'license' : 'user';
       return `Queued Microsoft 365 ${dataset} sync. Results will appear after the background worker finishes.`;
+    }
+
+    if (integrationId === 'datto') {
+      return body.includeBcdr === false
+        ? 'Queued Datto SaaS sync. Results will appear after the background worker finishes.'
+        : 'Queued Datto SaaS + BCDR sync. Results will appear after the background worker finishes.';
     }
 
     return `Queued ${integrationName(integrationId)} sync. Results will appear after the background worker finishes.`;
@@ -2581,6 +2802,15 @@ function App() {
   const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
     'Load net profit by active integration.',
   );
+  const [discrepancyReport, setDiscrepancyReport] = useState<DiscrepancyReportResponse | null>(null);
+  const [discrepancyLoadState, setDiscrepancyLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [discrepancyMessage, setDiscrepancyMessage] = useState('Load vendor-to-vendor discrepancy checks.');
+  const [selectedDiscrepancyBasis, setSelectedDiscrepancyBasis] = useState<'all' | DiscrepancyBasis>('all');
+  const [selectedDiscrepancySeverity, setSelectedDiscrepancySeverity] = useState<DiscrepancyFilterValue>('all');
+  const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState('all');
+  const [selectedDiscrepancyCustomerId, setSelectedDiscrepancyCustomerId] = useState('all');
+  const [includeMatchedDiscrepancies, setIncludeMatchedDiscrepancies] = useState(false);
+  const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<DiscrepancyRow | null>(null);
   const [customerLicenseCustomers, setCustomerLicenseCustomers] = useState<CustomerLicenseCustomerOption[]>([]);
   const [selectedCustomerLicenseCustomerId, setSelectedCustomerLicenseCustomerId] = useState('');
   const [selectedCustomerLicenseVendorId, setSelectedCustomerLicenseVendorId] = useState<CustomerLicenseReportVendorId>('all');
@@ -2753,6 +2983,33 @@ function App() {
       setProductProfitabilityReport(null);
       setProductProfitabilityLoadState('failed');
       setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to load product profitability.');
+      return null;
+    }
+  };
+
+  const loadDiscrepancyReport = async () => {
+    setDiscrepancyLoadState('loading');
+    setDiscrepancyMessage('Comparing vendor data...');
+
+    try {
+      const report = await fetchDiscrepancyReport({
+        basis: selectedDiscrepancyBasis === 'all' ? undefined : selectedDiscrepancyBasis,
+        severity: selectedDiscrepancySeverity === 'all' ? undefined : selectedDiscrepancySeverity,
+        customerId: selectedDiscrepancyCustomerId === 'all' ? undefined : selectedDiscrepancyCustomerId,
+        includeMatched: includeMatchedDiscrepancies,
+      });
+      setDiscrepancyReport(report);
+      setDiscrepancyLoadState('ready');
+      setDiscrepancyMessage(
+        report.rows.length > 0
+          ? `Loaded ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
+          : 'No discrepancy rows match the current filters.',
+      );
+      return report;
+    } catch (error) {
+      setDiscrepancyReport(null);
+      setDiscrepancyLoadState('failed');
+      setDiscrepancyMessage(error instanceof Error ? error.message : 'Unable to load discrepancy dashboard.');
       return null;
     }
   };
@@ -3010,6 +3267,20 @@ function App() {
   }, [reportSection, view]);
 
   useEffect(() => {
+    if (view !== 'discrepancies') {
+      return;
+    }
+
+    void loadDiscrepancyReport();
+  }, [
+    includeMatchedDiscrepancies,
+    selectedDiscrepancyBasis,
+    selectedDiscrepancyCustomerId,
+    selectedDiscrepancySeverity,
+    view,
+  ]);
+
+  useEffect(() => {
     if (view !== 'reports' || reportSection !== 'customer-license' || customerLicenseCustomers.length > 0) {
       return;
     }
@@ -3035,6 +3306,21 @@ function App() {
 
   const clientGroups = useMemo(() => groupIssuesByClient(filteredIssues), [filteredIssues]);
   const integrations = useMemo(() => buildIntegrations(runtimeIntegrations ?? undefined), [runtimeIntegrations]);
+  const rawSyncReportIntegrations = useMemo(() => {
+    const availableIntegrations = integrations.filter(hasAvailableRawSyncReport);
+    const selectedIntegration = selectedRawSyncIntegrationId
+      ? integrations.find((integration) => integration.id === selectedRawSyncIntegrationId)
+      : undefined;
+    const includesSelectedIntegration = selectedIntegration
+      ? availableIntegrations.some((integration) => integration.id === selectedIntegration.id)
+      : true;
+
+    return sortIntegrationsForDisplay(
+      selectedIntegration && !includesSelectedIntegration
+        ? [...availableIntegrations, selectedIntegration]
+        : availableIntegrations,
+    );
+  }, [integrations, selectedRawSyncIntegrationId]);
   const pendingCount = issues.filter(isReviewableIssue).length;
   const selectedReconciliationIntegration = integrations.find((integration) => integration.id === selectedReconciliationIntegrationId);
   const connectWiseIntegration = integrations.find((integration) => integration.id === 'connectwise');
@@ -3284,22 +3570,12 @@ function App() {
     }
   };
 
-  const syncIntegration = async (integrationId: IntegrationId, dataset?: RawSyncDataset) => {
-    const actionKey: IntegrationActionKey =
-      integrationId === 'microsoft-365' && dataset === 'licenses'
-        ? `${integrationId}:sync-licenses`
-        : integrationId === 'microsoft-365'
-          ? `${integrationId}:sync-users`
-          : `${integrationId}:sync`;
+  const syncIntegration = async (integrationId: IntegrationId, target?: IntegrationSyncTarget) => {
+    const actionKey = syncActionKey(integrationId, target);
     setBusyIntegrationAction(actionKey);
     setIntegrationActionMessages((messages) => ({
       ...messages,
-      [integrationId]:
-        integrationId === 'microsoft-365' && dataset === 'licenses'
-          ? 'Starting Microsoft 365 license sync...'
-          : integrationId === 'microsoft-365'
-            ? 'Starting Microsoft 365 user sync...'
-            : 'Starting sync...',
+      [integrationId]: syncStartingMessage(integrationId, target),
     }));
 
     try {
@@ -3308,7 +3584,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(syncRequestBodyForIntegration(integrationId, dataset)),
+        body: JSON.stringify(syncRequestBodyForIntegration(integrationId, target)),
       });
       const body = await responseJson(response);
       const queuedSync = body.status === 'queued' || body.queued === true;
@@ -3748,6 +4024,25 @@ function App() {
               vendorFilter={vendorFilter}
             />
           )}
+          {view === 'discrepancies' && (
+            <DiscrepancyDashboardView
+              basisFilter={selectedDiscrepancyBasis}
+              customerFilter={selectedDiscrepancyCustomerId}
+              includeMatched={includeMatchedDiscrepancies}
+              loadMessage={discrepancyMessage}
+              loadState={discrepancyLoadState}
+              onBasisFilterChange={setSelectedDiscrepancyBasis}
+              onCustomerFilterChange={setSelectedDiscrepancyCustomerId}
+              onIncludeMatchedChange={setIncludeMatchedDiscrepancies}
+              onPairFilterChange={setSelectedDiscrepancyPairId}
+              onRefresh={loadDiscrepancyReport}
+              onRowSelect={setSelectedDiscrepancyRow}
+              onSeverityFilterChange={setSelectedDiscrepancySeverity}
+              pairFilter={selectedDiscrepancyPairId}
+              report={discrepancyReport}
+              severityFilter={selectedDiscrepancySeverity}
+            />
+          )}
           {view === 'integrations' && (
             <IntegrationsView
               actionMessages={integrationActionMessages}
@@ -3803,14 +4098,21 @@ function App() {
             <ReportsView
               columnFilters={rawSyncColumnFilters}
               details={rawSyncDetails}
-              integrations={integrations}
+              integrations={rawSyncReportIntegrations}
               loadMessage={rawSyncMessage}
               loadState={rawSyncLoadState}
               onColumnFilterChange={(column, value) =>
-                setRawSyncColumnFilters((filters) => ({
-                  ...filters,
-                  [column]: value,
-                }))
+                setRawSyncColumnFilters((filters) => {
+                  if (value.trim().length === 0) {
+                    const { [column]: _removed, ...nextFilters } = filters;
+                    return nextFilters;
+                  }
+
+                  return {
+                    ...filters,
+                    [column]: value,
+                  };
+                })
               }
               onIntegrationChange={(integrationId) => {
                 setSelectedRawSyncIntegrationId(integrationId);
@@ -3936,12 +4238,20 @@ function App() {
           saving={savingManualOverride}
         />
       )}
+      {selectedDiscrepancyRow ? (
+        <DiscrepancyDetailModal
+          onClose={() => setSelectedDiscrepancyRow(null)}
+          row={selectedDiscrepancyRow}
+        />
+      ) : null}
     </div>
   );
 }
 
 function pageTitle(view: View) {
   switch (view) {
+    case 'discrepancies':
+      return 'Discrepancy dashboard';
     case 'integrations':
       return 'Integrations';
     case 'mappings':
@@ -3959,6 +4269,385 @@ function pageTitle(view: View) {
     default:
       return 'Reconciliation command center';
   }
+}
+
+function DiscrepancyDashboardView(props: {
+  basisFilter: 'all' | DiscrepancyBasis;
+  customerFilter: string;
+  includeMatched: boolean;
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onBasisFilterChange: (basis: 'all' | DiscrepancyBasis) => void;
+  onCustomerFilterChange: (customerId: string) => void;
+  onIncludeMatchedChange: (value: boolean) => void;
+  onPairFilterChange: (pairId: string) => void;
+  onRefresh: () => Promise<DiscrepancyReportResponse | null>;
+  onRowSelect: (row: DiscrepancyRow) => void;
+  onSeverityFilterChange: (severity: DiscrepancyFilterValue) => void;
+  pairFilter: string;
+  report: DiscrepancyReportResponse | null;
+  severityFilter: DiscrepancyFilterValue;
+}) {
+  const {
+    basisFilter,
+    customerFilter,
+    includeMatched,
+    loadMessage,
+    loadState,
+    onBasisFilterChange,
+    onCustomerFilterChange,
+    onIncludeMatchedChange,
+    onPairFilterChange,
+    onRefresh,
+    onRowSelect,
+    onSeverityFilterChange,
+    pairFilter,
+    report,
+    severityFilter,
+  } = props;
+  const rows = useMemo(
+    () =>
+      (report?.rows ?? []).filter((row) =>
+        pairFilter === 'all' ? true : row.comparisonPair.id === pairFilter,
+      ),
+    [pairFilter, report],
+  );
+  const groupedRows = useMemo(() => groupDiscrepancyRowsByCustomer(rows), [rows]);
+  const pairOptions = report?.comparisonPairs ?? [];
+  const customers = report?.customers ?? [];
+  const generatedAt = formatDateTime(report?.generatedAt);
+
+  return (
+    <section className="discrepancy-page" aria-label="Discrepancy dashboard">
+      <div className="integrations-live-bar report-reminder">
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <strong>{loadState === 'failed' ? 'Dashboard issue' : loadState === 'loading' ? 'Comparing sources' : 'Vendor discrepancies'}</strong>
+          <span>{loadMessage}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>{generatedAt ? `Generated ${generatedAt}` : 'Latest complete syncs'}</span>
+          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
+            <RefreshCcw size={16} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <section className="metric-grid discrepancy-metrics" aria-label="Discrepancy summary">
+        <MetricCard icon={Link2} label="Open discrepancies" tone="warn" value={formatCount(report?.summary.openDiscrepancyCount ?? 0)} />
+        <MetricCard icon={Database} label="Device gaps" tone="ready" value={formatCount(report?.summary.deviceGapCount ?? 0)} />
+        <MetricCard icon={Users} label="User gaps" tone="money" value={formatCount(report?.summary.userGapCount ?? 0)} />
+        <MetricCard icon={Activity} label="Unavailable / stale" tone="approved" value={`${formatCount(report?.summary.unavailableCount ?? 0)} / ${formatCount(report?.summary.staleSourceCount ?? 0)}`} />
+      </section>
+
+      <section className="toolbar reports-toolbar discrepancy-toolbar" aria-label="Discrepancy filters">
+        <label className="config-field report-select">
+          <span>Customer</span>
+          <select onChange={(event) => onCustomerFilterChange(event.target.value)} value={customerFilter}>
+            <option value="all">All customers</option>
+            {customers.map((customer) => (
+              <option key={customer.customerId} value={customer.customerId}>
+                {customer.customerName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="config-field report-select">
+          <span>Comparison</span>
+          <select onChange={(event) => onPairFilterChange(event.target.value)} value={pairFilter}>
+            <option value="all">All comparisons</option>
+            {pairOptions.map((pair) => (
+              <option key={pair.id} value={pair.id}>
+                {pair.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="config-field compact-filter">
+          <span>Basis</span>
+          <select onChange={(event) => onBasisFilterChange(event.target.value as 'all' | DiscrepancyBasis)} value={basisFilter}>
+            <option value="all">All</option>
+            <option value="device">Devices</option>
+            <option value="user">Users</option>
+          </select>
+        </label>
+        <label className="config-field compact-filter">
+          <span>Severity</span>
+          <select onChange={(event) => onSeverityFilterChange(event.target.value as DiscrepancyFilterValue)} value={severityFilter}>
+            <option value="all">Open + unavailable</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="unavailable">Unavailable</option>
+            <option value="matched">Matched</option>
+          </select>
+        </label>
+        <label className="switch-control customer-license-toggle">
+          <input
+            checked={includeMatched}
+            disabled={loadState === 'loading'}
+            onChange={(event) => onIncludeMatchedChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Show matched</span>
+        </label>
+      </section>
+
+      <section className="work-surface discrepancy-surface">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">Operational coverage</span>
+            <h2>{rows.length.toLocaleString()} comparison rows</h2>
+          </div>
+          <span className="status-pill ready">{formatCount(report?.summary.comparisonCount ?? 0)} configured pairs</span>
+        </div>
+
+        {loadState === 'loading' ? (
+          <div className="empty-state report-empty">
+            <Activity size={20} />
+            <strong>Comparing latest complete syncs.</strong>
+          </div>
+        ) : null}
+
+        {loadState !== 'loading' && rows.length === 0 ? (
+          <div className="empty-state report-empty">
+            <Search size={20} />
+            <strong>No discrepancy rows found.</strong>
+            <span>Adjust the filters or sync the related integrations.</span>
+          </div>
+        ) : null}
+
+        {groupedRows.map(([customerName, customerRows]) => (
+          <section className="discrepancy-customer-group" key={customerName}>
+            <div className="discrepancy-customer-header">
+              <strong>{customerName}</strong>
+              <span>{customerRows.length.toLocaleString()} rows</span>
+            </div>
+            <div className="discrepancy-table-scroll">
+              <table className="discrepancy-table">
+                <thead>
+                  <tr>
+                    <th>Comparison</th>
+                    <th>Product family</th>
+                    <th>Basis</th>
+                    <th>Counts</th>
+                    <th>Delta</th>
+                    <th>Status</th>
+                    <th>Latest sync</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customerRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <strong>{row.comparisonPair.label}</strong>
+                        <span>{row.comparisonPair.leftVendorName} vs {row.comparisonPair.rightVendorName}</span>
+                      </td>
+                      <td>
+                        <strong>{row.productFamily}</strong>
+                        <span>{row.domain ?? (row.aggregateOnly ? 'Aggregate count' : 'Item-level match')}</span>
+                      </td>
+                      <td>{row.basis === 'device' ? 'Device' : 'User'}</td>
+                      <td>
+                        {row.leftCount.toLocaleString()} / {row.rightCount.toLocaleString()}
+                      </td>
+                      <td className={row.delta >= 0 ? 'delta positive' : 'delta negative'}>
+                        {row.delta > 0 ? `+${row.delta}` : row.delta}
+                      </td>
+                      <td>
+                        <span className={`status-pill ${discrepancyStatusClass(row.status)}`}>
+                          {discrepancyStatusLabel(row.status)}
+                        </span>
+                        {row.stale ? <span className="stale-chip">Stale</span> : null}
+                      </td>
+                      <td>{latestDiscrepancySync(row)}</td>
+                      <td>
+                        <button className="button secondary compact" onClick={() => onRowSelect(row)} type="button">
+                          <Database size={15} />
+                          Details
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ))}
+      </section>
+    </section>
+  );
+}
+
+function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRow }) {
+  const { onClose, row } = props;
+  const leftLabel = row.comparisonPair.leftVendorName;
+  const rightLabel = row.comparisonPair.rightVendorName;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="discrepancy-detail-modal" role="dialog" aria-modal="true" aria-labelledby="discrepancy-detail-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="discrepancy-detail-title">
+              <Link2 size={18} />
+              Discrepancy Details
+            </h2>
+            <p>{row.customer.customerName} / {row.comparisonPair.label}</p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <section className="discrepancy-detail-summary">
+          <IntegrationStat label={leftLabel} value={row.leftCount.toLocaleString()} />
+          <IntegrationStat label={rightLabel} value={row.rightCount.toLocaleString()} />
+          <IntegrationStat label="Delta" value={row.delta > 0 ? `+${row.delta}` : String(row.delta)} />
+          <IntegrationStat label="Status" value={discrepancyStatusLabel(row.status)} />
+        </section>
+
+        {row.unavailableReason ? (
+          <div className="empty-state discrepancy-unavailable-note">
+            <Database size={20} />
+            <strong>Waiting for comparable data.</strong>
+            <span>{row.unavailableReason}</span>
+          </div>
+        ) : null}
+
+        <section className="discrepancy-detail-grid">
+          <DiscrepancyItemPanel
+            emptyLabel={`No ${rightLabel} items are missing from ${leftLabel}.`}
+            items={row.missingFromLeft}
+            title={`In ${rightLabel}, not in ${leftLabel}`}
+          />
+          <DiscrepancyItemPanel
+            emptyLabel={`No ${leftLabel} items are missing from ${rightLabel}.`}
+            items={row.missingFromRight}
+            title={`In ${leftLabel}, not in ${rightLabel}`}
+          />
+        </section>
+
+        {row.aggregateOnly ? (
+          <section className="discrepancy-reference-panel">
+            <div className="surface-header compact-header">
+              <div>
+                <span className="section-kicker">Reference detail</span>
+                <h3>Microsoft mailbox users used for the comparison</h3>
+              </div>
+              <span className="status-pill ready">{row.referenceItems.length.toLocaleString()} users</span>
+            </div>
+            <DiscrepancyItemList items={row.referenceItems} />
+          </section>
+        ) : null}
+
+        <section className="discrepancy-sync-panel">
+          <span>{leftLabel}: {formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}</span>
+          <span>{rightLabel}: {formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}</span>
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function DiscrepancyItemPanel(props: { emptyLabel: string; items: DiscrepancyItem[]; title: string }) {
+  return (
+    <section className="discrepancy-item-panel">
+      <div className="surface-header compact-header">
+        <div>
+          <span className="section-kicker">Missing items</span>
+          <h3>{props.title}</h3>
+        </div>
+        <span className="status-pill ready">{props.items.length.toLocaleString()}</span>
+      </div>
+      {props.items.length === 0 ? (
+        <div className="empty-state discrepancy-item-empty">
+          <Check size={18} />
+          <strong>{props.emptyLabel}</strong>
+        </div>
+      ) : (
+        <DiscrepancyItemList items={props.items} />
+      )}
+    </section>
+  );
+}
+
+function DiscrepancyItemList(props: { items: DiscrepancyItem[] }) {
+  if (props.items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="discrepancy-item-list">
+      {props.items.map((item) => (
+        <article className="discrepancy-item-row" key={`${item.vendorId}:${item.identity}:${item.id}`}>
+          <div>
+            <strong>{item.displayName}</strong>
+            <span>{item.identity}</span>
+          </div>
+          <div>
+            <span>{item.productName ?? item.productKey ?? item.vendorId}</span>
+            <small>{discrepancyItemDetail(item)}</small>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function groupDiscrepancyRowsByCustomer(rows: DiscrepancyRow[]) {
+  const groups = new Map<string, DiscrepancyRow[]>();
+  rows.forEach((row) => {
+    const key = row.customer.customerName;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  });
+  return [...groups.entries()].sort((left, right) => compareCustomerNames(left[0], right[0]));
+}
+
+function discrepancyStatusLabel(status: DiscrepancySeverity) {
+  if (status === 'critical') return 'Critical';
+  if (status === 'warning') return 'Warning';
+  if (status === 'unavailable') return 'Unavailable';
+  return 'Matched';
+}
+
+function discrepancyStatusClass(status: DiscrepancySeverity) {
+  if (status === 'critical') return 'blocked';
+  if (status === 'warning') return 'needs-review';
+  if (status === 'unavailable') return 'ready';
+  return 'approved';
+}
+
+function latestDiscrepancySync(row: DiscrepancyRow) {
+  const left = formatDateTime(row.syncTimestamps.left);
+  const right = formatDateTime(row.syncTimestamps.right);
+  if (left && right) return `${left} / ${right}`;
+  return left ?? right ?? 'Waiting for data';
+}
+
+function discrepancyItemDetail(item: DiscrepancyItem) {
+  const values = [
+    item.domain,
+    stringDetail(item.details.Tenant),
+    stringDetail(item.details.Site),
+    stringDetail(item.details.OS),
+    formatDateTime(item.observedAt),
+  ].filter((value): value is string => Boolean(value));
+
+  return values.join(' / ') || 'No extra detail';
+}
+
+function stringDetail(value: unknown) {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  return undefined;
 }
 
 type ManagedUserDraft = {
@@ -5285,7 +5974,7 @@ function IntegrationsView(props: {
   onConfigure: (integration: Integration) => void;
   onOpenMappings: (integrationId: IntegrationId) => void;
   onRefresh: () => Promise<RuntimeIntegrationsResponse | null>;
-  onSync: (integrationId: IntegrationId, dataset?: RawSyncDataset) => void;
+  onSync: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
   onTest: (integrationId: IntegrationId) => void;
 }) {
   const {
@@ -5401,7 +6090,7 @@ function IntegrationCard(props: {
   integration: Integration;
   onConfigure?: (integration: Integration) => void;
   onOpenMappings?: (integrationId: IntegrationId) => void;
-  onSync?: (integrationId: IntegrationId, dataset?: RawSyncDataset) => void;
+  onSync?: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
   onTest?: (integrationId: IntegrationId) => void;
 }) {
   const { actionMessage, busyAction, comingSoon = false, integration, onConfigure, onOpenMappings, onSync, onTest } = props;
@@ -5409,6 +6098,8 @@ function IntegrationCard(props: {
   const actionKeyPrefix = integration.id;
   const microsoft365SyncBusy =
     busyAction === `${actionKeyPrefix}:sync-users` || busyAction === `${actionKeyPrefix}:sync-licenses`;
+  const dattoSyncBusy =
+    busyAction === `${actionKeyPrefix}:sync-datto-saas` || busyAction === `${actionKeyPrefix}:sync-datto-saas-bcdr`;
 
   return (
     <article aria-disabled={comingSoon || undefined} className={comingSoon ? 'integration-card coming-soon' : 'integration-card'}>
@@ -5486,6 +6177,27 @@ function IntegrationCard(props: {
                       >
                         <RefreshCcw size={16} />
                         {busyAction === `${actionKeyPrefix}:sync-licenses` ? 'Syncing licenses' : 'Sync Licenses'}
+                      </button>
+                    </>
+                  ) : integration.id === 'datto' ? (
+                    <>
+                      <button
+                        className="button secondary compact"
+                        disabled={dattoSyncBusy}
+                        onClick={() => onSync?.(integration.id, 'datto-saas-bcdr')}
+                        type="button"
+                      >
+                        <RefreshCcw size={16} />
+                        {busyAction === `${actionKeyPrefix}:sync-datto-saas-bcdr` ? 'Syncing SaaS + BCDR' : 'Sync SaaS + BCDR'}
+                      </button>
+                      <button
+                        className="button secondary compact"
+                        disabled={dattoSyncBusy}
+                        onClick={() => onSync?.(integration.id, 'datto-saas')}
+                        type="button"
+                      >
+                        <RefreshCcw size={16} />
+                        {busyAction === `${actionKeyPrefix}:sync-datto-saas` ? 'Syncing SaaS' : 'SaaS only'}
                       </button>
                     </>
                   ) : (
@@ -5625,6 +6337,7 @@ function MappingsView(props: {
     usageOverrides,
   } = props;
   const [showMappedAccounts, setShowMappedAccounts] = useState(false);
+  const [dattoMappingDataset, setDattoMappingDataset] = useState<DattoMappingDataset>('saas');
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [manualCustomerId, setManualCustomerId] = useState('');
   const [manualAgreementId, setManualAgreementId] = useState('');
@@ -5653,16 +6366,19 @@ function MappingsView(props: {
   const [overrideTargetProductKey, setOverrideTargetProductKey] = useState('cove-server');
   const [overrideHostname, setOverrideHostname] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
-  const accountMappings = mappingState?.accountMappings ?? [];
-  const accountCandidates = mappingState?.accountCandidates ?? [];
+  const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
+  const accountMappings = filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
+  const accountCandidates = filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountRows = showMappedAccounts ? [...accountMappings, ...accountCandidates] : accountCandidates;
   const productRows = [
     ...(mappingState?.productMappings ?? []),
     ...(mappingState?.productCandidates ?? []),
-  ];
+  ].filter((row) => dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined));
   const productGroups = useMemo(() => buildProductGroups(productRows), [productRows]);
   const productSelectionDefaults = useMemo(() => buildProductSelectionDefaults(productGroups), [productGroups]);
-  const productBundles = mappingState?.productBundles ?? [];
+  const productBundles = (mappingState?.productBundles ?? []).filter((bundle) =>
+    dattoBundleMatchesDataset(bundle, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  );
   const bundleProductOptions = useMemo(
     () =>
       productGroups
@@ -5686,6 +6402,8 @@ function MappingsView(props: {
   const suggestedAccountCount = accountCandidates.filter(
     (candidate) => candidate.status === 'approved' && candidate.customerId,
   ).length;
+  const canBulkApproveSuggested = !isDattoMappingWorkspace && suggestedAccountCount > 0;
+  const selectedDatasetLabel = isDattoMappingWorkspace ? dattoMappingDatasetLabel(dattoMappingDataset) : selectedIntegrationName;
   const bundleActionKey = editingBundleKey ? `bundle:${editingBundleKey}` : 'bundle:new';
   const bundleTargetOptions = dedupeProductTargets(
     bundleTarget ? [bundleTarget, ...bundleCatalogResults] : bundleCatalogResults,
@@ -5714,7 +6432,7 @@ function MappingsView(props: {
     setProductCustomerReviewMessage('');
     setSelectedProductCustomerId('');
     resetBundleForm();
-  }, [mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
+  }, [dattoMappingDataset, mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
 
   const openAccountEditor = (row: AccountMappingCandidate) => {
     const customerId = row.customerId ?? '';
@@ -5960,22 +6678,53 @@ function MappingsView(props: {
           </button>
           <button
             className="button primary compact"
-            disabled={Boolean(busyAction) || suggestedAccountCount === 0}
+            disabled={Boolean(busyAction) || !canBulkApproveSuggested}
             onClick={onApproveSuggested}
-            title={suggestedAccountCount === 0 ? 'No suggested customer mappings are ready to approve.' : 'Approve all suggested customer mappings.'}
+            title={
+              isDattoMappingWorkspace
+                ? 'Approve Datto SaaS and BCDR mappings individually from their dataset table.'
+                : suggestedAccountCount === 0
+                  ? 'No suggested customer mappings are ready to approve.'
+                  : 'Approve all suggested customer mappings.'
+            }
             type="button"
           >
             <Link2 size={16} />
-            {busyAction === 'approve-suggested' ? 'Approving' : `Approve suggested (${suggestedAccountCount})`}
+            {busyAction === 'approve-suggested'
+              ? 'Approving'
+              : isDattoMappingWorkspace
+                ? 'Approve rows individually'
+                : `Approve suggested (${suggestedAccountCount})`}
           </button>
         </div>
       </div>
 
+      {isDattoMappingWorkspace ? (
+        <section className="mapping-dataset-tabs" aria-label="Datto mapping dataset">
+          {(['saas', 'bcdr'] as const).map((dataset) => {
+            const counts = dattoDatasetCounts(mappingState, dataset);
+            return (
+              <button
+                aria-selected={dattoMappingDataset === dataset}
+                className={dattoMappingDataset === dataset ? 'active' : ''}
+                key={dataset}
+                onClick={() => setDattoMappingDataset(dataset)}
+                type="button"
+              >
+                <span>{dattoMappingDatasetLabel(dataset)}</span>
+                <strong>{counts.accounts.toLocaleString()} accounts</strong>
+                <em>{counts.products.toLocaleString()} products</em>
+              </button>
+            );
+          })}
+        </section>
+      ) : null}
+
       <section className="metric-grid mapping-metrics" aria-label="Mapping summary">
-        <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(mappingState?.summary.approvedAccountMappings ?? 0)} />
-        <MetricCard icon={ClipboardCheck} label="Client review" tone="warn" value={formatCount(mappingState?.summary.accountCandidatesNeedingReview ?? 0)} />
-        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(mappingState?.summary.approvedProductMappings ?? 0)} />
-        <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(mappingState?.summary.productCandidates ?? 0)} />
+        <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length)} />
+        <MetricCard icon={ClipboardCheck} label="Client review" tone="warn" value={formatCount(accountCandidates.filter((candidate) => candidate.status === 'needs-review').length)} />
+        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(productRows.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length)} />
+        <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productRows.filter((row) => !('id' in row)).length)} />
       </section>
 
       {selectedIntegrationId === 'ncentral' ? (
@@ -5994,8 +6743,8 @@ function MappingsView(props: {
               <span className="section-kicker">Account mapping</span>
               <h2>
                 {showMappedAccounts
-                  ? `${accountRows.length.toLocaleString()} vendor accounts`
-                  : `${accountCandidates.length.toLocaleString()} unmapped vendor accounts`}
+                  ? `${accountRows.length.toLocaleString()} ${selectedDatasetLabel} accounts`
+                  : `${accountCandidates.length.toLocaleString()} unmapped ${selectedDatasetLabel} accounts`}
               </h2>
             </div>
             <label className="switch-control compact-switch">
@@ -6010,7 +6759,7 @@ function MappingsView(props: {
 
           <div className="mapping-review-list">
             <div className="mapping-review-header account" role="row">
-              <span>{selectedIntegrationName} customer</span>
+              <span>{selectedDatasetLabel} customer</span>
               <span aria-hidden="true" />
               <span>ConnectWise customer / agreement</span>
               <span>Status</span>
@@ -7135,6 +7884,75 @@ function NcentralFilterMappingRow(props: {
 
 type ProductMappingRow = ProductMapping | ProductMappingCandidate;
 
+function isSavedProductMapping(row: ProductMappingRow): row is ProductMapping {
+  return 'id' in row;
+}
+
+function dattoMappingDatasetLabel(dataset: DattoMappingDataset) {
+  return dataset === 'saas' ? 'Datto SaaS' : 'Datto BCDR';
+}
+
+function filterDattoAccountRows<T extends AccountMappingCandidate>(rows: T[], dataset?: DattoMappingDataset) {
+  if (!dataset) {
+    return rows;
+  }
+
+  return rows.filter((row) => dattoAccountMatchesDataset(row, dataset));
+}
+
+function dattoAccountMatchesDataset(row: AccountMappingCandidate, dataset: DattoMappingDataset) {
+  const accountId = row.externalAccountId.toLowerCase();
+  const accountName = row.externalAccountName.toLowerCase();
+  const isSaas =
+    accountId.includes('|datto-saas-') ||
+    accountName.includes('office 365') ||
+    accountName.includes('google workspace') ||
+    accountName.includes('datto saas');
+
+  return dataset === 'saas' ? isSaas : !isSaas;
+}
+
+function dattoProductMatchesDataset(vendorProductKey: string, dataset?: DattoMappingDataset) {
+  if (!dataset) {
+    return true;
+  }
+
+  const isSaas = vendorProductKey.startsWith('datto-saas-');
+  return dataset === 'saas' ? isSaas : vendorProductKey === 'datto-bcdr-agent' || !isSaas;
+}
+
+function dattoBundleMatchesDataset(bundle: ProductBundle, dataset?: DattoMappingDataset) {
+  if (!dataset) {
+    return true;
+  }
+
+  return bundle.components.length > 0 && bundle.components.every((component) => dattoProductMatchesDataset(component.vendorProductKey, dataset));
+}
+
+function dattoDatasetCounts(mappingState: MappingStateResponse | null, dataset: DattoMappingDataset) {
+  const accountIds = new Set(
+    [
+      ...(mappingState?.accountMappings ?? []),
+      ...(mappingState?.accountCandidates ?? []),
+    ]
+      .filter((row) => dattoAccountMatchesDataset(row, dataset))
+      .map((row) => row.externalAccountId),
+  );
+  const productKeys = new Set(
+    [
+      ...(mappingState?.productMappings ?? []),
+      ...(mappingState?.productCandidates ?? []),
+    ]
+      .filter((row) => dattoProductMatchesDataset(row.vendorProductKey, dataset))
+      .map((row) => row.vendorProductKey),
+  );
+
+  return {
+    accounts: accountIds.size,
+    products: productKeys.size,
+  };
+}
+
 type ProductMappingGroup = {
   vendorId: IntegrationId;
   vendorProductKey: string;
@@ -8068,15 +8886,19 @@ function ReportsView(props: {
   const columnsKey = columns.join('\u001f');
   const [reportColumnWidths, setReportColumnWidths] = useState<Record<string, number>>({});
   const [reportColumnResize, setReportColumnResize] = useState<ReportColumnResizeState | null>(null);
+  const [reportFiltersExpanded, setReportFiltersExpanded] = useState(false);
+  const [reportFilterColumn, setReportFilterColumn] = useState('');
+  const [reportSort, setReportSort] = useState<ReportSortState | null>(null);
   const reportColumnWidth = (column: string) => reportColumnWidths[column] ?? reportDefaultColumnWidth;
   const reportTableMinWidth = Math.max(
     720,
     columns.reduce((totalWidth, column) => totalWidth + reportColumnWidth(column), 0),
   );
+  const selectedReportFilterColumn = columns.includes(reportFilterColumn) ? reportFilterColumn : columns[0] ?? '';
   const activeColumnFilters = Object.entries(columnFilters)
     .map(([column, value]) => [column, value.trim().toLowerCase()] as const)
-    .filter(([, value]) => value.length > 0);
-  const visibleRows =
+    .filter(([column, value]) => columns.includes(column) && value.length > 0);
+  const filteredRows =
     activeColumnFilters.length > 0
       ? rows.filter((row) =>
           activeColumnFilters.every(([column, filter]) =>
@@ -8084,6 +8906,21 @@ function ReportsView(props: {
           ),
         )
       : rows;
+  const activeReportSort = reportSort && columns.includes(reportSort.column) ? reportSort : null;
+  const visibleRows = activeReportSort
+    ? [...filteredRows].sort((left, right) => {
+        const comparison = compareReportCellValues(
+          activeReportSort.column,
+          left[activeReportSort.column],
+          right[activeReportSort.column],
+        );
+        return activeReportSort.direction === 'asc' ? comparison : comparison * -1;
+      })
+    : filteredRows;
+  const activeReportFilterCount = activeColumnFilters.length + (activeReportSort ? 1 : 0);
+  const selectedReportFilterValue = selectedReportFilterColumn ? columnFilters[selectedReportFilterColumn] ?? '' : '';
+  const selectedReportSortDirection =
+    activeReportSort?.column === selectedReportFilterColumn ? activeReportSort.direction : undefined;
 
   useEffect(() => {
     const availableColumns = new Set(columns);
@@ -8096,6 +8933,8 @@ function ReportsView(props: {
     setReportColumnResize((currentResize) =>
       currentResize && availableColumns.has(currentResize.column) ? currentResize : null,
     );
+    setReportFilterColumn((currentColumn) => (currentColumn && availableColumns.has(currentColumn) ? currentColumn : columns[0] ?? ''));
+    setReportSort((currentSort) => (currentSort && availableColumns.has(currentSort.column) ? currentSort : null));
   }, [columnsKey]);
 
   const setReportColumnWidth = (column: string, width: number) => {
@@ -8161,6 +9000,35 @@ function ReportsView(props: {
     }
   };
 
+  const openReportColumnFilter = (column: string) => {
+    setReportFilterColumn(column);
+    setReportFiltersExpanded(true);
+  };
+
+  const setSelectedReportSortDirection = (direction: ReportSortDirection) => {
+    if (!selectedReportFilterColumn) {
+      return;
+    }
+
+    setReportSort({ column: selectedReportFilterColumn, direction });
+  };
+
+  const clearSelectedReportFilter = () => {
+    if (!selectedReportFilterColumn) {
+      return;
+    }
+
+    onColumnFilterChange(selectedReportFilterColumn, '');
+    setReportSort((currentSort) =>
+      currentSort?.column === selectedReportFilterColumn ? null : currentSort,
+    );
+  };
+
+  const clearAllReportFilters = () => {
+    Object.keys(columnFilters).forEach((column) => onColumnFilterChange(column, ''));
+    setReportSort(null);
+  };
+
   return (
     <section className="reports-page" aria-label="Reporting">
       <div className="integrations-live-bar report-reminder">
@@ -8187,10 +9055,11 @@ function ReportsView(props: {
         <label className="config-field report-select">
           <span>Integration</span>
           <select
+            disabled={integrations.length === 0}
             onChange={(event) => onIntegrationChange(event.target.value as IntegrationId | '')}
             value={selectedIntegrationId}
           >
-            <option value="">Select integration</option>
+            <option value="">{integrations.length === 0 ? 'No available raw sync reports' : 'Select integration'}</option>
             {integrations.map((integration) => (
               <option key={integration.id} value={integration.id}>
                 {integration.name}
@@ -8249,9 +9118,22 @@ function ReportsView(props: {
               {visibleRows.length.toLocaleString()} of {rows.length.toLocaleString()} raw sync rows
             </h2>
           </div>
-          <span className={`status-pill ${selectedRun?.status === 'complete' ? 'approved' : 'needs-review'}`}>
-            {selectedRun?.status ?? 'No run'}
-          </span>
+          <div className="surface-header-actions">
+            <button
+              aria-controls="raw-sync-column-filters"
+              aria-expanded={reportFiltersExpanded}
+              className="button secondary compact"
+              disabled={columns.length === 0}
+              onClick={() => setReportFiltersExpanded((expanded) => !expanded)}
+              type="button"
+            >
+              <Filter size={16} />
+              {activeReportFilterCount > 0 ? `${activeReportFilterCount} active` : 'Filters'}
+            </button>
+            <span className={`status-pill ${selectedRun?.status === 'complete' ? 'approved' : 'needs-review'}`}>
+              {selectedRun?.status ?? 'No run'}
+            </span>
+          </div>
         </div>
 
         {columns.length === 0 ? (
@@ -8261,61 +9143,157 @@ function ReportsView(props: {
             <span>Select an integration and SyncDate to inspect captured rows.</span>
           </div>
         ) : (
-          <div className="report-table-scroll">
-            <table
-              className={reportColumnResize ? 'report-detail-table resizing' : 'report-detail-table'}
-              style={{ minWidth: `${reportTableMinWidth}px` }}
+          <>
+            <div
+              className="report-filter-panel"
+              hidden={!reportFiltersExpanded}
+              id="raw-sync-column-filters"
             >
-              <colgroup>
-                {columns.map((column) => (
-                  <col key={column} style={{ width: `${reportColumnWidth(column)}px` }} />
-                ))}
-              </colgroup>
-              <thead>
-                <tr>
+              <label className="config-field report-filter-column">
+                <span>Column</span>
+                <select
+                  onChange={(event) => setReportFilterColumn(event.target.value)}
+                  value={selectedReportFilterColumn}
+                >
                   {columns.map((column) => (
-                    <th key={column}>
-                      <div className="report-column-header">
-                        <span title={column}>{column}</span>
-                        <input
-                          aria-label={`Filter ${column}`}
-                          onChange={(event) => onColumnFilterChange(column, event.target.value)}
-                          placeholder="Filter"
-                          type="text"
-                          value={columnFilters[column] ?? ''}
-                        />
-                      </div>
-                      <button
-                        aria-label={`Resize ${column} column`}
-                        className={
-                          reportColumnResize?.column === column
-                            ? 'report-column-resizer active'
-                            : 'report-column-resizer'
-                        }
-                        onDoubleClick={() => resetReportColumnWidth(column)}
-                        onKeyDown={(event) => handleReportColumnResizeKeyDown(column, event)}
-                        onPointerCancel={(event) => stopReportColumnResize(column, event)}
-                        onPointerDown={(event) => startReportColumnResize(column, event)}
-                        onPointerMove={(event) => moveReportColumnResize(column, event)}
-                        onPointerUp={(event) => stopReportColumnResize(column, event)}
-                        title="Drag to resize"
-                        type="button"
-                      />
-                    </th>
+                    <option key={column} value={column}>
+                      {column}
+                    </option>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRows.map((row, index) => (
-                  <tr key={`${String(row.id ?? 'row')}-${index}`}>
-                    {columns.map((column) => (
-                      <td key={column}>{formatReportCell(column, row[column])}</td>
-                    ))}
+                </select>
+              </label>
+
+              <label className="config-field report-filter-search">
+                <span>Search</span>
+                <div className="search-field report-search-field">
+                  <Search size={16} />
+                  <input
+                    aria-label={`Search ${selectedReportFilterColumn}`}
+                    disabled={!selectedReportFilterColumn}
+                    onChange={(event) => onColumnFilterChange(selectedReportFilterColumn, event.target.value)}
+                    placeholder="Search this column"
+                    type="search"
+                    value={selectedReportFilterValue}
+                  />
+                </div>
+              </label>
+
+              <div className="config-field report-sort-field">
+                <span>Sort</span>
+                <div className="segmented-control report-sort-toggle" role="group" aria-label="Column sort direction">
+                  <button
+                    className={selectedReportSortDirection === 'asc' ? 'active' : ''}
+                    disabled={!selectedReportFilterColumn}
+                    onClick={() => setSelectedReportSortDirection('asc')}
+                    type="button"
+                  >
+                    Asc
+                  </button>
+                  <button
+                    className={selectedReportSortDirection === 'desc' ? 'active' : ''}
+                    disabled={!selectedReportFilterColumn}
+                    onClick={() => setSelectedReportSortDirection('desc')}
+                    type="button"
+                  >
+                    Desc
+                  </button>
+                </div>
+              </div>
+
+              <button
+                className="button secondary compact report-clear-filter"
+                disabled={!selectedReportFilterValue && !selectedReportSortDirection}
+                onClick={clearSelectedReportFilter}
+                type="button"
+              >
+                <X size={16} />
+                Clear
+              </button>
+              <button
+                className="button ghost compact report-clear-filter"
+                disabled={activeReportFilterCount === 0}
+                onClick={clearAllReportFilters}
+                type="button"
+              >
+                Clear all
+              </button>
+            </div>
+
+            <div className="report-table-scroll">
+              <table
+                className={reportColumnResize ? 'report-detail-table resizing' : 'report-detail-table'}
+                style={{ minWidth: `${reportTableMinWidth}px` }}
+              >
+                <colgroup>
+                  {columns.map((column) => (
+                    <col key={column} style={{ width: `${reportColumnWidth(column)}px` }} />
+                  ))}
+                </colgroup>
+                <thead>
+                  <tr>
+                    {columns.map((column) => {
+                      const hasColumnFilter = Boolean((columnFilters[column] ?? '').trim());
+                      const columnSortDirection = activeReportSort?.column === column ? activeReportSort.direction : undefined;
+
+                      return (
+                        <th key={column}>
+                          <div className="report-column-header">
+                            <button
+                              aria-expanded={reportFiltersExpanded && selectedReportFilterColumn === column}
+                              className={
+                                hasColumnFilter || columnSortDirection
+                                  ? 'report-column-filter-trigger active'
+                                  : 'report-column-filter-trigger'
+                              }
+                              onClick={() => openReportColumnFilter(column)}
+                              title={`Filter ${column}`}
+                              type="button"
+                            >
+                              <span className="report-column-header-label" title={column}>{column}</span>
+                              <span className="report-column-badges" aria-hidden="true">
+                                {hasColumnFilter ? <Search size={12} /> : null}
+                                {columnSortDirection ? (
+                                  <span className="report-sort-indicator">
+                                    {columnSortDirection === 'asc' ? 'Asc' : 'Desc'}
+                                  </span>
+                                ) : null}
+                                <Filter size={12} />
+                              </span>
+                            </button>
+                          </div>
+                          <button
+                            aria-label={`Resize ${column} column`}
+                            className={
+                              reportColumnResize?.column === column
+                                ? 'report-column-resizer active'
+                                : 'report-column-resizer'
+                            }
+                            onDoubleClick={() => resetReportColumnWidth(column)}
+                            onKeyDown={(event) => handleReportColumnResizeKeyDown(column, event)}
+                            onPointerCancel={(event) => stopReportColumnResize(column, event)}
+                            onPointerDown={(event) => startReportColumnResize(column, event)}
+                            onPointerMove={(event) => moveReportColumnResize(column, event)}
+                            onPointerUp={(event) => stopReportColumnResize(column, event)}
+                            title="Drag to resize"
+                            type="button"
+                          />
+                        </th>
+                      );
+                    })}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {visibleRows.map((row, index) => (
+                    <tr key={`${String(row.id ?? 'row')}-${index}`}>
+                      {columns.map((column) => (
+                        <td key={column}>{formatReportCell(column, row[column])}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </section>
     </section>

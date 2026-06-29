@@ -1,12 +1,14 @@
 import { reconcileVendorUsage } from '../shared/reconciliation';
 import type { ReconcileVendorUsageRequest, ReconciliationResult, VendorRuleSet } from '../shared/types';
 import { coveRuleSet } from '../vendor/cove/rules';
+import { dattoRuleSet } from '../vendor/datto/rules';
 import { microsoft365RuleSet } from '../vendor/microsoft365/rules';
 import { ncentralRuleSet } from '../vendor/ncentral/rules';
 import { appRiverRuleSet } from '../vendor/appriver/rules';
 
 const vendorRuleSets: Record<string, VendorRuleSet> = {
   [coveRuleSet.vendorId]: coveRuleSet,
+  [dattoRuleSet.vendorId]: dattoRuleSet,
   [ncentralRuleSet.vendorId]: ncentralRuleSet,
   [microsoft365RuleSet.vendorId]: microsoft365RuleSet,
   [appRiverRuleSet.vendorId]: appRiverRuleSet,

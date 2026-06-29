@@ -146,3 +146,11 @@ The Configure modal does not ask for a refresh-token cache path. For local `.env
 The sync reads SecureCloud customers, subscriptions, and subscription details. The HTTP sync endpoint only gathers customers, writes `appriver_sync_work_items`, and enqueues one Azure Storage Queue message. The queue worker processes customers one at a time and enqueues the next worker message only after the current customer finishes. This keeps the long SecureCloud crawl out of the HTTP timeout window and prevents parallel refresh-token rotation. `AzureWebJobsStorage` must be configured for the AppRiver queued worker.
 
 Completed customer work stores one `vendor_usage_snapshots` row per AppRiver customer subscription with `vendor_id = 'opentext-appriver'`, quantity from `SubscriptionQuantity` or `TotalLicenses`, and dimensions containing customer, subscription, term, billing-frequency, assigned/unassigned license, domain, and commitment date details.
+
+## Datto Backup Notes
+
+The Datto Backup integration covers Kaseya Datto BCDR and SaaS Protection under the existing `datto` integration ID. Both product families use the Datto REST API at `DATTO_ENDPOINT` with Basic auth from `DATTO_API_KEY` as the username and `DATTO_API_SECRET` as the password. BCDR reads `/v1/bcdr/device` and `/v1/bcdr/device/{serialNumber}/asset/agent` when a sync includes BCDR. SaaS Protection reads `/v1/saas/domains` and uses Datto's domain-level `seatsUsed`, `productType`, and `retentionType` fields as the billing product-line source. It falls back to `/v1/saas/{saasCustomerId}/seats` only when a domain does not return `seatsUsed`.
+
+Completed syncs store SaaS product-line summaries and optional BCDR protected agents in `vendor_usage_snapshots` with `vendor_id = 'datto'`. Default product keys are `datto-bcdr-agent`, `datto-saas-office365-icr`, `datto-saas-office365-tbr`, `datto-saas-googleapps-icr`, and `datto-saas-googleapps-tbr`; unknown Datto product/retention pairs become dynamic `datto-saas-{productType}-{retentionType}` keys for product mapping review.
+
+Datto SaaS external account IDs include the Datto account/domain key and product key, so a customer can map Office 365 ICR, Office 365 TBR, and Google Workspace product lines to different ConnectWise agreements when needed.

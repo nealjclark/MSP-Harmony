@@ -725,10 +725,13 @@ export async function listProductMappingCustomers(
          coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text) as source_account_key,
          max(vendor_usage_snapshots.external_account_id) as external_account_id,
          coalesce(
+           max(nullif(vendor_usage_snapshots.dimensions->>'dattoExternalAccountName', '')),
            max(nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
            max(nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
            max(nullif(vendor_usage_snapshots.dimensions->>'coveCustomerName', '')),
            max(nullif(vendor_usage_snapshots.dimensions->>'ncentralCustomerName', '')),
+           max(nullif(vendor_usage_snapshots.dimensions->>'dattoCustomerName', '')),
+           max(nullif(vendor_usage_snapshots.dimensions->>'domain', '')),
            max(snapshot_customers.name),
            max(vendor_usage_snapshots.external_account_id),
            max(vendor_usage_snapshots.customer_id::text)
@@ -1375,11 +1378,38 @@ function isContainedPhrase(longer: string, shorter: string) {
 
 async function listAccountMappings(database: Queryable, vendorId: IntegrationId): Promise<AccountMapping[]> {
   const result = await database.query<AccountMappingRow>(
-    `select
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     source_account_names as (
+       select
+         external_account_id,
+         coalesce(
+           max(nullif(dimensions->>'dattoExternalAccountName', '')),
+           max(nullif(dimensions->>'coveCustomerName', '')),
+           max(nullif(dimensions->>'ncentralCustomerName', '')),
+           max(nullif(dimensions->>'customerName', '')),
+           max(nullif(dimensions->>'dattoCustomerName', '')),
+           max(nullif(dimensions->>'domain', '')),
+           external_account_id
+         ) as external_account_name,
+         max(observed_at) as last_seen_at
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and external_account_id is not null
+         and sync_run_id = (select id from latest_sync_run)
+       group by external_account_id
+     )
+     select
        vendor_account_mappings.id,
        vendor_account_mappings.vendor_id,
        vendor_account_mappings.external_account_id,
-       vendor_account_mappings.external_account_name,
+       coalesce(source_account_names.external_account_name, vendor_account_mappings.external_account_name) as external_account_name,
        vendor_account_mappings.customer_id,
        customers.name as customer_name,
        vendor_account_mappings.agreement_id,
@@ -1391,13 +1421,16 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
        vendor_account_mappings.active,
        vendor_account_mappings.reviewed_by,
        vendor_account_mappings.reviewed_at,
-       vendor_account_mappings.last_seen_at,
+       coalesce(source_account_names.last_seen_at, vendor_account_mappings.last_seen_at) as last_seen_at,
        vendor_account_mappings.match_evidence
      from vendor_account_mappings
      inner join customers on customers.id = vendor_account_mappings.customer_id
      left join agreements on agreements.id = vendor_account_mappings.agreement_id
+     left join source_account_names
+       on source_account_names.external_account_id = vendor_account_mappings.external_account_id
      where vendor_account_mappings.vendor_id = $1
-     order by vendor_account_mappings.mapping_status, vendor_account_mappings.external_account_name`,
+       and ($1 <> 'datto' or source_account_names.external_account_id is not null)
+     order by vendor_account_mappings.mapping_status, coalesce(source_account_names.external_account_name, vendor_account_mappings.external_account_name)`,
     [vendorId],
   );
 
@@ -1483,12 +1516,23 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
 
 async function loadVendorAccountSources(database: Queryable, vendorId: IntegrationId): Promise<VendorAccountSource[]> {
   const result = await database.query<AccountSourceRow>(
-    `select
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     )
+     select
        external_account_id,
        coalesce(
+         max(nullif(dimensions->>'dattoExternalAccountName', '')),
          max(nullif(dimensions->>'coveCustomerName', '')),
          max(nullif(dimensions->>'ncentralCustomerName', '')),
          max(nullif(dimensions->>'customerName', '')),
+         max(nullif(dimensions->>'dattoCustomerName', '')),
+         max(nullif(dimensions->>'domain', '')),
          external_account_id
        ) as external_account_name,
        count(*)::int as row_count,
@@ -1496,6 +1540,7 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
      from vendor_usage_snapshots
      where vendor_id = $1
        and external_account_id is not null
+       and sync_run_id = (select id from latest_sync_run)
      group by external_account_id
      order by external_account_name`,
     [vendorId],
@@ -1769,9 +1814,12 @@ async function upsertAccountMapping(
 async function loadExternalAccountName(database: Queryable, vendorId: IntegrationId, externalAccountId: string) {
   const result = await database.query<{ external_account_name: string | null }>(
      `select coalesce(
+       max(nullif(dimensions->>'dattoExternalAccountName', '')),
        max(nullif(dimensions->>'coveCustomerName', '')),
        max(nullif(dimensions->>'ncentralCustomerName', '')),
        max(nullif(dimensions->>'customerName', '')),
+       max(nullif(dimensions->>'dattoCustomerName', '')),
+       max(nullif(dimensions->>'domain', '')),
        external_account_id
      ) as external_account_name
      from vendor_usage_snapshots

@@ -115,4 +115,23 @@ assert.equal(connectedAppRiver.configuredStatus, 'connected');
 assert.deepEqual(connectedAppRiver.missingSecrets, []);
 assert.deepEqual(connectedAppRiver.missingNonSecrets, []);
 
+const datto = getIntegrationSettingsDefinition('datto');
+assert.ok(datto);
+
+const connectedDatto = validateIntegrationSettings(datto, {
+  integrationId: 'datto',
+  nonSecrets: {
+    endpoint: 'https://api.datto.com',
+  },
+  availableKeyVaultSecrets: [
+    'mspharmony-datto-api-key',
+    'mspharmony-datto-api-secret',
+  ],
+  lastTestResult: 'success',
+});
+
+assert.equal(connectedDatto.configuredStatus, 'connected');
+assert.deepEqual(connectedDatto.missingSecrets, []);
+assert.deepEqual(connectedDatto.missingNonSecrets, []);
+
 console.log('integration settings tests passed');

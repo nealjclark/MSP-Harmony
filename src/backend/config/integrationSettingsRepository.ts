@@ -220,6 +220,12 @@ export class PostgresIntegrationSettingsRepository
                from vendor_usage_snapshots
                where vendor_id = 'cove'`,
             )
+          : integrationId === 'datto'
+            ? await this.database.query<CountRow>(
+                `select count(*) as count
+                 from vendor_usage_snapshots
+                 where vendor_id = 'datto'`,
+              )
           : integrationId === 'opentext-appriver'
             ? await this.database.query<CountRow>(
                 `select count(*) as count

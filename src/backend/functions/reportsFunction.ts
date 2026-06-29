@@ -7,6 +7,11 @@ import {
   isCustomerLicenseReportVendorId,
   listCustomerLicenseReportCustomers,
 } from '../reports/customerLicenseReports';
+import {
+  getDiscrepancyReport,
+  isDiscrepancyBasis,
+  isDiscrepancySeverity,
+} from '../reports/discrepancyReports';
 import { getProductProfitabilityReport } from '../reports/productProfitabilityReports';
 import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../reports/rawSyncReports';
 import { hasMinimumRole, requireRole } from './auth';
@@ -237,6 +242,63 @@ export async function getProductProfitabilityReportHttp(
   }
 }
 
+export async function getDiscrepancyReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const customerId = request.query.get('customerId') ?? undefined;
+  const basis = request.query.get('basis') ?? undefined;
+  const severity = request.query.get('severity') ?? undefined;
+  const includeMatched = booleanQueryValue(request.query.get('includeMatched'));
+
+  if (customerId && !isUuid(customerId)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report customerId must be a UUID.',
+    });
+  }
+
+  if (basis && !isDiscrepancyBasis(basis)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report basis must be "user" or "device".',
+      supportedBasis: ['user', 'device'],
+    });
+  }
+
+  if (severity && !isDiscrepancySeverity(severity)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report severity is not supported.',
+      supportedSeverities: ['matched', 'warning', 'critical', 'unavailable'],
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Discrepancy reporting needs PostgreSQL settings before it can compare vendor data.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, await getDiscrepancyReport(repositoryContext.pool, {
+      customerId,
+      basis: isDiscrepancyBasis(basis) ? basis : undefined,
+      severity: isDiscrepancySeverity(severity) ? severity : undefined,
+      includeMatched,
+    }));
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load discrepancy report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function listCustomerLicenseReportCustomersHttp(
   request: HttpRequest,
   _context: InvocationContext,
@@ -380,6 +442,13 @@ app.http('getProductProfitabilityReport', {
   authLevel: 'anonymous',
   route: 'reports/product-profitability',
   handler: getProductProfitabilityReportHttp,
+});
+
+app.http('getDiscrepancyReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/discrepancies',
+  handler: getDiscrepancyReportHttp,
 });
 
 app.http('listCustomerLicenseReportCustomers', {

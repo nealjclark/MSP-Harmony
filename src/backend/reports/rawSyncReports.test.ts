@@ -78,6 +78,23 @@ async function run() {
         };
       }
 
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'datto'") && sql.includes('order by started_at')) {
+        return {
+          rows: [
+            {
+              id: 'datto-sync-1',
+              started_at: new Date('2026-06-15T16:00:00Z'),
+              completed_at: new Date('2026-06-15T16:01:00Z'),
+              status: 'complete',
+              records_read: 44,
+              records_written: 2,
+              error_message: null,
+              metadata: { entity: 'usage-snapshots', bcdrAgentsRead: 1, saasSeatQuantityRead: 42 },
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('from sync_runs') && sql.includes("integration_id = 'opentext-appriver'") && sql.includes('where id = $1')) {
         return {
           rows: [
@@ -90,6 +107,23 @@ async function run() {
               records_written: 2,
               error_message: null,
               metadata: { entity: 'subscription-snapshots', mappedSnapshots: 1, unmappedSnapshots: 1 },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'datto'") && sql.includes('where id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'datto-sync-1',
+              started_at: new Date('2026-06-15T16:00:00Z'),
+              completed_at: new Date('2026-06-15T16:01:00Z'),
+              status: 'complete',
+              records_read: 44,
+              records_written: 2,
+              error_message: null,
+              metadata: { entity: 'usage-snapshots', bcdrAgentsRead: 1, saasSeatQuantityRead: 42 },
             },
           ] as T[],
         };
@@ -257,6 +291,52 @@ async function run() {
         };
       }
 
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes("vendor_usage_snapshots.vendor_id = 'datto'")) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: 'Mapped Client',
+              vendor_product_key: 'datto-bcdr-agent',
+              product_code: 'CW-DATTO-BCDR',
+              product_name: 'CW Datto BCDR Agent',
+              quantity: '1',
+              observed_at: new Date('2026-06-15T16:01:00Z'),
+              dimensions: {
+                dattoProductFamily: 'bcdr',
+                dattoCustomerName: 'Mapped Client',
+                dattoDeviceHostname: 'siris-01',
+                dattoDeviceSerial: 'ABC123',
+                dattoAgentName: 'dc-01',
+              },
+              raw_payload: { backupVolume: { Agent: 'dc-01' } },
+            },
+            {
+              customer_name: null,
+              agreement_name: null,
+              external_account_id: 'saas-2',
+              vendor_product_key: 'datto-saas-office365-tbr',
+              product_code: 'DATTO-SAAS-OFFICE365-TBR',
+              product_name: 'Datto SaaS Protection Office 365 Time Based Retention',
+              quantity: '42',
+              observed_at: new Date('2026-06-15T16:01:00Z'),
+              dimensions: {
+                dattoProductFamily: 'saas',
+                dattoSaasProductKey: 'datto-saas-office365-tbr',
+                dattoSaasProductType: 'Office365',
+                dattoSaasRetentionType: 'TBR',
+                dattoSaasCustomerId: 'saas-2',
+                dattoCustomerName: 'Unmapped Client',
+                domain: 'unmapped.example',
+                quantitySource: 'domain-seats-used',
+              },
+              raw_payload: { domain: { saasCustomerId: 'saas-2', productType: 'Office365', retentionType: 'TBR', seatsUsed: 42 } },
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('from vendor_usage_snapshots')) {
         return {
           rows: [
@@ -391,6 +471,23 @@ async function run() {
   assert.equal(scopedAppRiverDetails?.summary.rowCount, 1);
   assert.equal(scopedAppRiverDetails?.rows[0]?.Customer, 'Mapped Client');
   assert.equal(scopedAppRiverDetails?.rows[0]?.ProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
+
+  const dattoRuns = await listRawSyncRuns(database, 'datto');
+  assert.equal(dattoRuns[0]?.id, 'datto-sync-1');
+
+  const dattoDetails = await getRawSyncDetails(database, 'datto', 'datto-sync-1');
+  assert.equal(dattoDetails?.integrationId, 'datto');
+  assert.equal(dattoDetails?.summary.rowCount, 2);
+  assert.equal(dattoDetails?.summary.companyCount, 2);
+  assert.equal(dattoDetails?.summary.productCount, 2);
+  assert.equal(dattoDetails?.rows[0]?.DattoCustomer, 'Mapped Client');
+  assert.equal(dattoDetails?.rows[0]?.ProductFamily, 'bcdr');
+  assert.equal(dattoDetails?.rows[0]?.AgentName, 'dc-01');
+  assert.equal(dattoDetails?.rows[1]?.Mapped, false);
+  assert.equal(dattoDetails?.rows[1]?.SaaSDomain, 'unmapped.example');
+  assert.equal(dattoDetails?.rows[1]?.ProductType, 'Office365');
+  assert.equal(dattoDetails?.rows[1]?.RetentionType, 'TBR');
+  assert.equal(dattoDetails?.rows[1]?.Quantity, 42);
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');

@@ -19,6 +19,7 @@ import {
 import type { IntegrationId } from '../../shared/integrationSettings';
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
+import { loadDattoRuleSet } from '../vendor/datto/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
@@ -278,6 +279,10 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
 
   if (vendorId === 'ncentral') {
     return loadNcentralRuleSet(database);
+  }
+
+  if (vendorId === 'datto') {
+    return loadDattoRuleSet(database);
   }
 
   if (vendorId === 'microsoft-365') {

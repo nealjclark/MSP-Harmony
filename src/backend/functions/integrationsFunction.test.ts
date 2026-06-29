@@ -18,6 +18,9 @@ const envKeys = [
   'COVE_PARTNER_NAME',
   'COVE_USERNAME',
   'COVE_PASSWORD',
+  'DATTO_ENDPOINT',
+  'DATTO_API_KEY',
+  'DATTO_API_SECRET',
   'MICROSOFT365_ENDPOINT',
   'MICROSOFT365_CLIENT_ID',
   'MICROSOFT365_TENANT_ID',
@@ -87,6 +90,20 @@ async function run() {
       /not implemented/i,
     );
 
+    const dattoTestResponse = await testIntegrationHttp(
+      {
+        params: { integrationId: 'datto' },
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(dattoTestResponse.status, 400);
+    assert.match(String((dattoTestResponse.jsonBody as { error?: string }).error), /Missing Datto Backup setting/);
+    assert.doesNotMatch(
+      String((dattoTestResponse.jsonBody as { error?: string }).error),
+      /not implemented/i,
+    );
+
     const coveSyncResponse = await syncIntegrationHttp(
       {
         params: { integrationId: 'cove' },
@@ -130,6 +147,36 @@ async function run() {
       pageSize: 100,
       maxPages: 100,
     });
+
+    const queuedDattoSyncResponse = await syncIntegrationHttp(
+      {
+        params: { integrationId: 'datto' },
+        headers: adminHeaders,
+        async json() {
+          return {};
+        },
+      } as never,
+      {
+        log() {},
+        extraOutputs: {
+          set(_output: unknown, value: unknown) {
+            queuedMessages.push(value);
+          },
+        },
+      } as never,
+    );
+    assert.equal(queuedDattoSyncResponse.status, 202);
+    assert.deepEqual(queuedMessages[1], {
+      integrationId: 'datto',
+      requestedBy: 'admin@example.com',
+      requestedAt: (queuedMessages[1] as { requestedAt: string }).requestedAt,
+      pageSize: 100,
+      maxPages: 100,
+      seatPageSize: 500,
+      seatMaxPages: 100,
+      includeBcdr: true,
+    });
+    assert.equal((queuedDattoSyncResponse.jsonBody as { includeBcdr?: boolean }).includeBcdr, true);
   } finally {
     for (const key of envKeys) {
       const originalValue = originalEnv[key];

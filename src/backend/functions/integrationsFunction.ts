@@ -8,6 +8,8 @@ import { syncConnectWiseAgreementReport, testConnectWiseConnection } from '../co
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 import { CoveApiError } from '../vendor/cove/client';
 import { syncCoveUsageSnapshots, testCoveConnection } from '../vendor/cove/operations';
+import { DattoApiError } from '../vendor/datto/client';
+import { syncDattoUsageSnapshots, testDattoConnection } from '../vendor/datto/operations';
 import { NcentralApiError } from '../vendor/ncentral/client';
 import { syncNcentralUsageSnapshots, testNcentralConnection } from '../vendor/ncentral/operations';
 import { AppRiverApiError } from '../vendor/appriver/client';
@@ -31,12 +33,15 @@ type SyncBody = {
   maxPages?: number;
   subscriptionPageSize?: number;
   subscriptionMaxPages?: number;
+  seatPageSize?: number;
+  seatMaxPages?: number;
+  includeBcdr?: boolean;
   dataset?: 'users' | 'licenses';
 };
 
 type SyncableIntegrationId = Extract<
   IntegrationId,
-  'connectwise' | 'cove' | 'ncentral' | 'opentext-appriver' | 'microsoft-365'
+  'connectwise' | 'cove' | 'ncentral' | 'datto' | 'opentext-appriver' | 'microsoft-365'
 >;
 
 type IntegrationSyncQueueMessage = SyncBody & {
@@ -104,6 +109,7 @@ export async function testIntegrationHttp(
     integrationId !== 'connectwise' &&
     integrationId !== 'cove' &&
     integrationId !== 'ncentral' &&
+    integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
     integrationId !== 'microsoft-365'
   ) {
@@ -175,6 +181,21 @@ export async function testIntegrationHttp(
       });
     }
 
+    if (integrationId === 'datto') {
+      const result = await testDattoConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        bcdrAgentCount: result.bcdrAgentCount,
+        sampleBcdrAgents: result.sampleBcdrAgents,
+        saasDomainCount: result.saasDomainCount,
+        sampleSaasDomains: result.sampleSaasDomains,
+      });
+    }
+
     if (integrationId === 'opentext-appriver') {
       const result = await testAppRiverConnection({ provider });
 
@@ -220,6 +241,7 @@ export async function syncIntegrationHttp(
     integrationId !== 'connectwise' &&
     integrationId !== 'cove' &&
     integrationId !== 'ncentral' &&
+    integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
     integrationId !== 'microsoft-365'
   ) {
@@ -255,6 +277,7 @@ export async function syncIntegrationHttp(
       status: 'queued',
       queued: true,
       dataset: integrationId === 'microsoft-365' ? message.dataset : undefined,
+      includeBcdr: integrationId === 'datto' ? message.includeBcdr : undefined,
       queuedAt,
       requestedBy: auth.principal.name,
     });
@@ -316,6 +339,20 @@ export async function processIntegrationSyncQueueMessage(
         maxPages: parsed.maxPages,
       });
       context.log(`N-central queued sync ${result.syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'datto') {
+      const result = await syncDattoUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+        seatPageSize: parsed.seatPageSize,
+        seatMaxPages: parsed.seatMaxPages,
+        includeBcdr: parsed.includeBcdr,
+      });
+      context.log(`Datto queued sync ${result.syncRunId} completed.`);
       return;
     }
 
@@ -451,6 +488,13 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof DattoApiError) {
+    return jsonResponse(502, {
+      error: fallback,
+      status: error.status,
+    });
+  }
+
   if (error instanceof AppRiverApiError) {
     return jsonResponse(502, {
       error: fallback,
@@ -475,6 +519,7 @@ function integrationErrorResponse(error: unknown, fallback: string) {
 function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'cove') return 'Cove';
   if (integrationId === 'ncentral') return 'N-central';
+  if (integrationId === 'datto') return 'Datto Backup';
   if (integrationId === 'opentext-appriver') return 'AppRiver - OpenText';
   if (integrationId === 'microsoft-365') return 'Microsoft 365';
   return 'ConnectWise';
@@ -521,6 +566,19 @@ function buildIntegrationSyncQueueMessage(
       requestedAt,
       pageSize: safePositiveInteger(body.pageSize, 500),
       maxPages: safePositiveInteger(body.maxPages, 100),
+    };
+  }
+
+  if (integrationId === 'datto') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 100),
+      maxPages: safePositiveInteger(body.maxPages, 100),
+      seatPageSize: safePositiveInteger(body.seatPageSize, 500),
+      seatMaxPages: safePositiveInteger(body.seatMaxPages, 100),
+      includeBcdr: body.includeBcdr !== false,
     };
   }
 
@@ -571,6 +629,7 @@ function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage |
     parsed.integrationId !== 'connectwise' &&
     parsed.integrationId !== 'cove' &&
     parsed.integrationId !== 'ncentral' &&
+    parsed.integrationId !== 'datto' &&
     parsed.integrationId !== 'opentext-appriver' &&
     parsed.integrationId !== 'microsoft-365'
   ) {

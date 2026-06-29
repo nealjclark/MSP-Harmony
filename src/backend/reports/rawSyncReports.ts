@@ -44,6 +44,7 @@ const legacyMicrosoft365SyncEntity = 'license-snapshots';
 const microsoft365UserSyncEntity = 'm365-users';
 const microsoft365LicenseSyncEntity = 'm365-licenses';
 const appRiverSyncEntity = 'subscription-snapshots';
+const dattoSyncEntity = 'usage-snapshots';
 
 type CoveSnapshotRow = {
   customer_id: string | null;
@@ -119,6 +120,20 @@ type Microsoft365SubscriptionSnapshotRow = {
 };
 
 type AppRiverSnapshotRow = {
+  customer_id: string | null;
+  customer_name: string | null;
+  agreement_name: string | null;
+  external_account_id: string | null;
+  vendor_product_key: string | null;
+  product_code: string;
+  product_name: string;
+  quantity: string | number;
+  observed_at: Date | string;
+  dimensions: unknown;
+  raw_payload: unknown;
+};
+
+type DattoSnapshotRow = {
   customer_id: string | null;
   customer_name: string | null;
   agreement_name: string | null;
@@ -257,6 +272,40 @@ export const appRiverRawSyncColumns = [
   'RawPayload',
 ] as const;
 
+export const dattoRawSyncColumns = [
+  'Customer',
+  'Agreement',
+  'DattoCustomer',
+  'ProductFamily',
+  'DeviceHostname',
+  'DeviceSerial',
+  'DeviceModel',
+  'AgentName',
+  'AgentHostname',
+  'AgentVersion',
+  'ProtectedVolumes',
+  'UnprotectedVolumes',
+  'Paused',
+  'Archived',
+  'LocalSnapshots',
+  'LastSnapshot',
+  'LastScreenshot',
+  'ScreenshotSuccess',
+  'SaaSDomain',
+  'SaaSCustomerId',
+  'ProductType',
+  'RetentionType',
+  'ProductKey',
+  'ProductCode',
+  'ProductName',
+  'Quantity',
+  'QuantitySource',
+  'ExternalAccountId',
+  'Mapped',
+  'ObservedAt',
+  'RawPayload',
+] as const;
+
 export async function listRawSyncRuns(
   database: Queryable,
   integrationId: RawSyncIntegrationId,
@@ -291,6 +340,20 @@ export async function listRawSyncRuns(
        order by started_at desc
        limit $2`,
       [appRiverSyncEntity, limit],
+    );
+
+    return result.rows.map(mapSyncRun);
+  }
+
+  if (integrationId === 'datto') {
+    const result = await database.query<SyncRunRow>(
+      `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
+       from sync_runs
+       where integration_id = 'datto'
+         and metadata->>'entity' = $1
+       order by started_at desc
+       limit $2`,
+      [dattoSyncEntity, limit],
     );
 
     return result.rows.map(mapSyncRun);
@@ -354,6 +417,10 @@ export async function getRawSyncDetails(
 
   if (integrationId === 'opentext-appriver') {
     return getAppRiverRawSyncDetails(database, syncRunId, options);
+  }
+
+  if (integrationId === 'datto') {
+    return getDattoRawSyncDetails(database, syncRunId, options);
   }
 
   return getGenericRawSyncDetails(database, integrationId, syncRunId);
@@ -720,6 +787,124 @@ function mapAppRiverSnapshotRow(row: AppRiverSnapshotRow): RawSyncDetail {
   };
 }
 
+async function getDattoRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
+  const syncRunResult = await database.query<SyncRunRow>(
+    `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
+     from sync_runs
+     where id = $1
+       and integration_id = 'datto'
+       and metadata->>'entity' = $2
+     limit 1`,
+    [syncRunId, dattoSyncEntity],
+  );
+  const syncRunRow = syncRunResult.rows[0];
+
+  if (!syncRunRow) {
+    return undefined;
+  }
+
+  const detailResult = await database.query<DattoSnapshotRow>(
+    `with mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.sync_run_id = $1
+         and vendor_usage_snapshots.vendor_id = 'datto'
+     )
+     select
+       mapped_snapshots.effective_customer_id as customer_id,
+       customers.name as customer_name,
+       agreements.name as agreement_name,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.vendor_product_key,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       mapped_snapshots.dimensions,
+       mapped_snapshots.raw_payload
+     from mapped_snapshots
+     left join customers on customers.id = mapped_snapshots.effective_customer_id
+     left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
+     order by coalesce(customers.name, mapped_snapshots.dimensions->>'dattoCustomerName', mapped_snapshots.dimensions->>'domain', mapped_snapshots.external_account_id),
+       mapped_snapshots.vendor_product_key,
+       mapped_snapshots.dimensions->>'dattoAgentName',
+       mapped_snapshots.dimensions->>'domain'`,
+    [syncRunId, options.customerId ?? null],
+  );
+  const rows = detailResult.rows.map(mapDattoSnapshotRow);
+
+  return {
+    integrationId: 'datto',
+    syncRun: mapSyncRun(syncRunRow),
+    columns: dattoRawSyncColumns,
+    rows,
+    summary: {
+      rowCount: rows.length,
+      companyCount: uniqueCount(rows, 'Customer') + uniqueUnmappedDattoAccountCount(rows),
+      agreementCount: uniqueCount(rows, 'Agreement'),
+      productCount: uniqueCount(rows, 'ProductKey'),
+    },
+  };
+}
+
+function mapDattoSnapshotRow(row: DattoSnapshotRow): RawSyncDetail {
+  const dimensions = recordFromJson(row.dimensions);
+
+  return {
+    CustomerId: row.customer_id,
+    Customer: row.customer_name,
+    Agreement: row.agreement_name,
+    DattoCustomer: stringValue(dimensions.dattoCustomerName),
+    ProductFamily: stringValue(dimensions.dattoProductFamily),
+    DeviceHostname: stringValue(dimensions.dattoDeviceHostname),
+    DeviceSerial: stringValue(dimensions.dattoDeviceSerial),
+    DeviceModel: stringValue(dimensions.dattoDeviceModel),
+    AgentName: stringValue(dimensions.dattoAgentName) ?? stringValue(dimensions.dattoAgentHostname),
+    AgentHostname: stringValue(dimensions.dattoAgentHostname),
+    AgentVersion: stringValue(dimensions.dattoAgentVersion),
+    ProtectedVolumes: numberValue(dimensions.dattoProtectedVolumesCount) ?? null,
+    UnprotectedVolumes: numberValue(dimensions.dattoUnprotectedVolumesCount) ?? null,
+    Paused: booleanValue(dimensions.dattoIsPaused),
+    Archived: booleanValue(dimensions.dattoIsArchived),
+    LocalSnapshots: numberValue(dimensions.dattoLocalSnapshots) ?? null,
+    LastSnapshot: numberValue(dimensions.dattoLastSnapshot) ?? null,
+    LastScreenshot: numberValue(dimensions.dattoLastScreenshot) ?? null,
+    ScreenshotSuccess: booleanValue(dimensions.dattoScreenshotSuccess),
+    SaaSDomain: stringValue(dimensions.domain),
+    SaaSCustomerId: stringValue(dimensions.dattoSaasCustomerId),
+    ProductType: stringValue(dimensions.dattoSaasProductType),
+    RetentionType: stringValue(dimensions.dattoSaasRetentionType),
+    ProductKey: row.vendor_product_key,
+    ProductCode: row.product_code,
+    ProductName: row.product_name,
+    Quantity: numberValue(row.quantity) ?? 0,
+    QuantitySource: stringValue(dimensions.quantitySource),
+    ExternalAccountId: row.external_account_id,
+    Mapped: Boolean(row.customer_name && row.agreement_name),
+    ObservedAt: isoDate(row.observed_at) ?? null,
+    RawPayload: compactJson(row.raw_payload),
+  };
+}
+
 async function getNcentralRawSyncDetails(
   database: Queryable,
   syncRunId: string,
@@ -1041,6 +1226,19 @@ function numberValue(value: unknown) {
   return undefined;
 }
 
+function booleanValue(value: unknown) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    if (/^true$/i.test(value)) return true;
+    if (/^false$/i.test(value)) return false;
+  }
+
+  return null;
+}
+
 function primitiveValue(value: unknown) {
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return value;
@@ -1085,6 +1283,15 @@ function uniqueUnmappedAppRiverCustomerCount(rows: RawSyncDetail[]) {
     rows
       .filter((row) => !row.Customer)
       .map((row) => row.AppRiverCustomerId ?? row.AppRiverCustomer)
+      .filter((value) => value !== null && value !== undefined && value !== ''),
+  ).size;
+}
+
+function uniqueUnmappedDattoAccountCount(rows: RawSyncDetail[]) {
+  return new Set(
+    rows
+      .filter((row) => !row.Customer)
+      .map((row) => row.SaaSCustomerId ?? row.DattoCustomer ?? row.SaaSDomain ?? row.ExternalAccountId)
       .filter((value) => value !== null && value !== undefined && value !== ''),
   ).size;
 }

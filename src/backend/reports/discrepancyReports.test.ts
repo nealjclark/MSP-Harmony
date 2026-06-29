@@ -1,0 +1,213 @@
+import assert from 'node:assert/strict';
+import {
+  getDiscrepancyReport,
+  type Queryable,
+} from './discrepancyReports';
+
+const customerA = '11111111-1111-4111-8111-111111111111';
+const customerB = '22222222-2222-4222-8222-222222222222';
+
+type SnapshotFixture = {
+  id: string;
+  vendor_id: string;
+  customer_id: string;
+  connectwise_company_id: string;
+  customer_name: string;
+  external_account_id?: string;
+  vendor_product_key?: string;
+  product_code: string;
+  product_name: string;
+  quantity: string | number;
+  observed_at: Date;
+  dimensions: Record<string, unknown>;
+};
+
+const syncRuns: Record<string, string> = {
+  ncentral: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  sentinelone: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  'microsoft-365': 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  'opentext-appriver': 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+};
+
+const snapshots: Record<string, SnapshotFixture[]> = {
+  ncentral: [
+    device('ncentral-1', 'ncentral', customerA, 'Mapped Client', 'DESKTOP-01.contoso.local'),
+    device('ncentral-2', 'ncentral', customerA, 'Mapped Client', 'LAPTOP-02'),
+  ],
+  sentinelone: [
+    device('sentinel-1', 'sentinelone', customerA, 'Mapped Client', 'desktop-01'),
+    device('sentinel-2', 'sentinelone', customerA, 'Mapped Client', 'SERVER-03'),
+  ],
+  'microsoft-365': [
+    microsoftUser('m365-user-1', customerA, 'Mapped Client', 'alpha@contoso.com', true, ['EXCHANGE_S_STANDARD']),
+    microsoftUser('m365-user-2', customerA, 'Mapped Client', 'bravo@contoso.com', true, ['EXCHANGE_S_ENTERPRISE']),
+    microsoftUser('m365-user-disabled', customerA, 'Mapped Client', 'disabled@contoso.com', false, ['EXCHANGE_S_STANDARD']),
+    microsoftUser('m365-user-sharepoint', customerA, 'Mapped Client', 'sharepoint@contoso.com', true, ['SHAREPOINTSTANDARD']),
+    microsoftUser('m365-user-other-customer', customerB, 'Other Client', 'third@contoso.com', true, ['EXCHANGE_S_STANDARD']),
+  ],
+  'opentext-appriver': [
+    {
+      id: 'appriver-1',
+      vendor_id: 'opentext-appriver',
+      customer_id: customerA,
+      connectwise_company_id: 'cw-101',
+      customer_name: 'Mapped Client',
+      external_account_id: 'appriver-101',
+      vendor_product_key: 'Email Protection|Monthly|Monthly',
+      product_code: 'EMAIL-PROTECTION',
+      product_name: 'Email Protection',
+      quantity: '1',
+      observed_at: new Date('2026-06-29T10:00:00Z'),
+      dimensions: {
+        domain: 'contoso.com',
+        customerName: 'Mapped Client',
+        subscriptionSource: 'appriver-securecloud-subscription',
+      },
+    },
+  ],
+};
+
+const database: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    const vendorId = String(values?.[0] ?? '');
+
+    if (sql.includes('from sync_runs')) {
+      const syncRunId = syncRuns[vendorId];
+      return {
+        rows: syncRunId
+          ? [
+              {
+                id: syncRunId,
+                started_at: new Date('2026-06-29T09:00:00Z'),
+                completed_at: new Date('2026-06-29T09:05:00Z'),
+                metadata: vendorId === 'microsoft-365' ? { entity: 'm365-users' } : {},
+              } as T,
+            ]
+          : [],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return {
+        rows: (snapshots[vendorId] ?? []) as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+async function run() {
+  const report = await getDiscrepancyReport(database, {
+    includeMatched: true,
+    now: '2026-06-29T10:30:00.000Z',
+  });
+
+  const deviceRow = report.rows.find((row) => row.comparisonPair.id === 'ncentral-sentinelone-devices');
+  assert.ok(deviceRow);
+  assert.equal(deviceRow.customer.customerId, customerA);
+  assert.equal(deviceRow.leftCount, 2);
+  assert.equal(deviceRow.rightCount, 2);
+  assert.equal(deviceRow.delta, 0);
+  assert.equal(deviceRow.status, 'warning');
+  assert.deepEqual(deviceRow.missingFromLeft.map((item) => item.displayName), ['SERVER-03']);
+  assert.deepEqual(deviceRow.missingFromRight.map((item) => item.displayName), ['LAPTOP-02']);
+
+  const appRiverRow = report.rows.find((row) => row.comparisonPair.id === 'appriver-microsoft365-users');
+  assert.ok(appRiverRow);
+  assert.equal(appRiverRow.customer.customerId, customerA);
+  assert.equal(appRiverRow.domain, 'contoso.com');
+  assert.equal(appRiverRow.leftCount, 1);
+  assert.equal(appRiverRow.rightCount, 2);
+  assert.equal(appRiverRow.delta, -1);
+  assert.equal(appRiverRow.status, 'warning');
+  assert.equal(appRiverRow.aggregateOnly, true);
+  assert.equal(appRiverRow.referenceItems.length, 2);
+  assert.deepEqual(appRiverRow.referenceItems.map((item) => item.identity), ['alpha@contoso.com', 'bravo@contoso.com']);
+  assert.equal(appRiverRow.referenceItems.some((item) => item.identity === 'third@contoso.com'), false);
+  assert.deepEqual(appRiverRow.missingFromLeft, []);
+  assert.deepEqual(appRiverRow.missingFromRight, []);
+
+  const proofpointRow = report.rows.find((row) => row.comparisonPair.id === 'proofpoint-microsoft365-users');
+  assert.ok(proofpointRow);
+  assert.equal(proofpointRow.status, 'unavailable');
+  assert.match(proofpointRow.unavailableReason ?? '', /Proofpoint/);
+
+  const filtered = await getDiscrepancyReport(database, {
+    basis: 'device',
+    includeMatched: false,
+    now: '2026-06-29T10:30:00.000Z',
+  });
+  assert.equal(filtered.rows.every((row) => row.basis === 'device'), true);
+  assert.equal(filtered.rows.some((row) => row.status === 'matched'), false);
+
+  console.log('discrepancy report tests passed');
+}
+
+run().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+
+function device(
+  id: string,
+  vendorId: 'ncentral' | 'sentinelone',
+  customerId: string,
+  customerName: string,
+  hostname: string,
+): SnapshotFixture {
+  return {
+    id,
+    vendor_id: vendorId,
+    customer_id: customerId,
+    connectwise_company_id: customerId === customerA ? 'cw-101' : 'cw-202',
+    customer_name: customerName,
+    external_account_id: `${vendorId}-${customerId}`,
+    vendor_product_key: `${vendorId}-workstation`,
+    product_code: `${vendorId.toUpperCase()}-WORKSTATION`,
+    product_name: `${vendorId} Workstation`,
+    quantity: 1,
+    observed_at: new Date('2026-06-29T10:00:00Z'),
+    dimensions: {
+      hostname,
+      deviceName: hostname,
+    },
+  };
+}
+
+function microsoftUser(
+  id: string,
+  customerId: string,
+  customerName: string,
+  email: string,
+  active: boolean,
+  servicePlanNames: string[],
+): SnapshotFixture {
+  return {
+    id,
+    vendor_id: 'microsoft-365',
+    customer_id: customerId,
+    connectwise_company_id: customerId === customerA ? 'cw-101' : 'cw-202',
+    customer_name: customerName,
+    external_account_id: `tenant-${customerId}`,
+    vendor_product_key: 'SPB',
+    product_code: 'SPB',
+    product_name: 'Microsoft 365 Business Premium',
+    quantity: 1,
+    observed_at: new Date('2026-06-29T10:00:00Z'),
+    dimensions: {
+      tenantName: `${customerName} Tenant`,
+      tenantDefaultDomainName: email.split('@')[1],
+      userPrincipalName: email,
+      email,
+      displayName: email.split('@')[0],
+      accountEnabled: active,
+      userState: active ? 'active' : 'disabled',
+      skuName: 'Microsoft 365 Business Premium',
+      servicePlans: servicePlanNames.map((serviceName) => ({
+        serviceName,
+        capabilityStatus: 'Success',
+      })),
+    },
+  };
+}
