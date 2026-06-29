@@ -2,9 +2,14 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { config as loadDotEnv } from 'dotenv';
 import { listIntegrationSettingsDefinitions } from '../../shared/integrationSettings';
 import { getAgreementReportDetails, listAgreementReportSyncRuns } from '../reports/agreementReports';
+import {
+  getCustomerLicenseReport,
+  isCustomerLicenseReportVendorId,
+  listCustomerLicenseReportCustomers,
+} from '../reports/customerLicenseReports';
 import { getProductProfitabilityReport } from '../reports/productProfitabilityReports';
 import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../reports/rawSyncReports';
-import { requireRole } from './auth';
+import { hasMinimumRole, requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
 loadDotEnv({ override: false });
@@ -232,12 +237,114 @@ export async function getProductProfitabilityReportHttp(
   }
 }
 
+export async function listCustomerLicenseReportCustomersHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Customer license reporting needs PostgreSQL settings before it can load customers.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, await listCustomerLicenseReportCustomers(repositoryContext.pool));
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load customer license report customers.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function getCustomerLicenseReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const customerId = request.query.get('customerId') ?? undefined;
+  const vendorId = request.query.get('vendorId') ?? undefined;
+  const monthCount = boundedInteger(request.query.get('monthCount'), 12, 1, 24);
+  const includeMicrosoftUserDetails = booleanQueryValue(request.query.get('includeMicrosoftUserDetails'));
+
+  if (!customerId || !isUuid(customerId)) {
+    return jsonResponse(400, {
+      error: 'Customer license report customerId must be a UUID.',
+    });
+  }
+
+  if (!isCustomerLicenseReportVendorId(vendorId)) {
+    return jsonResponse(400, {
+      error: 'Customer license report requires a supported vendorId.',
+      supportedVendorIds: ['all', 'cove', 'ncentral', 'microsoft-365', 'opentext-appriver'],
+    });
+  }
+
+  if (
+    includeMicrosoftUserDetails &&
+    (vendorId === 'microsoft-365' || vendorId === 'all') &&
+    !hasMinimumRole(auth.principal, 'Admin')
+  ) {
+    return jsonResponse(403, {
+      error: 'The Admin role is required to include Microsoft 365 licensed user details.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Customer license reporting needs PostgreSQL settings before it can generate a report.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const report = await getCustomerLicenseReport(repositoryContext.pool, {
+      customerId,
+      vendorId,
+      monthCount,
+      includeMicrosoftUserDetails:
+        vendorId === 'microsoft-365' || vendorId === 'all' ? includeMicrosoftUserDetails : false,
+    });
+
+    if (!report) {
+      return jsonResponse(404, {
+        error: 'Customer was not found.',
+      });
+    }
+
+    return jsonResponse(200, report);
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to generate customer license report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 function booleanQueryValue(value: string | null) {
   return typeof value === 'string' && ['1', 'true', 'yes'].includes(value.trim().toLowerCase());
+}
+
+function boundedInteger(value: string | null, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(Math.trunc(parsed), max));
 }
 
 app.http('listAgreementReportSyncRuns', {
@@ -273,4 +380,18 @@ app.http('getProductProfitabilityReport', {
   authLevel: 'anonymous',
   route: 'reports/product-profitability',
   handler: getProductProfitabilityReportHttp,
+});
+
+app.http('listCustomerLicenseReportCustomers', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/customer-license/customers',
+  handler: listCustomerLicenseReportCustomersHttp,
+});
+
+app.http('getCustomerLicenseReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/customer-license',
+  handler: getCustomerLicenseReportHttp,
 });

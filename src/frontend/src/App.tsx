@@ -59,7 +59,7 @@ type ManagedUserStatus = 'active' | 'disabled';
 type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'ready' | 'approved' | 'blocked' | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'credentials' | 'sync';
-type ReportSection = 'raw-sync' | 'product-profitability';
+type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 
 type ReconcileIssue = {
@@ -287,6 +287,74 @@ type ProductProfitabilityReportResponse = {
     missingCostRows: number;
   };
   integrations: ProductProfitabilityIntegrationSeries[];
+};
+
+type CustomerLicenseVendorId = Extract<IntegrationId, 'cove' | 'ncentral' | 'microsoft-365' | 'opentext-appriver'>;
+type CustomerLicenseReportVendorId = CustomerLicenseVendorId | 'all';
+
+type CustomerLicenseCustomerOption = {
+  customerId: string;
+  connectWiseCompanyId?: string;
+  customerName: string;
+  agreementCount: number;
+  mappedVendorIds: CustomerLicenseVendorId[];
+};
+
+type CustomerLicenseCustomersResponse = {
+  customers: CustomerLicenseCustomerOption[];
+};
+
+type CustomerLicenseDetailValue = string | number | boolean | null;
+type CustomerLicenseDetailRow = Record<string, CustomerLicenseDetailValue>;
+
+type CustomerLicenseMonthCount = {
+  month: string;
+  count: number;
+};
+
+type CustomerLicenseProductSection = {
+  productKey: string;
+  productCode?: string;
+  productName: string;
+  vendor: {
+    integrationId: CustomerLicenseVendorId;
+    integrationName: string;
+  };
+  currentCount: number;
+  months: CustomerLicenseMonthCount[];
+  detailColumns: string[];
+  detailRows: CustomerLicenseDetailRow[];
+};
+
+type CustomerLicenseInventoryItem = {
+  key: string;
+  product: CustomerLicenseProductSection;
+  row: CustomerLicenseDetailRow;
+};
+
+type CustomerLicenseReportResponse = {
+  reportType: 'customer-license';
+  generatedAt: string;
+  customer: {
+    customerId: string;
+    connectWiseCompanyId?: string;
+    customerName: string;
+  };
+  vendor: {
+    integrationId: CustomerLicenseReportVendorId;
+    integrationName: string;
+  };
+  startMonth: string;
+  endMonth: string;
+  months: string[];
+  summary: {
+    productCount: number;
+    vendorCount: number;
+    totalCurrentCount: number;
+    detailRowCount: number;
+    microsoftUserDetailCount: number;
+  };
+  products: CustomerLicenseProductSection[];
 };
 
 type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable';
@@ -822,9 +890,16 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
     enabled: true,
     description: 'Track net product profit by active integration across the last 12 months',
   },
+  {
+    id: 'customer-license',
+    label: 'Customer Licenses',
+    enabled: true,
+    description: 'Generate customer-facing license counts and product details on demand',
+  },
 ];
 
 const reconciliationVendorIds: IntegrationId[] = ['cove', 'ncentral', 'microsoft-365', 'opentext-appriver'];
+const customerLicenseVendorIds: CustomerLicenseReportVendorId[] = ['all', 'microsoft-365', 'cove', 'ncentral', 'opentext-appriver'];
 const reconciliationVendors = ['All', 'Cove Data Protection', 'N-able N-central', 'Microsoft 365', 'AppRiver - OpenText'];
 const noAgreementSyncValue = '__no_agreement_sync__';
 
@@ -957,6 +1032,95 @@ function formatFrequency(value: string) {
 
 function integrationName(integrationId: IntegrationId) {
   return integrationSettingsRegistry.find((integration) => integration.integrationId === integrationId)?.displayName ?? integrationId;
+}
+
+function customerLicenseVendorName(vendorId: CustomerLicenseReportVendorId) {
+  return vendorId === 'all' ? 'All licenses' : integrationName(vendorId);
+}
+
+const customerLicenseServicePalette = [
+  '#3478a7',
+  '#0d8f80',
+  '#6b61c9',
+  '#df604f',
+  '#b7791f',
+  '#2f855a',
+  '#805ad5',
+  '#c53030',
+  '#2b6cb0',
+  '#718096',
+];
+
+function customerLicenseInventoryRows(report: CustomerLicenseReportResponse | null): CustomerLicenseInventoryItem[] {
+  if (!report) {
+    return [];
+  }
+
+  return report.products.flatMap((product) =>
+    product.detailRows.map((row, rowIndex) => ({
+      key: `${product.productKey}-${rowIndex}`,
+      product,
+      row,
+    })),
+  );
+}
+
+function detailText(row: CustomerLicenseDetailRow, ...columns: string[]) {
+  for (const column of columns) {
+    const value = row[column];
+    if (typeof value === 'string' && value.trim().length > 0 && value.trim().toLowerCase() !== '[redacted]') {
+      return String(formatLicenseReportCell(column, value));
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(formatLicenseReportCell(column, value));
+    }
+  }
+
+  return '';
+}
+
+function buildCustomerLicenseChart(report: CustomerLicenseReportResponse | null) {
+  if (!report) {
+    return {
+      services: [] as Array<{
+        serviceId: string;
+        serviceName: string;
+        vendorName: string;
+        color: string;
+        currentCount: number;
+        points: CustomerLicenseMonthCount[];
+      }>,
+      months: [] as string[],
+      maxCount: 1,
+    };
+  }
+
+  const services = report.products.map((product, index) => ({
+    serviceId: product.productKey,
+    serviceName: product.productName,
+    vendorName: product.vendor.integrationName,
+    color: customerLicenseServicePalette[index % customerLicenseServicePalette.length],
+    currentCount: product.currentCount,
+    points: report.months.map((month) => ({
+      month,
+      count: product.months.find((item) => item.month === month)?.count ?? 0,
+    })),
+  }));
+
+  return {
+    services,
+    months: report.months,
+    maxCount: Math.max(
+      1,
+      ...services.flatMap((service) => service.points.map((point) => point.count)),
+    ),
+  };
+}
+
+function customerLicenseLinePath(points: Array<{ x: number; y: number }>) {
+  return points
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(' ');
 }
 
 function formatDateTime(value?: string) {
@@ -1370,6 +1534,30 @@ function formatReportCell(column: string, value: string | number | boolean | nul
   return value;
 }
 
+function formatLicenseReportCell(column: string, value: CustomerLicenseDetailValue | undefined) {
+  if (value === null || typeof value === 'undefined') return '';
+
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+
+  if (typeof value === 'number') {
+    return formatLicenseCount(value);
+  }
+
+  if (licenseReportDateColumns.has(column)) {
+    return formatDateTime(value) ?? value;
+  }
+
+  return value;
+}
+
+function formatLicenseCount(value: number) {
+  return value.toLocaleString(undefined, {
+    maximumFractionDigits: Number.isInteger(value) ? 0 : 4,
+  });
+}
+
 const moneyReportColumns = new Set([
   'unitPrice',
   'unitCost',
@@ -1383,6 +1571,15 @@ const moneyReportColumns = new Set([
 ]);
 
 const dateReportColumns = new Set(['effectiveDate', '_info']);
+const licenseReportDateColumns = new Set([
+  'ObservedAt',
+  'CreationDate',
+  'ExpirationDate',
+  'LastComplete',
+  'LastCheckIn',
+  'CommitmentEndDate',
+  'NextLifecycleAt',
+]);
 const reportDefaultColumnWidth = 180;
 const reportMinimumColumnWidth = 110;
 const reportMaximumColumnWidth = 640;
@@ -1686,6 +1883,44 @@ async function fetchProductProfitabilityReport() {
   }
 
   return body as unknown as ProductProfitabilityReportResponse;
+}
+
+async function fetchCustomerLicenseCustomers() {
+  const response = await fetch('/api/reports/customer-license/customers');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Customer license customer load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CustomerLicenseCustomersResponse;
+}
+
+async function fetchCustomerLicenseReport(options: {
+  customerId: string;
+  vendorId: CustomerLicenseReportVendorId;
+  monthCount?: number;
+  includeMicrosoftUserDetails?: boolean;
+}) {
+  const params = new URLSearchParams({
+    customerId: options.customerId,
+    vendorId: options.vendorId,
+  });
+  if (options.monthCount) {
+    params.set('monthCount', String(options.monthCount));
+  }
+  if ((options.vendorId === 'microsoft-365' || options.vendorId === 'all') && options.includeMicrosoftUserDetails) {
+    params.set('includeMicrosoftUserDetails', 'true');
+  }
+
+  const response = await fetch(`/api/reports/customer-license?${params.toString()}`);
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Customer license report failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CustomerLicenseReportResponse;
 }
 
 async function fetchAgreementAdditions(agreementId: string) {
@@ -2346,6 +2581,13 @@ function App() {
   const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
     'Load net profit by active integration.',
   );
+  const [customerLicenseCustomers, setCustomerLicenseCustomers] = useState<CustomerLicenseCustomerOption[]>([]);
+  const [selectedCustomerLicenseCustomerId, setSelectedCustomerLicenseCustomerId] = useState('');
+  const [selectedCustomerLicenseVendorId, setSelectedCustomerLicenseVendorId] = useState<CustomerLicenseReportVendorId>('all');
+  const [includeMicrosoftUserDetails, setIncludeMicrosoftUserDetails] = useState(true);
+  const [customerLicenseReport, setCustomerLicenseReport] = useState<CustomerLicenseReportResponse | null>(null);
+  const [customerLicenseLoadState, setCustomerLicenseLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [customerLicenseMessage, setCustomerLicenseMessage] = useState('Load customers, then generate a customer license report.');
   const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<IntegrationId>('cove');
   const [mappingState, setMappingState] = useState<MappingStateResponse | null>(null);
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
@@ -2511,6 +2753,66 @@ function App() {
       setProductProfitabilityReport(null);
       setProductProfitabilityLoadState('failed');
       setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to load product profitability.');
+      return null;
+    }
+  };
+
+  const loadCustomerLicenseCustomers = async () => {
+    setCustomerLicenseLoadState('loading');
+    setCustomerLicenseMessage('Loading customers...');
+
+    try {
+      const response = await fetchCustomerLicenseCustomers();
+      setCustomerLicenseCustomers(response.customers);
+      setSelectedCustomerLicenseCustomerId((currentCustomerId) =>
+        currentCustomerId || response.customers[0]?.customerId || '',
+      );
+      setCustomerLicenseLoadState('ready');
+      setCustomerLicenseMessage(
+        response.customers.length > 0
+          ? 'Select a customer, then generate the combined license report.'
+          : 'No active customers were found for customer license reporting.',
+      );
+      return response;
+    } catch (error) {
+      setCustomerLicenseCustomers([]);
+      setCustomerLicenseReport(null);
+      setCustomerLicenseLoadState('failed');
+      setCustomerLicenseMessage(error instanceof Error ? error.message : 'Unable to load customer license customers.');
+      return null;
+    }
+  };
+
+  const generateCustomerLicenseReport = async () => {
+    if (!selectedCustomerLicenseCustomerId) {
+      setCustomerLicenseLoadState('idle');
+      setCustomerLicenseMessage('Select a customer before generating the report.');
+      return null;
+    }
+
+    setCustomerLicenseLoadState('loading');
+    setCustomerLicenseMessage('Generating customer license report...');
+    setCustomerLicenseReport(null);
+
+    try {
+      const report = await fetchCustomerLicenseReport({
+        customerId: selectedCustomerLicenseCustomerId,
+        vendorId: selectedCustomerLicenseVendorId,
+        monthCount: 12,
+        includeMicrosoftUserDetails,
+      });
+      setCustomerLicenseReport(report);
+      setCustomerLicenseLoadState('ready');
+      setCustomerLicenseMessage(
+        report.products.length > 0
+          ? `Generated ${report.vendor.integrationName} report for ${report.customer.customerName}.`
+          : `No ${report.vendor.integrationName} data was found for ${report.customer.customerName}.`,
+      );
+      return report;
+    } catch (error) {
+      setCustomerLicenseReport(null);
+      setCustomerLicenseLoadState('failed');
+      setCustomerLicenseMessage(error instanceof Error ? error.message : 'Unable to generate customer license report.');
       return null;
     }
   };
@@ -2706,6 +3008,14 @@ function App() {
 
     void loadProductProfitabilityReport();
   }, [reportSection, view]);
+
+  useEffect(() => {
+    if (view !== 'reports' || reportSection !== 'customer-license' || customerLicenseCustomers.length > 0) {
+      return;
+    }
+
+    void loadCustomerLicenseCustomers();
+  }, [customerLicenseCustomers.length, reportSection, view]);
 
   useEffect(() => {
     if (view !== 'mappings') {
@@ -3531,6 +3841,38 @@ function App() {
               loadState={productProfitabilityLoadState}
               onRefresh={loadProductProfitabilityReport}
               report={productProfitabilityReport}
+            />
+          )}
+          {view === 'reports' && reportSection === 'customer-license' && (
+            <CustomerLicenseReportView
+              customers={customerLicenseCustomers}
+              includeMicrosoftUserDetails={includeMicrosoftUserDetails}
+              loadMessage={customerLicenseMessage}
+              loadState={customerLicenseLoadState}
+              onCustomerChange={(customerId) => {
+                setSelectedCustomerLicenseCustomerId(customerId);
+                setCustomerLicenseReport(null);
+                setCustomerLicenseMessage(customerId ? 'Generate the report for the selected customer.' : 'Select a customer before generating the report.');
+              }}
+              onGenerate={generateCustomerLicenseReport}
+              onIncludeMicrosoftUserDetailsChange={(value) => {
+                setIncludeMicrosoftUserDetails(value);
+                setCustomerLicenseReport(null);
+                setCustomerLicenseMessage(value ? 'Generate again to include Microsoft 365 licensed user details.' : 'Generate again to refresh the report.');
+              }}
+              onRefreshCustomers={loadCustomerLicenseCustomers}
+              onVendorChange={(vendorId) => {
+                setSelectedCustomerLicenseVendorId(vendorId);
+                setCustomerLicenseReport(null);
+                if (vendorId !== 'microsoft-365' && vendorId !== 'all') {
+                  setIncludeMicrosoftUserDetails(false);
+                }
+                setCustomerLicenseMessage('Generate the report for the selected scope.');
+              }}
+              report={customerLicenseReport}
+              selectedCustomerId={selectedCustomerLicenseCustomerId}
+              selectedVendorId={selectedCustomerLicenseVendorId}
+              vendorOptions={customerLicenseVendorIds}
             />
           )}
           {view === 'imports' && <ImportsView />}
@@ -7063,6 +7405,433 @@ function IntegrationModal(props: {
         </form>
       </section>
     </div>
+  );
+}
+
+function CustomerLicenseReportView(props: {
+  customers: CustomerLicenseCustomerOption[];
+  includeMicrosoftUserDetails: boolean;
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onCustomerChange: (customerId: string) => void;
+  onGenerate: () => Promise<CustomerLicenseReportResponse | null>;
+  onIncludeMicrosoftUserDetailsChange: (value: boolean) => void;
+  onRefreshCustomers: () => Promise<CustomerLicenseCustomersResponse | null>;
+  onVendorChange: (vendorId: CustomerLicenseReportVendorId) => void;
+  report: CustomerLicenseReportResponse | null;
+  selectedCustomerId: string;
+  selectedVendorId: CustomerLicenseReportVendorId;
+  vendorOptions: CustomerLicenseReportVendorId[];
+}) {
+  const {
+    customers,
+    includeMicrosoftUserDetails,
+    loadMessage,
+    loadState,
+    onCustomerChange,
+    onGenerate,
+    onIncludeMicrosoftUserDetailsChange,
+    onRefreshCustomers,
+    onVendorChange,
+    report,
+    selectedCustomerId,
+    selectedVendorId,
+    vendorOptions,
+  } = props;
+  const canIncludeMicrosoftUsers = selectedVendorId === 'microsoft-365' || selectedVendorId === 'all';
+  const generatedAt = formatDateTime(report?.generatedAt);
+  const chart = buildCustomerLicenseChart(report);
+  const inventoryRows = customerLicenseInventoryRows(report);
+  const userRows = inventoryRows.filter((item) => item.row.DetailType === 'Licensed user');
+  const deviceRows = inventoryRows.filter((item) => item.row.DetailType === 'Device');
+  const subscriptionRows = inventoryRows.filter(
+    (item) => item.row.DetailType === 'Subscription' || item.row.DetailType === 'License total',
+  );
+  const chartWidth = 920;
+  const chartHeight = 300;
+  const plot = {
+    left: 60,
+    right: 22,
+    top: 24,
+    bottom: 52,
+  };
+  const plotWidth = chartWidth - plot.left - plot.right;
+  const plotHeight = chartHeight - plot.top - plot.bottom;
+  const yForCount = (value: number) => plot.top + ((chart.maxCount - value) / chart.maxCount) * plotHeight;
+  const xForMonth = (index: number) =>
+    chart.months.length > 1 ? plot.left + (plotWidth * index) / (chart.months.length - 1) : plot.left + plotWidth / 2;
+  const yTicks = Array.from({ length: 4 }, (_, index) => (chart.maxCount * (3 - index)) / 3);
+  const pointRadius = 4;
+
+  return (
+    <section className="reports-page customer-license-page" aria-label="Customer license report">
+      <div className="integrations-live-bar report-reminder">
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <strong>{loadState === 'failed' ? 'Report issue' : loadState === 'loading' ? 'Loading' : 'Customer licenses'}</strong>
+          <span>{loadMessage}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>{report ? `${formatMonthRange(report.months)} / ${generatedAt ?? 'Generated'}` : 'On-demand preview'}</span>
+          <button
+            className="button secondary compact"
+            disabled={loadState === 'loading'}
+            onClick={() => void onRefreshCustomers()}
+            type="button"
+          >
+            <RefreshCcw size={16} />
+            Refresh customers
+          </button>
+        </div>
+      </div>
+
+      <section className="toolbar reports-toolbar customer-license-toolbar" aria-label="Customer license report filters">
+        <label className="config-field report-select">
+          <span>Customer</span>
+          <select
+            disabled={loadState === 'loading' && customers.length === 0}
+            onChange={(event) => onCustomerChange(event.target.value)}
+            value={selectedCustomerId}
+          >
+            <option value="">{customers.length === 0 ? 'No customers found' : 'Select customer'}</option>
+            {customers.map((customer) => (
+              <option key={customer.customerId} value={customer.customerId}>
+                {customer.customerName}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="config-field report-select">
+          <span>Scope</span>
+          <select
+            disabled={loadState === 'loading'}
+            onChange={(event) => onVendorChange(event.target.value as CustomerLicenseReportVendorId)}
+            value={selectedVendorId}
+          >
+            {vendorOptions.map((vendorId) => (
+              <option key={vendorId} value={vendorId}>
+                {customerLicenseVendorName(vendorId)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className={canIncludeMicrosoftUsers ? 'switch-control customer-license-toggle' : 'switch-control customer-license-toggle hidden'}>
+          <input
+            checked={includeMicrosoftUserDetails}
+            disabled={!canIncludeMicrosoftUsers || loadState === 'loading'}
+            onChange={(event) => onIncludeMicrosoftUserDetailsChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Include M365 users</span>
+        </label>
+
+        <button
+          className="button primary customer-license-generate"
+          disabled={!selectedCustomerId || loadState === 'loading'}
+          onClick={() => void onGenerate()}
+          type="button"
+        >
+            <FileSpreadsheet size={17} />
+          {loadState === 'loading' ? 'Generating' : selectedVendorId === 'all' ? 'Generate all' : 'Generate'}
+        </button>
+      </section>
+
+      {!report ? (
+        <section className="work-surface report-surface customer-license-surface">
+          <div className="empty-state report-empty">
+            <FileSpreadsheet size={20} />
+            <strong>No customer license report generated.</strong>
+            <span>Choose a customer to preview all license counts.</span>
+          </div>
+        </section>
+      ) : report.products.length === 0 ? (
+        <section className="work-surface report-surface customer-license-surface">
+          <div className="empty-state report-empty">
+            <Package size={20} />
+            <strong>No license rows found.</strong>
+            <span>{report.customer.customerName} has no saved {report.vendor.integrationName} rows in the selected period.</span>
+          </div>
+        </section>
+      ) : (
+        <section className="customer-client-report" aria-label={`${report.customer.customerName} client license report`}>
+          <div className="customer-report-cover">
+            <div>
+              <span className="section-kicker">Customer report</span>
+              <h2>License Summary</h2>
+              <p>{report.customer.customerName}</p>
+            </div>
+            <dl>
+              <div>
+                <dt>Period</dt>
+                <dd>{formatMonthRange(report.months)}</dd>
+              </div>
+              <div>
+                <dt>Generated</dt>
+                <dd>{generatedAt ?? 'Now'}</dd>
+              </div>
+              <div>
+                <dt>Scope</dt>
+                <dd>{report.vendor.integrationName}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="customer-report-kpis" aria-label="License report summary">
+            <article>
+              <span>Total licenses and devices</span>
+              <strong>{formatLicenseCount(report.summary.totalCurrentCount)}</strong>
+            </article>
+            <article>
+              <span>Licensed users</span>
+              <strong>{formatCount(userRows.length)}</strong>
+            </article>
+            <article>
+              <span>Devices</span>
+              <strong>{formatCount(deviceRows.length)}</strong>
+            </article>
+            <article>
+              <span>Products</span>
+              <strong>{formatCount(report.summary.productCount)}</strong>
+            </article>
+          </div>
+
+          <section className="customer-report-card customer-report-chart-card">
+            <div className="customer-report-card-header">
+              <div>
+                <span className="section-kicker">Trend</span>
+                <h3>Month-to-month service counts</h3>
+              </div>
+              <span className="status-pill approved">{formatCount(chart.services.length)} services</span>
+            </div>
+            <div className="customer-license-chart-wrap">
+              <svg
+                aria-label="Month-to-month license counts by service"
+                className="customer-license-chart"
+                role="img"
+                viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+              >
+                {yTicks.map((tick) => {
+                  const y = yForCount(tick);
+                  return (
+                    <g className="customer-license-chart-grid" key={tick.toFixed(2)}>
+                      <line x1={plot.left} x2={chartWidth - plot.right} y1={y} y2={y} />
+                      <text x={plot.left - 10} y={y + 4}>
+                        {formatLicenseCount(tick)}
+                      </text>
+                    </g>
+                  );
+                })}
+                {chart.services.map((service) => {
+                  const points = service.points.map((point, pointIndex) => ({
+                    ...point,
+                    x: xForMonth(pointIndex),
+                    y: yForCount(point.count),
+                  }));
+
+                  return (
+                    <g className="customer-license-chart-service" key={service.serviceId}>
+                      <path d={customerLicenseLinePath(points)} stroke={service.color}>
+                        <title>
+                          {service.vendorName} / {service.serviceName}
+                        </title>
+                      </path>
+                      {points.map((point) => (
+                        <circle cx={point.x} cy={point.y} fill={service.color} key={point.month} r={pointRadius}>
+                          <title>
+                            {service.vendorName} / {service.serviceName} / {formatMonthLabel(point.month, true)} / {formatLicenseCount(point.count)}
+                          </title>
+                        </circle>
+                      ))}
+                    </g>
+                  );
+                })}
+                {chart.months.map((month, monthIndex) => {
+                  const x = xForMonth(monthIndex);
+                  return (
+                    <g className="customer-license-chart-month" key={month}>
+                      <text x={x} y={chartHeight - 18}>
+                        {formatMonthLabel(month, month === report.startMonth || month === report.endMonth)}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+            <div className="customer-license-chart-legend" aria-label="Chart legend">
+              {chart.services.map((service) => (
+                <div key={service.serviceId}>
+                  <span style={{ backgroundColor: service.color }} />
+                  <strong>{service.serviceName}</strong>
+                  <small>{service.vendorName}</small>
+                  <em>{formatLicenseCount(service.currentCount)}</em>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="customer-report-card">
+            <div className="customer-report-card-header">
+              <div>
+                <span className="section-kicker">Products</span>
+                <h3>Current license summary</h3>
+              </div>
+            </div>
+            <div className="customer-report-table-scroll compact">
+              <table className="customer-report-table">
+                <thead>
+                  <tr>
+                    <th>Vendor</th>
+                    <th>Product</th>
+                    <th>Current</th>
+                    <th>Code</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.products.map((product) => (
+                    <tr key={product.productKey}>
+                      <td>{product.vendor.integrationName}</td>
+                      <td>{product.productName}</td>
+                      <td>{formatLicenseCount(product.currentCount)}</td>
+                      <td>{product.productCode ?? product.productKey}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="customer-report-card">
+            <div className="customer-report-card-header">
+              <div>
+                <span className="section-kicker">Users</span>
+                <h3>Licensed Microsoft users</h3>
+              </div>
+              <span className="status-pill ready">{formatCount(userRows.length)} users</span>
+            </div>
+            <div className="customer-report-table-scroll">
+              {userRows.length === 0 ? (
+                <div className="empty-state customer-license-detail-empty">
+                  <Users size={18} />
+                  <strong>No licensed user rows loaded.</strong>
+                  <span>Enable Microsoft 365 user details and generate the report with an Admin account.</span>
+                </div>
+              ) : (
+                <table className="customer-report-table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Email</th>
+                      <th>Status</th>
+                      <th>Product</th>
+                      <th>Tenant</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {userRows.map((item) => (
+                      <tr key={item.key}>
+                        <td>{detailText(item.row, 'DisplayName', 'Email', 'UserPrincipalName')}</td>
+                        <td>{detailText(item.row, 'Email', 'UserPrincipalName')}</td>
+                        <td>{detailText(item.row, 'UserState')}</td>
+                        <td>{item.product.productName}</td>
+                        <td>{detailText(item.row, 'TenantName')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+
+          <section className="customer-report-card">
+            <div className="customer-report-card-header">
+              <div>
+                <span className="section-kicker">Devices</span>
+                <h3>Device inventory</h3>
+              </div>
+              <span className="status-pill ready">{formatCount(deviceRows.length)} devices</span>
+            </div>
+            <div className="customer-report-table-scroll">
+              {deviceRows.length === 0 ? (
+                <div className="empty-state customer-license-detail-empty">
+                  <Database size={18} />
+                  <strong>No device rows loaded.</strong>
+                </div>
+              ) : (
+                <table className="customer-report-table">
+                  <thead>
+                    <tr>
+                      <th>Device</th>
+                      <th>Type</th>
+                      <th>Vendor</th>
+                      <th>Product</th>
+                      <th>Site / OS</th>
+                      <th>Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deviceRows.map((item) => (
+                      <tr key={item.key}>
+                        <td>{detailText(item.row, 'Hostname', 'DeviceId')}</td>
+                        <td>{detailText(item.row, 'ProtectedSystemType', 'DeviceClass')}</td>
+                        <td>{item.product.vendor.integrationName}</td>
+                        <td>{item.product.productName}</td>
+                        <td>{detailText(item.row, 'Site', 'OS')}</td>
+                        <td>{detailText(item.row, 'LastCheckIn', 'LastComplete', 'ObservedAt')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+
+          <section className="customer-report-card">
+            <div className="customer-report-card-header">
+              <div>
+                <span className="section-kicker">Subscriptions</span>
+                <h3>License subscriptions and totals</h3>
+              </div>
+              <span className="status-pill ready">{formatCount(subscriptionRows.length)} rows</span>
+            </div>
+            <div className="customer-report-table-scroll compact">
+              {subscriptionRows.length === 0 ? (
+                <div className="empty-state customer-license-detail-empty">
+                  <Package size={18} />
+                  <strong>No subscription rows loaded.</strong>
+                </div>
+              ) : (
+                <table className="customer-report-table">
+                  <thead>
+                    <tr>
+                      <th>Vendor</th>
+                      <th>Product</th>
+                      <th>Total</th>
+                      <th>Assigned</th>
+                      <th>Unassigned</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {subscriptionRows.map((item) => (
+                      <tr key={item.key}>
+                        <td>{item.product.vendor.integrationName}</td>
+                        <td>{item.product.productName}</td>
+                        <td>{detailText(item.row, 'TotalUnits', 'TotalLicenses', 'Quantity')}</td>
+                        <td>{detailText(item.row, 'AssignedUnits', 'AssignedLicenses')}</td>
+                        <td>{detailText(item.row, 'UnassignedUnits', 'UnassignedLicenses')}</td>
+                        <td>{detailText(item.row, 'SubscriptionStatus', 'CapabilityStatus', 'IsTrial')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+        </section>
+      )}
+    </section>
   );
 }
 

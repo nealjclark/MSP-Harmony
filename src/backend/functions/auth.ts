@@ -60,6 +60,46 @@ export async function requireRole(
   return { principal };
 }
 
+export type AuthSessionState = 'authorized' | 'pending' | 'database-unavailable';
+
+export type AuthSession = {
+  state: AuthSessionState;
+  principal: AuthPrincipal;
+  message?: string;
+};
+
+export async function getAuthSession(request: HttpRequest): Promise<AuthSession | undefined> {
+  const headerPrincipal = readAuthPrincipal(request);
+
+  if (!headerPrincipal) {
+    return undefined;
+  }
+
+  try {
+    const principal = await resolveApplicationPrincipal(headerPrincipal);
+
+    if (principal.roles.length > 0) {
+      return {
+        state: 'authorized',
+        principal,
+      };
+    }
+
+    return {
+      state: 'pending',
+      principal,
+      message: 'Your Microsoft sign-in succeeded. Waiting for application access to be assigned in MSP Harmony.',
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to verify application access.';
+    return {
+      state: 'database-unavailable',
+      principal: headerPrincipal,
+      message,
+    };
+  }
+}
+
 export function readAuthPrincipal(request: HttpRequest): AuthPrincipal | undefined {
   const headers = request.headers;
   const principalHeader = headers?.get('x-ms-client-principal');
