@@ -19,6 +19,7 @@ async function run() {
           rows: [
             {
               external_account_id: '119793',
+              external_account_name: 'Absolute Electric, Inc.',
               customer_id: customerId,
               agreement_id: agreementId,
             },
@@ -150,6 +151,109 @@ async function run() {
   assert.equal(insertedLines[2]?.values?.[21], '2026-06-17');
   assert.equal(insertedLines[0]?.values?.[20], -6.75);
   assert.match(String(insertedLines[0]?.values?.[30]), /Removed 2 Licenses\\nCommerce Mode/);
+
+  const fallbackInsertedImports: Array<{ sql: string; values?: unknown[] }> = [];
+  const fallbackInsertedLines: Array<{ sql: string; values?: unknown[] }> = [];
+  const fallbackDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from vendor_account_mappings')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('external_customer_account_number')) {
+        return {
+          rows: [
+            {
+              external_account_id: 'app-river-api-customer-119793',
+              external_customer_account_number: '119793',
+              app_river_customer_id: 'app-river-api-customer-119793',
+              customer_name: 'Absolute Electric',
+              app_river_customer_name: 'Absolute Electric',
+              domain: 'absoluteelectric.com',
+              customer_id: customerId,
+              agreement_id: agreementId,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_product_mappings')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'Exchange Online (Plan 1)|Monthly|Monthly',
+              target_index: 0,
+              connectwise_product_code: 'CW-EXCHANGE-P1',
+              connectwise_product_name: 'Exchange Online Plan 1',
+              unit_price: '4.22',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from target_names')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('source_product_code')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'Exchange Online (Plan 1)|Monthly|Monthly',
+              source_product_code: 'O365CSP-1',
+              source_product_name: 'Exchange Online (Plan 1)',
+              subscription_term: 'Monthly',
+              billing_frequency: 'Monthly',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('insert into invoice_imports')) {
+        fallbackInsertedImports.push({ sql, values });
+        return { rows: [{ id: '44444444-4444-4444-4444-444444444444' }] as T[] };
+      }
+
+      if (sql.includes('insert into invoice_line_items')) {
+        fallbackInsertedLines.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
+        const importValues = fallbackInsertedImports[0]?.values ?? [];
+        return {
+          rows: [
+            {
+              id: '44444444-4444-4444-4444-444444444444',
+              vendor_id: 'opentext-appriver',
+              file_name: importValues[1],
+              invoice_number: importValues[2],
+              imported_at: '2026-07-01T12:30:00Z',
+              invoice_date: importValues[3],
+              billing_period_start: importValues[4],
+              billing_period_end: importValues[5],
+              row_count: importValues[6],
+              matched_rows: importValues[7],
+              exception_rows: importValues[8],
+              status: importValues[9],
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+
+  const fallbackImported = await importAppRiverInvoiceCsv(fallbackDatabase, {
+    fileName: 'AccountHistory.csv',
+    content: csv,
+  });
+  assert.equal(fallbackImported.matchedRows, 3);
+  assert.equal(fallbackImported.exceptionRows, 0);
+  assert.equal(fallbackInsertedLines[2]?.values?.[2], customerId);
+  assert.equal(fallbackInsertedLines[2]?.values?.[3], agreementId);
+  assert.equal(fallbackInsertedLines[2]?.values?.[10], 'CW-EXCHANGE-P1');
 
   const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, 'opentext-appriver', [
     {

@@ -44,8 +44,28 @@ type InvoiceImportRow = {
 
 type AccountMappingRow = {
   external_account_id: string;
+  external_account_name: string | null;
   customer_id: string;
-  agreement_id: string | null;
+  agreement_id: string;
+};
+
+type AppRiverSnapshotAccountRow = {
+  external_account_id: string | null;
+  external_customer_account_number: string | null;
+  app_river_customer_id: string | null;
+  customer_name: string | null;
+  app_river_customer_name: string | null;
+  domain: string | null;
+  customer_id: string;
+  agreement_id: string;
+};
+
+type AppRiverSnapshotProductAliasRow = {
+  vendor_product_key: string | null;
+  source_product_code: string | null;
+  source_product_name: string | null;
+  subscription_term: string | null;
+  billing_frequency: string | null;
 };
 
 type InvoiceQuantityRow = {
@@ -101,6 +121,15 @@ type ProductMappingIndex = {
   byBaseKey: Map<string, AppRiverProductMapping>;
 };
 
+type AccountMappingIndex = {
+  byKey: Map<string, AccountMappingRow>;
+};
+
+type ProductAlias = {
+  keys: string[];
+  mapping: AppRiverProductMapping;
+};
+
 const appRiverInvoiceVendorId = appRiverIntegrationId as IntegrationId;
 
 export async function importAppRiverInvoiceCsv(
@@ -131,12 +160,15 @@ export async function importAppRiverInvoiceCsv(
     'Billing Frequency',
   ]);
 
-  const [accountMappings, productMappings] = await Promise.all([
-    loadAppRiverAccountMappings(database),
+  const [accountIndex, productMappings] = await Promise.all([
+    loadAppRiverAccountIndex(database),
     loadAppRiverProductMappings(database),
   ]);
-  const productIndex = buildProductMappingIndex(productMappings);
-  const lines = parsed.rows.map((row) => normalizeInvoiceLine(row, accountMappings, productIndex));
+  const productIndex = buildProductMappingIndex(
+    productMappings,
+    await loadAppRiverProductAliases(database, productMappings),
+  );
+  const lines = parsed.rows.map((row) => normalizeInvoiceLine(row, accountIndex, productIndex));
   const invoiceNumber = mostCommonString(lines.map((line) => stringValue(line.raw['Invoice Number'])));
   const invoiceDate = mostCommonString(lines.map((line) => line.invoiceDate));
   const billingPeriodStart = minimumDate(lines.map((line) => line.billingPeriodStart));
@@ -305,7 +337,7 @@ export function invoiceQuantityKey(customerId: string, agreementId: string, prod
 
 function normalizeInvoiceLine(
   row: ParsedCsv['rows'][number],
-  accountMappings: Map<string, AccountMappingRow>,
+  accountIndex: AccountMappingIndex,
   productIndex: ProductMappingIndex,
 ): NormalizedInvoiceLine {
   const values = row.values;
@@ -317,7 +349,7 @@ function normalizeInvoiceLine(
   const billingFrequency = stringValue(values['Billing Frequency']);
   const vendorProductKeyCandidates = productKeyCandidates(productCode, productName, term, billingFrequency);
   const productMapping = findProductMapping(productIndex, vendorProductKeyCandidates, productCode, productName);
-  const accountMapping = accountMappings.get(externalAccountId);
+  const accountMapping = findAccountMapping(accountIndex, values);
 
   return {
     rawRowNumber: row.recordNumber,
@@ -478,26 +510,113 @@ async function loadInvoiceImport(database: Queryable, importId: string) {
   return result.rows[0] ? mapInvoiceImportRow(result.rows[0]) : undefined;
 }
 
-async function loadAppRiverAccountMappings(database: Queryable) {
+async function loadAppRiverAccountIndex(database: Queryable): Promise<AccountMappingIndex> {
   const result = await database.query<AccountMappingRow>(
     `select external_account_id,
+            external_account_name,
             customer_id,
             agreement_id
        from vendor_account_mappings
       where vendor_id = $1
         and active = true
-        and mapping_status = 'approved'`,
+        and mapping_status = 'approved'
+        and agreement_id is not null`,
     [appRiverInvoiceVendorId],
   );
 
-  return new Map(result.rows.map((row) => [row.external_account_id, row]));
+  const snapshotResult = await database.query<AppRiverSnapshotAccountRow>(
+    `select distinct
+            external_account_id,
+            nullif(dimensions->>'externalCustomerAccountNumber', '') as external_customer_account_number,
+            nullif(dimensions->>'appRiverCustomerId', '') as app_river_customer_id,
+            nullif(dimensions->>'customerName', '') as customer_name,
+            nullif(dimensions->>'appRiverCustomerName', '') as app_river_customer_name,
+            nullif(dimensions->>'domain', '') as domain,
+            customer_id,
+            agreement_id
+       from vendor_usage_snapshots
+      where vendor_id = $1
+        and customer_id is not null
+        and agreement_id is not null`,
+    [appRiverInvoiceVendorId],
+  );
+
+  const entries: Array<{ keys: Array<string | null | undefined>; mapping: AccountMappingRow }> = [
+    ...result.rows.map((row) => ({
+      keys: [row.external_account_id, row.external_account_name],
+      mapping: row,
+    })),
+    ...snapshotResult.rows.map((row) => ({
+      keys: [
+        row.external_account_id,
+        row.external_customer_account_number,
+        row.app_river_customer_id,
+        row.customer_name,
+        row.app_river_customer_name,
+        row.domain,
+      ],
+      mapping: {
+        external_account_id: row.external_account_id ?? row.external_customer_account_number ?? row.app_river_customer_id ?? '',
+        external_account_name: row.customer_name ?? row.app_river_customer_name,
+        customer_id: row.customer_id,
+        agreement_id: row.agreement_id,
+      },
+    })),
+  ];
+
+  return {
+    byKey: uniqueMappingIndex(entries),
+  };
 }
 
 function isMappedInvoiceLine(line: NormalizedInvoiceLine) {
   return Boolean(line.customerId && line.agreementId && line.connectWiseProductCode);
 }
 
-function buildProductMappingIndex(mappings: Record<string, AppRiverProductMapping>): ProductMappingIndex {
+async function loadAppRiverProductAliases(
+  database: Queryable,
+  mappings: Record<string, AppRiverProductMapping>,
+): Promise<ProductAlias[]> {
+  const result = await database.query<AppRiverSnapshotProductAliasRow>(
+    `select distinct
+            vendor_product_key,
+            nullif(dimensions->>'productCode', '') as source_product_code,
+            nullif(dimensions->>'productName', '') as source_product_name,
+            nullif(dimensions->>'subscriptionTerm', '') as subscription_term,
+            nullif(dimensions->>'billingFrequency', '') as billing_frequency
+       from vendor_usage_snapshots
+      where vendor_id = $1
+        and vendor_product_key is not null`,
+    [appRiverInvoiceVendorId],
+  );
+
+  return result.rows.flatMap((row) => {
+    const mapping = row.vendor_product_key ? mappings[row.vendor_product_key] : undefined;
+    if (!mapping) {
+      return [];
+    }
+
+    return [
+      {
+        keys: [
+          ...productKeyCandidates(
+            row.source_product_code ?? '',
+            row.source_product_name ?? '',
+            row.subscription_term ?? undefined,
+            row.billing_frequency ?? undefined,
+          ),
+          row.vendor_product_key ?? '',
+        ],
+        mapping,
+      },
+    ];
+  });
+}
+
+function buildProductMappingIndex(
+  mappings: Record<string, AppRiverProductMapping>,
+  aliases: ProductAlias[] = [],
+): ProductMappingIndex {
   const byKey = new Map(Object.entries(mappings));
   const groupedBaseMappings = new Map<string, AppRiverProductMapping[]>();
 
@@ -522,6 +641,20 @@ function buildProductMappingIndex(mappings: Record<string, AppRiverProductMappin
     }
   }
 
+  for (const alias of aliases) {
+    for (const key of alias.keys) {
+      const normalizedKey = normalizeMatchKey(key);
+      if (normalizedKey && !byKey.has(key)) {
+        byKey.set(key, alias.mapping);
+        byKey.set(normalizedKey, alias.mapping);
+      }
+      const baseKey = baseProductKey(key);
+      if (baseKey && !byBaseKey.has(baseKey)) {
+        byBaseKey.set(baseKey, alias.mapping);
+      }
+    }
+  }
+
   return { byKey, byBaseKey };
 }
 
@@ -532,13 +665,37 @@ function findProductMapping(
   productName: string,
 ) {
   for (const candidate of candidates) {
-    const exact = index.byKey.get(candidate);
+    const exact = index.byKey.get(candidate) ?? index.byKey.get(normalizeMatchKey(candidate));
     if (exact) {
       return exact;
     }
   }
 
-  return index.byBaseKey.get(productCode) ?? index.byBaseKey.get(productName);
+  return (
+    index.byBaseKey.get(productCode) ??
+    index.byBaseKey.get(productName) ??
+    index.byBaseKey.get(normalizeMatchKey(productCode)) ??
+    index.byBaseKey.get(normalizeMatchKey(productName))
+  );
+}
+
+function findAccountMapping(index: AccountMappingIndex, values: Record<string, string>) {
+  const candidates = [
+    stringValue(values['Customer Account Number']),
+    stringValue(values['External Account Number']),
+    stringValue(values['Company Name']),
+    stringValue(values['Primary Domain']),
+    ...splitAliasDomains(values['Alias Domains']),
+  ];
+
+  for (const candidate of candidates) {
+    const mapping = index.byKey.get(normalizeMatchKey(candidate));
+    if (mapping) {
+      return mapping;
+    }
+  }
+
+  return undefined;
 }
 
 function productKeyCandidates(
@@ -565,7 +722,47 @@ function productKey(product: string, term: string | undefined, billingFrequency:
 }
 
 function baseProductKey(value: string) {
-  return value.split('|')[0]?.trim();
+  return normalizeMatchKey(value.split('|')[0]?.trim() ?? '');
+}
+
+function uniqueMappingIndex(entries: Array<{ keys: Array<string | null | undefined>; mapping: AccountMappingRow }>) {
+  const grouped = new Map<string, AccountMappingRow[]>();
+  for (const entry of entries) {
+    for (const key of entry.keys) {
+      const normalized = normalizeMatchKey(key);
+      if (!normalized) {
+        continue;
+      }
+      grouped.set(normalized, [...(grouped.get(normalized) ?? []), entry.mapping]);
+    }
+  }
+
+  const index = new Map<string, AccountMappingRow>();
+  for (const [key, mappings] of grouped.entries()) {
+    const uniqueTargets = new Map(mappings.map((mapping) => [`${mapping.customer_id}|${mapping.agreement_id}`, mapping]));
+    if (uniqueTargets.size === 1) {
+      index.set(key, [...uniqueTargets.values()][0]);
+    }
+  }
+
+  return index;
+}
+
+function splitAliasDomains(value: string | undefined) {
+  return (value ?? '')
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeMatchKey(value: string | null | undefined) {
+  return (value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\b(incorporated|inc|llc|l\.l\.c|corp|corporation|ltd|limited)\b\.?/g, '')
+    .replace(/[^a-z0-9@.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function rawSummary(fileName: string, headers: string[], lines: NormalizedInvoiceLine[]) {
