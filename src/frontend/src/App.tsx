@@ -505,12 +505,15 @@ type InvoiceImportSummary = {
   status: 'ready' | 'review';
 };
 
+type InvoiceImportMode = 'overwrite' | 'merge';
+
 type InvoiceImportsResponse = {
   imports: InvoiceImportSummary[];
 };
 
 type InvoiceImportResponse = {
   import: InvoiceImportSummary;
+  importMode?: InvoiceImportMode;
 };
 
 type AgreementAddition = {
@@ -2159,7 +2162,7 @@ async function fetchInvoiceImports(vendorId?: IntegrationId) {
   return body as unknown as InvoiceImportsResponse;
 }
 
-async function importAppRiverInvoiceFile(file: File) {
+async function importAppRiverInvoiceFile(file: File, importMode: InvoiceImportMode) {
   const content = await file.text();
   const response = await fetch('/api/invoice-imports/opentext-appriver', {
     method: 'POST',
@@ -2169,6 +2172,7 @@ async function importAppRiverInvoiceFile(file: File) {
     body: JSON.stringify({
       fileName: file.name,
       content,
+      importMode,
     }),
   });
   const body = await responseJson(response);
@@ -2912,6 +2916,7 @@ function App() {
   const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
   const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload an AppRiver invoice CSV.');
+  const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
   const [importingInvoice, setImportingInvoice] = useState(false);
   const [exportingReconciliationReport, setExportingReconciliationReport] = useState(false);
   const [agreementAdditionsByAgreement, setAgreementAdditionsByAgreement] = useState<Record<string, AgreementAddition[]>>({});
@@ -3179,18 +3184,18 @@ function App() {
     }
   };
 
-  const importAppRiverInvoice = async (file: File) => {
+  const importAppRiverInvoice = async (file: File, importMode: InvoiceImportMode) => {
     setImportingInvoice(true);
     setInvoiceImportLoadState('loading');
-    setInvoiceImportMessage(`Importing ${file.name}...`);
+    setInvoiceImportMessage(`${importMode === 'overwrite' ? 'Overwriting' : 'Merging'} ${file.name}...`);
 
     try {
-      const response = await importAppRiverInvoiceFile(file);
+      const response = await importAppRiverInvoiceFile(file, importMode);
       const importsResponse = await fetchInvoiceImports('opentext-appriver');
       setInvoiceImports(importsResponse.imports);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
-        `Imported ${response.import.rowCount.toLocaleString()} AppRiver invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} AppRiver invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
       if (selectedReconciliationIntegrationId === 'opentext-appriver') {
         void loadVendorReconciliation('opentext-appriver');
@@ -4326,10 +4331,12 @@ function App() {
           {view === 'imports' && (
             <ImportsView
               importing={importingInvoice}
+              importMode={invoiceImportMode}
               imports={invoiceImports}
               loadState={invoiceImportLoadState}
               message={invoiceImportMessage}
               onUpload={importAppRiverInvoice}
+              setImportMode={setInvoiceImportMode}
             />
           )}
           {view === 'agreements' && (
@@ -9424,20 +9431,22 @@ function ReportsView(props: {
 }
 
 function ImportsView(props: {
+  importMode: InvoiceImportMode;
   imports: InvoiceImportSummary[];
   importing: boolean;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   message: string;
-  onUpload: (file: File) => Promise<InvoiceImportSummary | null>;
+  onUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
+  setImportMode: (value: InvoiceImportMode) => void;
 }) {
-  const { imports, importing, loadState, message, onUpload } = props;
+  const { importMode, imports, importing, loadState, message, onUpload, setImportMode } = props;
   const latestImport = imports[0];
   const totalRows = imports.reduce((total, item) => total + item.rowCount, 0);
   const totalExceptions = imports.reduce((total, item) => total + item.exceptionRows, 0);
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (file) {
-      void onUpload(file);
+      void onUpload(file, importMode);
     }
     event.currentTarget.value = '';
   };
@@ -9450,11 +9459,31 @@ function ImportsView(props: {
             <span className="section-kicker">AppRiver - OpenText</span>
             <h2>Vendor invoice intake</h2>
           </div>
-          <label className={importing ? 'button primary compact file-upload-button disabled' : 'button primary compact file-upload-button'}>
-            <FileUp size={17} />
-            {importing ? 'Importing' : 'Upload file'}
-            <input accept=".csv,text/csv" disabled={importing} onChange={handleFileChange} type="file" />
-          </label>
+          <div className="import-actions">
+            <div className="segmented-control import-mode-toggle" role="group" aria-label="Invoice import mode">
+              {(['overwrite', 'merge'] as const).map((mode) => (
+                <button
+                  className={importMode === mode ? 'active' : ''}
+                  disabled={importing}
+                  key={mode}
+                  onClick={() => setImportMode(mode)}
+                  title={
+                    mode === 'overwrite'
+                      ? 'Replace existing imports for the same invoice number'
+                      : 'Keep existing imports and add this file as another import'
+                  }
+                  type="button"
+                >
+                  {mode === 'overwrite' ? 'Overwrite' : 'Merge'}
+                </button>
+              ))}
+            </div>
+            <label className={importing ? 'button primary compact file-upload-button disabled' : 'button primary compact file-upload-button'}>
+              <FileUp size={17} />
+              {importing ? 'Importing' : 'Upload file'}
+              <input accept=".csv,text/csv" disabled={importing} onChange={handleFileChange} type="file" />
+            </label>
+          </div>
         </div>
 
         <div className="import-drop">

@@ -12,6 +12,7 @@ const agreementId = '22222222-2222-2222-2222-222222222222';
 async function run() {
   const insertedImports: Array<{ sql: string; values?: unknown[] }> = [];
   const insertedLines: Array<{ sql: string; values?: unknown[] }> = [];
+  const deletedImports: Array<{ sql: string; values?: unknown[] }> = [];
   const database: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {
       if (sql.includes('from vendor_account_mappings')) {
@@ -55,8 +56,13 @@ async function run() {
         return { rows: [] as T[] };
       }
 
+      if (sql.includes('delete from invoice_imports')) {
+        deletedImports.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
       if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
-        const importValues = insertedImports[0]?.values ?? [];
+        const importValues = insertedImports[insertedImports.length - 1]?.values ?? [];
         return {
           rows: [
             {
@@ -151,6 +157,19 @@ async function run() {
   assert.equal(insertedLines[2]?.values?.[21], '2026-06-17');
   assert.equal(insertedLines[0]?.values?.[20], -6.75);
   assert.match(String(insertedLines[0]?.values?.[30]), /Removed 2 Licenses\\nCommerce Mode/);
+
+  await importAppRiverInvoiceCsv(database, {
+    fileName: 'AccountHistory.csv',
+    content: csv,
+    importMode: 'overwrite',
+  });
+  assert.equal(deletedImports.length, 1);
+  assert.match(deletedImports[0]?.sql ?? '', /delete from invoice_imports/);
+  assert.deepEqual(deletedImports[0]?.values, [
+    'opentext-appriver',
+    '4032091',
+    '33333333-3333-3333-3333-333333333333',
+  ]);
 
   const fallbackInsertedImports: Array<{ sql: string; values?: unknown[] }> = [];
   const fallbackInsertedLines: Array<{ sql: string; values?: unknown[] }> = [];

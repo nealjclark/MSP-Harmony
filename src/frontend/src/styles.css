@@ -4068,6 +4068,23 @@ h2 {
   grid-template-columns: minmax(0, 1.2fr) minmax(330px, 0.8fr);
 }
 
+.import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.segmented-control.import-mode-toggle {
+  min-height: 36px;
+}
+
+.segmented-control.import-mode-toggle button {
+  min-width: 92px;
+  padding-inline: 12px;
+}
+
 .import-drop {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -4095,11 +4112,11 @@ h2 {
   display: grid;
 }
 
-.import-row,
-.agreement-row,
-.rule-row,
-.sync-row,
-.timeline-row {
+  .import-row,
+  .agreement-row,
+  .rule-row,
+  .sync-row,
+  .timeline-row {
   display: grid;
   align-items: center;
   gap: 12px;
@@ -4509,6 +4526,11 @@ h2 {
 
   .import-drop {
     grid-template-columns: 1fr;
+  }
+
+  .import-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 }
 

@@ -1,7 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { type IntegrationId, getIntegrationSettingsDefinition } from '../../shared/integrationSettings';
-import { importAppRiverInvoiceCsv, listInvoiceImports } from '../invoices/appriverInvoiceImports';
+import { type InvoiceImportMode, importAppRiverInvoiceCsv, listInvoiceImports } from '../invoices/appriverInvoiceImports';
 import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
@@ -10,6 +10,7 @@ loadDotEnv({ override: false });
 type InvoiceImportBody = {
   fileName?: string;
   content?: string;
+  importMode?: string;
 };
 
 export async function importAppRiverInvoiceHttp(
@@ -29,6 +30,7 @@ export async function importAppRiverInvoiceHttp(
   const body = (await request.json().catch(() => ({}))) as InvoiceImportBody;
   const fileName = typeof body.fileName === 'string' && body.fileName.trim() ? body.fileName.trim() : undefined;
   const content = typeof body.content === 'string' ? body.content : undefined;
+  const importMode = parseInvoiceImportMode(body.importMode);
 
   if (!fileName || !content) {
     return jsonResponse(400, {
@@ -46,7 +48,8 @@ export async function importAppRiverInvoiceHttp(
 
   try {
     return jsonResponse(200, {
-      import: await importAppRiverInvoiceCsv(repositoryContext.pool, { fileName, content }),
+      import: await importAppRiverInvoiceCsv(repositoryContext.pool, { fileName, content, importMode }),
+      importMode,
     });
   } catch (error) {
     return jsonResponse(400, {
@@ -102,4 +105,8 @@ app.http('listInvoiceImports', {
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
   return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;
+}
+
+function parseInvoiceImportMode(value: string | undefined): InvoiceImportMode {
+  return value === 'overwrite' ? 'overwrite' : 'merge';
 }

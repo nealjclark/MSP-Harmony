@@ -27,6 +27,8 @@ export type InvoiceQuantity = {
   invoiceLineCount: number;
 };
 
+export type InvoiceImportMode = 'merge' | 'overwrite';
+
 type InvoiceImportRow = {
   id: string;
   vendor_id: IntegrationId;
@@ -134,8 +136,9 @@ const appRiverInvoiceVendorId = appRiverIntegrationId as IntegrationId;
 
 export async function importAppRiverInvoiceCsv(
   database: Queryable,
-  input: { fileName: string; content: string },
+  input: { fileName: string; content: string; importMode?: InvoiceImportMode },
 ): Promise<InvoiceImportSummary> {
+  const importMode = input.importMode ?? 'merge';
   const parsed = parseCsv(input.content);
   if (parsed.rows.length === 0) {
     throw new Error('AppRiver invoice CSV did not contain any data rows.');
@@ -215,6 +218,15 @@ export async function importAppRiverInvoiceCsv(
 
   for (const line of lines) {
     await insertInvoiceLine(database, importId, line);
+  }
+
+  if (importMode === 'overwrite') {
+    await deleteExistingInvoiceImports(database, {
+      currentImportId: importId,
+      fileName: input.fileName,
+      invoiceDate,
+      invoiceNumber,
+    });
   }
 
   const imported = await loadInvoiceImport(database, importId);
@@ -508,6 +520,37 @@ async function loadInvoiceImport(database: Queryable, importId: string) {
   );
 
   return result.rows[0] ? mapInvoiceImportRow(result.rows[0]) : undefined;
+}
+
+async function deleteExistingInvoiceImports(
+  database: Queryable,
+  input: {
+    currentImportId: string;
+    fileName: string;
+    invoiceNumber?: string;
+    invoiceDate?: string;
+  },
+) {
+  if (input.invoiceNumber) {
+    await database.query(
+      `delete from invoice_imports
+        where vendor_id = $1
+          and invoice_number = $2
+          and id <> $3::uuid`,
+      [appRiverInvoiceVendorId, input.invoiceNumber, input.currentImportId],
+    );
+    return;
+  }
+
+  await database.query(
+    `delete from invoice_imports
+      where vendor_id = $1
+        and invoice_number is null
+        and file_name = $2
+        and invoice_date is not distinct from $3::date
+        and id <> $4::uuid`,
+    [appRiverInvoiceVendorId, input.fileName, input.invoiceDate ?? null, input.currentImportId],
+  );
 }
 
 async function loadAppRiverAccountIndex(database: Queryable): Promise<AccountMappingIndex> {
