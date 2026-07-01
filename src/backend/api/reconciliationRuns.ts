@@ -24,6 +24,12 @@ import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
 import { listProductBundles, type ProductBundle } from '../mapping/mappingService';
+import {
+  invoiceQuantityKey,
+  loadLatestInvoiceQuantitiesForLines,
+  type InvoiceImportSummary,
+  type InvoiceQuantity,
+} from '../invoices/appriverInvoiceImports';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -101,6 +107,11 @@ export type DatabaseReconciliationLine = ReconciliationLine & {
   agreementName?: string;
   connectWiseCompanyId?: string;
   connectWiseAgreementId?: string;
+  invoiceQuantity?: number;
+  invoiceLineCount?: number;
+  invoiceImportId?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
   devices: DatabaseReconciliationDevice[];
   adjustments?: ReconciliationAdjustment[];
 };
@@ -126,6 +137,7 @@ export type DatabaseReconciliationResult = Omit<ReconciliationResult, 'lines'> &
   syncRunId?: string;
   snapshotCount: number;
   agreementAdditionCount: number;
+  latestInvoice?: InvoiceImportSummary;
   productOptions: ReconciliationProductOption[];
 };
 
@@ -175,6 +187,7 @@ export async function reconcileVendorFromDatabase(
       snapshots: [],
       agreementAdditions: [],
     });
+    const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, []);
 
     return {
       ...emptyResult,
@@ -182,6 +195,7 @@ export async function reconcileVendorFromDatabase(
       syncRunId,
       snapshotCount: 0,
       agreementAdditionCount: 0,
+      latestInvoice: invoiceState.latestInvoice,
       productOptions: productOptionsForRuleSet(ruleSet),
     };
   }
@@ -208,14 +222,16 @@ export async function reconcileVendorFromDatabase(
     result.lines,
     await loadReconciliationAdjustments(database, vendorId, result.lines),
   );
+  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, adjustedLines);
 
   return {
     ...result,
     totals: totalsForLines(adjustedLines),
-    lines: await withLineDetails(database, adjustedLines, snapshots, ruleSet),
+    lines: await withLineDetails(database, adjustedLines, snapshots, ruleSet, invoiceState.quantities),
     syncRunId,
     snapshotCount: snapshots.length,
     agreementAdditionCount: agreementAdditions.length,
+    latestInvoice: invoiceState.latestInvoice,
     productOptions: productOptionsForRuleSet(ruleSet),
   };
 }
@@ -588,6 +604,7 @@ async function withLineDetails(
   lines: ReconciliationLineWithAdjustments[],
   snapshots: UsageSnapshot[],
   ruleSet: VendorRuleSet,
+  invoiceQuantities: Map<string, InvoiceQuantity>,
 ): Promise<DatabaseReconciliationLine[]> {
   if (lines.length === 0) {
     return [];
@@ -622,12 +639,27 @@ async function withLineDetails(
       },
     ]),
   );
-
   return lines.map((line) => ({
     ...line,
     ...labelsByLineKey.get(`${line.clientId}|${line.agreementId}`),
+    ...invoiceDetailsForLine(invoiceQuantities, line),
     devices: devicesForLine(line, snapshots, ruleSet),
   }));
+}
+
+function invoiceDetailsForLine(quantities: Map<string, InvoiceQuantity>, line: ReconciliationLine) {
+  const quantity = quantities.get(invoiceQuantityKey(line.clientId, line.agreementId, line.productCode));
+  if (!quantity) {
+    return {};
+  }
+
+  return {
+    invoiceQuantity: quantity.invoiceQuantity,
+    invoiceLineCount: quantity.invoiceLineCount,
+    invoiceImportId: quantity.invoiceImportId,
+    invoiceNumber: quantity.invoiceNumber,
+    invoiceDate: quantity.invoiceDate,
+  };
 }
 
 function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ruleSet: VendorRuleSet) {

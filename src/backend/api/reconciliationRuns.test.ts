@@ -137,6 +137,17 @@ async function run() {
   assert.equal(standardLine?.status, 'matched');
   assert.equal(standardLine?.devices[0]?.vendorProductKey, 'Microsoft 365 Business Standard|Monthly|Monthly');
 
+  const appRiverInvoiceResult = await reconcileVendorFromDatabase(appRiverInvoiceDatabase, 'opentext-appriver', { syncRunId });
+  const invoicedLine = appRiverInvoiceResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
+  assert.equal(invoicedLine?.sourceQuantity, 6);
+  assert.equal(invoicedLine?.agreementQuantity, 5);
+  assert.equal(invoicedLine?.delta, 1);
+  assert.equal(invoicedLine?.status, 'needs-review');
+  assert.equal(invoicedLine?.invoiceQuantity, 4);
+  assert.equal(invoicedLine?.invoiceLineCount, 2);
+  assert.equal(invoicedLine?.invoiceNumber, '4032091');
+  assert.equal(appRiverInvoiceResult.latestInvoice?.invoiceNumber, '4032091');
+
   console.log('database reconciliation tests passed');
 }
 
@@ -392,5 +403,63 @@ const appRiverAliasDatabase: Queryable = {
     }
 
     return { rows: [] as T[] };
+  },
+};
+
+const appRiverInvoiceDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from invoice_imports') && sql.includes('order by invoice_date desc')) {
+      return {
+        rows: [
+          {
+            id: '33333333-3333-3333-3333-333333333333',
+            vendor_id: 'opentext-appriver',
+            file_name: 'AccountHistory.csv',
+            invoice_number: '4032091',
+            imported_at: '2026-07-01T12:00:00Z',
+            invoice_date: '2026-06-21',
+            billing_period_start: '2026-06-01',
+            billing_period_end: '2026-07-01',
+            row_count: 12,
+            matched_rows: 10,
+            exception_rows: 2,
+            status: 'review',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from invoice_line_items') && sql.includes("charge_type = 'Renewal'")) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            connectwise_product_code: 'Microsoft 365 Business Standard-M',
+            invoice_quantity: '4',
+            invoice_line_count: '2',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-business-standard',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            product_code: 'Microsoft 365 Business Standard-M',
+            product_name: 'Microsoft 365 Business Standard-M',
+            quantity: '5',
+            unit_price: '14',
+            updated_at: new Date('2026-06-24T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    return appRiverAliasDatabase.query<T>(sql);
   },
 };

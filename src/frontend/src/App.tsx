@@ -38,6 +38,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ChangeEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -77,6 +78,11 @@ type ReconcileIssue = {
   lineType: 'base-count' | 'usage-add-on';
   measuredSourceCount: number;
   sourceCount: number;
+  vendorInvoiceCount?: number;
+  vendorInvoiceLineCount?: number;
+  invoiceImportId?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
   invoiceCount: number;
   proposedCount: number;
   amount: number;
@@ -151,13 +157,8 @@ type Integration = {
   auth: string;
   description: string;
   lastSync?: string;
-  lastTest?: string;
   lastSyncStatus?: string;
-  frequency?: string;
   records?: string;
-  secretSource?: string;
-  keyVaultUrl?: string;
-  scopes: string[];
   enabled: boolean;
   endpoint: string;
   nonSecrets: Record<string, string | undefined>;
@@ -166,7 +167,6 @@ type Integration = {
   missingSecrets: string[];
   missingNonSecrets: string[];
   webhookSupported: boolean;
-  lastTestedAt?: string;
 };
 
 type IntegrationSettingsPayload = {
@@ -178,8 +178,6 @@ type IntegrationSettingsPayload = {
 type RuntimeIntegrationSummary = IntegrationSettingsDefinition & {
   nonSecrets?: Record<string, string | undefined>;
   validation?: IntegrationSettingsValidation;
-  secretSource?: string;
-  keyVaultUrl?: string;
   operationalStatus?: {
     lastSyncAt?: string;
     lastSyncCompletedAt?: string;
@@ -488,7 +486,31 @@ type ReconciliationRunMeta = {
   generatedAt: string;
   snapshotCount?: number;
   agreementAdditionCount?: number;
+  latestInvoice?: InvoiceImportSummary;
   productCheckCount: number;
+};
+
+type InvoiceImportSummary = {
+  id: string;
+  vendorId: IntegrationId;
+  fileName: string;
+  invoiceNumber?: string;
+  importedAt: string;
+  invoiceDate?: string;
+  billingPeriodStart?: string;
+  billingPeriodEnd?: string;
+  rowCount: number;
+  matchedRows: number;
+  exceptionRows: number;
+  status: 'ready' | 'review';
+};
+
+type InvoiceImportsResponse = {
+  imports: InvoiceImportSummary[];
+};
+
+type InvoiceImportResponse = {
+  import: InvoiceImportSummary;
 };
 
 type AgreementAddition = {
@@ -568,6 +590,11 @@ type ReconciliationLineResponse = {
   productName: string;
   lineType: 'base-count' | 'usage-add-on';
   sourceQuantity: number;
+  invoiceQuantity?: number;
+  invoiceLineCount?: number;
+  invoiceImportId?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
   agreementQuantity: number;
   proposedQuantity: number;
   delta: number;
@@ -597,6 +624,7 @@ type ReconciliationRunResponse = {
   syncRunId?: string;
   snapshotCount?: number;
   agreementAdditionCount?: number;
+  latestInvoice?: InvoiceImportSummary;
   productOptions?: ReconciliationProductOption[];
   lines: ReconciliationLineResponse[];
   totals: {
@@ -914,13 +942,6 @@ const productRules: ProductRule[] = [
   },
 ];
 
-const imports = [
-  { file: 'microsoft-june-invoice.csv', vendor: 'Microsoft', rows: 624, matched: 602, exceptions: 22, status: 'Review' },
-  { file: 'sentinelone-usage.csv', vendor: 'SentinelOne', rows: 311, matched: 298, exceptions: 13, status: 'Ready' },
-  { file: 'pax8-marketplace.csv', vendor: 'Pax8', rows: 842, matched: 836, exceptions: 6, status: 'Ready' },
-  { file: 'datto-saas.csv', vendor: 'Datto', rows: 188, matched: 171, exceptions: 17, status: 'Review' },
-];
-
 const agreements = [
   { customer: 'Northstar Dental Group', agreement: 'Managed Services - Premium', products: 31, exposure: 1540, nextAction: 'Approve M365 seats' },
   { customer: 'Harbor Ridge Logistics', agreement: 'Security Stack Bundle', products: 18, exposure: -925, nextAction: 'Review vendor credit' },
@@ -936,10 +957,10 @@ const syncRuns = [
 ];
 
 const workflow = [
-  { label: 'Vendor data', value: 'Latest sync', icon: Database, state: 'done' },
+  { label: 'Vendor API Data', value: 'Latest sync', icon: Database, state: 'done' },
+  { label: 'Vendor Invoice', value: 'No invoice', icon: FileSpreadsheet, state: 'done' },
   { label: 'CW Data', value: 'Last sync', icon: FileUp, state: 'done' },
   { label: 'Discrepancies', value: '0 review', icon: Link2, state: 'active' },
-  { label: 'Client review', value: '6 groups', icon: Users, state: 'ready' },
   { label: 'Unresolved exposure', value: '$0', icon: CircleDollarSign, state: 'idle' },
 ];
 
@@ -1048,8 +1069,6 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       ...runtime,
       ...definition,
       nonSecrets: runtime?.nonSecrets ?? {},
-      secretSource: runtime?.secretSource,
-      keyVaultUrl: runtime?.keyVaultUrl,
       operationalStatus: runtime?.operationalStatus,
       validation:
         runtime?.validation ??
@@ -1073,13 +1092,8 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       auth: formatAuthMode(definition.authMode),
       description: definition.description,
       lastSync: formatDateTime(operationalStatus?.lastSyncCompletedAt ?? operationalStatus?.lastSyncAt),
-      lastTest: formatDateTime(validation?.lastTestedAt),
       lastSyncStatus: operationalStatus?.lastSyncStatus,
-      frequency: formatFrequency(definition.syncFrequency),
       records: typeof records === 'number' ? records.toLocaleString() : undefined,
-      secretSource: definition.secretSource,
-      keyVaultUrl: definition.keyVaultUrl,
-      scopes: definition.scopes,
       enabled: validation?.configuredStatus !== 'not-configured',
       endpoint: definition.endpoint,
       nonSecrets: definition.nonSecrets ?? {},
@@ -1088,7 +1102,6 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       missingSecrets: validation?.missingSecrets.map((setting) => setting.label) ?? [],
       missingNonSecrets: validation?.missingNonSecrets.map((setting) => setting.label) ?? [],
       webhookSupported: definition.webhookSupported,
-      lastTestedAt: validation?.lastTestedAt,
     };
   });
 }
@@ -1120,6 +1133,10 @@ function formatCount(value: number) {
   return value.toLocaleString();
 }
 
+function formatOptionalCount(value: number | undefined) {
+  return typeof value === 'number' ? value.toLocaleString() : '-';
+}
+
 function formatMoneyValue(value: number) {
   return formatMoneyAmount({ amount: value, currency: 'USD' });
 }
@@ -1127,10 +1144,6 @@ function formatMoneyValue(value: number) {
 function formatAuthMode(value: string) {
   if (value === 'api-key') return 'api key';
   return value;
-}
-
-function formatFrequency(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function integrationName(integrationId: IntegrationId) {
@@ -1270,6 +1283,28 @@ function formatSyncSummary(syncDate: string | undefined, count: number | undefin
   const dateLabel = syncDate ?? 'No sync date';
   const countLabel = typeof count === 'number' ? `${count.toLocaleString()} ${unit}` : 'No count';
   return `${dateLabel} / ${countLabel}`;
+}
+
+function formatInvoiceSummary(invoice: InvoiceImportSummary | undefined) {
+  if (!invoice) {
+    return 'No invoice';
+  }
+
+  const invoiceLabel = invoice.invoiceNumber ? `Invoice ${invoice.invoiceNumber}` : 'Latest invoice';
+  const dateLabel = formatDateOnly(invoice.invoiceDate) ?? formatDateTime(invoice.importedAt) ?? 'Unknown date';
+  return `${invoiceLabel} / ${dateLabel} / ${invoice.rowCount.toLocaleString()} rows`;
+}
+
+function formatDateOnly(value?: string) {
+  if (!value) return undefined;
+
+  const parsed = new Date(`${value.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+
+  return parsed.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function rawSyncDatasetForVendorData(integrationId: IntegrationId): RawSyncDataset | undefined {
@@ -2109,6 +2144,42 @@ async function fetchAgreementAdditions(agreementId: string) {
   return body as unknown as AgreementAdditionsResponse;
 }
 
+async function fetchInvoiceImports(vendorId?: IntegrationId) {
+  const params = new URLSearchParams();
+  if (vendorId) {
+    params.set('vendorId', vendorId);
+  }
+  const response = await fetch(`/api/invoice-imports${params.toString() ? `?${params.toString()}` : ''}`);
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice imports load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceImportsResponse;
+}
+
+async function importAppRiverInvoiceFile(file: File) {
+  const content = await file.text();
+  const response = await fetch('/api/invoice-imports/opentext-appriver', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      content,
+    }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `AppRiver invoice import failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceImportResponse;
+}
+
 async function fetchMappingState(integrationId: IntegrationId) {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}`);
   const body = await responseJson(response);
@@ -2624,6 +2695,11 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       lineType: line.lineType,
       measuredSourceCount: line.sourceQuantity,
       sourceCount: line.proposedQuantity,
+      vendorInvoiceCount: line.invoiceQuantity,
+      vendorInvoiceLineCount: line.invoiceLineCount,
+      invoiceImportId: line.invoiceImportId,
+      invoiceNumber: line.invoiceNumber,
+      invoiceDate: line.invoiceDate,
       invoiceCount: line.agreementQuantity,
       proposedCount: line.proposedQuantity,
       amount: line.financialImpact.amount,
@@ -2685,6 +2761,9 @@ function buildReconciliationExportRows(
         'Manual Less Count': manualLessCount,
         'Manual Less Count Reasons': lessCountAdjustments.map((adjustment) => adjustment.reason).filter(Boolean).join('; '),
         'Proposed Count After Less Count': issue.proposedCount,
+        'Vendor Invoice Count': issue.vendorInvoiceCount ?? '',
+        'Vendor Invoice Number': issue.invoiceNumber ?? '',
+        'Vendor Invoice Date': issue.invoiceDate ?? '',
         'CW Count': issue.invoiceCount,
         Delta: issue.proposedCount - issue.invoiceCount,
         'Financial Impact': issue.amount,
@@ -2830,6 +2909,10 @@ function App() {
   const [reconciliationMessage, setReconciliationMessage] = useState('Choose a vendor.');
   const [reconciliationRunMeta, setReconciliationRunMeta] = useState<ReconciliationRunMeta | null>(null);
   const [reconciliationProductOptions, setReconciliationProductOptions] = useState<ReconciliationProductOption[]>([]);
+  const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
+  const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload an AppRiver invoice CSV.');
+  const [importingInvoice, setImportingInvoice] = useState(false);
   const [exportingReconciliationReport, setExportingReconciliationReport] = useState(false);
   const [agreementAdditionsByAgreement, setAgreementAdditionsByAgreement] = useState<Record<string, AgreementAddition[]>>({});
   const [agreementAdditionsSelection, setAgreementAdditionsSelection] = useState<AgreementAdditionsSelection | null>(null);
@@ -3074,6 +3157,54 @@ function App() {
     }
   };
 
+  const loadInvoiceImports = async () => {
+    setInvoiceImportLoadState('loading');
+    setInvoiceImportMessage('Loading invoice imports...');
+
+    try {
+      const response = await fetchInvoiceImports('opentext-appriver');
+      setInvoiceImports(response.imports);
+      setInvoiceImportLoadState('ready');
+      setInvoiceImportMessage(
+        response.imports.length > 0
+          ? `Loaded ${response.imports.length.toLocaleString()} AppRiver invoice imports.`
+          : 'No AppRiver invoices have been imported yet.',
+      );
+      return response;
+    } catch (error) {
+      setInvoiceImports([]);
+      setInvoiceImportLoadState('failed');
+      setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to load invoice imports.');
+      return null;
+    }
+  };
+
+  const importAppRiverInvoice = async (file: File) => {
+    setImportingInvoice(true);
+    setInvoiceImportLoadState('loading');
+    setInvoiceImportMessage(`Importing ${file.name}...`);
+
+    try {
+      const response = await importAppRiverInvoiceFile(file);
+      const importsResponse = await fetchInvoiceImports('opentext-appriver');
+      setInvoiceImports(importsResponse.imports);
+      setInvoiceImportLoadState('ready');
+      setInvoiceImportMessage(
+        `Imported ${response.import.rowCount.toLocaleString()} AppRiver invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+      );
+      if (selectedReconciliationIntegrationId === 'opentext-appriver') {
+        void loadVendorReconciliation('opentext-appriver');
+      }
+      return response.import;
+    } catch (error) {
+      setInvoiceImportLoadState('failed');
+      setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to import AppRiver invoice.');
+      return null;
+    } finally {
+      setImportingInvoice(false);
+    }
+  };
+
   const loadCustomerVendorData = async (
     client: ClientGroup,
     vendorId: IntegrationId,
@@ -3193,6 +3324,7 @@ function App() {
         generatedAt: run.generatedAt,
         snapshotCount: run.snapshotCount,
         agreementAdditionCount: run.agreementAdditionCount,
+        latestInvoice: run.latestInvoice,
         productCheckCount: nextIssues.length,
       });
       setReconciliationProductOptions(run.productOptions ?? []);
@@ -3296,6 +3428,14 @@ function App() {
     void refreshMappingWorkspace(selectedMappingIntegrationId);
   }, [selectedMappingIntegrationId, view]);
 
+  useEffect(() => {
+    if (view !== 'imports') {
+      return;
+    }
+
+    void loadInvoiceImports();
+  }, [view]);
+
   const filteredIssues = useMemo(() => {
     return issues.filter((issue) => {
       const matchesSearchAndVendor = issueMatchesSearchAndVendor(issue, query, vendorFilter);
@@ -3328,6 +3468,11 @@ function App() {
     selectedReconciliationIntegration?.lastSync,
     reconciliationRunMeta?.snapshotCount,
     'snapshots',
+  );
+  const vendorInvoiceSummary = formatInvoiceSummary(
+    selectedReconciliationIntegrationId === 'opentext-appriver'
+      ? reconciliationRunMeta?.latestInvoice ?? invoiceImports[0]
+      : undefined,
   );
   const connectWiseSyncSummary = connectWiseIntegration?.lastSync
     ? `Last sync ${connectWiseIntegration.lastSync}`
@@ -3971,11 +4116,11 @@ function App() {
       <div className="app-main">
         <header className="topbar">
           <div className="title-block">
-            <span className="section-kicker">Vendor counts + ConnectWise additions</span>
+            <span className="section-kicker">Vendor API counts + ConnectWise additions</span>
             <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view)}</h1>
           </div>
           <div className="top-actions">
-            <button className="button secondary" type="button">
+            <button className="button secondary" onClick={() => navigateToView('imports')} type="button">
               <Upload size={18} />
               Import invoices
             </button>
@@ -4021,6 +4166,7 @@ function App() {
               skipIssue={skipIssue}
               totalExposure={totalExposure}
               vendorDataSummary={vendorDataSummary}
+              vendorInvoiceSummary={vendorInvoiceSummary}
               vendorFilter={vendorFilter}
             />
           )}
@@ -4177,7 +4323,15 @@ function App() {
               vendorOptions={customerLicenseVendorIds}
             />
           )}
-          {view === 'imports' && <ImportsView />}
+          {view === 'imports' && (
+            <ImportsView
+              importing={importingInvoice}
+              imports={invoiceImports}
+              loadState={invoiceImportLoadState}
+              message={invoiceImportMessage}
+              onUpload={importAppRiverInvoice}
+            />
+          )}
           {view === 'agreements' && (
             <AgreementsView
               autoPost={autoPost}
@@ -5017,6 +5171,7 @@ function ReconcileView(props: {
   skipIssue: (issueId: string) => void;
   totalExposure: number;
   vendorDataSummary: string;
+  vendorInvoiceSummary: string;
   vendorFilter: string;
 }) {
   const {
@@ -5048,6 +5203,7 @@ function ReconcileView(props: {
     skipIssue,
     totalExposure,
     vendorDataSummary,
+    vendorInvoiceSummary,
     vendorFilter,
   } = props;
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
@@ -5057,10 +5213,10 @@ function ReconcileView(props: {
     ? integrationName(selectedReconciliationIntegrationId)
     : 'Choose a vendor';
   const workflowSteps = workflow.map((step) => {
-    if (step.label === 'Vendor data') return { ...step, value: vendorDataSummary };
+    if (step.label === 'Vendor API Data') return { ...step, value: vendorDataSummary };
+    if (step.label === 'Vendor Invoice') return { ...step, value: vendorInvoiceSummary };
     if (step.label === 'CW Data') return { ...step, value: connectWiseSyncSummary };
     if (step.label === 'Discrepancies') return { ...step, value: `${pendingCount.toLocaleString()} review` };
-    if (step.label === 'Client review') return { ...step, value: `${clientGroups.length} groups` };
     if (step.label === 'Unresolved exposure') return { ...step, value: formatCurrency(totalExposure) };
     return step;
   });
@@ -5138,7 +5294,7 @@ function ReconcileView(props: {
       </section>
 
       <section className="workflow-band" aria-label="Reconciliation workflow">
-        {workflowSteps.map((step) => {
+        {workflowSteps.map((step, index) => {
           const Icon = step.icon;
           return (
             <div className={`workflow-step ${step.state}`} key={step.label}>
@@ -5149,7 +5305,7 @@ function ReconcileView(props: {
                 <span>{step.label}</span>
                 <strong>{step.value}</strong>
               </div>
-              {step.label !== 'Post' && <ChevronRight className="workflow-arrow" size={18} />}
+              {index < workflowSteps.length - 1 && <ChevronRight className="workflow-arrow" size={18} />}
             </div>
           );
         })}
@@ -5244,7 +5400,7 @@ function ReconcileView(props: {
                 </strong>
                 <span>
                   {!selectedReconciliationIntegrationId
-                    ? 'Pick a vendor above when you are ready to compare vendor counts with CW data.'
+                    ? 'Pick a vendor above when you are ready to compare vendor API counts with CW data.'
                     : pendingCount === 0
                     ? reconciliationMessage
                     : 'Adjust the vendor, status, or exposure filters to bring product checks back.'}
@@ -5332,7 +5488,7 @@ function ReconcileView(props: {
                                   type="button"
                                 >
                                   <Database size={14} />
-                                  Vendor Data
+                                  Vendor API Data
                                 </button>
                                 <span>{visibleVendorIssues.length} product checks</span>
                               </div>
@@ -5340,7 +5496,8 @@ function ReconcileView(props: {
                             <div className="license-table" role="table" aria-label={`${client.customer} ${vendor} license checks`}>
                               <div className="license-row heading" role="row">
                                 <span>Product</span>
-                                <span>Vendor count</span>
+                                <span>API Count</span>
+                                <span>Inv. Count</span>
                                 <span>CW Count</span>
                                 <span>Delta</span>
                                 <span>Impact</span>
@@ -5359,6 +5516,7 @@ function ReconcileView(props: {
                                       <em>{issue.serviceCode} / {issue.family}</em>
                                     </span>
                                     <span>{issue.sourceCount}</span>
+                                    <span>{formatOptionalCount(issue.vendorInvoiceCount)}</span>
                                     <span>{issue.invoiceCount}</span>
                                     <span className={delta >= 0 ? 'delta positive' : 'delta negative'}>
                                       {delta > 0 ? `+${delta}` : delta}
@@ -5450,7 +5608,7 @@ function VendorDataModal(props: { onClose: () => void; selection: VendorDataSele
           <div>
             <h2 id="vendor-data-title">
               <Database size={18} />
-              Vendor Data
+              Vendor API Data
             </h2>
             <p>
               {selection.customer} / {selection.vendor}
@@ -5840,7 +5998,8 @@ function ManualOverrideModal(props: {
         </div>
 
         <div className="manual-summary">
-          <IntegrationStat label="Vendor count" value={issue.sourceCount.toLocaleString()} />
+          <IntegrationStat label="API Count" value={issue.sourceCount.toLocaleString()} />
+          <IntegrationStat label="Inv. Count" value={formatOptionalCount(issue.vendorInvoiceCount)} />
           <IntegrationStat label="ConnectWise" value={issue.invoiceCount.toLocaleString()} />
           <IntegrationStat label="Proposed" value={issue.proposedCount.toLocaleString()} />
           <IntegrationStat label="Impact" value={formatCurrency(issue.amount)} />
@@ -6119,33 +6278,12 @@ function IntegrationCard(props: {
 
         <div className="integration-stats" aria-label={`${integration.name} integration status`}>
           <IntegrationStat label="Last sync" value={comingSoon ? 'Unavailable' : integration.lastSync ?? 'Never'} />
-          <IntegrationStat label="Last test" value={comingSoon ? 'Unavailable' : integration.lastTest ?? 'Never'} />
-          <IntegrationStat label="Frequency" value={comingSoon ? 'TBD' : integration.frequency ?? 'Manual'} />
           <IntegrationStat label="Records" value={comingSoon ? '0' : integration.records ?? '0'} />
         </div>
 
-        <div className="scope-list runtime-list" aria-label={`${integration.name} runtime details`}>
-          {comingSoon ? (
-            <span>Not implemented yet</span>
-          ) : (
-            <>
-              <span>Secrets: {integration.secretSource === 'key-vault' ? 'Key Vault' : 'Environment'}</span>
-              {integration.lastSyncStatus ? <span>Last sync: {integration.lastSyncStatus}</span> : null}
-            </>
-          )}
-        </div>
-
-        <div className="scope-list" aria-label={`${integration.name} scopes`}>
-          {integration.scopes.map((scope) => (
-            <span key={scope}>{scope}</span>
-          ))}
-        </div>
-
-        {!comingSoon && integration.missingSecrets.length + integration.missingNonSecrets.length > 0 ? (
-          <div className="scope-list warning-list" aria-label={`${integration.name} missing settings`}>
-            {[...integration.missingSecrets, ...integration.missingNonSecrets].map((setting) => (
-              <span key={setting}>Missing {setting}</span>
-            ))}
+        {comingSoon || integration.lastSyncStatus ? (
+          <div className="scope-list runtime-list" aria-label={`${integration.name} runtime details`}>
+            <span>{comingSoon ? 'Not implemented yet' : `Last sync: ${integration.lastSyncStatus}`}</span>
           </div>
         ) : null}
 
@@ -8157,11 +8295,6 @@ function IntegrationModal(props: {
                   />
                 </label>
               ))}
-              <div className="scope-list config-setting-list" aria-label={`${integration.name} Key Vault secrets`}>
-                {integration.requiredSecrets.map((setting) => (
-                  <span key={setting.key}>Key Vault: {setting.keyVaultSecretName}</span>
-                ))}
-              </div>
               {integration.requiredSecrets.map((setting) => (
                 <label className="config-field" key={setting.key}>
                   <span>{setting.label}</span>
@@ -8178,18 +8311,8 @@ function IntegrationModal(props: {
 
           {tab === 'sync' && (
             <>
-              <label className="config-field">
-                <span>Sync frequency</span>
-                <select defaultValue={integration.frequency ?? 'Daily'}>
-                  <option>Hourly</option>
-                  <option>Daily</option>
-                  <option>Weekly</option>
-                  <option>Manual</option>
-                </select>
-              </label>
               <p className="config-note">
-                Last sync {integration.lastSync ?? 'never'} / Last test {integration.lastTest ?? 'never'} / Records{' '}
-                {integration.records ?? '0'}
+                Last sync {integration.lastSync ?? 'never'} / Records {integration.records ?? '0'}
               </p>
             </>
           )}
@@ -9300,46 +9423,76 @@ function ReportsView(props: {
   );
 }
 
-function ImportsView() {
+function ImportsView(props: {
+  imports: InvoiceImportSummary[];
+  importing: boolean;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onUpload: (file: File) => Promise<InvoiceImportSummary | null>;
+}) {
+  const { imports, importing, loadState, message, onUpload } = props;
+  const latestImport = imports[0];
+  const totalRows = imports.reduce((total, item) => total + item.rowCount, 0);
+  const totalExceptions = imports.reduce((total, item) => total + item.exceptionRows, 0);
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (file) {
+      void onUpload(file);
+    }
+    event.currentTarget.value = '';
+  };
+
   return (
     <section className="view-grid imports-view">
       <div className="work-surface">
         <div className="surface-header">
           <div>
-            <span className="section-kicker">Import batch 14</span>
+            <span className="section-kicker">AppRiver - OpenText</span>
             <h2>Vendor invoice intake</h2>
           </div>
-          <button className="button primary compact" type="button">
+          <label className={importing ? 'button primary compact file-upload-button disabled' : 'button primary compact file-upload-button'}>
             <FileUp size={17} />
-            Upload file
-          </button>
+            {importing ? 'Importing' : 'Upload file'}
+            <input accept=".csv,text/csv" disabled={importing} onChange={handleFileChange} type="file" />
+          </label>
         </div>
 
         <div className="import-drop">
           <FileSpreadsheet size={28} />
           <div>
-            <strong>1,965 invoice rows normalized</strong>
-            <span>Four vendor files matched against ConnectWise product codes.</span>
+            <strong>
+              {latestImport
+                ? `${latestImport.rowCount.toLocaleString()} rows on ${latestImport.invoiceNumber ? `invoice ${latestImport.invoiceNumber}` : latestImport.fileName}`
+                : 'No invoice imported yet'}
+            </strong>
+            <span>{loadState === 'failed' ? message : latestImport ? `${totalRows.toLocaleString()} total rows imported / ${totalExceptions.toLocaleString()} exceptions` : message}</span>
           </div>
-          <button className="icon-button" title="Download normalized import" type="button">
-            <Download size={18} />
-          </button>
         </div>
 
         <div className="import-table">
+          {imports.length === 0 ? (
+            <div className="empty-state">
+              <FileSpreadsheet size={20} />
+              <strong>{loadState === 'loading' ? 'Loading invoice imports.' : 'No AppRiver invoice imports found.'}</strong>
+              <span>{message}</span>
+            </div>
+          ) : null}
+
           {imports.map((item) => (
-            <div className="import-row" key={item.file}>
-              <span className="vendor-badge">{item.vendor}</span>
+            <div className="import-row" key={item.id}>
+              <span className="vendor-badge">AppRiver</span>
               <div>
-                <strong>{item.file}</strong>
-                <span>{formatCount(item.rows)} rows</span>
+                <strong>{item.invoiceNumber ? `Invoice ${item.invoiceNumber}` : item.fileName}</strong>
+                <span>
+                  {formatCount(item.rowCount)} rows / {formatDateOnly(item.invoiceDate) ?? formatDateTime(item.importedAt)}
+                </span>
               </div>
               <div className="match-bar">
-                <span style={{ width: `${(item.matched / item.rows) * 100}%` }} />
+                <span style={{ width: `${item.rowCount > 0 ? (item.matchedRows / item.rowCount) * 100 : 0}%` }} />
               </div>
-              <strong>{item.exceptions} exceptions</strong>
-              <span className={item.status === 'Ready' ? 'status-pill ready' : 'status-pill needs-review'}>
-                {item.status}
+              <strong>{item.exceptionRows} exceptions</strong>
+              <span className={item.status === 'ready' ? 'status-pill ready' : 'status-pill needs-review'}>
+                {item.status === 'ready' ? 'Ready' : 'Review'}
               </span>
             </div>
           ))}
@@ -9358,11 +9511,11 @@ function ImportsView() {
         </div>
         <div className="mapping-list">
           {[
-            ['Tenant Name', 'Customer alias', '98%'],
-            ['SKU', 'Product code', '94%'],
-            ['Quantity', 'Billed count', '100%'],
-            ['Unit Price', 'Cost basis', '91%'],
-            ['Mailbox Type', 'Billing class', '76%'],
+            ['Customer Account Number', 'AppRiver account', 'Required'],
+            ['Product Code + Term', 'Vendor product key', 'Required'],
+            ['Charge Qty', 'Invoice count', 'Renewals'],
+            ['Billed Amount', 'Invoice amount', 'Detail'],
+            ['Charge Type', 'Renewal / adjustment', 'Detail'],
           ].map(([source, target, score]) => (
             <div className="mapping-row" key={source}>
               <span>{source}</span>

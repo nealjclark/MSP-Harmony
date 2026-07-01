@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS invoice_imports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
   file_name text NOT NULL,
+  invoice_number text,
   imported_at timestamptz NOT NULL DEFAULT now(),
   invoice_date date,
   billing_period_start date,
@@ -318,6 +319,42 @@ CREATE TABLE IF NOT EXISTS invoice_imports (
   exception_rows integer NOT NULL DEFAULT 0,
   status text NOT NULL,
   raw_summary jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS invoice_line_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_import_id uuid NOT NULL REFERENCES invoice_imports(id) ON DELETE CASCADE,
+  vendor_id text NOT NULL,
+  customer_id uuid REFERENCES customers(id),
+  agreement_id uuid REFERENCES agreements(id),
+  external_account_id text,
+  external_account_name text,
+  vendor_product_key text,
+  vendor_product_key_candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
+  product_code text NOT NULL,
+  product_name text NOT NULL,
+  connectwise_product_code text,
+  connectwise_product_name text,
+  charge_type text,
+  charge_name text,
+  quantity numeric(18, 4) NOT NULL DEFAULT 0,
+  previous_quantity numeric(18, 4),
+  post_quantity numeric(18, 4),
+  rate numeric(18, 4),
+  months numeric(18, 4),
+  amount numeric(18, 4),
+  billed_amount numeric(18, 4),
+  effective_date date,
+  invoice_date date,
+  billing_period_start date,
+  billing_period_end date,
+  term text,
+  billing_frequency text,
+  primary_domain text,
+  alias_domains text,
+  raw_row_number integer NOT NULL,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS reconciliation_runs (
@@ -401,6 +438,12 @@ CREATE INDEX IF NOT EXISTS idx_vendor_product_bundles_vendor ON vendor_product_b
 CREATE INDEX IF NOT EXISTS idx_vendor_usage_overrides_scope
   ON vendor_usage_overrides(vendor_id, customer_id, agreement_id, source_vendor_product_key)
   WHERE active;
+CREATE INDEX IF NOT EXISTS idx_invoice_imports_vendor_latest
+  ON invoice_imports(vendor_id, invoice_date DESC, imported_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_items_import_scope
+  ON invoice_line_items(invoice_import_id, customer_id, agreement_id, connectwise_product_code);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_items_vendor_external
+  ON invoice_line_items(vendor_id, external_account_id, vendor_product_key);
 CREATE INDEX IF NOT EXISTS idx_ncentral_filter_mappings_active
   ON ncentral_filter_mappings(mapping_type, vendor_product_key, tag_key)
   WHERE active;
@@ -469,6 +512,49 @@ CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_next
   ON appriver_sync_work_items(sync_run_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_customer
   ON appriver_sync_work_items(external_customer_id);
+
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS invoice_number text;
+CREATE TABLE IF NOT EXISTS invoice_line_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_import_id uuid NOT NULL REFERENCES invoice_imports(id) ON DELETE CASCADE,
+  vendor_id text NOT NULL,
+  customer_id uuid REFERENCES customers(id),
+  agreement_id uuid REFERENCES agreements(id),
+  external_account_id text,
+  external_account_name text,
+  vendor_product_key text,
+  vendor_product_key_candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
+  product_code text NOT NULL,
+  product_name text NOT NULL,
+  connectwise_product_code text,
+  connectwise_product_name text,
+  charge_type text,
+  charge_name text,
+  quantity numeric(18, 4) NOT NULL DEFAULT 0,
+  previous_quantity numeric(18, 4),
+  post_quantity numeric(18, 4),
+  rate numeric(18, 4),
+  months numeric(18, 4),
+  amount numeric(18, 4),
+  billed_amount numeric(18, 4),
+  effective_date date,
+  invoice_date date,
+  billing_period_start date,
+  billing_period_end date,
+  term text,
+  billing_frequency text,
+  primary_domain text,
+  alias_domains text,
+  raw_row_number integer NOT NULL,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_imports_vendor_latest
+  ON invoice_imports(vendor_id, invoice_date DESC, imported_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_items_import_scope
+  ON invoice_line_items(invoice_import_id, customer_id, agreement_id, connectwise_product_code);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_items_vendor_external
+  ON invoice_line_items(vendor_id, external_account_id, vendor_product_key);
 
 ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_id text;
 ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS filter_name text NOT NULL DEFAULT '';
