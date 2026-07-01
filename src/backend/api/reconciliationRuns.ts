@@ -10,12 +10,7 @@ import type {
   UsageSnapshot,
   VendorRuleSet,
 } from '../shared/types';
-import {
-  applyReconciliationAdjustments,
-  loadReconciliationAdjustments,
-  type ReconciliationAdjustment,
-  type ReconciliationLineWithAdjustments,
-} from './reconciliationAdjustments';
+import type { ReconciliationAdjustment } from './reconciliationAdjustments';
 import type { IntegrationId } from '../../shared/integrationSettings';
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
@@ -112,9 +107,25 @@ export type DatabaseReconciliationLine = ReconciliationLine & {
   invoiceImportId?: string;
   invoiceNumber?: string;
   invoiceDate?: string;
+  matchedAgreementAdditions: ReconciliationLineAgreementAddition[];
   devices: DatabaseReconciliationDevice[];
   adjustments?: ReconciliationAdjustment[];
 };
+
+export type ReconciliationLineAgreementAddition = {
+  id: string;
+  connectWiseAdditionId: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice?: MoneyAmount;
+  lessIncluded?: number;
+  billedQuantity?: number;
+  additionStatus?: string;
+  updatedAt?: string;
+};
+
+type LoadedAgreementAddition = AgreementAddition & ReconciliationLineAgreementAddition;
 
 export type DatabaseReconciliationDevice = {
   id: string;
@@ -218,16 +229,12 @@ export async function reconcileVendorFromDatabase(
     snapshots,
     agreementAdditions,
   });
-  const adjustedLines = applyReconciliationAdjustments(
-    result.lines,
-    await loadReconciliationAdjustments(database, vendorId, result.lines),
-  );
-  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, adjustedLines);
+  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, result.lines);
 
   return {
     ...result,
-    totals: totalsForLines(adjustedLines),
-    lines: await withLineDetails(database, adjustedLines, snapshots, ruleSet, invoiceState.quantities),
+    totals: totalsForLines(result.lines),
+    lines: await withLineDetails(database, result.lines, snapshots, agreementAdditions, ruleSet, invoiceState.quantities),
     syncRunId,
     snapshotCount: snapshots.length,
     agreementAdditionCount: agreementAdditions.length,
@@ -273,6 +280,7 @@ function totalsForLines(lines: ReconciliationLine[]) {
       if (line.status === 'matched') summary.matched += 1;
       if (line.status === 'needs-review') summary.needsReview += 1;
       if (line.status === 'not-billable') summary.notBillable += 1;
+      if (line.status === 'unmapped') summary.unmapped += 1;
       summary.financialImpact.amount += line.financialImpact.amount;
       return summary;
     },
@@ -280,6 +288,7 @@ function totalsForLines(lines: ReconciliationLine[]) {
       matched: 0,
       needsReview: 0,
       notBillable: 0,
+      unmapped: 0,
       financialImpact: {
         amount: 0,
         currency: 'USD' as const,
@@ -579,11 +588,14 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
        agreement_additions.id,
        agreement_additions.customer_id,
        agreement_additions.agreement_id,
+       agreement_additions.connectwise_addition_id,
        agreement_additions.product_code,
        agreement_additions.product_name,
        agreement_additions.quantity,
        agreement_additions.unit_price,
-       agreement_additions.updated_at
+       agreement_additions.addition_status,
+       agreement_additions.updated_at,
+       agreement_additions.raw_payload
      from agreement_additions
      inner join agreements
        on agreements.id = agreement_additions.agreement_id
@@ -601,8 +613,9 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
 
 async function withLineDetails(
   database: Queryable,
-  lines: ReconciliationLineWithAdjustments[],
+  lines: ReconciliationLine[],
   snapshots: UsageSnapshot[],
+  agreementAdditions: LoadedAgreementAddition[],
   ruleSet: VendorRuleSet,
   invoiceQuantities: Map<string, InvoiceQuantity>,
 ): Promise<DatabaseReconciliationLine[]> {
@@ -643,6 +656,7 @@ async function withLineDetails(
     ...line,
     ...labelsByLineKey.get(`${line.clientId}|${line.agreementId}`),
     ...invoiceDetailsForLine(invoiceQuantities, line),
+    matchedAgreementAdditions: matchedAgreementAdditionsForLine(line, agreementAdditions),
     devices: devicesForLine(line, snapshots, ruleSet),
   }));
 }
@@ -670,7 +684,9 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
       (snapshot) =>
         snapshot.clientId === line.clientId &&
         snapshot.agreementId === line.agreementId &&
-        (!rule || snapshotMatchesRule(snapshot, rule)),
+        (line.lineType === 'unmapped-vendor'
+          ? snapshotMatchesUnmappedLine(snapshot, line)
+          : !rule || snapshotMatchesRule(snapshot, rule)),
     )
     .map((snapshot) => ({
       id: snapshot.id,
@@ -681,6 +697,39 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
       observedAt: snapshot.observedAt,
       dimensions: snapshot.dimensions,
     }));
+}
+
+function matchedAgreementAdditionsForLine(
+  line: ReconciliationLine,
+  agreementAdditions: LoadedAgreementAddition[],
+): ReconciliationLineAgreementAddition[] {
+  if (line.lineType === 'unmapped-vendor') {
+    return [];
+  }
+
+  return agreementAdditions
+    .filter(
+      (addition) =>
+        addition.clientId === line.clientId &&
+        addition.agreementId === line.agreementId &&
+        addition.productCode.trim().toLowerCase() === line.productCode.trim().toLowerCase(),
+    )
+    .map((addition) => ({
+      id: addition.id,
+      connectWiseAdditionId: addition.connectWiseAdditionId,
+      productCode: addition.productCode,
+      productName: addition.productName,
+      quantity: addition.quantity,
+      unitPrice: addition.unitPrice,
+      lessIncluded: addition.lessIncluded,
+      billedQuantity: addition.billedQuantity,
+      additionStatus: addition.additionStatus,
+      updatedAt: addition.updatedAt,
+    }));
+}
+
+function snapshotMatchesUnmappedLine(snapshot: UsageSnapshot, line: ReconciliationLine) {
+  return snapshot.productCode === line.productCode && snapshot.productName === line.productName;
 }
 
 function productOptionsForRuleSet(ruleSet: VendorRuleSet): ReconciliationProductOption[] {
@@ -745,11 +794,14 @@ function mapUsageOverrideRow(row: UsageOverrideRow): UsageOverride {
   };
 }
 
-function mapAdditionRow(row: AdditionRow): AgreementAddition {
+function mapAdditionRow(row: AdditionRow): LoadedAgreementAddition {
+  const raw = recordFromJson(row.raw_payload);
+
   return {
     id: row.id,
     clientId: row.customer_id,
     agreementId: row.agreement_id,
+    connectWiseAdditionId: row.connectwise_addition_id ?? row.id,
     productCode: row.product_code,
     productName: row.product_name,
     quantity: numericValue(row.quantity),
@@ -761,6 +813,9 @@ function mapAdditionRow(row: AdditionRow): AgreementAddition {
             currency: 'USD',
           },
     updatedAt: isoDate(row.updated_at),
+    lessIncluded: optionalNumericValue(raw.lessIncluded),
+    billedQuantity: optionalNumericValue(raw.billedQuantity),
+    additionStatus: row.addition_status,
   };
 }
 

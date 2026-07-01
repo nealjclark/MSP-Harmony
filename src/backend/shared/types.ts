@@ -7,8 +7,8 @@ export type MoneyAmount = {
 
 export type BillingUnit = 'device' | 'server' | 'workstation' | 'TB' | 'GB' | 'license';
 
-export type ReconciliationLineType = 'base-count' | 'usage-add-on';
-export type ReconciliationStatus = 'matched' | 'needs-review' | 'not-billable';
+export type ReconciliationLineType = 'base-count' | 'usage-add-on' | 'unmapped-vendor';
+export type ReconciliationStatus = 'matched' | 'needs-review' | 'not-billable' | 'unmapped';
 export type ReconciliationWriteAction = 'update-addition' | 'create-addition' | 'review-required';
 
 export type DimensionValue = string | number | boolean | null | undefined;
@@ -131,6 +131,7 @@ export type ReconciliationResult = {
     matched: number;
     needsReview: number;
     notBillable: number;
+    unmapped: number;
     financialImpact: MoneyAmount;
   };
 };

@@ -57,11 +57,28 @@ import {
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
-type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'ready' | 'approved' | 'blocked' | 'skipped';
+type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'unmapped' | 'ready' | 'approved' | 'blocked' | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'credentials' | 'sync';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
+type ReconciliationCountSource = 'api' | 'invoice';
+
+type ReconciliationMatchedAgreementAddition = {
+  id: string;
+  connectWiseAdditionId: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice?: {
+    amount: number;
+    currency: string;
+  };
+  lessIncluded?: number;
+  billedQuantity?: number;
+  additionStatus?: string;
+  updatedAt?: string;
+};
 
 type ReconcileIssue = {
   id: string;
@@ -75,7 +92,7 @@ type ReconcileIssue = {
   product: string;
   family: string;
   serviceCode: string;
-  lineType: 'base-count' | 'usage-add-on';
+  lineType: 'base-count' | 'usage-add-on' | 'unmapped-vendor';
   measuredSourceCount: number;
   sourceCount: number;
   vendorInvoiceCount?: number;
@@ -85,7 +102,11 @@ type ReconcileIssue = {
   invoiceDate?: string;
   invoiceCount: number;
   proposedCount: number;
+  selectedCountSource: ReconciliationCountSource;
+  baseStatus: IssueStatus;
   amount: number;
+  unitPriceAmount?: number;
+  unitPriceCurrency?: string;
   unit: string;
   confidence: number;
   owner: string;
@@ -97,6 +118,10 @@ type ReconcileIssue = {
   audit: string[];
   devices: ReconciliationDevice[];
   adjustments: ReconciliationAdjustment[];
+  matchedAgreementAdditions: ReconciliationMatchedAgreementAddition[];
+  writeAction?: 'update-addition' | 'create-addition' | 'review-required';
+  proposedLessIncluded?: number;
+  lessIncludedTouched?: boolean;
 };
 
 type ProductRule = {
@@ -445,7 +470,7 @@ type DiscrepancyReportResponse = {
   rows: DiscrepancyRow[];
 };
 
-type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable';
+type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable' | 'unmapped';
 
 type ReconciliationDevice = {
   id: string;
@@ -591,7 +616,7 @@ type ReconciliationLineResponse = {
   connectWiseAgreementId?: string;
   productCode: string;
   productName: string;
-  lineType: 'base-count' | 'usage-add-on';
+  lineType: 'base-count' | 'usage-add-on' | 'unmapped-vendor';
   sourceQuantity: number;
   invoiceQuantity?: number;
   invoiceLineCount?: number;
@@ -617,8 +642,54 @@ type ReconciliationLineResponse = {
     label: string;
     value: string | number;
   }>;
+  matchedAgreementAdditions?: ReconciliationMatchedAgreementAddition[];
   devices?: ReconciliationDevice[];
   adjustments?: ReconciliationAdjustment[];
+};
+
+type AgreementAdditionUpdatePayload = {
+  sourceLineId: string;
+  vendorId: IntegrationId;
+  customerId: string;
+  customerName: string;
+  agreementId: string;
+  agreementName: string;
+  connectWiseAdditionId: string;
+  productCode: string;
+  productName: string;
+  currentQuantity: number;
+  currentLessIncluded: number;
+  quantity: number;
+  lessIncluded?: number;
+  apiQuantity: number;
+  invoiceQuantity?: number;
+  selectedSource: ReconciliationCountSource;
+};
+
+type AgreementAdditionUpdateResultItem = {
+  itemId?: string;
+  sourceLineId: string;
+  connectWiseAdditionId: string;
+  productCode: string;
+  productName: string;
+  currentQuantity: number;
+  proposedQuantity: number;
+  currentLessIncluded: number;
+  proposedLessIncluded?: number;
+  lessIncludedChanged: boolean;
+  status: 'written' | 'failed' | 'discarded';
+  error?: string;
+};
+
+type AgreementAdditionUpdateResponse = {
+  batchId: string;
+  status: 'written' | 'partial' | 'discarded';
+  summary: {
+    written: number;
+    failed: number;
+    discarded: number;
+  };
+  items: AgreementAdditionUpdateResultItem[];
 };
 
 type ReconciliationRunResponse = {
@@ -634,6 +705,7 @@ type ReconciliationRunResponse = {
     matched: number;
     needsReview: number;
     notBillable: number;
+    unmapped: number;
     financialImpact: {
       amount: number;
       currency: string;
@@ -1138,6 +1210,139 @@ function formatCount(value: number) {
 
 function formatOptionalCount(value: number | undefined) {
   return typeof value === 'number' ? value.toLocaleString() : '-';
+}
+
+function validVendorInvoiceCount(issue: Pick<ReconcileIssue, 'vendorInvoiceCount'>) {
+  return typeof issue.vendorInvoiceCount === 'number' && Number.isFinite(issue.vendorInvoiceCount)
+    ? issue.vendorInvoiceCount
+    : undefined;
+}
+
+function preferredReconciliationCountSource(
+  apiCount: number,
+  invoiceCount: number | undefined,
+): ReconciliationCountSource {
+  return typeof invoiceCount === 'number' && invoiceCount > apiCount ? 'invoice' : 'api';
+}
+
+function reconciliationCountSource(issue: ReconcileIssue): ReconciliationCountSource {
+  const invoiceCount = validVendorInvoiceCount(issue);
+  return issue.selectedCountSource === 'invoice' && typeof invoiceCount === 'number' ? 'invoice' : 'api';
+}
+
+function reconciliationSelectedCount(issue: ReconcileIssue) {
+  return reconciliationCountSource(issue) === 'invoice' ? validVendorInvoiceCount(issue) ?? issue.sourceCount : issue.sourceCount;
+}
+
+function reconciliationDelta(issue: ReconcileIssue) {
+  return reconciliationSelectedCount(issue) - issue.invoiceCount;
+}
+
+function reconciliationIssueImpact(issue: ReconcileIssue) {
+  const delta = reconciliationDelta(issue);
+  if (typeof issue.unitPriceAmount === 'number') {
+    return delta * issue.unitPriceAmount;
+  }
+
+  const originalDelta = issue.proposedCount - issue.invoiceCount;
+  return originalDelta === 0 ? issue.amount : issue.amount * (delta / originalDelta);
+}
+
+function currentLessIncluded(issue: ReconcileIssue) {
+  return issue.matchedAgreementAdditions.reduce((total, addition) => total + (addition.lessIncluded ?? 0), 0);
+}
+
+function proposedLessIncluded(issue: ReconcileIssue) {
+  return issue.lessIncludedTouched ? issue.proposedLessIncluded ?? 0 : currentLessIncluded(issue);
+}
+
+function selectedAgreementAddition(issue: ReconcileIssue) {
+  return issue.matchedAgreementAdditions.length === 1 ? issue.matchedAgreementAdditions[0] : undefined;
+}
+
+function cwCountLabel(issue: ReconcileIssue) {
+  const lessIncluded = currentLessIncluded(issue);
+  return lessIncluded > 0
+    ? `${issue.invoiceCount.toLocaleString()} (less ${lessIncluded.toLocaleString()})`
+    : issue.invoiceCount.toLocaleString();
+}
+
+function deltaLabel(value: number) {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function lessIncludedDelta(issue: ReconcileIssue) {
+  if (!issue.lessIncludedTouched) {
+    return undefined;
+  }
+
+  return proposedLessIncluded(issue) - currentLessIncluded(issue);
+}
+
+function applyBlockReason(issue: ReconcileIssue) {
+  if (issue.lineType === 'unmapped-vendor') {
+    return 'Map this vendor product before applying.';
+  }
+
+  if (issue.writeAction === 'create-addition') {
+    return 'Create-addition rows are handled manually in this flow.';
+  }
+
+  if (issue.matchedAgreementAdditions.length === 0) {
+    return 'No active matching CW addition was found.';
+  }
+
+  if (issue.matchedAgreementAdditions.length > 1) {
+    return 'Multiple active matching CW additions were found.';
+  }
+
+  return undefined;
+}
+
+function isApplyEligibleIssue(issue: ReconcileIssue) {
+  return issue.status === 'approved' && !applyBlockReason(issue);
+}
+
+function buildAgreementAdditionUpdatePayload(
+  issue: ReconcileIssue,
+  options: { allowUnselected?: boolean } = {},
+): AgreementAdditionUpdatePayload | undefined {
+  const addition = selectedAgreementAddition(issue) ?? (options.allowUnselected ? issue.matchedAgreementAdditions[0] : undefined);
+  if (!addition && !options.allowUnselected) {
+    return undefined;
+  }
+
+  const payload: AgreementAdditionUpdatePayload = {
+    sourceLineId: issue.id,
+    vendorId: issue.vendorId,
+    customerId: issue.clientId,
+    customerName: issue.customer,
+    agreementId: issue.agreementId,
+    agreementName: issue.agreement,
+    connectWiseAdditionId: addition?.connectWiseAdditionId ?? 'unselected',
+    productCode: issue.serviceCode,
+    productName: issue.product,
+    currentQuantity: addition?.quantity ?? issue.invoiceCount,
+    currentLessIncluded: addition?.lessIncluded ?? currentLessIncluded(issue),
+    quantity: reconciliationSelectedCount(issue),
+    apiQuantity: issue.sourceCount,
+    invoiceQuantity: validVendorInvoiceCount(issue),
+    selectedSource: reconciliationCountSource(issue),
+  };
+
+  if (issue.lessIncludedTouched) {
+    payload.lessIncluded = proposedLessIncluded(issue);
+  }
+
+  return payload;
+}
+
+function restoredReconciliationStatus(issue: ReconcileIssue): IssueStatus {
+  if (reconciliationDelta(issue) === 0) {
+    return 'matched';
+  }
+
+  return issue.baseStatus === 'matched' || issue.baseStatus === 'approved' ? 'needs-review' : issue.baseStatus;
 }
 
 function formatMoneyValue(value: number) {
@@ -1759,6 +1964,8 @@ const reportDefaultColumnWidth = 180;
 const reportMinimumColumnWidth = 110;
 const reportMaximumColumnWidth = 640;
 const reportColumnKeyboardStep = 24;
+const vendorDataMinimumColumnWidth = 120;
+const vendorDataMaximumColumnWidth = 760;
 
 type ReportColumnResizeState = {
   column: string;
@@ -1791,6 +1998,31 @@ function clampReportColumnWidth(width: number) {
   return Math.min(reportMaximumColumnWidth, Math.max(reportMinimumColumnWidth, Math.round(width)));
 }
 
+function vendorDataDefaultColumnWidth(column: string) {
+  const normalizedColumn = column.toLowerCase();
+  if (
+    normalizedColumn.includes('product') ||
+    normalizedColumn.includes('subscription') ||
+    normalizedColumn.includes('description')
+  ) {
+    return 260;
+  }
+
+  if (
+    normalizedColumn.includes('customer') ||
+    normalizedColumn.includes('tenant') ||
+    normalizedColumn.includes('account')
+  ) {
+    return 220;
+  }
+
+  return 170;
+}
+
+function clampVendorDataColumnWidth(width: number) {
+  return Math.min(vendorDataMaximumColumnWidth, Math.max(vendorDataMinimumColumnWidth, Math.round(width)));
+}
+
 function profitabilityPath(points: Array<{ x: number; y: number }>) {
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
 }
@@ -1803,6 +2035,8 @@ function statusLabel(status: IssueStatus) {
       return 'Needs review';
     case 'not-billable':
       return 'Not billable';
+    case 'unmapped':
+      return 'Unmapped';
     case 'ready':
       return 'Ready';
     case 'approved':
@@ -1817,7 +2051,11 @@ function statusLabel(status: IssueStatus) {
 }
 
 function isReviewableIssue(issue: ReconcileIssue) {
-  return issue.status === 'needs-review' || issue.status === 'blocked';
+  return issue.status === 'needs-review' || issue.status === 'unmapped' || issue.status === 'blocked';
+}
+
+function isReviewViewIssue(issue: ReconcileIssue) {
+  return isReviewableIssue(issue) || issue.status === 'approved';
 }
 
 function issueMatchesSearchAndVendor(issue: ReconcileIssue, query: string, vendorFilter: string) {
@@ -1915,11 +2153,11 @@ function groupIssuesByClient(issues: ReconcileIssue[]): ClientGroup[] {
         agreementId: firstIssue.agreementId,
         issues: clientIssues,
         vendors: Array.from(new Set(clientIssues.map((issue) => issue.vendor))),
-        exposure: clientIssues.reduce((total, issue) => total + issue.amount, 0),
+        exposure: clientIssues.reduce((total, issue) => total + reconciliationIssueImpact(issue), 0),
         changeCount: clientIssues.length,
         readyCount: clientIssues.filter((issue) => issue.status === 'ready').length,
         blockedCount: clientIssues.filter((issue) => issue.status === 'blocked').length,
-        needsReviewCount: clientIssues.filter((issue) => issue.status === 'needs-review').length,
+        needsReviewCount: clientIssues.filter((issue) => issue.status === 'needs-review' || issue.status === 'unmapped').length,
       };
     })
     .sort((left, right) => compareCustomerNames(left.customer, right.customer));
@@ -2223,6 +2461,29 @@ async function fetchReconciliationRun(integrationId: IntegrationId) {
   }
 
   return body as unknown as ReconciliationRunResponse;
+}
+
+async function applyAgreementAdditionUpdatesRequest(
+  updates: AgreementAdditionUpdatePayload[],
+  discardedUpdates: AgreementAdditionUpdatePayload[],
+) {
+  const response = await fetch('/api/reconciliation/connectwise/agreement-addition-updates', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      updates,
+      discardedUpdates,
+    }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Agreement addition update failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as AgreementAdditionUpdateResponse;
 }
 
 async function postMappingAction(integrationId: IntegrationId, action: 'automap' | 'apply' | 'approve-suggested') {
@@ -2671,18 +2932,29 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
   return run.lines.map((line) => {
     const customer = line.customerName ?? `Customer ${shortId(line.clientId)}`;
     const agreement = line.agreementName ?? `Agreement ${shortId(line.agreementId)}`;
+    const selectedCountSource = preferredReconciliationCountSource(line.proposedQuantity, line.invoiceQuantity);
     const actionLabel =
       line.status === 'matched'
         ? 'No change needed; vendor and ConnectWise counts match.'
         : line.status === 'not-billable'
           ? 'Track source usage only; no ConnectWise billable addition is generated.'
-          : line.writeAction === 'create-addition'
-            ? 'Create a ConnectWise agreement addition after review.'
-            : line.writeAction === 'update-addition'
-              ? 'Update the ConnectWise agreement addition after review.'
-              : 'Review the matching ConnectWise additions before writing changes.';
+          : line.status === 'unmapped'
+            ? 'Map this vendor product before reconciling or writing ConnectWise changes.'
+            : line.writeAction === 'create-addition'
+              ? 'Create a ConnectWise agreement addition after review.'
+              : line.writeAction === 'update-addition'
+                ? 'Update the ConnectWise agreement addition after review.'
+                : 'Review the matching ConnectWise additions before writing changes.';
     const confidence =
-      line.status === 'matched' ? 99 : line.status === 'not-billable' ? 95 : line.writeAction === 'review-required' ? 70 : 90;
+      line.status === 'matched'
+        ? 99
+        : line.status === 'not-billable'
+          ? 95
+          : line.status === 'unmapped'
+            ? 60
+            : line.writeAction === 'review-required'
+              ? 70
+              : 90;
 
     return {
       id: line.id,
@@ -2694,7 +2966,12 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       agreement,
       vendor: sourceName,
       product: line.productName,
-      family: line.lineType === 'usage-add-on' ? 'Usage add-on' : 'Base count',
+      family:
+        line.lineType === 'usage-add-on'
+          ? 'Usage add-on'
+          : line.lineType === 'unmapped-vendor'
+            ? 'Unmapped vendor product'
+            : 'Base count',
       serviceCode: line.productCode,
       lineType: line.lineType,
       measuredSourceCount: line.sourceQuantity,
@@ -2706,7 +2983,11 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       invoiceDate: line.invoiceDate,
       invoiceCount: line.agreementQuantity,
       proposedCount: line.proposedQuantity,
+      selectedCountSource,
+      baseStatus: line.status,
       amount: line.financialImpact.amount,
+      unitPriceAmount: line.unitPrice?.amount,
+      unitPriceCurrency: line.unitPrice?.currency,
       unit: line.unit,
       confidence,
       owner: 'Finance',
@@ -2725,6 +3006,10 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       ].filter((entry): entry is string => Boolean(entry)),
       devices: line.devices ?? [],
       adjustments: line.adjustments ?? [],
+      matchedAgreementAdditions: line.matchedAgreementAdditions ?? [],
+      writeAction: line.writeAction,
+      proposedLessIncluded: undefined,
+      lessIncludedTouched: false,
     };
   });
 }
@@ -2751,6 +3036,8 @@ function buildReconciliationExportRows(
       );
       const manualLessCount = lessCountAdjustments.reduce((total, adjustment) => total + adjustment.quantity, 0);
       const cwLessIncluded = matchedAdditions.reduce((total, addition) => total + (addition.lessIncluded ?? 0), 0);
+      const selectedCountSource = reconciliationCountSource(issue);
+      const selectedCount = reconciliationSelectedCount(issue);
 
       return {
         'Selected Reconciliation': selectedSourceName,
@@ -2766,11 +3053,13 @@ function buildReconciliationExportRows(
         'Manual Less Count Reasons': lessCountAdjustments.map((adjustment) => adjustment.reason).filter(Boolean).join('; '),
         'Proposed Count After Less Count': issue.proposedCount,
         'Vendor Invoice Count': issue.vendorInvoiceCount ?? '',
+        'Selected Count Source': selectedCountSource === 'invoice' ? 'Vendor Invoice' : 'Vendor API',
+        'Selected Count To Approve': selectedCount,
         'Vendor Invoice Number': issue.invoiceNumber ?? '',
         'Vendor Invoice Date': issue.invoiceDate ?? '',
         'CW Count': issue.invoiceCount,
-        Delta: issue.proposedCount - issue.invoiceCount,
-        'Financial Impact': issue.amount,
+        Delta: reconciliationDelta(issue),
+        'Financial Impact': reconciliationIssueImpact(issue),
         Status: statusLabel(issue.status),
         Recommendation: issue.recommendation,
         Reason: issue.reason,
@@ -2927,6 +3216,9 @@ function App() {
   const [manualOverrideIssue, setManualOverrideIssue] = useState<ReconcileIssue | null>(null);
   const [manualOverrideMessage, setManualOverrideMessage] = useState('');
   const [savingManualOverride, setSavingManualOverride] = useState(false);
+  const [reviewingAgreementUpdates, setReviewingAgreementUpdates] = useState(false);
+  const [applyingAgreementUpdates, setApplyingAgreementUpdates] = useState(false);
+  const [agreementUpdateMessage, setAgreementUpdateMessage] = useState('');
 
   const navigateToView = (nextView: View) => {
     setView(nextView);
@@ -3444,7 +3736,7 @@ function App() {
   const filteredIssues = useMemo(() => {
     return issues.filter((issue) => {
       const matchesSearchAndVendor = issueMatchesSearchAndVendor(issue, query, vendorFilter);
-      const matchesStatus = !needsReviewOnly || isReviewableIssue(issue);
+      const matchesStatus = !needsReviewOnly || isReviewViewIssue(issue);
       return matchesSearchAndVendor && matchesStatus;
     });
   }, [issues, needsReviewOnly, query, vendorFilter]);
@@ -3484,7 +3776,11 @@ function App() {
     : 'No sync date';
   const totalExposure = issues
     .filter(isReviewableIssue)
-    .reduce((total, issue) => total + issue.amount, 0);
+    .reduce((total, issue) => total + reconciliationIssueImpact(issue), 0);
+  const queuedAgreementUpdateIssues = useMemo(
+    () => issues.filter((issue) => issue.status === 'approved'),
+    [issues],
+  );
   const visibleRules = productRules.filter((rule) => {
     if (productFilter === 'All products') return true;
     if (productFilter === 'Bundled') return rule.bundle !== 'None';
@@ -3499,9 +3795,37 @@ function App() {
 
   const approveIssue = (issueId: string) => {
     setIssues((currentIssues) =>
-      currentIssues.map((issue) =>
-        issue.id === issueId ? { ...issue, status: 'approved', owner: 'Finance' } : issue,
-      ),
+      currentIssues.map((issue) => {
+        if (issue.id !== issueId) {
+          return issue;
+        }
+
+        return issue.status === 'approved'
+          ? {
+              ...issue,
+              status: restoredReconciliationStatus(issue),
+              owner: 'Finance',
+              proposedLessIncluded: undefined,
+              lessIncludedTouched: false,
+            }
+          : { ...issue, status: 'approved', selectedCountSource: reconciliationCountSource(issue), owner: 'Finance' };
+      }),
+    );
+  };
+
+  const selectIssueCountSource = (issueId: string, countSource: ReconciliationCountSource) => {
+    setIssues((currentIssues) =>
+      currentIssues.map((issue) => {
+        if (issue.id !== issueId) {
+          return issue;
+        }
+
+        if (countSource === 'invoice' && typeof validVendorInvoiceCount(issue) !== 'number') {
+          return issue;
+        }
+
+        return { ...issue, selectedCountSource: countSource };
+      }),
     );
   };
 
@@ -3509,7 +3833,7 @@ function App() {
     setIssues((currentIssues) =>
       currentIssues.map((issue) =>
         issue.customer === customer && (issue.status === 'ready' || issue.status === 'needs-review')
-          ? { ...issue, status: 'approved', owner: 'Finance' }
+          ? { ...issue, status: 'approved', selectedCountSource: reconciliationCountSource(issue), owner: 'Finance' }
           : issue,
       ),
     );
@@ -3977,30 +4301,108 @@ function App() {
     }
   };
 
-  const saveLessCountAdjustment = async (issue: ReconcileIssue, quantity: number, reason: string) => {
-    setSavingManualOverride(true);
-    setManualOverrideMessage('Saving Less Count adjustment...');
+  const queueLessIncludedUpdate = async (issue: ReconcileIssue, quantity: number) => {
+    setIssues((currentIssues) =>
+      currentIssues.map((currentIssue) =>
+        currentIssue.id === issue.id
+          ? {
+              ...currentIssue,
+              proposedLessIncluded: quantity,
+              lessIncludedTouched: true,
+              selectedCountSource: reconciliationCountSource(currentIssue),
+              status: 'approved',
+              owner: 'Finance',
+            }
+          : currentIssue,
+      ),
+    );
+    setManualOverrideMessage('Less Included Qty queued for review.');
+    setManualOverrideIssue(null);
+    return true;
+  };
+
+  const applyReviewedAgreementUpdates = async (selectedIssueIds: string[]) => {
+    const selectedIds = new Set(selectedIssueIds);
+    const queuedIssues = issues.filter((issue) => issue.status === 'approved');
+    const updates = queuedIssues
+      .filter((issue) => selectedIds.has(issue.id) && isApplyEligibleIssue(issue))
+      .map((issue) => buildAgreementAdditionUpdatePayload(issue))
+      .filter((payload): payload is AgreementAdditionUpdatePayload => Boolean(payload));
+    const discardedUpdates = queuedIssues
+      .filter((issue) => !selectedIds.has(issue.id) || !isApplyEligibleIssue(issue))
+      .map((issue) => buildAgreementAdditionUpdatePayload(issue, { allowUnselected: true }))
+      .filter((payload): payload is AgreementAdditionUpdatePayload => Boolean(payload));
+
+    if (updates.length === 0 && discardedUpdates.length === 0) {
+      setAgreementUpdateMessage('No queued changes are ready to review.');
+      return null;
+    }
+
+    setApplyingAgreementUpdates(true);
+    setAgreementUpdateMessage('Applying reviewed ConnectWise changes...');
 
     try {
-      await createReconciliationAdjustmentRequest(issue.vendorId, {
-        customerId: issue.clientId,
-        agreementId: issue.agreementId,
-        productCode: issue.serviceCode,
-        productName: issue.product,
-        lineType: issue.lineType,
-        adjustmentType: 'less-count',
-        quantity,
-        reason,
-      });
-      setManualOverrideMessage('Less Count adjustment saved.');
-      await loadVendorReconciliation(issue.vendorId);
-      setManualOverrideIssue(null);
-      return true;
+      const response = await applyAgreementAdditionUpdatesRequest(updates, discardedUpdates);
+      const resultsByLineId = new Map(response.items.map((item) => [item.sourceLineId, item]));
+
+      setIssues((currentIssues) =>
+        currentIssues.map((issue) => {
+          const result = resultsByLineId.get(issue.id);
+          if (!result) {
+            return issue;
+          }
+
+          if (result.status === 'written') {
+            return {
+              ...issue,
+              invoiceCount: result.proposedQuantity,
+              baseStatus: 'matched',
+              status: 'matched',
+              reason: 'ConnectWise agreement addition update applied.',
+              recommendation: 'No change needed; vendor and ConnectWise counts match.',
+              proposedLessIncluded: undefined,
+              lessIncludedTouched: false,
+              matchedAgreementAdditions: issue.matchedAgreementAdditions.map((addition) =>
+                addition.connectWiseAdditionId === result.connectWiseAdditionId
+                  ? {
+                      ...addition,
+                      quantity: result.proposedQuantity,
+                      lessIncluded: result.lessIncludedChanged
+                        ? result.proposedLessIncluded ?? 0
+                        : addition.lessIncluded,
+                    }
+                  : addition,
+              ),
+            };
+          }
+
+          if (result.status === 'discarded') {
+            return {
+              ...issue,
+              status: restoredReconciliationStatus(issue),
+              proposedLessIncluded: undefined,
+              lessIncludedTouched: false,
+            };
+          }
+
+          return {
+            ...issue,
+            status: 'blocked',
+            recommendation: result.error ?? 'ConnectWise update failed.',
+            reason: result.error ?? issue.reason,
+          };
+        }),
+      );
+      setReviewingAgreementUpdates(false);
+      setAgreementUpdateMessage(
+        `Applied ${response.summary.written.toLocaleString()}, discarded ${response.summary.discarded.toLocaleString()}, failed ${response.summary.failed.toLocaleString()}.`,
+      );
+      return response;
     } catch (error) {
-      setManualOverrideMessage(error instanceof Error ? error.message : 'Less Count adjustment failed.');
-      return false;
+      setAgreementUpdateMessage(error instanceof Error ? error.message : 'Unable to apply ConnectWise changes.');
+      return null;
     } finally {
-      setSavingManualOverride(false);
+      setApplyingAgreementUpdates(false);
     }
   };
 
@@ -4137,6 +4539,8 @@ function App() {
             <ReconcileView
               approveClient={approveClient}
               approveIssue={approveIssue}
+              agreementUpdateMessage={agreementUpdateMessage}
+              applyingAgreementUpdates={applyingAgreementUpdates}
               clientGroups={clientGroups}
               connectWiseSyncSummary={connectWiseSyncSummary}
               exportingReport={exportingReconciliationReport}
@@ -4144,6 +4548,7 @@ function App() {
               filteredIssues={filteredIssues}
               issues={issues}
               needsReviewOnly={needsReviewOnly}
+              onCountSourceSelect={selectIssueCountSource}
               onExportReport={exportSelectedReconciliationReport}
               onManualOverride={setManualOverrideIssue}
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
@@ -4157,10 +4562,12 @@ function App() {
               onReconciliationSourceChange={(integrationId) => {
                 setSelectedReconciliationIntegrationId(integrationId);
                 setVendorFilter('All');
-                void loadVendorReconciliation(integrationId);
-              }}
+                  void loadVendorReconciliation(integrationId);
+                }}
+              onReviewAgreementUpdates={() => setReviewingAgreementUpdates(true)}
               pendingCount={pendingCount}
               query={query}
+              queuedAgreementUpdateCount={queuedAgreementUpdateIssues.length}
               reconciliationLoadState={reconciliationLoadState}
               reconciliationMessage={reconciliationMessage}
               selectedReconciliationIntegrationId={selectedReconciliationIntegrationId}
@@ -4374,6 +4781,15 @@ function App() {
           syncSummary={connectWiseSyncSummary}
         />
       )}
+      {reviewingAgreementUpdates ? (
+        <AgreementUpdateReviewModal
+          applying={applyingAgreementUpdates}
+          issues={queuedAgreementUpdateIssues}
+          message={agreementUpdateMessage}
+          onApply={(selectedIssueIds) => void applyReviewedAgreementUpdates(selectedIssueIds)}
+          onClose={() => setReviewingAgreementUpdates(false)}
+        />
+      ) : null}
       {selectedIntegration && (
           <IntegrationModal
             integration={selectedIntegration}
@@ -4393,7 +4809,7 @@ function App() {
             setManualOverrideIssue(null);
             setManualOverrideMessage('');
           }}
-          onLessCountSave={saveLessCountAdjustment}
+          onLessCountSave={queueLessIncludedUpdate}
           onDeviceRemap={remapReconciliationDevice}
           productOptions={reconciliationProductOptions}
           saving={savingManualOverride}
@@ -5152,6 +5568,8 @@ function managedUserStatusLabel(status: ManagedUserStatus) {
 function ReconcileView(props: {
   approveClient: (customer: string) => void;
   approveIssue: (issueId: string) => void;
+  agreementUpdateMessage: string;
+  applyingAgreementUpdates: boolean;
   clientGroups: ClientGroup[];
   connectWiseSyncSummary: string;
   exportingReport: boolean;
@@ -5159,6 +5577,7 @@ function ReconcileView(props: {
   filteredIssues: ReconcileIssue[];
   issues: ReconcileIssue[];
   needsReviewOnly: boolean;
+  onCountSourceSelect: (issueId: string, countSource: ReconciliationCountSource) => void;
   onExportReport: () => Promise<void>;
   onLoadVendorData: (client: ClientGroup, vendorId: IntegrationId, vendor: string) => Promise<VendorDataSelection>;
   onManualOverride: (issue: ReconcileIssue) => void;
@@ -5166,8 +5585,10 @@ function ReconcileView(props: {
   onOpenTicket: (client: ClientGroup) => void;
   onRefreshReconciliation: () => Promise<ReconciliationRunResponse | null>;
   onReconciliationSourceChange: (integrationId: IntegrationId) => void;
+  onReviewAgreementUpdates: () => void;
   pendingCount: number;
   query: string;
+  queuedAgreementUpdateCount: number;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reconciliationMessage: string;
   selectedReconciliationIntegrationId: IntegrationId | '';
@@ -5184,6 +5605,8 @@ function ReconcileView(props: {
   const {
     approveClient,
     approveIssue,
+    agreementUpdateMessage,
+    applyingAgreementUpdates,
     clientGroups,
     connectWiseSyncSummary,
     exportingReport,
@@ -5191,6 +5614,7 @@ function ReconcileView(props: {
     filteredIssues,
     issues,
     needsReviewOnly,
+    onCountSourceSelect,
     onExportReport,
     onLoadVendorData,
     onManualOverride,
@@ -5198,8 +5622,10 @@ function ReconcileView(props: {
     onOpenTicket,
     onRefreshReconciliation,
     onReconciliationSourceChange,
+    onReviewAgreementUpdates,
     pendingCount,
     query,
+    queuedAgreementUpdateCount,
     reconciliationLoadState,
     reconciliationMessage,
     selectedReconciliationIntegrationId,
@@ -5215,7 +5641,7 @@ function ReconcileView(props: {
   } = props;
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
   const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
-  const filteredReviewCount = filteredIssues.filter(isReviewableIssue).length;
+  const filteredReviewCount = filteredIssues.filter(isReviewViewIssue).length;
   const selectedSourceName = selectedReconciliationIntegrationId
     ? integrationName(selectedReconciliationIntegrationId)
     : 'Choose a vendor';
@@ -5362,6 +5788,17 @@ function ReconcileView(props: {
             </div>
             <div className="review-group-actions">
               <button
+                className="button primary compact"
+                disabled={queuedAgreementUpdateCount === 0 || applyingAgreementUpdates}
+                onClick={onReviewAgreementUpdates}
+                type="button"
+              >
+                <ListChecks size={16} />
+                {applyingAgreementUpdates
+                  ? 'Applying'
+                  : `Review & Apply (${queuedAgreementUpdateCount.toLocaleString()})`}
+              </button>
+              <button
                 className="button secondary compact"
                 disabled={
                   exportingReport ||
@@ -5393,6 +5830,11 @@ function ReconcileView(props: {
               </button>
             </div>
           </div>
+          {agreementUpdateMessage ? (
+            <div className="reconciliation-apply-message">
+              {agreementUpdateMessage}
+            </div>
+          ) : null}
 
           <div className="client-group-list">
             {clientGroups.length === 0 && (
@@ -5512,42 +5954,90 @@ function ReconcileView(props: {
                                 <span>Actions</span>
                               </div>
                               {visibleVendorIssues.map((issue) => {
-                                const delta = issue.sourceCount - issue.invoiceCount;
-                                const canApproveOrSkip = isReviewableIssue(issue) || issue.status === 'ready';
+                                const invoiceCount = validVendorInvoiceCount(issue);
+                                const selectedCountSource = reconciliationCountSource(issue);
+                                const preferredCountSource = preferredReconciliationCountSource(issue.sourceCount, invoiceCount);
+                                const delta = reconciliationDelta(issue);
+                                const lessDelta = lessIncludedDelta(issue);
+                                const impact = reconciliationIssueImpact(issue);
+                                const canToggleApproval =
+                                  issue.status === 'approved' ||
+                                  ((isReviewableIssue(issue) && issue.status !== 'unmapped') || issue.status === 'ready');
+                                const countButtonClass = (countSource: ReconciliationCountSource) =>
+                                  [
+                                    'count-select-button',
+                                    selectedCountSource === countSource ? 'selected' : '',
+                                    preferredCountSource === countSource ? 'largest' : '',
+                                  ].filter(Boolean).join(' ');
                                 const passiveActionLabel =
-                                  issue.status === 'approved' ? 'Approved' : issue.status === 'skipped' ? 'Skipped' : 'No change';
+                                  issue.status === 'approved'
+                                    ? 'Approved'
+                                    : issue.status === 'skipped'
+                                      ? 'Skipped'
+                                      : issue.status === 'unmapped'
+                                        ? 'Map product'
+                                        : 'No change';
                                 return (
                                   <div className="license-row" key={issue.id} role="row">
                                     <span className="license-product">
                                       <strong>{issue.product}</strong>
                                       <em>{issue.serviceCode} / {issue.family}</em>
                                     </span>
-                                    <span>{issue.sourceCount}</span>
-                                    <span>{formatOptionalCount(issue.vendorInvoiceCount)}</span>
-                                    <span>{issue.invoiceCount}</span>
-                                    <span className={delta >= 0 ? 'delta positive' : 'delta negative'}>
-                                      {delta > 0 ? `+${delta}` : delta}
+                                    <span className="count-cell">
+                                      <button
+                                        aria-pressed={selectedCountSource === 'api'}
+                                        className={countButtonClass('api')}
+                                        onClick={() => onCountSourceSelect(issue.id, 'api')}
+                                        title="Use API count"
+                                        type="button"
+                                      >
+                                        {issue.sourceCount.toLocaleString()}
+                                      </button>
                                     </span>
-                                    <span>{formatCurrency(issue.amount)}</span>
+                                    <span className="count-cell">
+                                      <button
+                                        aria-pressed={selectedCountSource === 'invoice'}
+                                        className={countButtonClass('invoice')}
+                                        disabled={typeof invoiceCount !== 'number'}
+                                        onClick={() => onCountSourceSelect(issue.id, 'invoice')}
+                                        title="Use invoice count"
+                                        type="button"
+                                      >
+                                        {formatOptionalCount(invoiceCount)}
+                                      </button>
+                                    </span>
+                                    <span>{cwCountLabel(issue)}</span>
+                                    <span className={delta >= 0 ? 'delta positive' : 'delta negative'}>
+                                      {deltaLabel(delta)}
+                                      {typeof lessDelta === 'number' ? (
+                                        <small className="delta-note">less {deltaLabel(lessDelta)}</small>
+                                      ) : null}
+                                    </span>
+                                    <span>{formatCurrency(impact)}</span>
                                     <span className={`status-pill ${issue.status}`}>{statusLabel(issue.status)}</span>
                                     <span className="license-actions">
-                                      {canApproveOrSkip ? (
+                                      {canToggleApproval ? (
                                         <>
-                                          <label className="approval-checkbox" title="Approve suggested change">
-                                            <input
-                                              checked={issue.status === 'approved'}
-                                              onChange={() => approveIssue(issue.id)}
-                                              type="checkbox"
-                                            />
-                                          </label>
                                           <button
-                                            className="button secondary compact table-action-button"
-                                            onClick={() => skipIssue(issue.id)}
-                                            title="Skip change"
+                                            aria-label={issue.status === 'approved' ? 'Remove approval' : 'Approve selected count'}
+                                            aria-pressed={issue.status === 'approved'}
+                                            className={issue.status === 'approved' ? 'approval-toggle approved' : 'approval-toggle'}
+                                            onClick={() => approveIssue(issue.id)}
+                                            title={issue.status === 'approved' ? 'Remove approval' : 'Approve selected count'}
                                             type="button"
                                           >
-                                            Skip
+                                            {issue.status === 'approved' ? <Check size={16} /> : null}
                                           </button>
+                                          {issue.status !== 'approved' ? (
+                                            <button
+                                              className="button secondary compact table-action-button"
+                                              onClick={() => skipIssue(issue.id)}
+                                              title="Skip change"
+                                              type="button"
+                                            >
+                                              Skip
+                                            </button>
+                                          ) : null}
                                         </>
                                       ) : (
                                         <span className="no-change-action">{passiveActionLabel}</span>
@@ -5606,7 +6096,90 @@ function ReconcileView(props: {
 
 function VendorDataModal(props: { onClose: () => void; selection: VendorDataSelection }) {
   const { onClose, selection } = props;
-  const minTableWidth = Math.max(980, selection.columns.length * 150);
+  const columnsKey = selection.columns.join('\u001f');
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [columnResize, setColumnResize] = useState<ReportColumnResizeState | null>(null);
+  const columnWidth = (column: string) => columnWidths[column] ?? vendorDataDefaultColumnWidth(column);
+  const minTableWidth = Math.max(
+    980,
+    selection.columns.reduce((totalWidth, column) => totalWidth + columnWidth(column), 0),
+  );
+
+  useEffect(() => {
+    const availableColumns = new Set(selection.columns);
+    setColumnWidths((currentWidths) => {
+      const nextWidths = Object.fromEntries(
+        Object.entries(currentWidths).filter(([column]) => availableColumns.has(column)),
+      );
+      return Object.keys(nextWidths).length === Object.keys(currentWidths).length ? currentWidths : nextWidths;
+    });
+    setColumnResize((currentResize) =>
+      currentResize && availableColumns.has(currentResize.column) ? currentResize : null,
+    );
+  }, [columnsKey, selection.columns]);
+
+  const setColumnWidth = (column: string, width: number) => {
+    const nextWidth = clampVendorDataColumnWidth(width);
+    setColumnWidths((currentWidths) =>
+      currentWidths[column] === nextWidth ? currentWidths : { ...currentWidths, [column]: nextWidth },
+    );
+  };
+
+  const startColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setColumnResize({
+      column,
+      pointerId: event.pointerId,
+      startWidth: columnWidth(column),
+      startX: event.clientX,
+    });
+  };
+
+  const moveColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!columnResize || columnResize.column !== column || columnResize.pointerId !== event.pointerId) {
+      return;
+    }
+
+    setColumnWidth(column, columnResize.startWidth + event.clientX - columnResize.startX);
+  };
+
+  const stopColumnResize = (column: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!columnResize || columnResize.column !== column || columnResize.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setColumnResize(null);
+  };
+
+  const resetColumnWidth = (column: string) => {
+    setColumnWidths((currentWidths) => {
+      if (typeof currentWidths[column] === 'undefined') {
+        return currentWidths;
+      }
+
+      const { [column]: _removed, ...nextWidths } = currentWidths;
+      return nextWidths;
+    });
+  };
+
+  const handleColumnResizeKeyDown = (column: string, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      setColumnWidth(column, columnWidth(column) + direction * reportColumnKeyboardStep);
+      return;
+    }
+
+    if (event.key === 'Home') {
+      event.preventDefault();
+      resetColumnWidth(column);
+    }
+  };
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -5646,11 +6219,39 @@ function VendorDataModal(props: { onClose: () => void; selection: VendorDataSele
 
           {selection.status === 'ready' && selection.rows.length > 0 ? (
             <div className="vendor-device-table-scroll">
-              <table className="vendor-raw-sync-table" style={{ minWidth: `${minTableWidth}px` }}>
+              <table
+                className={columnResize ? 'vendor-raw-sync-table resizing' : 'vendor-raw-sync-table'}
+                style={{ minWidth: `${minTableWidth}px` }}
+              >
+                <colgroup>
+                  {selection.columns.map((column) => (
+                    <col key={column} style={{ width: `${columnWidth(column)}px` }} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
                     {selection.columns.map((column) => (
-                      <th key={column}>{column}</th>
+                      <th key={column}>
+                        <div className="vendor-raw-column-header">
+                          <span title={column}>{column}</span>
+                        </div>
+                        <button
+                          aria-label={`Resize ${column} column`}
+                          className={
+                            columnResize?.column === column
+                              ? 'report-column-resizer active'
+                              : 'report-column-resizer'
+                          }
+                          onDoubleClick={() => resetColumnWidth(column)}
+                          onKeyDown={(event) => handleColumnResizeKeyDown(column, event)}
+                          onPointerCancel={(event) => stopColumnResize(column, event)}
+                          onPointerDown={(event) => startColumnResize(column, event)}
+                          onPointerMove={(event) => moveColumnResize(column, event)}
+                          onPointerUp={(event) => stopColumnResize(column, event)}
+                          title="Drag to resize"
+                          type="button"
+                        />
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -5718,6 +6319,8 @@ function AgreementAdditionsModal(props: {
                   <th>Code</th>
                   <th>CW ID</th>
                   <th>Qty</th>
+                  <th>Less</th>
+                  <th>Billed</th>
                   <th>Unit Price</th>
                   <th>Status</th>
                   <th>Updated</th>
@@ -5730,6 +6333,8 @@ function AgreementAdditionsModal(props: {
                     <td>{addition.productCode}</td>
                     <td>{addition.connectWiseAdditionId}</td>
                     <td>{addition.quantity.toLocaleString()}</td>
+                    <td>{addition.lessIncluded && addition.lessIncluded > 0 ? addition.lessIncluded.toLocaleString() : '-'}</td>
+                    <td>{typeof addition.billedQuantity === 'number' ? addition.billedQuantity.toLocaleString() : '-'}</td>
                     <td>{formatMoneyAmount(addition.unitPrice)}</td>
                     <td>{addition.additionStatus}</td>
                     <td>{formatDateTime(addition.updatedAt) ?? '-'}</td>
@@ -5739,6 +6344,129 @@ function AgreementAdditionsModal(props: {
             </table>
           </div>
         )}
+      </section>
+    </div>
+  );
+}
+
+function AgreementUpdateReviewModal(props: {
+  applying: boolean;
+  issues: ReconcileIssue[];
+  message: string;
+  onApply: (selectedIssueIds: string[]) => void;
+  onClose: () => void;
+}) {
+  const { applying, issues, message, onApply, onClose } = props;
+  const eligibleIssueIds = useMemo(
+    () => issues.filter(isApplyEligibleIssue).map((issue) => issue.id),
+    [issues],
+  );
+  const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>(eligibleIssueIds);
+  const selectedIssueIdSet = new Set(selectedIssueIds);
+  const selectedCount = issues.filter((issue) => selectedIssueIdSet.has(issue.id) && isApplyEligibleIssue(issue)).length;
+  const discardedCount = issues.length - selectedCount;
+
+  const toggleIssue = (issueId: string) => {
+    setSelectedIssueIds((currentIds) =>
+      currentIds.includes(issueId)
+        ? currentIds.filter((currentId) => currentId !== issueId)
+        : [...currentIds, issueId],
+    );
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="agreement-update-modal" role="dialog" aria-modal="true" aria-labelledby="agreement-update-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="agreement-update-title">
+              <ListChecks size={18} />
+              Review & Apply
+            </h2>
+            <p>
+              {selectedCount.toLocaleString()} selected / {discardedCount.toLocaleString()} discarded
+            </p>
+          </div>
+          <button className="modal-close" disabled={applying} onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        {message ? <div className="agreement-update-message">{message}</div> : null}
+
+        {issues.length === 0 ? (
+          <div className="empty-state agreement-additions-empty">
+            <ListChecks size={20} />
+            <strong>No approved changes are queued.</strong>
+          </div>
+        ) : (
+          <div className="agreement-update-list">
+            {issues.map((issue) => {
+              const addition = selectedAgreementAddition(issue);
+              const blockReason = applyBlockReason(issue);
+              const isSelected = selectedIssueIdSet.has(issue.id) && !blockReason;
+              const currentQuantity = addition?.quantity ?? issue.invoiceCount;
+              const nextQuantity = reconciliationSelectedCount(issue);
+              const currentLess = addition?.lessIncluded ?? currentLessIncluded(issue);
+              const nextLess = proposedLessIncluded(issue);
+
+              return (
+                <article className={blockReason ? 'agreement-update-row blocked' : 'agreement-update-row'} key={issue.id}>
+                  <label className="agreement-update-select">
+                    <input
+                      checked={isSelected}
+                      disabled={Boolean(blockReason) || applying}
+                      onChange={() => toggleIssue(issue.id)}
+                      type="checkbox"
+                    />
+                  </label>
+                  <div>
+                    <strong>{issue.customer}</strong>
+                    <span>{issue.product}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {currentQuantity.toLocaleString()}
+                      {' -> '}
+                      {nextQuantity.toLocaleString()}
+                    </strong>
+                    <span>
+                      {issue.vendor} {reconciliationCountSource(issue) === 'invoice' ? 'invoice' : 'API'}{' '}
+                      {nextQuantity.toLocaleString()}
+                    </span>
+                  </div>
+                  <div>
+                    <strong>
+                      {issue.lessIncludedTouched
+                        ? `${currentLess.toLocaleString()} -> ${nextLess.toLocaleString()}`
+                        : '-'}
+                    </strong>
+                    <span>Less Included Qty</span>
+                  </div>
+                  <div>
+                    <strong>{addition?.connectWiseAdditionId ?? 'Blocked'}</strong>
+                    <span>{blockReason ?? 'Ready'}</span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="button secondary" disabled={applying} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button
+            className="button primary"
+            disabled={issues.length === 0 || applying}
+            onClick={() => onApply(selectedIssueIds)}
+            type="button"
+          >
+            <Check size={17} />
+            {applying ? 'Applying' : 'Apply All'}
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -5977,16 +6705,17 @@ function ManualOverrideModal(props: {
     device: ReconciliationDevice,
     targetVendorProductKey: string,
   ) => Promise<boolean>;
-  onLessCountSave: (issue: ReconcileIssue, quantity: number, reason: string) => Promise<boolean>;
+  onLessCountSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
   productOptions: ReconciliationProductOption[];
   saving: boolean;
 }) {
   const { issue, message, onClose, onDeviceRemap, onLessCountSave, productOptions, saving } = props;
-  const [lessCount, setLessCount] = useState('1');
-  const [lessCountReason, setLessCountReason] = useState('');
+  const [lessCount, setLessCount] = useState(String(proposedLessIncluded(issue)));
   const [remapTargets, setRemapTargets] = useState<Record<string, string>>({});
   const lessCountValue = Number(lessCount);
-  const canSaveLessCount = Number.isFinite(lessCountValue) && lessCountValue > 0 && !saving;
+  const selectedAddition = selectedAgreementAddition(issue);
+  const blockReason = applyBlockReason(issue);
+  const canSaveLessCount = Number.isFinite(lessCountValue) && lessCountValue >= 0 && !saving && !blockReason;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -6007,53 +6736,54 @@ function ManualOverrideModal(props: {
         <div className="manual-summary">
           <IntegrationStat label="API Count" value={issue.sourceCount.toLocaleString()} />
           <IntegrationStat label="Inv. Count" value={formatOptionalCount(issue.vendorInvoiceCount)} />
-          <IntegrationStat label="ConnectWise" value={issue.invoiceCount.toLocaleString()} />
-          <IntegrationStat label="Proposed" value={issue.proposedCount.toLocaleString()} />
-          <IntegrationStat label="Impact" value={formatCurrency(issue.amount)} />
+          <IntegrationStat label="CW Count" value={cwCountLabel(issue)} />
+          <IntegrationStat label="Change To" value={reconciliationSelectedCount(issue).toLocaleString()} />
+          <IntegrationStat label="Impact" value={formatCurrency(reconciliationIssueImpact(issue))} />
         </div>
 
-        <section className="manual-section" aria-label="Less Count adjustment">
+        <section className="manual-section" aria-label="Less Included Qty update">
           <div className="manual-section-header">
-            <span className="section-kicker">Less Count</span>
-            <strong>{issue.adjustments.length.toLocaleString()} active</strong>
+            <span className="section-kicker">Less Included Qty</span>
+            <strong>{currentLessIncluded(issue).toLocaleString()} current</strong>
+          </div>
+          <div className="cw-addition-context">
+            {selectedAddition ? (
+              <span>
+                {selectedAddition.productName} / CW {selectedAddition.connectWiseAdditionId} / qty{' '}
+                {selectedAddition.quantity.toLocaleString()}
+              </span>
+            ) : (
+              <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
+            )}
           </div>
           <div className="less-count-form">
             <label>
-              <span>Count</span>
+              <span>Less Qty</span>
               <input
-                min="1"
+                min="0"
                 onChange={(event) => setLessCount(event.target.value)}
                 step="1"
                 type="number"
                 value={lessCount}
               />
             </label>
-            <label>
-              <span>Reason</span>
-              <input
-                onChange={(event) => setLessCountReason(event.target.value)}
-                placeholder="Included at no charge"
-                value={lessCountReason}
-              />
-            </label>
             <button
               className="button primary compact"
               disabled={!canSaveLessCount}
-              onClick={() => void onLessCountSave(issue, lessCountValue, lessCountReason)}
+              onClick={() => void onLessCountSave(issue, lessCountValue)}
               type="button"
             >
               <Check size={16} />
-              Save Less Count
+              Queue Less Qty
             </button>
           </div>
-          {issue.adjustments.length > 0 ? (
-            <div className="adjustment-chip-list" aria-label="Active less-count adjustments">
-              {issue.adjustments.map((adjustment) => (
-                <span key={adjustment.id}>
-                  Less {adjustment.quantity.toLocaleString()}
-                  {adjustment.reason ? ` / ${adjustment.reason}` : ''}
-                </span>
-              ))}
+          {issue.lessIncludedTouched ? (
+            <div className="adjustment-chip-list" aria-label="Queued less-included update">
+              <span>
+                Queued less {proposedLessIncluded(issue).toLocaleString()}
+                {' '}
+                ({deltaLabel(proposedLessIncluded(issue) - currentLessIncluded(issue))})
+              </span>
             </div>
           ) : null}
         </section>

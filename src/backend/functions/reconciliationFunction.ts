@@ -2,11 +2,17 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { config as loadDotEnv } from 'dotenv';
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
 import {
+  applyReconciliationAgreementAdditionUpdates,
+  type ReconciliationAgreementAdditionUpdateInput,
+} from '../api/reconciliationAgreementUpdates';
+import {
   createReconciliationAdjustment,
   deactivateReconciliationAdjustment,
   type CreateReconciliationAdjustmentInput,
 } from '../api/reconciliationAdjustments';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
+import { createIntegrationSettingsProvider } from '../config/settingsProvider';
+import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
@@ -18,6 +24,11 @@ type ReconciliationBody = {
 
 type ReconciliationAdjustmentBody = CreateReconciliationAdjustmentInput & {
   reviewedBy?: string;
+};
+
+type AgreementAdditionUpdatesBody = {
+  updates?: ReconciliationAgreementAdditionUpdateInput[];
+  discardedUpdates?: ReconciliationAgreementAdditionUpdateInput[];
 };
 
 export async function runVendorReconciliationHttp(
@@ -108,6 +119,76 @@ app.http('listAgreementAdditions', {
   authLevel: 'anonymous',
   route: 'reconciliation/agreements/{agreementId}/additions',
   handler: listAgreementAdditionsHttp,
+});
+
+export async function applyAgreementAdditionUpdatesHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    return jsonResponse(400, {
+      error: 'Agreement addition updates need PostgreSQL settings before they can save audit details.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as AgreementAdditionUpdatesBody;
+  const updates = Array.isArray(body.updates) ? body.updates : [];
+  const discardedUpdates = Array.isArray(body.discardedUpdates) ? body.discardedUpdates : [];
+
+  if (updates.length === 0 && discardedUpdates.length === 0) {
+    return jsonResponse(400, {
+      error: 'At least one update or discarded update is required.',
+    });
+  }
+
+  const provider = createIntegrationSettingsProvider({
+    loadLocalEnv: true,
+    metadataReader: repositoryContext.repository,
+  });
+
+  try {
+    const settings = await provider.getIntegrationSettings('connectwise');
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(settings));
+    const result = await applyReconciliationAgreementAdditionUpdates(repositoryContext.pool, {
+      actor: auth.principal.name,
+      updates,
+      discardedUpdates,
+      writer: {
+        patchAgreementAddition(connectWiseAgreementId, connectWiseAdditionId, changes) {
+          return client.patchAgreementAddition(
+            connectWiseAgreementId,
+            connectWiseAdditionId,
+            [
+              { op: 'replace', path: '/quantity', value: changes.quantity },
+              ...(changes.lessIncludedChanged
+                ? [{ op: 'replace' as const, path: '/lessIncluded', value: changes.lessIncluded ?? 0 }]
+                : []),
+            ],
+          );
+        },
+      },
+    });
+
+    return jsonResponse(200, result);
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to apply agreement addition updates.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+app.http('applyAgreementAdditionUpdates', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/connectwise/agreement-addition-updates',
+  handler: applyAgreementAdditionUpdatesHttp,
 });
 
 export async function createReconciliationAdjustmentHttp(

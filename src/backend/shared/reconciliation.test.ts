@@ -31,6 +31,7 @@ assert.equal(workstationStorage, undefined);
 assert.equal(result.totals.matched, 2);
 assert.equal(result.totals.needsReview, 1);
 assert.equal(result.totals.notBillable, 0);
+assert.equal(result.totals.unmapped, 0);
 assert.equal(result.totals.financialImpact.amount, 75);
 
 const ncentralRules = buildNcentralRuleSet({
@@ -60,6 +61,34 @@ assert.equal(ncentralWorkstationLine?.status, 'needs-review');
 assert.equal(ncentralWorkstationLine?.writeAction, 'update-addition');
 assert.equal(ncentralWorkstationLine?.sourceQuantity, 2);
 assert.equal(ncentralWorkstationLine?.agreementQuantity, 1);
+
+const unmappedAppRiverResult = reconcileVendorUsage({
+  vendorId: 'opentext-appriver',
+  rules: [],
+  snapshots: [
+    {
+      id: 'appriver-e5-no-teams',
+      vendorId: 'opentext-appriver',
+      clientId: 'building-trades',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'Microsoft 365 E5 (no Teams)|Monthly|Monthly',
+      productCode: 'MICROSOFT-365-E5-NO-TEAMS-MONTHLY-MONTHLY',
+      productName: 'Microsoft 365 E5 (no Teams)',
+      quantity: 1,
+      observedAt: '2026-07-01T14:43:10.943Z',
+      dimensions: {
+        subscriptionSource: 'appriver-securecloud-subscription',
+      },
+    },
+  ],
+  agreementAdditions: [],
+});
+const unmappedE5Line = unmappedAppRiverResult.lines.find((line) => line.status === 'unmapped');
+assert.equal(unmappedE5Line?.lineType, 'unmapped-vendor');
+assert.equal(unmappedE5Line?.sourceQuantity, 1);
+assert.equal(unmappedE5Line?.agreementQuantity, 0);
+assert.equal(unmappedE5Line?.writeAction, undefined);
+assert.equal(unmappedAppRiverResult.totals.unmapped, 1);
 
 console.log('backend reconciliation tests passed');
 

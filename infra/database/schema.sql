@@ -404,11 +404,30 @@ CREATE TABLE IF NOT EXISTS approval_batch_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   approval_batch_id uuid NOT NULL REFERENCES approval_batches(id),
   reconciliation_finding_id uuid REFERENCES reconciliation_findings(id),
+  source_line_id text,
+  vendor_id text,
+  customer_id uuid REFERENCES customers(id),
+  customer_name text,
+  agreement_id uuid REFERENCES agreements(id),
+  agreement_name text,
   connectwise_addition_id text,
   product_code text NOT NULL,
+  product_name text NOT NULL DEFAULT '',
   current_quantity numeric(18, 4) NOT NULL,
   proposed_quantity numeric(18, 4) NOT NULL,
+  current_less_included numeric(18, 4),
+  proposed_less_included numeric(18, 4),
+  less_included_changed boolean NOT NULL DEFAULT false,
+  source_quantity numeric(18, 4),
+  invoice_quantity numeric(18, 4),
+  selected_source text,
   status text NOT NULL DEFAULT 'draft',
+  approved_by text,
+  approved_at timestamptz,
+  written_at timestamptz,
+  error_message text,
+  request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  response_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   write_result jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -569,3 +588,23 @@ ALTER TABLE ncentral_filter_mappings ADD COLUMN IF NOT EXISTS raw_payload jsonb 
 
 ALTER TABLE agreement_additions ADD COLUMN IF NOT EXISTS addition_status text NOT NULL DEFAULT 'Active';
 ALTER TABLE addition_history ADD COLUMN IF NOT EXISTS addition_status text NOT NULL DEFAULT 'Active';
+
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS source_line_id text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS vendor_id text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS customer_id uuid REFERENCES customers(id);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS customer_name text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS agreement_id uuid REFERENCES agreements(id);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS agreement_name text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS product_name text NOT NULL DEFAULT '';
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS current_less_included numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS proposed_less_included numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS less_included_changed boolean NOT NULL DEFAULT false;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS source_quantity numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS invoice_quantity numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS selected_source text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS approved_by text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS written_at timestamptz;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS error_message text;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS request_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS response_payload jsonb NOT NULL DEFAULT '{}'::jsonb;

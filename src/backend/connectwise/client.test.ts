@@ -24,11 +24,13 @@ async function run() {
   assert.equal(credentials.companyId, 'company');
   assert.equal(credentials.clientId, 'client-id');
 
-  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+  const requests: Array<{ url: string; method?: string; body?: BodyInit | null; headers: Record<string, string> }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
     requests.push({
       url: String(input),
+      method: init?.method,
+      body: init?.body,
       headers: init?.headers as Record<string, string>,
     });
 
@@ -44,6 +46,10 @@ async function run() {
   await client.listAgreementAdditions(123, { pageSize: 100 });
   await client.listProducts({ pageSize: 5 });
   await client.listCatalogItems({ pageSize: 5 });
+  await client.patchAgreementAddition(123, 456, [
+    { op: 'replace', path: '/quantity', value: 110 },
+    { op: 'replace', path: '/lessIncluded', value: 5 },
+  ]);
   await client.getSystemInfo();
   globalThis.fetch = originalFetch;
 
@@ -70,7 +76,19 @@ async function run() {
     requests[4]?.url,
     'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/procurement/catalog?page=1&pageSize=5',
   );
-  assert.equal(requests[5]?.url, 'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/system/info');
+  assert.equal(
+    requests[5]?.url,
+    'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/finance/agreements/123/additions/456',
+  );
+  assert.equal(requests[5]?.method, 'PATCH');
+  assert.equal(
+    requests[5]?.body,
+    JSON.stringify([
+      { op: 'replace', path: '/quantity', value: 110 },
+      { op: 'replace', path: '/lessIncluded', value: 5 },
+    ]),
+  );
+  assert.equal(requests[6]?.url, 'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/system/info');
 
   assert.throws(
     () =>

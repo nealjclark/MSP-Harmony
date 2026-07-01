@@ -54,6 +54,7 @@ export type ConnectWiseAgreementAddition = {
     description?: string;
   };
   quantity?: number;
+  lessIncluded?: number;
   unitPrice?: number;
   unitCost?: number;
   billCustomer?: string;
@@ -96,6 +97,12 @@ export type ConnectWiseListOptions = {
   pageSize?: number;
   conditions?: string;
   orderBy?: string;
+};
+
+export type ConnectWisePatchOperation = {
+  op: 'add' | 'replace' | 'remove';
+  path: string;
+  value?: string | number | boolean | null;
 };
 
 export class ConnectWiseApiError extends Error {
@@ -143,6 +150,20 @@ export class ConnectWiseClient {
     );
   }
 
+  async patchAgreementAddition(
+    agreementId: number | string,
+    additionId: number | string,
+    operations: ConnectWisePatchOperation[],
+  ) {
+    return this.request<ConnectWiseAgreementAddition>(
+      `/finance/agreements/${encodeURIComponent(String(agreementId))}/additions/${encodeURIComponent(String(additionId))}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(operations),
+      },
+    );
+  }
+
   async listProducts(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseProduct[]>(`/procurement/products?${listParams(options).toString()}`);
   }
@@ -155,11 +176,12 @@ export class ConnectWiseClient {
     return this.request<ConnectWiseSystemInfo>('/system/info');
   }
 
-  private async request<T>(path: string): Promise<T> {
+  private async request<T>(path: string, init: Pick<RequestInit, 'method' | 'body'> = {}): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const response = await fetch(url, {
-      method: 'GET',
+      method: init.method ?? 'GET',
       headers: this.headers,
+      body: init.body,
     });
 
     if (!response.ok) {

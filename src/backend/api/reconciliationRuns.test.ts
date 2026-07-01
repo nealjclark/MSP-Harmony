@@ -148,6 +148,16 @@ async function run() {
   assert.equal(invoicedLine?.invoiceNumber, '4032091');
   assert.equal(appRiverInvoiceResult.latestInvoice?.invoiceNumber, '4032091');
 
+  const appRiverUnmappedResult = await reconcileVendorFromDatabase(appRiverUnmappedProductDatabase, 'opentext-appriver', { syncRunId });
+  const unmappedE5Line = appRiverUnmappedResult.lines.find((line) => line.status === 'unmapped');
+  assert.equal(unmappedE5Line?.productCode, 'MICROSOFT-365-E5-NO-TEAMS-MONTHLY-MONTHLY');
+  assert.equal(unmappedE5Line?.productName, 'Microsoft 365 E5 (no Teams)');
+  assert.equal(unmappedE5Line?.sourceQuantity, 1);
+  assert.equal(unmappedE5Line?.agreementQuantity, 0);
+  assert.equal(unmappedE5Line?.devices.length, 1);
+  assert.equal(unmappedE5Line?.devices[0]?.vendorProductKey, 'Microsoft 365 E5 (no Teams)|Monthly|Monthly');
+  assert.equal(appRiverUnmappedResult.totals.unmapped, 1);
+
   console.log('database reconciliation tests passed');
 }
 
@@ -307,6 +317,10 @@ const appRiverBundleDatabase: Queryable = {
       return { rows: [] as T[] };
     }
 
+    if (sql.includes('from target_names')) {
+      return { rows: [] as T[] };
+    }
+
     if (sql.includes('from agreement_additions')) {
       return {
         rows: [
@@ -461,5 +475,77 @@ const appRiverInvoiceDatabase: Queryable = {
     }
 
     return appRiverAliasDatabase.query<T>(sql);
+  },
+};
+
+const appRiverUnmappedProductDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return {
+        rows: [
+          {
+            id: 'snapshot-e5-no-teams',
+            vendor_id: 'opentext-appriver',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            external_account_id: 'appriver-building-trades',
+            vendor_product_key: 'Microsoft 365 E5 (no Teams)|Monthly|Monthly',
+            product_code: 'MICROSOFT-365-E5-NO-TEAMS-MONTHLY-MONTHLY',
+            product_name: 'Microsoft 365 E5 (no Teams)',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T14:43:10.943Z'),
+            dimensions: {
+              subscriptionSource: 'appriver-securecloud-subscription',
+              appRiverCustomerId: 'appriver-building-trades',
+            },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_mappings')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Microsoft 365 E5|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'Microsoft 365 E5-M',
+            connectwise_product_name: 'Microsoft 365 E5 - Monthly',
+            unit_price: '73.08',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_bundles')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-e5',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            product_code: 'Microsoft 365 E5-M',
+            product_name: 'Microsoft 365 E5 - Monthly',
+            quantity: '1',
+            unit_price: '73.08',
+            updated_at: new Date('2026-07-01T05:53:26.629Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from invoice_imports')) {
+      return { rows: [] as T[] };
+    }
+
+    return { rows: [] as T[] };
   },
 };

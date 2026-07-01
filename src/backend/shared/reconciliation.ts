@@ -14,12 +14,16 @@ import type {
 const zeroUsd: MoneyAmount = { amount: 0, currency: 'USD' };
 
 export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): ReconciliationResult {
-  const lines = request.rules.flatMap((rule) => reconcileRule(request, rule));
+  const lines = [
+    ...request.rules.flatMap((rule) => reconcileRule(request, rule)),
+    ...reconcileUnmappedSnapshots(request),
+  ];
   const totals = lines.reduce(
     (summary, line) => {
       if (line.status === 'matched') summary.matched += 1;
       if (line.status === 'needs-review') summary.needsReview += 1;
       if (line.status === 'not-billable') summary.notBillable += 1;
+      if (line.status === 'unmapped') summary.unmapped += 1;
       summary.financialImpact.amount += line.financialImpact.amount;
       return summary;
     },
@@ -27,6 +31,7 @@ export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): Reco
       matched: 0,
       needsReview: 0,
       notBillable: 0,
+      unmapped: 0,
       financialImpact: { ...zeroUsd },
     },
   );
@@ -37,6 +42,69 @@ export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): Reco
     lines,
     totals,
   };
+}
+
+function reconcileUnmappedSnapshots(request: ReconcileVendorUsageRequest): ReconciliationLine[] {
+  const mappedSnapshots = request.snapshots.filter((snapshot) =>
+    request.rules.some((rule) =>
+      snapshot.vendorId === request.vendorId &&
+      matchesRuleProduct(snapshot, rule) &&
+      matchesDimensions(snapshot, rule.dimensions),
+    ),
+  );
+  const mappedSnapshotIds = new Set(mappedSnapshots.map((snapshot) => snapshot.id));
+  const unmappedSnapshots = request.snapshots.filter(
+    (snapshot) => snapshot.vendorId === request.vendorId && !mappedSnapshotIds.has(snapshot.id),
+  );
+  const groupedSnapshots = groupUnmappedSnapshots(unmappedSnapshots);
+
+  return [...groupedSnapshots.entries()].map(([groupKey, snapshots]) => {
+    const firstSnapshot = snapshots[0];
+    const [clientId, agreementId] = groupKey.split('\u0001');
+    const sourceQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
+    const vendorProductKey = firstSnapshot?.vendorProductKey;
+    const productName = firstSnapshot?.productName ?? firstSnapshot?.productCode ?? 'Unmapped vendor product';
+    const productCode = firstSnapshot?.productCode ?? vendorProductKey ?? productName;
+
+    return {
+      id: `${groupKey}|${productCode}|unmapped`,
+      vendorId: request.vendorId,
+      clientId,
+      agreementId,
+      productCode,
+      productName,
+      lineType: 'unmapped-vendor',
+      ruleId: 'unmapped-vendor-product',
+      sourceQuantity,
+      agreementQuantity: 0,
+      proposedQuantity: sourceQuantity,
+      delta: sourceQuantity,
+      unit: 'license',
+      financialImpact: { ...zeroUsd },
+      status: 'unmapped',
+      reason: `${productName} is present in vendor usage but has no approved product mapping.`,
+      evidence: [
+        { label: 'Snapshot rows', value: snapshots.length },
+        ...(vendorProductKey ? [{ label: 'Vendor product key', value: vendorProductKey }] : []),
+        { label: 'Action', value: 'Map this vendor product before reconciling it to ConnectWise.' },
+      ],
+    };
+  });
+}
+
+function groupUnmappedSnapshots(snapshots: UsageSnapshot[]) {
+  return snapshots.reduce((groups, snapshot) => {
+    const key = [
+      snapshot.clientId,
+      snapshot.agreementId,
+      snapshot.vendorProductKey ?? '',
+      snapshot.productCode,
+      snapshot.productName,
+    ].join('\u0001');
+    const existing = groups.get(key) ?? [];
+    groups.set(key, [...existing, snapshot]);
+    return groups;
+  }, new Map<string, UsageSnapshot[]>());
 }
 
 function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule): ReconciliationLine[] {
