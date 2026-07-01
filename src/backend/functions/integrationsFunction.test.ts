@@ -9,6 +9,7 @@ const adminHeaders = new Headers({
 const envKeys = [
   'BOOTSTRAP_ADMIN_EMAILS',
   'AUTH_DISABLE_BOOTSTRAP_UPSERT',
+  'KEY_VAULT_URL',
   'DATABASE_URL',
   'DATABASE_HOST',
   'DATABASE_NAME',
@@ -38,6 +39,10 @@ async function run() {
   process.env.AUTH_DISABLE_BOOTSTRAP_UPSERT = 'true';
   for (const key of envKeys) {
     if (key === 'BOOTSTRAP_ADMIN_EMAILS' || key === 'AUTH_DISABLE_BOOTSTRAP_UPSERT') continue;
+    if (key === 'KEY_VAULT_URL') {
+      delete process.env.KEY_VAULT_URL;
+      continue;
+    }
     process.env[key] = '';
   }
 
@@ -98,7 +103,7 @@ async function run() {
       { log() {} } as never,
     );
     assert.equal(dattoTestResponse.status, 400);
-    assert.match(String((dattoTestResponse.jsonBody as { error?: string }).error), /Missing Datto Backup setting/);
+    assert.match(String((dattoTestResponse.jsonBody as { error?: string }).error), /Datto Backup settings/);
     assert.doesNotMatch(
       String((dattoTestResponse.jsonBody as { error?: string }).error),
       /not implemented/i,
