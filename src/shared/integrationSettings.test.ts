@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   getIntegrationSettingsDefinition,
+  integrationHasAnyCapability,
+  integrationHasCapability,
+  integrationIdsWithCapability,
   validateIntegrationRegistry,
   validateIntegrationSettings,
 } from './integrationSettings';
@@ -114,6 +117,9 @@ const connectedAppRiver = validateIntegrationSettings(appRiver, {
 assert.equal(connectedAppRiver.configuredStatus, 'connected');
 assert.deepEqual(connectedAppRiver.missingSecrets, []);
 assert.deepEqual(connectedAppRiver.missingNonSecrets, []);
+assert.equal(integrationHasCapability('opentext-appriver', 'invoice-import'), true);
+assert.equal(integrationHasCapability('opentext-appriver', 'mapping'), true);
+assert.deepEqual(integrationIdsWithCapability('invoice-import'), ['opentext-appriver']);
 
 const datto = getIntegrationSettingsDefinition('datto');
 assert.ok(datto);
@@ -133,5 +139,7 @@ const connectedDatto = validateIntegrationSettings(datto, {
 assert.equal(connectedDatto.configuredStatus, 'connected');
 assert.deepEqual(connectedDatto.missingSecrets, []);
 assert.deepEqual(connectedDatto.missingNonSecrets, []);
+assert.equal(integrationHasCapability('datto', 'mapping'), true);
+assert.equal(integrationHasAnyCapability('proofpoint'), false);
 
 console.log('integration settings tests passed');

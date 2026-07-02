@@ -11,6 +11,7 @@ export type IntegrationId =
   | 'pax8';
 
 export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic';
+export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import';
 export type IntegrationConfiguredStatus = 'connected' | 'degraded' | 'not-configured';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
@@ -36,6 +37,7 @@ export type IntegrationSettingsDefinition = {
   displayName: string;
   category: string;
   authMode: IntegrationAuthMode;
+  capabilities: IntegrationCapability[];
   description: string;
   endpoint: string;
   requiredSecrets: IntegrationSecretDefinition[];
@@ -69,6 +71,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'ConnectWise Manage',
     category: 'PSA',
     authMode: 'api-key',
+    capabilities: ['live-api'],
     description: 'PSA companies, agreements, products, additions, tickets, and approved write-back.',
     endpoint: 'https://api-na.myconnectwise.net',
     requiredSecrets: [
@@ -89,6 +92,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Cove Data Protection',
     category: 'Backup',
     authMode: 'basic',
+    capabilities: ['live-api', 'mapping'],
     description: 'Protected-system counts and selected-storage usage for Cove backup billing.',
     endpoint: 'https://api.backup.management',
     requiredSecrets: [
@@ -108,6 +112,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'N-able N-central',
     category: 'RMM',
     authMode: 'token',
+    capabilities: ['live-api', 'mapping'],
     description: 'Filter-driven managed server and workstation billing with custom overlay tags.',
     endpoint: 'https://ncentral.example.com',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
@@ -121,6 +126,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'SentinelOne',
     category: 'Security',
     authMode: 'token',
+    capabilities: [],
     description: 'Endpoint, site, workstation, and server agent counts.',
     endpoint: 'https://usea1.sentinelone.net',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-sentinelone-api-token', 'SENTINELONE_API_TOKEN')],
@@ -134,6 +140,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Proofpoint Essentials',
     category: 'Email Security',
     authMode: 'basic',
+    capabilities: [],
     description: 'Email security seat counts by customer domain.',
     endpoint: 'https://api.proofpointessentials.com',
     requiredSecrets: [
@@ -150,6 +157,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Datto Backup',
     category: 'Backup',
     authMode: 'basic',
+    capabilities: ['live-api', 'mapping'],
     description: 'Kaseya Datto BCDR protected-agent counts and SaaS Protection seat counts.',
     endpoint: 'https://api.datto.com',
     requiredSecrets: [
@@ -168,6 +176,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Microsoft 365',
     category: 'Productivity',
     authMode: 'oauth2',
+    capabilities: ['live-api', 'mapping'],
     description: 'Assigned user license counts through Microsoft Graph application permissions.',
     endpoint: 'https://graph.microsoft.com',
     requiredSecrets: [
@@ -191,6 +200,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'AppRiver - OpenText',
     category: 'Marketplace',
     authMode: 'oauth2',
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
     description: 'SecureCloud reseller subscriptions and Microsoft 365 license quantities from AppRiver.',
     endpoint: 'https://unityapi.webrootcloudav.com',
     requiredSecrets: [
@@ -210,6 +220,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Microsoft Azure',
     category: 'Cloud',
     authMode: 'oauth2',
+    capabilities: [],
     description: 'Azure subscription consumption and configurable markup inputs.',
     endpoint: 'https://management.azure.com',
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-azure-client-secret', 'AZURE_CLIENT_SECRET')],
@@ -228,6 +239,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Pax8',
     category: 'Marketplace',
     authMode: 'oauth2',
+    capabilities: [],
     description: 'Marketplace subscriptions, SKU aliases, and customer product mapping.',
     endpoint: 'https://api.pax8.com',
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-pax8-client-secret', 'PAX8_CLIENT_SECRET')],
@@ -247,6 +259,20 @@ export function listIntegrationSettingsDefinitions() {
 
 export function getIntegrationSettingsDefinition(integrationId: IntegrationId) {
   return integrationSettingsRegistry.find((definition) => definition.integrationId === integrationId);
+}
+
+export function integrationHasCapability(integrationId: IntegrationId, capability: IntegrationCapability) {
+  return Boolean(getIntegrationSettingsDefinition(integrationId)?.capabilities.includes(capability));
+}
+
+export function integrationHasAnyCapability(integrationId: IntegrationId) {
+  return Boolean(getIntegrationSettingsDefinition(integrationId)?.capabilities.length);
+}
+
+export function integrationIdsWithCapability(capability: IntegrationCapability) {
+  return integrationSettingsRegistry
+    .filter((definition) => definition.capabilities.includes(capability))
+    .map((definition) => definition.integrationId);
 }
 
 export function validateIntegrationSettings(

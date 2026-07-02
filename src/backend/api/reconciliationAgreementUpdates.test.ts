@@ -53,6 +53,20 @@ async function run() {
   assert.equal(auditEventTypes(quantityOnly.calls).includes('reconciliation.connectwise.item.written'), true);
   assert.equal(auditEventTypes(quantityOnly.calls).includes('reconciliation.connectwise.item.discarded'), true);
 
+  const manualOverride = createHarness({
+    'EMAIL-LICENSE': [additionRow({ connectwise_addition_id: '3401', product_code: 'EMAIL-LICENSE', quantity: '100', lessIncluded: 2 })],
+  });
+  await applyReconciliationAgreementAdditionUpdates(manualOverride.database, {
+    actor: 'approver@example.com',
+    now: '2026-07-01T14:02:00.000Z',
+    updates: [{ ...baseUpdate, sourceLineId: 'line-manual', quantity: 117, manualQuantity: 117, selectedSource: 'manual' }],
+    writer: manualOverride.writer,
+  });
+  const manualItem = insertedItemValues(manualOverride.calls).find((values) => values[1] === 'line-manual');
+  assert.equal(manualOverride.writes[0]?.changes.quantity, 117);
+  assert.equal(manualItem?.[17], 'manual');
+  assert.match(String(manualItem?.[22] ?? ''), /"manualQuantity":117/);
+
   const clearLess = createHarness({
     'EMAIL-LICENSE': [additionRow({ connectwise_addition_id: '3401', product_code: 'EMAIL-LICENSE', quantity: '100', lessIncluded: 5 })],
   });

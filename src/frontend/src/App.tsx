@@ -44,8 +44,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
+  integrationHasAnyCapability,
+  integrationHasCapability,
   integrationSettingsRegistry,
   validateIntegrationRegistry,
+  type IntegrationCapability,
   type IntegrationId,
   type IntegrationSettingsDefinition,
   type IntegrationNonSecretDefinition,
@@ -57,12 +60,27 @@ import {
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
-type IssueStatus = 'matched' | 'needs-review' | 'not-billable' | 'unmapped' | 'ready' | 'approved' | 'blocked' | 'skipped';
+type IssueStatus =
+  | 'matched'
+  | 'needs-review'
+  | 'not-billable'
+  | 'unmapped'
+  | 'ready'
+  | 'approved'
+  | 'updated'
+  | 'blocked'
+  | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'credentials' | 'sync';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type ReconciliationCountSource = 'api' | 'invoice';
+type ReconciliationCountSource = 'api' | 'invoice' | 'manual';
+
+type AppliedReconciliationUpdate = {
+  quantityDelta: number;
+  lessIncludedDelta?: number;
+  appliedAt: string;
+};
 
 type ReconciliationMatchedAgreementAddition = {
   id: string;
@@ -103,6 +121,8 @@ type ReconcileIssue = {
   invoiceCount: number;
   proposedCount: number;
   selectedCountSource: ReconciliationCountSource;
+  manualOverrideTotal?: number;
+  manualOverrideTotalTouched?: boolean;
   baseStatus: IssueStatus;
   amount: number;
   unitPriceAmount?: number;
@@ -122,6 +142,7 @@ type ReconcileIssue = {
   writeAction?: 'update-addition' | 'create-addition' | 'review-required';
   proposedLessIncluded?: number;
   lessIncludedTouched?: boolean;
+  appliedUpdate?: AppliedReconciliationUpdate;
 };
 
 type ProductRule = {
@@ -180,6 +201,7 @@ type Integration = {
   category: string;
   status: IntegrationStatus;
   auth: string;
+  capabilities: IntegrationCapability[];
   description: string;
   lastSync?: string;
   lastSyncStatus?: string;
@@ -536,9 +558,105 @@ type InvoiceImportsResponse = {
   imports: InvoiceImportSummary[];
 };
 
+type DetectedInvoiceVendor = {
+  vendorId: IntegrationId;
+  vendorName: string;
+  confidence: 'high' | 'medium';
+  reason: string;
+};
+
 type InvoiceImportResponse = {
+  detectedVendor?: DetectedInvoiceVendor;
   import: InvoiceImportSummary;
   importMode?: InvoiceImportMode;
+};
+
+type InvoiceExceptionSummary = {
+  exceptionRows: number;
+  missingCustomerRows: number;
+  missingAgreementRows: number;
+  missingProductRows: number;
+  renewalExceptionRows: number;
+  otherExceptionRows: number;
+};
+
+type InvoiceExceptionLine = {
+  id: string;
+  rawRowNumber: number;
+  externalAccountId?: string;
+  externalAccountName?: string;
+  vendorProductKey?: string;
+  vendorProductKeyCandidates: string[];
+  productCode: string;
+  productName: string;
+  connectWiseProductCode?: string;
+  connectWiseProductName?: string;
+  chargeType?: string;
+  quantity: number;
+  billedAmount?: number;
+  term?: string;
+  billingFrequency?: string;
+  invoiceDate?: string;
+  primaryDomain?: string;
+  missingCustomer: boolean;
+  missingAgreement: boolean;
+  missingProduct: boolean;
+};
+
+type InvoiceAccountExistingMapping = {
+  customerId: string;
+  customerName: string;
+  agreementId?: string;
+  agreementName?: string;
+  status: string;
+  active: boolean;
+};
+
+type InvoiceAccountException = {
+  externalAccountId: string;
+  externalAccountName: string;
+  rowCount: number;
+  quantity: number;
+  missingCustomer: boolean;
+  missingAgreement: boolean;
+  missingProduct: boolean;
+  currentMapping?: InvoiceAccountExistingMapping;
+  sampleRows: InvoiceExceptionLine[];
+};
+
+type InvoiceProductExistingMapping = {
+  connectWiseProductCode: string;
+  connectWiseProductName: string;
+  status: string;
+  active: boolean;
+};
+
+type InvoiceProductException = {
+  vendorProductKey: string;
+  vendorProductKeyCandidates: string[];
+  productCode: string;
+  productName: string;
+  term?: string;
+  billingFrequency?: string;
+  rowCount: number;
+  quantity: number;
+  missingProduct: boolean;
+  existingMappings: InvoiceProductExistingMapping[];
+  sampleRows: InvoiceExceptionLine[];
+};
+
+type InvoiceImportExceptionReview = {
+  import: InvoiceImportSummary;
+  summary: InvoiceExceptionSummary;
+  accountExceptions: InvoiceAccountException[];
+  productExceptions: InvoiceProductException[];
+  lines: InvoiceExceptionLine[];
+};
+
+type InvoiceImportRefreshResponse = {
+  import: InvoiceImportSummary;
+  accountRowsUpdated: number;
+  productRowsUpdated: number;
 };
 
 type AgreementAddition = {
@@ -660,6 +778,7 @@ type AgreementAdditionUpdatePayload = {
   currentQuantity: number;
   currentLessIncluded: number;
   quantity: number;
+  manualQuantity?: number;
   lessIncluded?: number;
   apiQuantity: number;
   invoiceQuantity?: number;
@@ -951,21 +1070,6 @@ type ProductMappingCustomerReview = {
 
 type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-saas-bcdr';
 type IntegrationActionKey = `${IntegrationId}:${IntegrationAction}`;
-const liveIntegrationIds: ReadonlySet<IntegrationId> = new Set([
-  'connectwise',
-  'cove',
-  'ncentral',
-  'datto',
-  'microsoft-365',
-  'opentext-appriver',
-]);
-const mappingIntegrationIds: ReadonlySet<IntegrationId> = new Set([
-  'cove',
-  'ncentral',
-  'datto',
-  'microsoft-365',
-  'opentext-appriver',
-]);
 
 const clientProfiles: Record<string, ClientProfile> = {};
 
@@ -1098,15 +1202,15 @@ const integrationSettingsStates: IntegrationSettingsState[] = [];
 const demoIntegrationValidations = validateIntegrationRegistry(integrationSettingsStates);
 
 function hasLiveIntegrationActions(integrationId: IntegrationId) {
-  return liveIntegrationIds.has(integrationId);
+  return integrationHasCapability(integrationId, 'live-api');
 }
 
 function hasMappingWorkspace(integrationId: IntegrationId) {
-  return mappingIntegrationIds.has(integrationId);
+  return integrationHasCapability(integrationId, 'mapping');
 }
 
 function isImplementedIntegration(integrationId: IntegrationId) {
-  return liveIntegrationIds.has(integrationId);
+  return integrationHasAnyCapability(integrationId);
 }
 
 function hasRawSyncReportDataSignal(integration: Integration) {
@@ -1165,6 +1269,7 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       category: definition.category,
       status: validation?.configuredStatus ?? 'not-configured',
       auth: formatAuthMode(definition.authMode),
+      capabilities: definition.capabilities,
       description: definition.description,
       lastSync: formatDateTime(operationalStatus?.lastSyncCompletedAt ?? operationalStatus?.lastSyncAt),
       lastSyncStatus: operationalStatus?.lastSyncStatus,
@@ -1218,6 +1323,14 @@ function validVendorInvoiceCount(issue: Pick<ReconcileIssue, 'vendorInvoiceCount
     : undefined;
 }
 
+function validManualOverrideTotal(issue: Pick<ReconcileIssue, 'manualOverrideTotal' | 'manualOverrideTotalTouched'>) {
+  return issue.manualOverrideTotalTouched &&
+    typeof issue.manualOverrideTotal === 'number' &&
+    Number.isFinite(issue.manualOverrideTotal)
+    ? issue.manualOverrideTotal
+    : undefined;
+}
+
 function preferredReconciliationCountSource(
   apiCount: number,
   invoiceCount: number | undefined,
@@ -1227,11 +1340,21 @@ function preferredReconciliationCountSource(
 
 function reconciliationCountSource(issue: ReconcileIssue): ReconciliationCountSource {
   const invoiceCount = validVendorInvoiceCount(issue);
+  const manualTotal = validManualOverrideTotal(issue);
+  if (issue.selectedCountSource === 'manual' && typeof manualTotal === 'number') {
+    return 'manual';
+  }
+
   return issue.selectedCountSource === 'invoice' && typeof invoiceCount === 'number' ? 'invoice' : 'api';
 }
 
 function reconciliationSelectedCount(issue: ReconcileIssue) {
-  return reconciliationCountSource(issue) === 'invoice' ? validVendorInvoiceCount(issue) ?? issue.sourceCount : issue.sourceCount;
+  const countSource = reconciliationCountSource(issue);
+  if (countSource === 'manual') {
+    return validManualOverrideTotal(issue) ?? issue.sourceCount;
+  }
+
+  return countSource === 'invoice' ? validVendorInvoiceCount(issue) ?? issue.sourceCount : issue.sourceCount;
 }
 
 function reconciliationDelta(issue: ReconcileIssue) {
@@ -1325,6 +1448,7 @@ function buildAgreementAdditionUpdatePayload(
     currentQuantity: addition?.quantity ?? issue.invoiceCount,
     currentLessIncluded: addition?.lessIncluded ?? currentLessIncluded(issue),
     quantity: reconciliationSelectedCount(issue),
+    manualQuantity: reconciliationCountSource(issue) === 'manual' ? reconciliationSelectedCount(issue) : undefined,
     apiQuantity: issue.sourceCount,
     invoiceQuantity: validVendorInvoiceCount(issue),
     selectedSource: reconciliationCountSource(issue),
@@ -2041,6 +2165,8 @@ function statusLabel(status: IssueStatus) {
       return 'Ready';
     case 'approved':
       return 'Approved';
+    case 'updated':
+      return 'Updated';
     case 'blocked':
       return 'Blocked';
     case 'skipped':
@@ -2050,12 +2176,35 @@ function statusLabel(status: IssueStatus) {
   }
 }
 
+function reconciliationStatusLabel(issue: ReconcileIssue) {
+  if (issue.status === 'updated' && issue.appliedUpdate) {
+    return `Updated (${appliedUpdateDeltaLabel(issue.appliedUpdate)})`;
+  }
+
+  return statusLabel(issue.status);
+}
+
+function appliedUpdateDeltaLabel(update: AppliedReconciliationUpdate) {
+  const deltas = [deltaLabel(update.quantityDelta)];
+  if (typeof update.lessIncludedDelta === 'number' && update.lessIncludedDelta !== 0) {
+    deltas.push(`less ${deltaLabel(update.lessIncludedDelta)}`);
+  }
+
+  return deltas.join(', ');
+}
+
+function reconciliationCountSourceLabel(source: ReconciliationCountSource) {
+  if (source === 'invoice') return 'Vendor Invoice';
+  if (source === 'manual') return 'Manual Override';
+  return 'Vendor API';
+}
+
 function isReviewableIssue(issue: ReconcileIssue) {
   return issue.status === 'needs-review' || issue.status === 'unmapped' || issue.status === 'blocked';
 }
 
 function isReviewViewIssue(issue: ReconcileIssue) {
-  return isReviewableIssue(issue) || issue.status === 'approved';
+  return isReviewableIssue(issue) || issue.status === 'approved' || issue.status === 'updated';
 }
 
 function issueMatchesSearchAndVendor(issue: ReconcileIssue, query: string, vendorFilter: string) {
@@ -2400,9 +2549,9 @@ async function fetchInvoiceImports(vendorId?: IntegrationId) {
   return body as unknown as InvoiceImportsResponse;
 }
 
-async function importAppRiverInvoiceFile(file: File, importMode: InvoiceImportMode) {
+async function importInvoiceFile(file: File, importMode: InvoiceImportMode) {
   const content = await file.text();
-  const response = await fetch('/api/invoice-imports/opentext-appriver', {
+  const response = await fetch('/api/invoice-imports', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2416,10 +2565,43 @@ async function importAppRiverInvoiceFile(file: File, importMode: InvoiceImportMo
   const body = await responseJson(response);
 
   if (!response.ok) {
-    throw new Error(String(body.error ?? `AppRiver invoice import failed with HTTP ${response.status}.`));
+    throw new Error(String(body.error ?? `Invoice import failed with HTTP ${response.status}.`));
   }
 
   return body as unknown as InvoiceImportResponse;
+}
+
+async function fetchInvoiceImportExceptions(vendorId: IntegrationId, importId: string) {
+  const response = await fetch(
+    `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}/exceptions`,
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice exception review failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceImportExceptionReview;
+}
+
+async function refreshInvoiceImportMappingsRequest(vendorId: IntegrationId, importId: string) {
+  const response = await fetch(
+    `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}/refresh-mappings`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ actor: 'frontend' }),
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice mapping refresh failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceImportRefreshResponse;
 }
 
 async function fetchMappingState(integrationId: IntegrationId) {
@@ -2984,6 +3166,8 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       invoiceCount: line.agreementQuantity,
       proposedCount: line.proposedQuantity,
       selectedCountSource,
+      manualOverrideTotal: undefined,
+      manualOverrideTotalTouched: false,
       baseStatus: line.status,
       amount: line.financialImpact.amount,
       unitPriceAmount: line.unitPrice?.amount,
@@ -3010,6 +3194,7 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       writeAction: line.writeAction,
       proposedLessIncluded: undefined,
       lessIncludedTouched: false,
+      appliedUpdate: undefined,
     };
   });
 }
@@ -3053,14 +3238,15 @@ function buildReconciliationExportRows(
         'Manual Less Count Reasons': lessCountAdjustments.map((adjustment) => adjustment.reason).filter(Boolean).join('; '),
         'Proposed Count After Less Count': issue.proposedCount,
         'Vendor Invoice Count': issue.vendorInvoiceCount ?? '',
-        'Selected Count Source': selectedCountSource === 'invoice' ? 'Vendor Invoice' : 'Vendor API',
+        'Selected Count Source': reconciliationCountSourceLabel(selectedCountSource),
+        'Manual Override Total': selectedCountSource === 'manual' ? selectedCount : '',
         'Selected Count To Approve': selectedCount,
         'Vendor Invoice Number': issue.invoiceNumber ?? '',
         'Vendor Invoice Date': issue.invoiceDate ?? '',
         'CW Count': issue.invoiceCount,
         Delta: reconciliationDelta(issue),
         'Financial Impact': reconciliationIssueImpact(issue),
-        Status: statusLabel(issue.status),
+        Status: reconciliationStatusLabel(issue),
         Recommendation: issue.recommendation,
         Reason: issue.reason,
         Evidence: issue.audit.join(' | '),
@@ -3111,6 +3297,28 @@ function formatAgreementAdditionLabel(addition: AgreementAddition) {
 
 function sumAgreementAdditionField(additions: AgreementAddition[], field: 'quantity' | 'billedQuantity') {
   return additions.reduce((total, addition) => total + (addition[field] ?? 0), 0);
+}
+
+function applyAgreementUpdateResultsToAdditions(
+  additions: AgreementAddition[],
+  resultsByAdditionId: Map<string, AgreementAdditionUpdateResultItem>,
+) {
+  if (resultsByAdditionId.size === 0) {
+    return additions;
+  }
+
+  return additions.map((addition) => {
+    const result = resultsByAdditionId.get(addition.connectWiseAdditionId);
+    if (!result || result.status !== 'written') {
+      return addition;
+    }
+
+    return {
+      ...addition,
+      quantity: result.proposedQuantity,
+      lessIncluded: result.lessIncludedChanged ? result.proposedLessIncluded ?? 0 : addition.lessIncluded,
+    };
+  });
 }
 
 function formatOptionalStringList(values: Array<string | undefined>) {
@@ -3204,9 +3412,14 @@ function App() {
   const [reconciliationProductOptions, setReconciliationProductOptions] = useState<ReconciliationProductOption[]>([]);
   const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
   const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
-  const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload an AppRiver invoice CSV.');
+  const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload a vendor invoice CSV.');
   const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
   const [importingInvoice, setImportingInvoice] = useState(false);
+  const [invoiceExceptionReview, setInvoiceExceptionReview] = useState<InvoiceImportExceptionReview | null>(null);
+  const [invoiceExceptionCustomerOptions, setInvoiceExceptionCustomerOptions] = useState<MappingCustomerOption[]>([]);
+  const [invoiceExceptionLoadState, setInvoiceExceptionLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [invoiceExceptionMessage, setInvoiceExceptionMessage] = useState('Select an invoice import to review exceptions.');
+  const [busyInvoiceExceptionAction, setBusyInvoiceExceptionAction] = useState<string | null>(null);
   const [exportingReconciliationReport, setExportingReconciliationReport] = useState(false);
   const [agreementAdditionsByAgreement, setAgreementAdditionsByAgreement] = useState<Record<string, AgreementAddition[]>>({});
   const [agreementAdditionsSelection, setAgreementAdditionsSelection] = useState<AgreementAdditionsSelection | null>(null);
@@ -3459,13 +3672,13 @@ function App() {
     setInvoiceImportMessage('Loading invoice imports...');
 
     try {
-      const response = await fetchInvoiceImports('opentext-appriver');
+      const response = await fetchInvoiceImports();
       setInvoiceImports(response.imports);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
         response.imports.length > 0
-          ? `Loaded ${response.imports.length.toLocaleString()} AppRiver invoice imports.`
-          : 'No AppRiver invoices have been imported yet.',
+          ? `Loaded ${response.imports.length.toLocaleString()} vendor invoice imports.`
+          : 'No vendor invoices have been imported yet.',
       );
       return response;
     } catch (error) {
@@ -3476,29 +3689,177 @@ function App() {
     }
   };
 
-  const importAppRiverInvoice = async (file: File, importMode: InvoiceImportMode) => {
+  const importVendorInvoice = async (file: File, importMode: InvoiceImportMode) => {
     setImportingInvoice(true);
     setInvoiceImportLoadState('loading');
     setInvoiceImportMessage(`${importMode === 'overwrite' ? 'Overwriting' : 'Merging'} ${file.name}...`);
+    setInvoiceExceptionReview(null);
+    setInvoiceExceptionLoadState('idle');
+    setInvoiceExceptionMessage('Select an invoice import to review exceptions.');
 
     try {
-      const response = await importAppRiverInvoiceFile(file, importMode);
-      const importsResponse = await fetchInvoiceImports('opentext-appriver');
+      const response = await importInvoiceFile(file, importMode);
+      const importsResponse = await fetchInvoiceImports();
       setInvoiceImports(importsResponse.imports);
       setInvoiceImportLoadState('ready');
+      const vendorName = response.detectedVendor?.vendorName ?? integrationName(response.import.vendorId);
       setInvoiceImportMessage(
-        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} AppRiver invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${vendorName} invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
-      if (selectedReconciliationIntegrationId === 'opentext-appriver') {
-        void loadVendorReconciliation('opentext-appriver');
+      if (selectedReconciliationIntegrationId === response.import.vendorId && reconciliationVendorIds.includes(response.import.vendorId)) {
+        void loadVendorReconciliation(response.import.vendorId);
       }
       return response.import;
     } catch (error) {
       setInvoiceImportLoadState('failed');
-      setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to import AppRiver invoice.');
+      setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to import vendor invoice.');
       return null;
     } finally {
       setImportingInvoice(false);
+    }
+  };
+
+  const updateInvoiceImportSummary = (invoiceImport: InvoiceImportSummary) => {
+    setInvoiceImports((current) => {
+      const exists = current.some((item) => item.id === invoiceImport.id);
+      const nextImports = exists
+        ? current.map((item) => (item.id === invoiceImport.id ? invoiceImport : item))
+        : [invoiceImport, ...current];
+      return [...nextImports].sort(
+        (left, right) =>
+          String(right.invoiceDate ?? '').localeCompare(String(left.invoiceDate ?? '')) ||
+          String(right.importedAt ?? '').localeCompare(String(left.importedAt ?? '')),
+      );
+    });
+  };
+
+  const openInvoiceExceptionReview = async (invoiceImport: InvoiceImportSummary) => {
+    setInvoiceExceptionLoadState('loading');
+    setInvoiceExceptionReview(null);
+    setInvoiceExceptionMessage(
+      invoiceImport.exceptionRows > 0
+        ? `Loading ${invoiceImport.exceptionRows.toLocaleString()} invoice exceptions...`
+        : 'Loading invoice review...',
+    );
+
+    try {
+      const [review, mappingResponse] = await Promise.all([
+        fetchInvoiceImportExceptions(invoiceImport.vendorId, invoiceImport.id),
+        hasMappingWorkspace(invoiceImport.vendorId)
+          ? fetchMappingState(invoiceImport.vendorId)
+          : Promise.resolve({ customerOptions: [] } as unknown as MappingStateResponse),
+      ]);
+      setInvoiceExceptionReview(review);
+      setInvoiceExceptionCustomerOptions(mappingResponse.customerOptions);
+      updateInvoiceImportSummary(review.import);
+      setInvoiceExceptionLoadState('ready');
+      setInvoiceExceptionMessage(
+        review.summary.exceptionRows > 0
+          ? `${review.summary.exceptionRows.toLocaleString()} exceptions need mapping decisions.`
+          : 'No exceptions remain on this invoice import.',
+      );
+      return review;
+    } catch (error) {
+      setInvoiceExceptionReview(null);
+      setInvoiceExceptionLoadState('failed');
+      setInvoiceExceptionMessage(error instanceof Error ? error.message : 'Unable to load invoice exceptions.');
+      return null;
+    }
+  };
+
+  const closeInvoiceExceptionReview = () => {
+    setInvoiceExceptionReview(null);
+    setInvoiceExceptionLoadState('idle');
+    setInvoiceExceptionMessage('Select an invoice import to review exceptions.');
+    setBusyInvoiceExceptionAction(null);
+  };
+
+  const reloadInvoiceExceptionReview = async () => {
+    if (!invoiceExceptionReview) {
+      return null;
+    }
+    return openInvoiceExceptionReview(invoiceExceptionReview.import);
+  };
+
+  const refreshInvoiceImportMappingsForReview = async (invoiceImport: InvoiceImportSummary) => {
+    const refresh = await refreshInvoiceImportMappingsRequest(invoiceImport.vendorId, invoiceImport.id);
+    updateInvoiceImportSummary(refresh.import);
+    const review = await fetchInvoiceImportExceptions(invoiceImport.vendorId, invoiceImport.id);
+    setInvoiceExceptionReview(review);
+    updateInvoiceImportSummary(review.import);
+    if (selectedReconciliationIntegrationId === 'opentext-appriver') {
+      void loadVendorReconciliation('opentext-appriver');
+    }
+    return refresh;
+  };
+
+  const saveInvoiceExceptionAccountMapping = async (
+    account: InvoiceAccountException,
+    customerId: string,
+    agreementId: string,
+  ) => {
+    if (!invoiceExceptionReview) {
+      return false;
+    }
+    if (!customerId || !agreementId || agreementId === noAgreementSyncValue) {
+      setInvoiceExceptionLoadState('failed');
+      setInvoiceExceptionMessage('Choose a ConnectWise customer and billing agreement before saving.');
+      return false;
+    }
+
+    const actionKey = `invoice-account:${account.externalAccountId}`;
+    setBusyInvoiceExceptionAction(actionKey);
+    setInvoiceExceptionMessage(`Saving mapping for ${account.externalAccountName}...`);
+    try {
+      await saveAccountMapping(invoiceExceptionReview.import.vendorId, account.externalAccountId, {
+        status: 'approved',
+        customerId,
+        agreementId,
+        externalAccountName: account.externalAccountName,
+      });
+      const refresh = await refreshInvoiceImportMappingsForReview(invoiceExceptionReview.import);
+      setInvoiceExceptionLoadState('ready');
+      setInvoiceExceptionMessage(
+        `Mapped ${account.externalAccountName}. Refreshed ${refresh.accountRowsUpdated.toLocaleString()} account rows and ${refresh.productRowsUpdated.toLocaleString()} product rows.`,
+      );
+      return true;
+    } catch (error) {
+      setInvoiceExceptionLoadState('failed');
+      setInvoiceExceptionMessage(error instanceof Error ? error.message : 'Account mapping save failed.');
+      return false;
+    } finally {
+      setBusyInvoiceExceptionAction(null);
+    }
+  };
+
+  const saveInvoiceExceptionProductMapping = async (
+    product: InvoiceProductException,
+    target: ProductMappingTarget,
+  ) => {
+    if (!invoiceExceptionReview) {
+      return false;
+    }
+
+    const actionKey = `invoice-product:${product.vendorProductKey}`;
+    setBusyInvoiceExceptionAction(actionKey);
+    setInvoiceExceptionMessage(`Saving product mapping for ${product.productName}...`);
+    try {
+      await saveProductMapping(invoiceExceptionReview.import.vendorId, product.vendorProductKey, {
+        status: 'approved',
+        targetProducts: [target],
+      });
+      const refresh = await refreshInvoiceImportMappingsForReview(invoiceExceptionReview.import);
+      setInvoiceExceptionLoadState('ready');
+      setInvoiceExceptionMessage(
+        `Mapped ${product.productName}. Refreshed ${refresh.productRowsUpdated.toLocaleString()} product rows and ${refresh.accountRowsUpdated.toLocaleString()} account rows.`,
+      );
+      return true;
+    } catch (error) {
+      setInvoiceExceptionLoadState('failed');
+      setInvoiceExceptionMessage(error instanceof Error ? error.message : 'Product mapping save failed.');
+      return false;
+    } finally {
+      setBusyInvoiceExceptionAction(null);
     }
   };
 
@@ -3805,10 +4166,19 @@ function App() {
               ...issue,
               status: restoredReconciliationStatus(issue),
               owner: 'Finance',
+              manualOverrideTotal: undefined,
+              manualOverrideTotalTouched: false,
               proposedLessIncluded: undefined,
               lessIncludedTouched: false,
+              appliedUpdate: undefined,
             }
-          : { ...issue, status: 'approved', selectedCountSource: reconciliationCountSource(issue), owner: 'Finance' };
+          : {
+              ...issue,
+              status: 'approved',
+              selectedCountSource: reconciliationCountSource(issue),
+              owner: 'Finance',
+              appliedUpdate: undefined,
+            };
       }),
     );
   };
@@ -3824,7 +4194,12 @@ function App() {
           return issue;
         }
 
-        return { ...issue, selectedCountSource: countSource };
+        return {
+          ...issue,
+          selectedCountSource: countSource,
+          manualOverrideTotal: undefined,
+          manualOverrideTotalTouched: false,
+        };
       }),
     );
   };
@@ -3833,7 +4208,13 @@ function App() {
     setIssues((currentIssues) =>
       currentIssues.map((issue) =>
         issue.customer === customer && (issue.status === 'ready' || issue.status === 'needs-review')
-          ? { ...issue, status: 'approved', selectedCountSource: reconciliationCountSource(issue), owner: 'Finance' }
+          ? {
+              ...issue,
+              status: 'approved',
+              selectedCountSource: reconciliationCountSource(issue),
+              owner: 'Finance',
+              appliedUpdate: undefined,
+            }
           : issue,
       ),
     );
@@ -3842,7 +4223,16 @@ function App() {
   const skipIssue = (issueId: string) => {
     setIssues((currentIssues) =>
       currentIssues.map((issue) =>
-        issue.id === issueId ? { ...issue, status: 'skipped', owner: 'Finance' } : issue,
+        issue.id === issueId
+          ? {
+              ...issue,
+              status: 'skipped',
+              owner: 'Finance',
+              manualOverrideTotal: undefined,
+              manualOverrideTotalTouched: false,
+              appliedUpdate: undefined,
+            }
+          : issue,
       ),
     );
   };
@@ -4078,6 +4468,14 @@ function App() {
       if (!queuedSync && integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
         await loadVendorReconciliation(integrationId);
       }
+      if (
+        !queuedSync &&
+        integrationId === 'connectwise' &&
+        selectedReconciliationIntegrationId &&
+        reconciliationVendorIds.includes(selectedReconciliationIntegrationId)
+      ) {
+        await loadVendorReconciliation(selectedReconciliationIntegrationId);
+      }
     } catch (error) {
       setIntegrationActionMessages((messages) => ({
         ...messages,
@@ -4312,11 +4710,33 @@ function App() {
               selectedCountSource: reconciliationCountSource(currentIssue),
               status: 'approved',
               owner: 'Finance',
+              appliedUpdate: undefined,
             }
           : currentIssue,
       ),
     );
     setManualOverrideMessage('Less Included Qty queued for review.');
+    setManualOverrideIssue(null);
+    return true;
+  };
+
+  const queueManualTotalUpdate = async (issue: ReconcileIssue, quantity: number) => {
+    setIssues((currentIssues) =>
+      currentIssues.map((currentIssue) =>
+        currentIssue.id === issue.id
+          ? {
+              ...currentIssue,
+              manualOverrideTotal: quantity,
+              manualOverrideTotalTouched: true,
+              selectedCountSource: 'manual',
+              status: 'approved',
+              owner: 'Finance',
+              appliedUpdate: undefined,
+            }
+          : currentIssue,
+      ),
+    );
+    setManualOverrideMessage('Manual override total queued for review.');
     setManualOverrideIssue(null);
     return true;
   };
@@ -4344,6 +4764,25 @@ function App() {
     try {
       const response = await applyAgreementAdditionUpdatesRequest(updates, discardedUpdates);
       const resultsByLineId = new Map(response.items.map((item) => [item.sourceLineId, item]));
+      const writtenResultsByAdditionId = new Map(
+        response.items
+          .filter((item) => item.status === 'written')
+          .map((item) => [item.connectWiseAdditionId, item] as const),
+      );
+
+      if (writtenResultsByAdditionId.size > 0) {
+        setAgreementAdditions((currentAdditions) =>
+          applyAgreementUpdateResultsToAdditions(currentAdditions, writtenResultsByAdditionId),
+        );
+        setAgreementAdditionsByAgreement((currentCache) =>
+          Object.fromEntries(
+            Object.entries(currentCache).map(([agreementId, additions]) => [
+              agreementId,
+              applyAgreementUpdateResultsToAdditions(additions, writtenResultsByAdditionId),
+            ]),
+          ),
+        );
+      }
 
       setIssues((currentIssues) =>
         currentIssues.map((issue) => {
@@ -4353,15 +4792,27 @@ function App() {
           }
 
           if (result.status === 'written') {
+            const selectedCountSource = reconciliationCountSource(issue);
             return {
               ...issue,
               invoiceCount: result.proposedQuantity,
+              proposedCount: result.proposedQuantity,
+              selectedCountSource,
               baseStatus: 'matched',
-              status: 'matched',
+              status: 'updated',
               reason: 'ConnectWise agreement addition update applied.',
-              recommendation: 'No change needed; vendor and ConnectWise counts match.',
+              recommendation: 'ConnectWise was updated in this reconciliation run.',
+              manualOverrideTotal: selectedCountSource === 'manual' ? result.proposedQuantity : undefined,
+              manualOverrideTotalTouched: selectedCountSource === 'manual',
               proposedLessIncluded: undefined,
               lessIncludedTouched: false,
+              appliedUpdate: {
+                quantityDelta: result.proposedQuantity - result.currentQuantity,
+                lessIncludedDelta: result.lessIncludedChanged
+                  ? (result.proposedLessIncluded ?? 0) - result.currentLessIncluded
+                  : undefined,
+                appliedAt: new Date().toISOString(),
+              },
               matchedAgreementAdditions: issue.matchedAgreementAdditions.map((addition) =>
                 addition.connectWiseAdditionId === result.connectWiseAdditionId
                   ? {
@@ -4380,8 +4831,11 @@ function App() {
             return {
               ...issue,
               status: restoredReconciliationStatus(issue),
+              manualOverrideTotal: undefined,
+              manualOverrideTotalTouched: false,
               proposedLessIncluded: undefined,
               lessIncludedTouched: false,
+              appliedUpdate: undefined,
             };
           }
 
@@ -4390,6 +4844,7 @@ function App() {
             status: 'blocked',
             recommendation: result.error ?? 'ConnectWise update failed.',
             reason: result.error ?? issue.reason,
+            appliedUpdate: undefined,
           };
         }),
       );
@@ -4527,10 +4982,26 @@ function App() {
             <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view)}</h1>
           </div>
           <div className="top-actions">
-            <button className="button secondary" onClick={() => navigateToView('imports')} type="button">
-              <Upload size={18} />
-              Import invoices
-            </button>
+            {view === 'reconcile' ? (
+              queuedAgreementUpdateIssues.length > 0 ? (
+                <button
+                  className="button primary"
+                  disabled={applyingAgreementUpdates}
+                  onClick={() => setReviewingAgreementUpdates(true)}
+                  type="button"
+                >
+                  <ListChecks size={18} />
+                  {applyingAgreementUpdates
+                    ? 'Applying'
+                    : `Review & Apply (${queuedAgreementUpdateIssues.length.toLocaleString()})`}
+                </button>
+              ) : null
+            ) : (
+              <button className="button secondary" onClick={() => navigateToView('imports')} type="button">
+                <Upload size={18} />
+                Import invoices
+              </button>
+            )}
           </div>
         </header>
 
@@ -4540,7 +5011,6 @@ function App() {
               approveClient={approveClient}
               approveIssue={approveIssue}
               agreementUpdateMessage={agreementUpdateMessage}
-              applyingAgreementUpdates={applyingAgreementUpdates}
               clientGroups={clientGroups}
               connectWiseSyncSummary={connectWiseSyncSummary}
               exportingReport={exportingReconciliationReport}
@@ -4550,7 +5020,10 @@ function App() {
               needsReviewOnly={needsReviewOnly}
               onCountSourceSelect={selectIssueCountSource}
               onExportReport={exportSelectedReconciliationReport}
-              onManualOverride={setManualOverrideIssue}
+              onManualOverride={(issue) => {
+                setManualOverrideIssue(issue);
+                setManualOverrideMessage('');
+              }}
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
               onLoadVendorData={loadCustomerVendorData}
@@ -4564,10 +5037,8 @@ function App() {
                 setVendorFilter('All');
                   void loadVendorReconciliation(integrationId);
                 }}
-              onReviewAgreementUpdates={() => setReviewingAgreementUpdates(true)}
               pendingCount={pendingCount}
               query={query}
-              queuedAgreementUpdateCount={queuedAgreementUpdateIssues.length}
               reconciliationLoadState={reconciliationLoadState}
               reconciliationMessage={reconciliationMessage}
               selectedReconciliationIntegrationId={selectedReconciliationIntegrationId}
@@ -4737,12 +5208,25 @@ function App() {
           )}
           {view === 'imports' && (
             <ImportsView
+              busyReviewAction={busyInvoiceExceptionAction}
+              customerOptions={invoiceExceptionCustomerOptions}
               importing={importingInvoice}
               importMode={invoiceImportMode}
               imports={invoiceImports}
               loadState={invoiceImportLoadState}
               message={invoiceImportMessage}
-              onUpload={importAppRiverInvoice}
+              onAccountMappingSave={saveInvoiceExceptionAccountMapping}
+              onCloseReview={closeInvoiceExceptionReview}
+              onProductCatalogSearch={(query) =>
+                searchProductCatalog(invoiceExceptionReview?.import.vendorId ?? 'opentext-appriver', query)
+              }
+              onProductMappingSave={saveInvoiceExceptionProductMapping}
+              onRefreshReview={reloadInvoiceExceptionReview}
+              onReviewImport={openInvoiceExceptionReview}
+              onUpload={importVendorInvoice}
+              review={invoiceExceptionReview}
+              reviewLoadState={invoiceExceptionLoadState}
+              reviewMessage={invoiceExceptionMessage}
               setImportMode={setInvoiceImportMode}
             />
           )}
@@ -4810,6 +5294,7 @@ function App() {
             setManualOverrideMessage('');
           }}
           onLessCountSave={queueLessIncludedUpdate}
+          onManualTotalSave={queueManualTotalUpdate}
           onDeviceRemap={remapReconciliationDevice}
           productOptions={reconciliationProductOptions}
           saving={savingManualOverride}
@@ -5569,7 +6054,6 @@ function ReconcileView(props: {
   approveClient: (customer: string) => void;
   approveIssue: (issueId: string) => void;
   agreementUpdateMessage: string;
-  applyingAgreementUpdates: boolean;
   clientGroups: ClientGroup[];
   connectWiseSyncSummary: string;
   exportingReport: boolean;
@@ -5585,10 +6069,8 @@ function ReconcileView(props: {
   onOpenTicket: (client: ClientGroup) => void;
   onRefreshReconciliation: () => Promise<ReconciliationRunResponse | null>;
   onReconciliationSourceChange: (integrationId: IntegrationId) => void;
-  onReviewAgreementUpdates: () => void;
   pendingCount: number;
   query: string;
-  queuedAgreementUpdateCount: number;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reconciliationMessage: string;
   selectedReconciliationIntegrationId: IntegrationId | '';
@@ -5606,7 +6088,6 @@ function ReconcileView(props: {
     approveClient,
     approveIssue,
     agreementUpdateMessage,
-    applyingAgreementUpdates,
     clientGroups,
     connectWiseSyncSummary,
     exportingReport,
@@ -5622,10 +6103,8 @@ function ReconcileView(props: {
     onOpenTicket,
     onRefreshReconciliation,
     onReconciliationSourceChange,
-    onReviewAgreementUpdates,
     pendingCount,
     query,
-    queuedAgreementUpdateCount,
     reconciliationLoadState,
     reconciliationMessage,
     selectedReconciliationIntegrationId,
@@ -5787,17 +6266,6 @@ function ReconcileView(props: {
               <h2>{filteredReviewCount} review items across {clientGroups.length} clients</h2>
             </div>
             <div className="review-group-actions">
-              <button
-                className="button primary compact"
-                disabled={queuedAgreementUpdateCount === 0 || applyingAgreementUpdates}
-                onClick={onReviewAgreementUpdates}
-                type="button"
-              >
-                <ListChecks size={16} />
-                {applyingAgreementUpdates
-                  ? 'Applying'
-                  : `Review & Apply (${queuedAgreementUpdateCount.toLocaleString()})`}
-              </button>
               <button
                 className="button secondary compact"
                 disabled={
@@ -5974,9 +6442,11 @@ function ReconcileView(props: {
                                     ? 'Approved'
                                     : issue.status === 'skipped'
                                       ? 'Skipped'
-                                      : issue.status === 'unmapped'
-                                        ? 'Map product'
-                                        : 'No change';
+                                      : issue.status === 'updated'
+                                        ? reconciliationStatusLabel(issue)
+                                        : issue.status === 'unmapped'
+                                          ? 'Map product'
+                                          : 'No change';
                                 return (
                                   <div className="license-row" key={issue.id} role="row">
                                     <span className="license-product">
@@ -6009,12 +6479,17 @@ function ReconcileView(props: {
                                     <span>{cwCountLabel(issue)}</span>
                                     <span className={delta >= 0 ? 'delta positive' : 'delta negative'}>
                                       {deltaLabel(delta)}
+                                      {selectedCountSource === 'manual' ? (
+                                        <small className="delta-note">
+                                          manual total {reconciliationSelectedCount(issue).toLocaleString()}
+                                        </small>
+                                      ) : null}
                                       {typeof lessDelta === 'number' ? (
                                         <small className="delta-note">less {deltaLabel(lessDelta)}</small>
                                       ) : null}
                                     </span>
                                     <span>{formatCurrency(impact)}</span>
-                                    <span className={`status-pill ${issue.status}`}>{statusLabel(issue.status)}</span>
+                                    <span className={`status-pill ${issue.status}`}>{reconciliationStatusLabel(issue)}</span>
                                     <span className="license-actions">
                                       {canToggleApproval ? (
                                         <>
@@ -6431,7 +6906,7 @@ function AgreementUpdateReviewModal(props: {
                       {nextQuantity.toLocaleString()}
                     </strong>
                     <span>
-                      {issue.vendor} {reconciliationCountSource(issue) === 'invoice' ? 'invoice' : 'API'}{' '}
+                      {issue.vendor} {reconciliationCountSourceLabel(reconciliationCountSource(issue)).toLowerCase()}{' '}
                       {nextQuantity.toLocaleString()}
                     </span>
                   </div>
@@ -6706,15 +7181,21 @@ function ManualOverrideModal(props: {
     targetVendorProductKey: string,
   ) => Promise<boolean>;
   onLessCountSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
+  onManualTotalSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
   productOptions: ReconciliationProductOption[];
   saving: boolean;
 }) {
-  const { issue, message, onClose, onDeviceRemap, onLessCountSave, productOptions, saving } = props;
+  const { issue, message, onClose, onDeviceRemap, onLessCountSave, onManualTotalSave, productOptions, saving } = props;
+  const [manualTotal, setManualTotal] = useState(
+    String(validManualOverrideTotal(issue) ?? reconciliationSelectedCount(issue)),
+  );
   const [lessCount, setLessCount] = useState(String(proposedLessIncluded(issue)));
   const [remapTargets, setRemapTargets] = useState<Record<string, string>>({});
+  const manualTotalValue = Number(manualTotal);
   const lessCountValue = Number(lessCount);
   const selectedAddition = selectedAgreementAddition(issue);
   const blockReason = applyBlockReason(issue);
+  const canSaveManualTotal = Number.isFinite(manualTotalValue) && manualTotalValue >= 0 && !saving && !blockReason;
   const canSaveLessCount = Number.isFinite(lessCountValue) && lessCountValue >= 0 && !saving && !blockReason;
 
   return (
@@ -6740,6 +7221,53 @@ function ManualOverrideModal(props: {
           <IntegrationStat label="Change To" value={reconciliationSelectedCount(issue).toLocaleString()} />
           <IntegrationStat label="Impact" value={formatCurrency(reconciliationIssueImpact(issue))} />
         </div>
+
+        <section className="manual-section" aria-label="Manual total update">
+          <div className="manual-section-header">
+            <span className="section-kicker">Manual Override Total</span>
+            <strong>{reconciliationSelectedCount(issue).toLocaleString()} selected</strong>
+          </div>
+          <div className="cw-addition-context">
+            {selectedAddition ? (
+              <span>
+                {selectedAddition.productName} / CW {selectedAddition.connectWiseAdditionId} / qty{' '}
+                {selectedAddition.quantity.toLocaleString()}
+              </span>
+            ) : (
+              <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
+            )}
+          </div>
+          <div className="manual-count-form">
+            <label>
+              <span>Total Count</span>
+              <input
+                min="0"
+                onChange={(event) => setManualTotal(event.target.value)}
+                step="1"
+                type="number"
+                value={manualTotal}
+              />
+            </label>
+            <button
+              className="button primary compact"
+              disabled={!canSaveManualTotal}
+              onClick={() => void onManualTotalSave(issue, manualTotalValue)}
+              type="button"
+            >
+              <Check size={16} />
+              Queue Total
+            </button>
+          </div>
+          {issue.manualOverrideTotalTouched && typeof issue.manualOverrideTotal === 'number' ? (
+            <div className="adjustment-chip-list" aria-label="Queued manual total update">
+              <span>
+                Queued total {issue.manualOverrideTotal.toLocaleString()}
+                {' '}
+                ({deltaLabel(issue.manualOverrideTotal - issue.invoiceCount)})
+              </span>
+            </div>
+          ) : null}
+        </section>
 
         <section className="manual-section" aria-label="Less Included Qty update">
           <div className="manual-section-header">
@@ -10161,15 +10689,45 @@ function ReportsView(props: {
 }
 
 function ImportsView(props: {
+  busyReviewAction: string | null;
+  customerOptions: MappingCustomerOption[];
   importMode: InvoiceImportMode;
   imports: InvoiceImportSummary[];
   importing: boolean;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   message: string;
+  onAccountMappingSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
+  onCloseReview: () => void;
+  onProductCatalogSearch: (query: string) => Promise<ProductCatalogSearchResponse>;
+  onProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
+  onRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
+  onReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
   onUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
+  review: InvoiceImportExceptionReview | null;
+  reviewLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  reviewMessage: string;
   setImportMode: (value: InvoiceImportMode) => void;
 }) {
-  const { importMode, imports, importing, loadState, message, onUpload, setImportMode } = props;
+  const {
+    busyReviewAction,
+    customerOptions,
+    importMode,
+    imports,
+    importing,
+    loadState,
+    message,
+    onAccountMappingSave,
+    onCloseReview,
+    onProductCatalogSearch,
+    onProductMappingSave,
+    onRefreshReview,
+    onReviewImport,
+    onUpload,
+    review,
+    reviewLoadState,
+    reviewMessage,
+    setImportMode,
+  } = props;
   const latestImport = imports[0];
   const totalRows = imports.reduce((total, item) => total + item.rowCount, 0);
   const totalExceptions = imports.reduce((total, item) => total + item.exceptionRows, 0);
@@ -10186,8 +10744,8 @@ function ImportsView(props: {
       <div className="work-surface">
         <div className="surface-header">
           <div>
-            <span className="section-kicker">AppRiver - OpenText</span>
-            <h2>Vendor invoice intake</h2>
+            <span className="section-kicker">Vendor invoices</span>
+            <h2>Invoice intake</h2>
           </div>
           <div className="import-actions">
             <div className="segmented-control import-mode-toggle" role="group" aria-label="Invoice import mode">
@@ -10232,14 +10790,14 @@ function ImportsView(props: {
           {imports.length === 0 ? (
             <div className="empty-state">
               <FileSpreadsheet size={20} />
-              <strong>{loadState === 'loading' ? 'Loading invoice imports.' : 'No AppRiver invoice imports found.'}</strong>
+              <strong>{loadState === 'loading' ? 'Loading invoice imports.' : 'No vendor invoice imports found.'}</strong>
               <span>{message}</span>
             </div>
           ) : null}
 
           {imports.map((item) => (
             <div className="import-row" key={item.id}>
-              <span className="vendor-badge">AppRiver</span>
+              <span className="vendor-badge">{integrationName(item.vendorId)}</span>
               <div>
                 <strong>{item.invoiceNumber ? `Invoice ${item.invoiceNumber}` : item.fileName}</strong>
                 <span>
@@ -10250,13 +10808,33 @@ function ImportsView(props: {
                 <span style={{ width: `${item.rowCount > 0 ? (item.matchedRows / item.rowCount) * 100 : 0}%` }} />
               </div>
               <strong>{item.exceptionRows} exceptions</strong>
-              <span className={item.status === 'ready' ? 'status-pill ready' : 'status-pill needs-review'}>
-                {item.status === 'ready' ? 'Ready' : 'Review'}
-              </span>
+              <button
+                className={item.status === 'ready' ? 'button secondary compact' : 'button primary compact'}
+                disabled={reviewLoadState === 'loading'}
+                onClick={() => void onReviewImport(item)}
+                type="button"
+              >
+                {item.status === 'ready' ? 'Open' : 'Review'}
+              </button>
             </div>
           ))}
         </div>
       </div>
+
+      {review || reviewLoadState !== 'idle' ? (
+        <InvoiceExceptionReviewPanel
+          busyAction={busyReviewAction}
+          customerOptions={customerOptions}
+          loadState={reviewLoadState}
+          message={reviewMessage}
+          onAccountMappingSave={onAccountMappingSave}
+          onClose={onCloseReview}
+          onProductCatalogSearch={onProductCatalogSearch}
+          onProductMappingSave={onProductMappingSave}
+          onRefresh={onRefreshReview}
+          review={review}
+        />
+      ) : null}
 
       <div className="work-surface">
         <div className="surface-header">
@@ -10287,6 +10865,424 @@ function ImportsView(props: {
       </div>
     </section>
   );
+}
+
+function InvoiceExceptionReviewPanel(props: {
+  busyAction: string | null;
+  customerOptions: MappingCustomerOption[];
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onAccountMappingSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
+  onClose: () => void;
+  onProductCatalogSearch: (query: string) => Promise<ProductCatalogSearchResponse>;
+  onProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
+  onRefresh: () => Promise<InvoiceImportExceptionReview | null>;
+  review: InvoiceImportExceptionReview | null;
+}) {
+  const {
+    busyAction,
+    customerOptions,
+    loadState,
+    message,
+    onAccountMappingSave,
+    onClose,
+    onProductCatalogSearch,
+    onProductMappingSave,
+    onRefresh,
+    review,
+  } = props;
+  const invoiceLabel = review?.import.invoiceNumber ? `Invoice ${review.import.invoiceNumber}` : review?.import.fileName ?? 'Invoice review';
+
+  return (
+    <div className="work-surface invoice-review-surface">
+      <div className="surface-header">
+        <div>
+          <span className="section-kicker">Exception review</span>
+          <h2>{invoiceLabel}</h2>
+        </div>
+        <div className="import-actions">
+          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
+            <RefreshCcw size={16} />
+            Refresh
+          </button>
+          <button className="icon-button" onClick={onClose} title="Close review" type="button">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      <div className={`integrations-live-bar invoice-review-status ${loadState === 'failed' ? 'failed' : ''}`}>
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <strong>{loadState === 'failed' ? 'Review issue' : loadState === 'loading' ? 'Loading review' : 'Review ready'}</strong>
+          <span>{message}</span>
+        </div>
+      </div>
+
+      {review ? (
+        <>
+          <section className="metric-grid invoice-review-metrics" aria-label="Invoice exception summary">
+            <MetricCard icon={ListChecks} label="Exceptions" tone="warn" value={formatCount(review.summary.exceptionRows)} />
+            <MetricCard icon={Users} label="Account rows" tone="money" value={formatCount(review.summary.missingAgreementRows)} />
+            <MetricCard icon={Package} label="Product rows" tone="ready" value={formatCount(review.summary.missingProductRows)} />
+            <MetricCard icon={FileSpreadsheet} label="Renewals" tone="approved" value={formatCount(review.summary.renewalExceptionRows)} />
+          </section>
+
+          <div className="invoice-exception-grid">
+            <section className="invoice-exception-panel" aria-label="Account exceptions">
+              <div className="surface-header compact-header">
+                <div>
+                  <span className="section-kicker">Customer / agreement</span>
+                  <h3>{review.accountExceptions.length.toLocaleString()} account groups</h3>
+                </div>
+              </div>
+              <div className="invoice-exception-list">
+                {review.accountExceptions.length === 0 ? (
+                  <div className="empty-state">
+                    <Users size={20} />
+                    <strong>No account exceptions.</strong>
+                  </div>
+                ) : null}
+                {review.accountExceptions.map((account) => (
+                  <InvoiceAccountExceptionRow
+                    account={account}
+                    busyAction={busyAction}
+                    customerOptions={customerOptions}
+                    key={account.externalAccountId}
+                    onSave={onAccountMappingSave}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="invoice-exception-panel" aria-label="Product exceptions">
+              <div className="surface-header compact-header">
+                <div>
+                  <span className="section-kicker">Product catalog</span>
+                  <h3>{review.productExceptions.length.toLocaleString()} product groups</h3>
+                </div>
+              </div>
+              <div className="invoice-exception-list">
+                {review.productExceptions.length === 0 ? (
+                  <div className="empty-state">
+                    <Package size={20} />
+                    <strong>No product exceptions.</strong>
+                  </div>
+                ) : null}
+                {review.productExceptions.map((product) => (
+                  <InvoiceProductExceptionRow
+                    busyAction={busyAction}
+                    key={product.vendorProductKey}
+                    onCatalogSearch={onProductCatalogSearch}
+                    onSave={onProductMappingSave}
+                    product={product}
+                  />
+                ))}
+              </div>
+            </section>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function InvoiceAccountExceptionRow(props: {
+  account: InvoiceAccountException;
+  busyAction: string | null;
+  customerOptions: MappingCustomerOption[];
+  onSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
+}) {
+  const { account, busyAction, customerOptions, onSave } = props;
+  const initialCustomerId = account.currentMapping?.customerId ?? '';
+  const initialAgreementId = account.currentMapping?.agreementId ?? '';
+  const [customerId, setCustomerId] = useState(initialCustomerId);
+  const [agreementId, setAgreementId] = useState(initialAgreementId);
+  const selectedCustomer = customerOptions.find((customer) => customer.customerId === customerId);
+  const agreementOptions = selectedCustomer?.agreements ?? [];
+  const actionKey = `invoice-account:${account.externalAccountId}`;
+  const isBusy = busyAction === actionKey;
+  const hasUsableMapping = Boolean(account.currentMapping?.active && account.currentMapping.agreementId);
+
+  useEffect(() => {
+    setCustomerId(initialCustomerId);
+    setAgreementId(initialAgreementId);
+  }, [initialAgreementId, initialCustomerId]);
+
+  const selectCustomer = (nextCustomerId: string) => {
+    const nextCustomer = customerOptions.find((customer) => customer.customerId === nextCustomerId);
+    setCustomerId(nextCustomerId);
+    setAgreementId(nextCustomer?.agreements[0]?.agreementId ?? '');
+  };
+
+  return (
+    <article className="invoice-exception-row">
+      <div className="invoice-exception-row-main">
+        <div>
+          <strong>{account.externalAccountName}</strong>
+          <span>{account.externalAccountId}</span>
+        </div>
+        <span className={hasUsableMapping ? 'status-pill approved' : 'status-pill needs-review'}>
+          {hasUsableMapping ? 'Mapped' : 'Needs mapping'}
+        </span>
+      </div>
+      <div className="invoice-exception-meta">
+        <span>{formatCount(account.rowCount)} rows</span>
+        <span>{formatCount(account.quantity)} qty</span>
+        <span>{invoiceIssueLabels(account.sampleRows).join(', ')}</span>
+      </div>
+      {account.currentMapping ? (
+        <div className="invoice-existing-map">
+          <ArrowRight size={15} />
+          <span>
+            {account.currentMapping.customerName}
+            {account.currentMapping.agreementName ? ` / ${account.currentMapping.agreementName}` : ''}
+          </span>
+        </div>
+      ) : null}
+      <div className="invoice-map-form account-map-form">
+        <label>
+          <span>ConnectWise customer</span>
+          <select onChange={(event) => selectCustomer(event.target.value)} value={customerId}>
+            <option value="">Select customer</option>
+            {customerOptions.map((customer) => (
+              <option key={customer.customerId} value={customer.customerId}>
+                {customer.connectWiseCompanyId
+                  ? `${customer.customerName} (#${customer.connectWiseCompanyId})`
+                  : customer.customerName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Billing agreement</span>
+          <select disabled={!customerId} onChange={(event) => setAgreementId(event.target.value)} value={agreementId}>
+            <option value="">Select agreement</option>
+            {agreementOptions.map((agreement) => (
+              <option key={agreement.agreementId} value={agreement.agreementId}>
+                {agreement.agreementName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="button primary compact"
+          disabled={isBusy || !customerId || !agreementId}
+          onClick={() => void onSave(account, customerId, agreementId)}
+          type="button"
+        >
+          <Check size={15} />
+          {isBusy ? 'Saving' : 'Save'}
+        </button>
+      </div>
+      <InvoiceExceptionSamples lines={account.sampleRows} />
+    </article>
+  );
+}
+
+function InvoiceProductExceptionRow(props: {
+  busyAction: string | null;
+  onCatalogSearch: (query: string) => Promise<ProductCatalogSearchResponse>;
+  onSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
+  product: InvoiceProductException;
+}) {
+  const { busyAction, onCatalogSearch, onSave, product } = props;
+  const [query, setQuery] = useState(defaultInvoiceProductSearch(product));
+  const [results, setResults] = useState<ProductCatalogTarget[]>([]);
+  const [selectedCode, setSelectedCode] = useState('');
+  const [searchMessage, setSearchMessage] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [showNewItemStub, setShowNewItemStub] = useState(false);
+  const actionKey = `invoice-product:${product.vendorProductKey}`;
+  const isBusy = busyAction === actionKey;
+  const selectedTarget = results.find((result) => result.connectwiseProductCode === selectedCode);
+  const activeExisting = product.existingMappings.find((mapping) => mapping.active && mapping.status === 'approved');
+
+  useEffect(() => {
+    setQuery(defaultInvoiceProductSearch(product));
+    setResults([]);
+    setSelectedCode('');
+    setSearchMessage('');
+    setShowNewItemStub(false);
+  }, [product.vendorProductKey]);
+
+  const runSearch = async () => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setSearchMessage('Enter a catalog search.');
+      return;
+    }
+
+    setSearching(true);
+    setSearchMessage('');
+    try {
+      const response = await onCatalogSearch(trimmed);
+      setResults(response.targets);
+      setSelectedCode(response.targets[0]?.connectwiseProductCode ?? '');
+      setSearchMessage(
+        response.targets.length > 0
+          ? `${response.targets.length.toLocaleString()} catalog matches`
+          : 'No existing catalog matches',
+      );
+    } catch (error) {
+      setResults([]);
+      setSelectedCode('');
+      setSearchMessage(error instanceof Error ? error.message : 'Catalog search failed.');
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  return (
+    <article className="invoice-exception-row">
+      <div className="invoice-exception-row-main">
+        <div>
+          <strong>{product.productName}</strong>
+          <span>{product.vendorProductKey}</span>
+        </div>
+        <span className={activeExisting ? 'status-pill approved' : 'status-pill needs-review'}>
+          {activeExisting ? 'Mapped' : 'Needs mapping'}
+        </span>
+      </div>
+      <div className="invoice-exception-meta">
+        <span>{formatCount(product.rowCount)} rows</span>
+        <span>{formatCount(product.quantity)} qty</span>
+        <span>{[product.productCode, product.term, product.billingFrequency].filter(Boolean).join(' / ')}</span>
+      </div>
+      {activeExisting ? (
+        <div className="invoice-existing-map">
+          <ArrowRight size={15} />
+          <span>{activeExisting.connectWiseProductName} / {activeExisting.connectWiseProductCode}</span>
+        </div>
+      ) : null}
+      <div className="invoice-map-form product-map-form">
+        <label>
+          <span>Catalog search</span>
+          <div className="product-catalog-search-row">
+            <input
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void runSearch();
+                }
+              }}
+              value={query}
+            />
+            <button className="button secondary compact" disabled={searching} onClick={() => void runSearch()} type="button">
+              <Search size={14} />
+              {searching ? 'Searching' : 'Search'}
+            </button>
+          </div>
+        </label>
+        {searchMessage ? <span className="product-catalog-message">{searchMessage}</span> : null}
+        {results.length > 0 ? (
+          <div className="invoice-catalog-results">
+            {results.map((target) => (
+              <label className="product-target-option" key={target.connectwiseProductCode}>
+                <input
+                  checked={selectedCode === target.connectwiseProductCode}
+                  onChange={() => setSelectedCode(target.connectwiseProductCode)}
+                  type="radio"
+                />
+                <span>
+                  <strong>{target.connectwiseProductName}</strong>
+                  <em>{target.connectwiseProductCode} - {target.source}</em>
+                </span>
+              </label>
+            ))}
+          </div>
+        ) : null}
+        <div className="invoice-product-actions">
+          <button
+            className="button primary compact"
+            disabled={isBusy || !selectedTarget}
+            onClick={() => selectedTarget && void onSave(product, selectedTarget)}
+            type="button"
+          >
+            <Check size={15} />
+            {isBusy ? 'Saving' : 'Map selected'}
+          </button>
+          <button
+            className="button secondary compact"
+            onClick={() => setShowNewItemStub((current) => !current)}
+            type="button"
+          >
+            <Package size={15} />
+            New catalog item
+          </button>
+        </div>
+      </div>
+      {showNewItemStub ? <InvoiceNewCatalogItemStub product={product} /> : null}
+      <InvoiceExceptionSamples lines={product.sampleRows} />
+    </article>
+  );
+}
+
+function InvoiceNewCatalogItemStub(props: { product: InvoiceProductException }) {
+  const { product } = props;
+  const suggestedCode = suggestedInvoiceCatalogCode(product);
+
+  return (
+    <div className="invoice-new-item-stub">
+      <div>
+        <span className="section-kicker">AI draft</span>
+        <strong>{product.productName}</strong>
+      </div>
+      <label>
+        <span>Suggested code</span>
+        <input readOnly value={suggestedCode} />
+      </label>
+      <label>
+        <span>Suggested name</span>
+        <input readOnly value={product.productName} />
+      </label>
+      <button className="button secondary compact" disabled title="AI catalog creation stub" type="button">
+        <Zap size={15} />
+        Generate
+      </button>
+    </div>
+  );
+}
+
+function InvoiceExceptionSamples(props: { lines: InvoiceExceptionLine[] }) {
+  const { lines } = props;
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return (
+    <details className="invoice-exception-samples">
+      <summary>Rows</summary>
+      <div>
+        {lines.map((line) => (
+          <span key={line.id}>
+            #{line.rawRowNumber} / {line.chargeType ?? 'Line'} / {formatCount(line.quantity)} / {invoiceIssueLabels([line]).join(', ')}
+          </span>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function invoiceIssueLabels(lines: InvoiceExceptionLine[]) {
+  const labels = new Set<string>();
+  if (lines.some((line) => line.missingCustomer)) labels.add('customer');
+  if (lines.some((line) => line.missingAgreement)) labels.add('agreement');
+  if (lines.some((line) => line.missingProduct)) labels.add('product');
+  return [...labels].map((label) => `missing ${label}`);
+}
+
+function defaultInvoiceProductSearch(product: InvoiceProductException) {
+  return product.productName || product.productCode || product.vendorProductKey;
+}
+
+function suggestedInvoiceCatalogCode(product: InvoiceProductException) {
+  return (product.productCode || product.productName || product.vendorProductKey)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
 }
 
 function AgreementsView(props: {

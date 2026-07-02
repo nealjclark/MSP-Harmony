@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import {
+  detectInvoiceVendor,
+  getInvoiceImportExceptionReview,
   importAppRiverInvoiceCsv,
   loadLatestInvoiceQuantitiesForLines,
+  refreshInvoiceImportMappings,
   type InvoiceImportSummary,
 } from './appriverInvoiceImports';
 import type { Queryable } from '../vendor/cove/operations';
@@ -129,6 +132,10 @@ async function run() {
     '119793,,"Absolute Electric, Inc.",2026-May-22,Adjustment,Exchange Online (Plan 1),O365CSP-1,Added Licenses,,30,28,-2,0,,,,absoluteelectric.com,,,"2026-May-22",2026-Jun-17,2026-Jun-21,4032091,,,,',
     '119793,,"Absolute Electric, Inc.",2026-Jun-17,Renewal,Exchange Online (Plan 1),O365CSP-1,Licenses,,0,0,27,4.22,1,113.94,113.94,absoluteelectric.com,,Monthly,2026-Jun-17,2026-Jul-17,2026-Jun-21,4032091,,,Monthly,Commerce Mode: NCE.',
   ].join('\n');
+
+  const detectedVendor = detectInvoiceVendor({ fileName: 'AccountHistory.csv', content: csv });
+  assert.equal(detectedVendor?.vendorId, 'opentext-appriver');
+  assert.equal(detectedVendor?.confidence, 'high');
 
   const imported = await importAppRiverInvoiceCsv(database, {
     fileName: 'AccountHistory.csv',
@@ -285,6 +292,179 @@ async function run() {
   assert.equal(invoiceState.latestInvoice?.invoiceNumber, '4032091');
   assert.equal(quantity?.invoiceQuantity, 27);
   assert.equal(quantity?.invoiceLineCount, 1);
+
+  const reviewDatabase: Queryable = {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid') && sql.includes('and vendor_id = $2')) {
+        return {
+          rows: [
+            {
+              id: '55555555-5555-5555-5555-555555555555',
+              vendor_id: 'opentext-appriver',
+              file_name: 'AccountHistory.csv',
+              invoice_number: '4032091',
+              imported_at: '2026-07-01T12:00:00Z',
+              invoice_date: '2026-06-21',
+              billing_period_start: '2026-05-22',
+              billing_period_end: '2026-07-17',
+              row_count: 2,
+              matched_rows: 0,
+              exception_rows: 2,
+              status: 'review',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from invoice_line_items') && sql.includes('customer_id is null or agreement_id is null or connectwise_product_code is null')) {
+        return {
+          rows: [
+            {
+              id: 'line-account',
+              raw_row_number: 7,
+              external_account_id: '522801',
+              external_account_name: 'Stetson Cybergroup',
+              vendor_product_key: 'Exchange Online (Plan 1)|Monthly|Monthly',
+              vendor_product_key_candidates: ['Exchange Online (Plan 1)|Monthly|Monthly'],
+              product_code: 'O365CSP-1',
+              product_name: 'Exchange Online (Plan 1)',
+              connectwise_product_code: 'CW-EXCHANGE-P1',
+              connectwise_product_name: 'Exchange Online Plan 1',
+              charge_type: 'Renewal',
+              quantity: '3',
+              billed_amount: '12.66',
+              term: 'Monthly',
+              billing_frequency: 'Monthly',
+              invoice_date: '2026-06-21',
+              primary_domain: 'stetson.example',
+              customer_id: null,
+              agreement_id: null,
+            },
+            {
+              id: 'line-product',
+              raw_row_number: 8,
+              external_account_id: '119793',
+              external_account_name: 'Absolute Electric',
+              vendor_product_key: 'SAT-1|Monthly|Monthly',
+              vendor_product_key_candidates: ['SAT-1|Monthly|Monthly', 'Security Awareness Training|Monthly|Monthly'],
+              product_code: 'SAT-1',
+              product_name: 'Security Awareness Training',
+              connectwise_product_code: null,
+              connectwise_product_name: null,
+              charge_type: 'Renewal',
+              quantity: '12',
+              billed_amount: '24',
+              term: 'Monthly',
+              billing_frequency: 'Monthly',
+              invoice_date: '2026-06-21',
+              primary_domain: 'absolute.example',
+              customer_id: customerId,
+              agreement_id: agreementId,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_account_mappings') && sql.includes('distinct on')) {
+        return {
+          rows: [
+            {
+              external_account_id: '522801',
+              customer_id: customerId,
+              customer_name: 'Stetson Cybergroup Inc.',
+              agreement_id: agreementId,
+              agreement_name: 'Stetson Monthly Services',
+              mapping_status: 'approved',
+              active: true,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_product_mappings') && sql.includes('vendor_product_key = any')) {
+        return { rows: [] as T[] };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+
+  const review = await getInvoiceImportExceptionReview(
+    reviewDatabase,
+    'opentext-appriver',
+    '55555555-5555-5555-5555-555555555555',
+  );
+  assert.equal(review?.summary.exceptionRows, 2);
+  assert.equal(review?.summary.missingAgreementRows, 1);
+  assert.equal(review?.summary.missingProductRows, 1);
+  assert.equal(review?.accountExceptions[0]?.externalAccountId, '522801');
+  assert.equal(review?.accountExceptions[0]?.currentMapping?.agreementName, 'Stetson Monthly Services');
+  assert.equal(review?.productExceptions[0]?.vendorProductKey, 'SAT-1|Monthly|Monthly');
+  assert.equal(review?.productExceptions[0]?.quantity, 12);
+
+  const refreshDatabase: Queryable = {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid') && sql.includes('and vendor_id = $2')) {
+        return {
+          rows: [
+            {
+              id: '55555555-5555-5555-5555-555555555555',
+              vendor_id: 'opentext-appriver',
+              file_name: 'AccountHistory.csv',
+              invoice_number: '4032091',
+              imported_at: '2026-07-01T12:00:00Z',
+              invoice_date: '2026-06-21',
+              billing_period_start: '2026-05-22',
+              billing_period_end: '2026-07-17',
+              row_count: 2,
+              matched_rows: 0,
+              exception_rows: 2,
+              status: 'review',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('update invoice_line_items') && sql.includes('vendor_account_mappings')) {
+        return { rows: [{ updated_count: 1 }] as T[] };
+      }
+
+      if (sql.includes('update invoice_line_items') && sql.includes('approved_product_mappings')) {
+        return { rows: [{ updated_count: 1 }] as T[] };
+      }
+
+      if (sql.includes('update invoice_imports') && sql.includes('returning invoice_imports.id')) {
+        return {
+          rows: [
+            {
+              id: '55555555-5555-5555-5555-555555555555',
+              vendor_id: 'opentext-appriver',
+              file_name: 'AccountHistory.csv',
+              invoice_number: '4032091',
+              imported_at: '2026-07-01T12:00:00Z',
+              invoice_date: '2026-06-21',
+              billing_period_start: '2026-05-22',
+              billing_period_end: '2026-07-17',
+              row_count: 2,
+              matched_rows: 2,
+              exception_rows: 0,
+              status: 'ready',
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  const refresh = await refreshInvoiceImportMappings(
+    refreshDatabase,
+    'opentext-appriver',
+    '55555555-5555-5555-5555-555555555555',
+  );
+  assert.equal(refresh?.accountRowsUpdated, 1);
+  assert.equal(refresh?.productRowsUpdated, 1);
+  assert.equal(refresh?.import.status, 'ready');
 
   console.log('AppRiver invoice import tests passed');
 }
