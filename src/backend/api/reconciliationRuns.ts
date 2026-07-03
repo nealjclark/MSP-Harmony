@@ -354,16 +354,16 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
      ),
      approved_product_mappings as (
        select vendor_id,
-              vendor_product_key,
+              replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
               min(connectwise_product_code) as connectwise_product_code,
               min(connectwise_product_name) as connectwise_product_name,
-              count(*) as target_count
+              count(distinct connectwise_product_code) as target_count
        from vendor_product_mappings
        where vendor_id = $1
          and active = true
          and mapping_status = 'approved'
-       group by vendor_id, vendor_product_key
-       having count(*) = 1
+       group by vendor_id, replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/')
+       having count(distinct connectwise_product_code) = 1
      )
      select
        vendor_usage_snapshots.id,

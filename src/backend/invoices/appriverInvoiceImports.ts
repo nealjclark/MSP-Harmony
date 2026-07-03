@@ -534,16 +534,19 @@ export async function refreshInvoiceImportMappings(
 
   const productResult = await database.query<{ updated_count: string | number }>(
     `with approved_product_mappings as (
-       select distinct on (vendor_id, vendor_product_key)
+       select distinct on (vendor_id, replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/'))
               vendor_id,
-              vendor_product_key,
+              replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
               connectwise_product_code,
               connectwise_product_name
          from vendor_product_mappings
         where vendor_id = $2
           and active = true
           and mapping_status = 'approved'
-        order by vendor_id, vendor_product_key, target_index, connectwise_product_code
+        order by vendor_id,
+                 replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/'),
+                 target_index,
+                 connectwise_product_code
      ),
      updated as (
        update invoice_line_items

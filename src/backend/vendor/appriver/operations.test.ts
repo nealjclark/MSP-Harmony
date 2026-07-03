@@ -523,6 +523,18 @@ async function run() {
     ['Exchange Online Plan 1 - AM', 'Exchange Online Plan 1-AM'],
   );
 
+  const urlEncodedMappings = await loadAppRiverProductMappings(urlEncodedProductMappingDatabase);
+  const teamsAudio =
+    urlEncodedMappings['Microsoft Teams Audio Conferencing with dial-out to USA/CAN (Add-on)|Monthly|Monthly'];
+  assert.equal(teamsAudio?.productCode, 'CW-TEAMS-AUDIO');
+  assert.deepEqual(
+    teamsAudio?.vendorProductKeys?.sort(),
+    [
+      'Microsoft Teams Audio Conferencing with dial-out to USA%2FCAN (Add-on)|Monthly|Monthly',
+      'Microsoft Teams Audio Conferencing with dial-out to USA/CAN (Add-on)|Monthly|Monthly',
+    ],
+  );
+
   console.log('appriver operations tests passed');
 }
 
@@ -579,6 +591,26 @@ const exchangeProductAliasDatabase: Queryable = {
             product_code: 'Exchange Online Plan 1 - AM',
           },
         ] as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const urlEncodedProductMappingDatabase: Queryable = {
+  async query<T = unknown>(sql: string) {
+    if (sql.includes('from vendor_product_mappings')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Microsoft Teams Audio Conferencing with dial-out to USA%2FCAN (Add-on)|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'CW-TEAMS-AUDIO',
+            connectwise_product_name: 'Teams Audio Conferencing',
+            unit_price: null,
+          } as T,
+        ],
       };
     }
 

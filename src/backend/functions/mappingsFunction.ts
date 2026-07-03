@@ -146,7 +146,7 @@ export async function updateAccountMappingHttp(
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
-  const externalAccountId = request.params.externalAccountId;
+  const externalAccountId = decodedRouteParam(request.params.externalAccountId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
@@ -198,7 +198,7 @@ export async function updateProductMappingHttp(
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
-  const vendorProductKey = request.params.vendorProductKey;
+  const vendorProductKey = decodedRouteParam(request.params.vendorProductKey);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
@@ -249,7 +249,7 @@ export async function listProductMappingCustomersHttp(
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
-  const vendorProductKey = request.params.vendorProductKey;
+  const vendorProductKey = decodedRouteParam(request.params.vendorProductKey);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
@@ -329,7 +329,7 @@ export async function deactivateProductBundleHttp(
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
-  const bundleKey = request.params.bundleKey;
+  const bundleKey = decodedRouteParam(request.params.bundleKey);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
@@ -575,7 +575,7 @@ export async function deactivateUsageOverrideHttp(
   if (auth.response) return auth.response;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
-  const overrideId = request.params.overrideId;
+  const overrideId = decodedRouteParam(request.params.overrideId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
@@ -835,6 +835,18 @@ function unsupportedVendorResponse(value: string | undefined) {
   return jsonResponse(400, {
     error: `Mapping is not available for integration "${value ?? 'unknown'}".`,
   });
+}
+
+function decodedRouteParam(value: string | undefined) {
+  if (!value) {
+    return value;
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function isMappingStatus(value: unknown): value is MappingStatus {

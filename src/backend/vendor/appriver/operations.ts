@@ -1360,20 +1360,43 @@ function withEquivalentAppRiverProductMappings(
 }
 
 function equivalentAppRiverProductKeys(vendorProductKey: string) {
-  const parts = vendorProductKey.split('|');
-  const productName = parts[0]?.trim();
-  if (!productName) {
-    return [];
-  }
-  if (!/^(Microsoft|Office)\s+365\b/i.test(productName) || /\(no\s+Teams\)/i.test(productName)) {
-    return [];
+  const keys = new Set<string>();
+  const decodedProductKey = decodedAppRiverProductKey(vendorProductKey);
+  const sourceKeys = [vendorProductKey];
+  if (decodedProductKey !== vendorProductKey) {
+    sourceKeys.push(decodedProductKey);
+    keys.add(decodedProductKey);
   }
 
-  const equivalentProductNames = /\s+\(T\)$/i.test(productName)
-    ? [productName.replace(/\s+\(T\)$/i, '')]
-    : [`${productName} (T)`];
+  for (const sourceKey of sourceKeys) {
+    const parts = sourceKey.split('|');
+    const productName = parts[0]?.trim();
+    if (!productName) {
+      continue;
+    }
+    if (!/^(Microsoft|Office)\s+365\b/i.test(productName) || /\(no\s+Teams\)/i.test(productName)) {
+      continue;
+    }
 
-  return equivalentProductNames.map((equivalentProductName) => [equivalentProductName, ...parts.slice(1)].join('|'));
+    const equivalentProductNames = /\s+\(T\)$/i.test(productName)
+      ? [productName.replace(/\s+\(T\)$/i, '')]
+      : [`${productName} (T)`];
+
+    for (const equivalentProductName of equivalentProductNames) {
+      keys.add([equivalentProductName, ...parts.slice(1)].join('|'));
+    }
+  }
+
+  keys.delete(vendorProductKey);
+  return [...keys];
+}
+
+function decodedAppRiverProductKey(vendorProductKey: string) {
+  try {
+    return decodeURIComponent(vendorProductKey);
+  } catch {
+    return vendorProductKey;
+  }
 }
 
 function nullableMoney(value: string | number | null | undefined) {

@@ -7740,6 +7740,7 @@ function MappingsView(props: {
     usageOverrides,
   } = props;
   const [showMappedAccounts, setShowMappedAccounts] = useState(false);
+  const [showMappedProducts, setShowMappedProducts] = useState(false);
   const [dattoMappingDataset, setDattoMappingDataset] = useState<DattoMappingDataset>('saas');
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [manualCustomerId, setManualCustomerId] = useState('');
@@ -7773,18 +7774,23 @@ function MappingsView(props: {
   const accountMappings = filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountCandidates = filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountRows = showMappedAccounts ? [...accountMappings, ...accountCandidates] : accountCandidates;
-  const productRows = [
-    ...(mappingState?.productMappings ?? []),
-    ...(mappingState?.productCandidates ?? []),
-  ].filter((row) => dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined));
-  const productGroups = useMemo(() => buildProductGroups(productRows), [productRows]);
+  const productMappings = (mappingState?.productMappings ?? []).filter((row) =>
+    dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  );
+  const productCandidates = (mappingState?.productCandidates ?? []).filter((row) =>
+    dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  );
+  const allProductRows = [...productMappings, ...productCandidates];
+  const visibleProductRows = showMappedProducts ? allProductRows : productCandidates;
+  const allProductGroups = useMemo(() => buildProductGroups(allProductRows), [allProductRows]);
+  const productGroups = useMemo(() => buildProductGroups(visibleProductRows), [visibleProductRows]);
   const productSelectionDefaults = useMemo(() => buildProductSelectionDefaults(productGroups), [productGroups]);
   const productBundles = (mappingState?.productBundles ?? []).filter((bundle) =>
     dattoBundleMatchesDataset(bundle, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
   );
   const bundleProductOptions = useMemo(
     () =>
-      productGroups
+      allProductGroups
         .map((group) => ({
           vendorProductKey: group.vendorProductKey,
           vendorProductName: group.vendorProductName,
@@ -7795,7 +7801,7 @@ function MappingsView(props: {
             left.vendorProductName.localeCompare(right.vendorProductName) ||
             left.vendorProductKey.localeCompare(right.vendorProductKey),
         ),
-    [productGroups],
+    [allProductGroups],
   );
   const customerOptions = mappingState?.customerOptions ?? [];
   const selectedOverrideCustomer = customerOptions.find((option) => option.customerId === overrideCustomerId);
@@ -8126,8 +8132,8 @@ function MappingsView(props: {
       <section className="metric-grid mapping-metrics" aria-label="Mapping summary">
         <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length)} />
         <MetricCard icon={ClipboardCheck} label="Client review" tone="warn" value={formatCount(accountCandidates.filter((candidate) => candidate.status === 'needs-review').length)} />
-        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(productRows.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length)} />
-        <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productRows.filter((row) => !('id' in row)).length)} />
+        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(productMappings.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length)} />
+        <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productCandidates.length)} />
       </section>
 
       {selectedIntegrationId === 'ncentral' ? (
@@ -8294,8 +8300,20 @@ function MappingsView(props: {
           <div className="surface-header">
             <div>
               <span className="section-kicker">Product mapping</span>
-              <h2>{productGroups.length.toLocaleString()} {selectedIntegrationName} product groups</h2>
+              <h2>
+                {showMappedProducts
+                  ? `${productGroups.length.toLocaleString()} ${selectedIntegrationName} product groups`
+                  : `${productGroups.length.toLocaleString()} unmatched ${selectedIntegrationName} product groups`}
+              </h2>
             </div>
+            <label className="switch-control compact-switch">
+              <input
+                checked={showMappedProducts}
+                onChange={(event) => setShowMappedProducts(event.target.checked)}
+                type="checkbox"
+              />
+              Show matched products
+            </label>
           </div>
 
           <div className="mapping-review-list">

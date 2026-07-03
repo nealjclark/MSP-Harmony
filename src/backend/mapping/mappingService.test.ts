@@ -215,6 +215,33 @@ async function run() {
   assert.equal(insertQueries[1]?.values?.[6], 'approved');
   assert.equal(insertQueries[1]?.values?.[9], true);
 
+  const encodedAppRiverProductKey =
+    'Microsoft Teams Audio Conferencing with dial-out to USA%2FCAN (Add-on)|Monthly|Monthly';
+  const decodedAppRiverProductKey =
+    'Microsoft Teams Audio Conferencing with dial-out to USA/CAN (Add-on)|Monthly|Monthly';
+  const encodedProductQueryStart = queries.length;
+  await updateProductMapping(database, 'opentext-appriver', encodedAppRiverProductKey, {
+    status: 'approved',
+    reviewedBy: 'reviewer@example.com',
+    targetProducts: [
+      {
+        connectwiseProductCode: 'CW-TEAMS-AUDIO',
+        connectwiseProductName: 'Teams Audio Conferencing',
+      },
+    ],
+  });
+  const encodedProductQueries = queries.slice(encodedProductQueryStart);
+  const encodedDeactivateAliases = encodedProductQueries[0]?.values?.[1] as string[] | undefined;
+  assert.equal(encodedProductQueries[0]?.sql.includes('vendor_product_key = any'), true);
+  assert.equal(encodedDeactivateAliases?.includes(encodedAppRiverProductKey), true);
+  assert.equal(encodedDeactivateAliases?.includes(decodedAppRiverProductKey), true);
+  assert.equal(encodedDeactivateAliases?.includes(decodedAppRiverProductKey.replace(/\//g, '%2f')), true);
+  assert.equal(encodedDeactivateAliases?.includes(encodeURIComponent(decodedAppRiverProductKey)), true);
+  const encodedProductInsert = encodedProductQueries.find((query) =>
+    query.sql.includes('insert into vendor_product_mappings'),
+  );
+  assert.equal(encodedProductInsert?.values?.[1], decodedAppRiverProductKey);
+
   const bundleQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const bundleDatabase: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {

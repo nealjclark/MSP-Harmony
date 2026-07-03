@@ -599,13 +599,14 @@ export async function updateProductMapping(
     reviewedBy?: string;
   },
 ) {
+  const canonicalProductKey = canonicalVendorProductKey(vendorProductKey);
   await database.query(
     `update vendor_product_mappings
      set active = false,
          updated_at = now()
      where vendor_id = $1
-       and vendor_product_key = $2`,
-    [vendorId, vendorProductKey],
+       and vendor_product_key = any($2::text[])`,
+    [vendorId, vendorProductKeyAliases(canonicalProductKey, vendorProductKey)],
   );
 
   if (input.status === 'rejected') {
@@ -656,7 +657,7 @@ export async function updateProductMapping(
          updated_at = now()`,
       [
         vendorId,
-        vendorProductKey,
+        canonicalProductKey,
         index,
         target.connectwiseProductCode,
         target.connectwiseProductName,
@@ -711,6 +712,7 @@ export async function listProductMappingCustomers(
   vendorId: IntegrationId,
   vendorProductKey: string,
 ): Promise<ProductMappingCustomerReview> {
+  const canonicalProductKey = canonicalVendorProductKey(vendorProductKey);
   const result = await database.query<ProductMappingCustomerReviewRow>(
     `with latest_sync_run as (
        select id
@@ -794,10 +796,10 @@ export async function listProductMappingCustomers(
        agreement_additions.product_name,
        agreement_additions.product_code,
        agreement_additions.connectwise_addition_id`,
-    [vendorId, vendorProductKey],
+    [vendorId, canonicalProductKey],
   );
 
-  return mapProductMappingCustomerReview(vendorId, vendorProductKey, result.rows);
+  return mapProductMappingCustomerReview(vendorId, canonicalProductKey, result.rows);
 }
 
 export async function upsertProductBundle(
@@ -1037,16 +1039,16 @@ export async function applyApprovedMappings(
   const productResult = await database.query<{ updated_count: string | number }>(
     `with approved_product_mappings as (
        select vendor_id,
-              vendor_product_key,
+              replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
               min(connectwise_product_code) as connectwise_product_code,
               min(connectwise_product_name) as connectwise_product_name,
-              count(*) as target_count
+              count(distinct connectwise_product_code) as target_count
        from vendor_product_mappings
        where vendor_id = $1
          and active = true
          and mapping_status = 'approved'
-       group by vendor_id, vendor_product_key
-       having count(*) = 1
+       group by vendor_id, replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/')
+       having count(distinct connectwise_product_code) = 1
      ),
      updated as (
        update vendor_usage_snapshots
@@ -1489,7 +1491,11 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
        group by vendor_id, vendor_product_key
      ) vendor_product_usage_counts
        on vendor_product_usage_counts.vendor_id = vendor_product_mappings.vendor_id
-      and vendor_product_usage_counts.vendor_product_key = vendor_product_mappings.vendor_product_key
+      and vendor_product_usage_counts.vendor_product_key = replace(
+        replace(vendor_product_mappings.vendor_product_key, '%2F', '/'),
+        '%2f',
+        '/'
+      )
      where vendor_product_mappings.vendor_id = $1
      group by
        vendor_product_mappings.id,
@@ -2018,6 +2024,24 @@ function productClassesForVendorProductKey(vendorProductKey: string) {
   );
 }
 
+export function canonicalVendorProductKey(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function vendorProductKeyAliases(canonicalProductKey: string, originalProductKey: string) {
+  return [
+    originalProductKey,
+    canonicalProductKey,
+    canonicalProductKey.replace(/\//g, '%2F'),
+    canonicalProductKey.replace(/\//g, '%2f'),
+    encodeURIComponent(canonicalProductKey),
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+}
+
 function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
   return {
     id: row.id,
@@ -2043,15 +2067,16 @@ function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
 }
 
 function mapProductMappingRow(row: ProductMappingRow): ProductMapping {
+  const vendorProductKey = canonicalVendorProductKey(row.vendor_product_key);
   const productClass = productClassesForVendor(row.vendor_id).find(
-    (item) => item.vendorProductKey === row.vendor_product_key,
+    (item) => item.vendorProductKey === vendorProductKey,
   );
 
   return {
     id: row.id,
     vendorId: row.vendor_id,
-    vendorProductKey: row.vendor_product_key,
-    vendorProductName: productClass?.vendorProductName ?? row.vendor_product_key,
+    vendorProductKey,
+    vendorProductName: productClass?.vendorProductName ?? vendorProductKey,
     status: row.mapping_status,
     confidence: row.confidence,
     target: {
