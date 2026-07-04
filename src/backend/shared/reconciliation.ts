@@ -116,10 +116,11 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
   );
 
   const groupedSnapshots = groupSnapshotsByAgreement(scopedSnapshots);
-  const groupedRelevantAdditions = groupAdditionsByAgreement(
+  const groupedRelevantAdditions = groupAdditionsForSnapshotAgreements(
     request.agreementAdditions.filter((addition) =>
       [...targetProductCodes(rule), ...(rule.addOn ? targetProductCodes(rule.addOn) : [])].includes(addition.productCode),
     ),
+    groupedSnapshots,
   );
   const agreementKeys = new Set([...groupedSnapshots.keys(), ...groupedRelevantAdditions.keys()]);
   const lines: ReconciliationLine[] = [];
@@ -128,7 +129,8 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     const [clientId, agreementId] = agreementKey.split('|');
     const snapshots = groupedSnapshots.get(agreementKey) ?? [];
     const proposedBaseQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
-    const baseAdditions = findAdditions(request.agreementAdditions, clientId, agreementId, targetProductCodes(rule));
+    const relevantAdditions = groupedRelevantAdditions.get(agreementKey) ?? [];
+    const baseAdditions = findAdditions(relevantAdditions, clientId, agreementId, targetProductCodes(rule));
     if (rule.requiresExistingAgreementProduct && baseAdditions.length === 0) {
       return;
     }
@@ -172,7 +174,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     if (rule.allowance?.kind === 'included' && rule.addOn) {
       const sourceQuantity = sumMetric(snapshots, rule.addOn.metric);
       const proposedAddOnQuantity = calculateAddOnQuantity(snapshots, rule.allowance.metric, rule.allowance.includedQuantity, rule.allowance.scope, rule.addOn.incrementQuantity, rule.addOn.roundOverage);
-      const addOnAdditions = findAdditions(request.agreementAdditions, clientId, agreementId, targetProductCodes(rule.addOn));
+      const addOnAdditions = findAdditions(relevantAdditions, clientId, agreementId, targetProductCodes(rule.addOn));
       const agreementQuantity = sumAdditions(addOnAdditions);
       const delta = proposedAddOnQuantity - agreementQuantity;
       const unitPrice = unitPriceForImpact(addOnAdditions, rule.addOn.productCode, rule.addOn.unitPrice);
@@ -290,6 +292,40 @@ function groupAdditionsByAgreement(additions: AgreementAddition[]) {
     const key = `${addition.clientId}|${addition.agreementId}`;
     const existing = groups.get(key) ?? [];
     groups.set(key, [...existing, addition]);
+    return groups;
+  }, new Map<string, AgreementAddition[]>());
+}
+
+function groupAdditionsForSnapshotAgreements(
+  additions: AgreementAddition[],
+  snapshotGroups: Map<string, UsageSnapshot[]>,
+) {
+  const snapshotKeysByClient = new Map<string, string[]>();
+  for (const key of snapshotGroups.keys()) {
+    const [clientId] = key.split('|');
+    snapshotKeysByClient.set(clientId, [...(snapshotKeysByClient.get(clientId) ?? []), key]);
+  }
+
+  return additions.reduce((groups, addition) => {
+    const actualKey = `${addition.clientId}|${addition.agreementId}`;
+    const clientSnapshotKeys = snapshotKeysByClient.get(addition.clientId) ?? [];
+    const targetKeys =
+      clientSnapshotKeys.includes(actualKey) || clientSnapshotKeys.length !== 1 ? [actualKey] : clientSnapshotKeys;
+
+    for (const targetKey of targetKeys) {
+      const [, targetAgreementId] = targetKey.split('|');
+      const projectedAddition =
+        targetAgreementId === addition.agreementId
+          ? addition
+          : {
+              ...addition,
+              agreementId: targetAgreementId,
+              sourceAgreementId: addition.sourceAgreementId ?? addition.agreementId,
+            };
+      const existing = groups.get(targetKey) ?? [];
+      groups.set(targetKey, [...existing, projectedAddition]);
+    }
+
     return groups;
   }, new Map<string, AgreementAddition[]>());
 }

@@ -232,7 +232,12 @@ export class PostgresIntegrationSettingsRepository
                  from vendor_usage_snapshots
                  where vendor_id = 'opentext-appriver'`,
               )
-          : undefined;
+          : await this.database.query<CountRow>(
+              `select count(*) as count
+               from vendor_usage_snapshots
+               where vendor_id = $1`,
+              [integrationId],
+            );
     if (!result) {
       return undefined;
     }

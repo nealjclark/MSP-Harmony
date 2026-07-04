@@ -36,6 +36,9 @@ export type AgreementAddition = {
   quantity: number;
   unitPrice?: MoneyAmount;
   updatedAt?: string;
+  sourceAgreementId?: string;
+  sourceAgreementName?: string;
+  sourceConnectWiseAgreementId?: string;
 };
 
 export type DimensionFilter = Record<string, string | number | boolean>;

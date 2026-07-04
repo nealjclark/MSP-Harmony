@@ -2,7 +2,7 @@
 
 ## Data Flow
 
-ConnectWise is the system of record for customers, agreements, products, and agreement additions. Vendor integrations normalize their usage or invoice data into shared snapshots. Reconciliation compares normalized vendor snapshots with ConnectWise additions and produces findings.
+ConnectWise is the system of record for customers, agreements, products, and agreement additions. Vendor integrations declare the shape of data they provide, then normalize live API usage or invoice imports into shared tables. Customer-scoped usage feeds shared snapshots for reconciliation, while reseller-wide product-total invoices stay in invoice line items for cost/profit tracking and product mapping.
 
 The first MVP flow is:
 

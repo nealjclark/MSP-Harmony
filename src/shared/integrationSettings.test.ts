@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   getIntegrationSettingsDefinition,
+  getIntegrationDataSource,
+  integrationDataSourceRequiresCustomerMapping,
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationIdsWithCapability,
@@ -97,6 +99,7 @@ const connectedMicrosoft365 = validateIntegrationSettings(microsoft365, {
 assert.equal(connectedMicrosoft365.configuredStatus, 'connected');
 assert.deepEqual(connectedMicrosoft365.missingSecrets, []);
 assert.deepEqual(connectedMicrosoft365.missingNonSecrets, []);
+assert.equal(getIntegrationDataSource('microsoft-365', 'user-license-detail')?.requiresCustomerMapping, true);
 
 const appRiver = getIntegrationSettingsDefinition('opentext-appriver');
 assert.ok(appRiver);
@@ -119,7 +122,26 @@ assert.deepEqual(connectedAppRiver.missingSecrets, []);
 assert.deepEqual(connectedAppRiver.missingNonSecrets, []);
 assert.equal(integrationHasCapability('opentext-appriver', 'invoice-import'), true);
 assert.equal(integrationHasCapability('opentext-appriver', 'mapping'), true);
-assert.deepEqual(integrationIdsWithCapability('invoice-import'), ['opentext-appriver']);
+assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
+  'cove',
+  'ncentral',
+  'sentinelone',
+  'proofpoint',
+  'datto',
+  'microsoft-365',
+  'opentext-appriver',
+  'huntress',
+  'microsoft-azure',
+  'pax8',
+  'custom-table',
+]);
+
+const huntress = getIntegrationSettingsDefinition('huntress');
+assert.ok(huntress);
+assert.equal(huntress.authMode, 'none');
+assert.equal(integrationHasCapability('huntress', 'invoice-import'), true);
+assert.equal(getIntegrationDataSource('huntress', 'customer-product-breakdown')?.label, 'Customer products');
+assert.equal(integrationDataSourceRequiresCustomerMapping('reseller-product-total'), false);
 
 const datto = getIntegrationSettingsDefinition('datto');
 assert.ok(datto);
@@ -140,6 +162,14 @@ assert.equal(connectedDatto.configuredStatus, 'connected');
 assert.deepEqual(connectedDatto.missingSecrets, []);
 assert.deepEqual(connectedDatto.missingNonSecrets, []);
 assert.equal(integrationHasCapability('datto', 'mapping'), true);
-assert.equal(integrationHasAnyCapability('proofpoint'), false);
+assert.equal(integrationHasCapability('datto', 'invoice-import'), true);
+assert.equal(integrationHasAnyCapability('proofpoint'), true);
+
+const customTable = getIntegrationSettingsDefinition('custom-table');
+assert.ok(customTable);
+assert.equal(customTable.authMode, 'none');
+assert.equal(validateIntegrationSettings(customTable).configuredStatus, 'connected');
+assert.equal(integrationHasCapability('custom-table', 'invoice-import'), true);
+assert.equal(integrationHasCapability('custom-table', 'mapping'), true);
 
 console.log('integration settings tests passed');

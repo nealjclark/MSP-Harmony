@@ -4,6 +4,7 @@ import {
   createIntegrationSettingsProvider,
   type SecretReader,
 } from './settingsProvider';
+import { listIntegrationSettingsDefinitions } from '../../shared/integrationSettings';
 
 async function run() {
   const localProvider = createIntegrationSettingsProvider({
@@ -113,7 +114,7 @@ async function run() {
   );
 
   const allSettings = await localProvider.listIntegrationSettings();
-  assert.equal(allSettings.length, 10);
+  assert.equal(allSettings.length, listIntegrationSettingsDefinitions().length);
 
   const envReader = createDefaultSecretReader(
     {

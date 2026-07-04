@@ -114,6 +114,24 @@ async function run() {
   assert.equal(serverLine?.sourceQuantity, 1);
   assert.equal(serverLine?.agreementQuantity, 1);
 
+  const annualAgreementResult = await reconcileVendorFromDatabase(crossAgreementDatabase, 'cove', { syncRunId });
+  const annualAgreementLine = annualAgreementResult.lines.find((line) => line.productCode === 'COVE-SERVER');
+  assert.equal(annualAgreementLine?.status, 'matched');
+  assert.equal(annualAgreementLine?.sourceQuantity, 1);
+  assert.equal(annualAgreementLine?.agreementQuantity, 1);
+  assert.equal(annualAgreementLine?.agreementId, '22222222-2222-2222-2222-222222222222');
+  assert.equal(annualAgreementLine?.matchedAgreementAdditions[0]?.agreementId, '33333333-3333-3333-3333-333333333333');
+  assert.equal(annualAgreementLine?.matchedAgreementAdditions[0]?.agreementName, 'Botta Annual Agreement');
+  assert.equal(
+    crossAgreementQueries.some(
+      (query) =>
+        query.sql.includes('agreement_additions.customer_id = any($1::uuid[])') &&
+        Array.isArray(query.values?.[0]) &&
+        query.values[0].includes('11111111-1111-1111-1111-111111111111'),
+    ),
+    true,
+  );
+
   const appRiverBundleResult = await reconcileVendorFromDatabase(appRiverBundleDatabase, 'opentext-appriver', { syncRunId });
   const bundleLine = appRiverBundleResult.lines.find((line) => line.productCode === 'CW-ZIX-ADVANCED');
   assert.equal(bundleLine?.sourceQuantity, 10);
@@ -226,6 +244,74 @@ const overrideDatabase: Queryable = {
             quantity: '1',
             unit_price: '120',
             updated_at: new Date('2026-06-15T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const crossAgreementQueries: Array<{ sql: string; values?: unknown[] }> = [];
+const crossAgreementDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    crossAgreementQueries.push({ sql, values });
+
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return {
+        rows: [
+          {
+            id: 'snapshot-cross-agreement',
+            vendor_id: 'cove',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            vendor_product_key: 'cove-server',
+            product_code: 'COVE-SERVER',
+            product_name: 'Cove Server Backup',
+            quantity: '1',
+            observed_at: new Date('2026-06-15T12:00:00Z'),
+            dimensions: {
+              protectedSystemType: 'server',
+              selectedStorageGb: 300,
+            },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-annual-server',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '33333333-3333-3333-3333-333333333333',
+            source_agreement_name: 'Botta Annual Agreement',
+            source_connectwise_agreement_id: '9900',
+            connectwise_addition_id: 'cw-annual-server',
+            product_code: 'COVE-SERVER',
+            product_name: 'Cove Server Backup',
+            quantity: '1',
+            unit_price: '120',
+            addition_status: 'Active',
+            updated_at: new Date('2026-06-15T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            customer_name: 'Botta Sferrazza',
+            connectwise_company_id: 'BOTTA',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            agreement_name: 'Botta Monthly Services',
+            connectwise_agreement_id: '8800',
           },
         ] as T[],
       };

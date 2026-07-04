@@ -1,10 +1,12 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
-import { type IntegrationId, getIntegrationSettingsDefinition } from '../../shared/integrationSettings';
+import { type IntegrationDataSourceType, type IntegrationId, getIntegrationSettingsDefinition } from '../../shared/integrationSettings';
 import {
   detectInvoiceVendor,
   getInvoiceImportExceptionReview,
+  importMappedInvoiceTableCsv,
   type InvoiceImportMode,
+  type InvoiceTableColumnMap,
   importAppRiverInvoiceCsv,
   listInvoiceImports,
   refreshInvoiceImportMappings,
@@ -19,6 +21,8 @@ type InvoiceImportBody = {
   fileName?: string;
   content?: string;
   importMode?: string;
+  columnMap?: InvoiceTableColumnMap;
+  sourceType?: string;
 };
 
 export async function importDetectedInvoiceHttp(
@@ -128,6 +132,66 @@ export async function importAppRiverInvoiceHttp(
   }
 }
 
+export async function importMappedInvoiceTableHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const vendorId = parseIntegrationId(request.params.vendorId);
+  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
+    return unsupportedInvoiceVendorResponse(request.params.vendorId);
+  }
+
+  const body = (await request.json().catch(() => ({}))) as InvoiceImportBody;
+  const fileName = typeof body.fileName === 'string' && body.fileName.trim() ? body.fileName.trim() : undefined;
+  const content = typeof body.content === 'string' ? body.content : undefined;
+  const importMode = parseInvoiceImportMode(body.importMode);
+  const columnMap = body.columnMap && typeof body.columnMap === 'object' ? body.columnMap : undefined;
+  const sourceType = parseInvoiceImportSourceType(body.sourceType);
+
+  if (!fileName || !content || !columnMap) {
+    return jsonResponse(400, {
+      error: 'Invoice table import requires fileName, CSV content, and columnMap.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Invoice import needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      detectedVendor: {
+        vendorId,
+        vendorName: getIntegrationSettingsDefinition(vendorId)?.displayName ?? vendorId,
+        confidence: 'high',
+        reason: 'User selected this integration and mapped invoice table columns.',
+      },
+      import: await importMappedInvoiceTableCsv(repositoryContext.pool, {
+        vendorId,
+        fileName,
+        content,
+        columnMap,
+        sourceType,
+        importMode,
+      }),
+      importMode,
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to import mapped invoice table.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function listInvoiceImportsHttp(
   request: HttpRequest,
   _context: InvocationContext,
@@ -166,7 +230,7 @@ export async function getInvoiceImportExceptionsHttp(
 
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;
-  if (vendorId !== 'opentext-appriver') {
+  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
   if (!importId) {
@@ -206,7 +270,7 @@ export async function refreshInvoiceImportMappingsHttp(
 
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;
-  if (vendorId !== 'opentext-appriver') {
+  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
   if (!importId) {
@@ -251,6 +315,13 @@ app.http('importDetectedInvoice', {
   handler: importDetectedInvoiceHttp,
 });
 
+app.http('importMappedInvoiceTable', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'invoice-imports/{vendorId}/table',
+  handler: importMappedInvoiceTableHttp,
+});
+
 app.http('listInvoiceImports', {
   methods: ['GET'],
   authLevel: 'anonymous',
@@ -278,6 +349,22 @@ function parseIntegrationId(value: string | undefined): IntegrationId | undefine
 
 function parseInvoiceImportMode(value: string | undefined): InvoiceImportMode {
   return value === 'overwrite' ? 'overwrite' : 'merge';
+}
+
+function parseInvoiceImportSourceType(value: string | undefined): IntegrationDataSourceType | undefined {
+  if (
+    value === 'user-license-detail' ||
+    value === 'customer-product-breakdown' ||
+    value === 'reseller-product-total'
+  ) {
+    return value;
+  }
+
+  return undefined;
+}
+
+function integrationSupportsInvoiceImport(value: IntegrationId) {
+  return supportedInvoiceVendorIds.includes(value);
 }
 
 function unsupportedInvoiceVendorResponse(value: string | undefined): HttpResponseInit {

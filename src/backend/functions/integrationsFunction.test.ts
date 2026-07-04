@@ -103,7 +103,7 @@ async function run() {
       { log() {} } as never,
     );
     assert.equal(dattoTestResponse.status, 400);
-    assert.match(String((dattoTestResponse.jsonBody as { error?: string }).error), /Datto Backup settings/);
+    assert.match(String((dattoTestResponse.jsonBody as { error?: string }).error), /Datto Backup setting/);
     assert.doesNotMatch(
       String((dattoTestResponse.jsonBody as { error?: string }).error),
       /not implemented/i,

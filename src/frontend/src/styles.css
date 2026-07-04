@@ -1698,6 +1698,12 @@ h2 {
   gap: 12px;
 }
 
+.integration-management-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
 .reports-page {
   display: grid;
   gap: 14px;
@@ -3849,6 +3855,12 @@ h2 {
   font-size: 0.9rem;
 }
 
+.capability-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .integration-chip,
 .auth-chip,
 .integration-status {
@@ -4013,7 +4025,7 @@ h2 {
 
 .integration-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 0;
   margin: 14px 18px 10px;
   padding: 4px;
@@ -4041,6 +4053,23 @@ h2 {
   display: grid;
   gap: 14px;
   padding: 6px 20px 18px;
+}
+
+.integration-invoice-settings {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfdf9;
+}
+
+.integration-invoice-settings > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted);
 }
 
 .config-field {
@@ -4275,6 +4304,10 @@ h2 {
   min-width: 0;
 }
 
+.import-vendor-select {
+  min-width: 220px;
+}
+
 .segmented-control.import-mode-toggle {
   min-height: 36px;
 }
@@ -4282,6 +4315,14 @@ h2 {
 .segmented-control.import-mode-toggle button {
   min-width: 92px;
   padding-inline: 12px;
+}
+
+.segmented-control.invoice-source-toggle {
+  justify-content: flex-start;
+}
+
+.segmented-control.invoice-source-toggle button {
+  min-width: 124px;
 }
 
 .import-drop {
@@ -4300,6 +4341,58 @@ h2 {
 
 .import-drop svg {
   color: var(--teal-dark);
+}
+
+.invoice-table-import-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.invoice-table-import-header,
+.invoice-table-import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.invoice-table-import-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.invoice-table-import-body {
+  display: grid;
+  gap: 12px;
+}
+
+.invoice-table-import-summary {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.invoice-table-import-summary strong,
+.invoice-table-import-summary span {
+  overflow-wrap: anywhere;
+}
+
+.invoice-table-import-summary span,
+.invoice-table-import-actions span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.invoice-column-map-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
 }
 
 .import-table,
@@ -4652,6 +4745,7 @@ h2 {
   .mapping-review-grid,
   .integrations-live-bar,
   .settings-user-form,
+  .invoice-column-map-grid,
   .product-bundle-form,
   .usage-override-form {
     grid-template-columns: 1fr;
@@ -4935,6 +5029,17 @@ h2 {
   .import-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .import-vendor-select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .invoice-table-import-header,
+  .invoice-table-import-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

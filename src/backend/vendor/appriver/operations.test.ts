@@ -422,6 +422,7 @@ async function run() {
   const mappedDimensions = JSON.parse(String(mappedSnapshot?.[10]));
   assert.equal(mappedDimensions.subscriptionSource, 'appriver-securecloud-subscription');
   assert.equal(mappedDimensions.customerName, 'Mapped Client');
+  assert.equal(mappedDimensions.externalCustomerAccountNumber, 'cw-123');
   assert.equal(mappedDimensions.assignedLicenses, 1);
   assert.equal(mappedDimensions.unassignedLicenses, 2);
   assert.equal(mappedDimensions.domain, 'mapped.example');
@@ -453,6 +454,7 @@ async function run() {
     queued.workItems.map((item) => item.external_customer_id),
     ['customer-1', 'customer-2'],
   );
+  assert.equal((queued.workItems[0]?.raw_payload as { externalCustomerAccountNumber?: string } | undefined)?.externalCustomerAccountNumber, 'cw-123');
 
   const firstQueuedWork = await processNextAppRiverQueuedCustomer({
     pool: queued.database,
@@ -478,6 +480,8 @@ async function run() {
   assert.equal(secondQueuedWork.shouldContinue, false);
   assert.equal(secondQueuedWork.processedCustomerId, 'customer-2');
   assert.equal(queued.snapshots.length, 2);
+  const queuedMappedDimensions = JSON.parse(String(queued.snapshots[0]?.[10]));
+  assert.equal(queuedMappedDimensions.externalCustomerAccountNumber, 'cw-123');
   assert.equal(queued.completed[0]?.[1], 3);
   assert.equal(queued.completed[0]?.[2], 2);
   const queuedMetadata = JSON.parse(String(queued.completed[0]?.[3]));

@@ -17,6 +17,7 @@ export type VendorAccountSource = {
   externalAccountId: string;
   externalAccountName: string;
   rowCount: number;
+  productCodes?: string[];
   lastSeenAt?: string;
 };
 
@@ -215,6 +216,7 @@ type AccountSourceRow = {
   external_account_id: string;
   external_account_name: string | null;
   row_count: number;
+  product_codes: unknown;
   last_seen_at: Date | string | null;
 };
 
@@ -571,10 +573,15 @@ export async function updateAccountMapping(
     throw new Error('Approving an account mapping requires customerId.');
   }
 
-  const sourceName = input.externalAccountName ?? (await loadExternalAccountName(database, vendorId, externalAccountId));
+  const canonicalAccount = await loadCanonicalVendorAccount(database, vendorId, externalAccountId, input.externalAccountName);
+  const sourceExternalAccountId = canonicalAccount?.externalAccountId ?? externalAccountId;
+  const sourceName =
+    canonicalAccount?.externalAccountName ??
+    input.externalAccountName ??
+    (await loadExternalAccountName(database, vendorId, sourceExternalAccountId));
   await upsertAccountMapping(database, {
     vendorId,
-    externalAccountId,
+    externalAccountId: sourceExternalAccountId,
     externalAccountName: sourceName,
     customerId: input.customerId,
     agreementId: input.agreementId,
@@ -587,6 +594,9 @@ export async function updateAccountMapping(
     mappingSource: 'manual',
     reviewedBy: input.reviewedBy ?? 'user',
   });
+  if (sourceExternalAccountId !== externalAccountId) {
+    await deactivateSupersededAccountAliasMapping(database, vendorId, externalAccountId, input.reviewedBy ?? 'user');
+  }
 }
 
 export async function updateProductMapping(
@@ -719,6 +729,7 @@ export async function listProductMappingCustomers(
        from sync_runs
        where integration_id = $1
          and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
        order by completed_at desc nulls last, started_at desc
        limit 1
      ),
@@ -1136,7 +1147,11 @@ export function buildAccountMappingCandidates(
     }
 
     const secondDistinct = rankedCustomers.find((candidate) => candidate.customer.customerId !== best.customer.customerId);
-    const agreementChoice = chooseAgreement(best.customer.agreements, preferredProductCodes);
+    const agreementChoice = chooseAgreement(
+      best.customer.agreements,
+      source.productCodes ?? [],
+      preferredProductCodes,
+    );
     const activeRecommended =
       best.score >= aggressiveAutoMapThreshold &&
       (!secondDistinct || best.score - secondDistinct.score >= ambiguityMargin) &&
@@ -1156,7 +1171,7 @@ export function buildAccountMappingCandidates(
       matchScore: best.score,
       activeRecommended,
       reason: activeRecommended
-        ? 'Aggressive automap found a unique customer and agreement match.'
+        ? `${agreementChoice.reason} Unique customer match was strong enough to auto-approve.`
         : agreementChoice.reason,
       evidence: [
         { label: 'Vendor rows', value: source.rowCount },
@@ -1385,6 +1400,7 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
        from sync_runs
        where integration_id = $1
          and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
        order by completed_at desc nulls last, started_at desc
        limit 1
      ),
@@ -1396,6 +1412,7 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
            max(nullif(dimensions->>'coveCustomerName', '')),
            max(nullif(dimensions->>'ncentralCustomerName', '')),
            max(nullif(dimensions->>'customerName', '')),
+           max(nullif(dimensions->>'appRiverCustomerName', '')),
            max(nullif(dimensions->>'dattoCustomerName', '')),
            max(nullif(dimensions->>'domain', '')),
            external_account_id
@@ -1406,12 +1423,47 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
          and external_account_id is not null
          and sync_run_id = (select id from latest_sync_run)
        group by external_account_id
+     ),
+     app_river_account_aliases as (
+       select
+         alias_key,
+         min(external_account_id) as external_account_id,
+         min(external_account_name) as external_account_name
+       from (
+         select
+           lower(trim(alias_value)) as alias_key,
+           source_account_names.external_account_id,
+           source_account_names.external_account_name
+         from vendor_usage_snapshots
+         inner join source_account_names
+           on source_account_names.external_account_id = vendor_usage_snapshots.external_account_id
+         cross join lateral (
+           values
+             (vendor_usage_snapshots.external_account_id),
+             (nullif(vendor_usage_snapshots.dimensions->>'externalCustomerAccountNumber', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerId', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'domain', ''))
+         ) aliases(alias_value)
+         where $1 = 'opentext-appriver'
+           and vendor_usage_snapshots.vendor_id = $1
+           and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+           and nullif(trim(alias_value), '') is not null
+       ) alias_rows
+       where alias_key is not null
+       group by alias_key
+       having count(distinct external_account_id) = 1
      )
      select
        vendor_account_mappings.id,
        vendor_account_mappings.vendor_id,
-       vendor_account_mappings.external_account_id,
-       coalesce(source_account_names.external_account_name, vendor_account_mappings.external_account_name) as external_account_name,
+       coalesce(app_river_account_aliases.external_account_id, vendor_account_mappings.external_account_id) as external_account_id,
+       coalesce(
+         source_account_names.external_account_name,
+         app_river_account_aliases.external_account_name,
+         vendor_account_mappings.external_account_name
+       ) as external_account_name,
        vendor_account_mappings.customer_id,
        customers.name as customer_name,
        vendor_account_mappings.agreement_id,
@@ -1428,15 +1480,42 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
      from vendor_account_mappings
      inner join customers on customers.id = vendor_account_mappings.customer_id
      left join agreements on agreements.id = vendor_account_mappings.agreement_id
+     left join lateral (
+       select
+         app_river_account_aliases.external_account_id,
+         app_river_account_aliases.external_account_name
+       from app_river_account_aliases
+       where app_river_account_aliases.alias_key in (
+         lower(trim(vendor_account_mappings.external_account_id)),
+         lower(trim(coalesce(vendor_account_mappings.external_account_name, '')))
+       )
+       order by
+         case
+           when app_river_account_aliases.alias_key = lower(trim(vendor_account_mappings.external_account_id)) then 0
+           else 1
+         end,
+         app_river_account_aliases.external_account_name
+       limit 1
+     ) app_river_account_aliases on true
      left join source_account_names
-       on source_account_names.external_account_id = vendor_account_mappings.external_account_id
+       on source_account_names.external_account_id = coalesce(
+         app_river_account_aliases.external_account_id,
+         vendor_account_mappings.external_account_id
+       )
      where vendor_account_mappings.vendor_id = $1
        and ($1 <> 'datto' or source_account_names.external_account_id is not null)
-     order by vendor_account_mappings.mapping_status, coalesce(source_account_names.external_account_name, vendor_account_mappings.external_account_name)`,
+     order by
+       vendor_account_mappings.mapping_status,
+       coalesce(source_account_names.external_account_name, app_river_account_aliases.external_account_name, vendor_account_mappings.external_account_name),
+       case
+         when app_river_account_aliases.external_account_id is not null
+          and app_river_account_aliases.external_account_id <> vendor_account_mappings.external_account_id then 1
+         else 0
+       end`,
     [vendorId],
   );
 
-  return result.rows.map(mapAccountMappingRow);
+  return dedupeAccountMappingsForDisplay(vendorId, result.rows.map(mapAccountMappingRow));
 }
 
 async function listProductMappings(database: Queryable, vendorId: IntegrationId): Promise<ProductMapping[]> {
@@ -1478,6 +1557,7 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
          from sync_runs
          where integration_id = $1
            and status = 'complete'
+           and coalesce(metadata->>'source', '') <> 'invoice-table'
          order by completed_at desc nulls last, started_at desc
          limit 1
        )
@@ -1527,26 +1607,121 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
        from sync_runs
        where integration_id = $1
          and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
        order by completed_at desc nulls last, started_at desc
        limit 1
+     ),
+     latest_invoice_import as (
+       select id
+       from invoice_imports
+       where vendor_id = $1
+       order by invoice_date desc nulls last, imported_at desc
+       limit 1
+     ),
+     api_account_rows as (
+       select
+         external_account_id,
+         coalesce(
+           nullif(dimensions->>'dattoExternalAccountName', ''),
+           nullif(dimensions->>'coveCustomerName', ''),
+           nullif(dimensions->>'ncentralCustomerName', ''),
+           nullif(dimensions->>'customerName', ''),
+           nullif(dimensions->>'appRiverCustomerName', ''),
+           nullif(dimensions->>'dattoCustomerName', ''),
+           nullif(dimensions->>'domain', ''),
+           external_account_id
+         ) as external_account_name,
+         observed_at,
+         nullif(product_code, '') as source_product_code,
+         nullif(dimensions->>'externalCustomerAccountNumber', '') as external_customer_account_number,
+         nullif(dimensions->>'appRiverCustomerId', '') as app_river_customer_id,
+         nullif(dimensions->>'customerName', '') as customer_name,
+         nullif(dimensions->>'appRiverCustomerName', '') as app_river_customer_name,
+         nullif(dimensions->>'domain', '') as domain
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and nullif(external_account_id, '') is not null
+         and sync_run_id = (select id from latest_sync_run)
+     ),
+     app_river_account_aliases as (
+       select
+         alias_key,
+         min(external_account_id) as external_account_id,
+         min(external_account_name) as external_account_name
+       from (
+         select
+           lower(trim(alias_value)) as alias_key,
+           api_account_rows.external_account_id,
+           api_account_rows.external_account_name
+         from api_account_rows
+         cross join lateral (
+           values
+             (api_account_rows.external_account_id),
+             (api_account_rows.external_customer_account_number),
+             (api_account_rows.app_river_customer_id),
+             (api_account_rows.customer_name),
+             (api_account_rows.app_river_customer_name),
+             (api_account_rows.domain)
+         ) aliases(alias_value)
+         where $1 = 'opentext-appriver'
+           and nullif(trim(alias_value), '') is not null
+       ) alias_rows
+       where alias_key is not null
+       group by alias_key
+       having count(distinct external_account_id) = 1
+     ),
+     source_rows as (
+       select
+         external_account_id,
+         external_account_name,
+         observed_at,
+         source_product_code
+       from api_account_rows
+       union all
+       select
+         coalesce(canonical_account.external_account_id, invoice_line_items.external_account_id) as external_account_id,
+         coalesce(
+           canonical_account.external_account_name,
+           nullif(invoice_line_items.external_account_name, ''),
+           invoice_line_items.external_account_id
+         ) as external_account_name,
+         coalesce(invoice_line_items.invoice_date::timestamptz, invoice_line_items.created_at) as observed_at,
+         nullif(invoice_line_items.connectwise_product_code, '') as source_product_code
+       from invoice_line_items
+       inner join invoice_imports
+          on invoice_imports.id = invoice_line_items.invoice_import_id
+       left join lateral (
+         select
+           app_river_account_aliases.external_account_id,
+           app_river_account_aliases.external_account_name
+         from app_river_account_aliases
+         where app_river_account_aliases.alias_key in (
+           lower(trim(coalesce(invoice_line_items.external_account_id, ''))),
+           lower(trim(coalesce(invoice_line_items.external_account_name, '')))
+         )
+         order by
+           case
+             when app_river_account_aliases.alias_key = lower(trim(coalesce(invoice_line_items.external_account_id, ''))) then 0
+             else 1
+           end,
+           app_river_account_aliases.external_account_name
+         limit 1
+       ) canonical_account on true
+       where invoice_line_items.vendor_id = $1
+         and nullif(invoice_line_items.external_account_id, '') is not null
+         and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
+         and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
      )
      select
        external_account_id,
-       coalesce(
-         max(nullif(dimensions->>'dattoExternalAccountName', '')),
-         max(nullif(dimensions->>'coveCustomerName', '')),
-         max(nullif(dimensions->>'ncentralCustomerName', '')),
-         max(nullif(dimensions->>'customerName', '')),
-         max(nullif(dimensions->>'dattoCustomerName', '')),
-         max(nullif(dimensions->>'domain', '')),
-         external_account_id
-       ) as external_account_name,
+       coalesce(max(nullif(external_account_name, '')), external_account_id) as external_account_name,
        count(*)::int as row_count,
+       coalesce(
+         jsonb_agg(distinct source_product_code) filter (where source_product_code is not null),
+         '[]'::jsonb
+       ) as product_codes,
        max(observed_at) as last_seen_at
-     from vendor_usage_snapshots
-     where vendor_id = $1
-       and external_account_id is not null
-       and sync_run_id = (select id from latest_sync_run)
+     from source_rows
      group by external_account_id
      order by external_account_name`,
     [vendorId],
@@ -1556,6 +1731,7 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
     externalAccountId: row.external_account_id,
     externalAccountName: row.external_account_name ?? row.external_account_id,
     rowCount: integerValue(row.row_count),
+    productCodes: stringArray(row.product_codes),
     lastSeenAt: isoDate(row.last_seen_at),
   }));
 }
@@ -1570,22 +1746,48 @@ async function loadVendorProductSources(
        from sync_runs
        where integration_id = $1
          and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
        order by completed_at desc nulls last, started_at desc
        limit 1
+     ),
+     latest_invoice_import as (
+       select id
+       from invoice_imports
+       where vendor_id = $1
+       order by invoice_date desc nulls last, imported_at desc
+       limit 1
+     ),
+     source_rows as (
+       select
+         vendor_product_key,
+         coalesce(
+           nullif(dimensions->>'productName', ''),
+           nullif(product_name, ''),
+           vendor_product_key
+         ) as vendor_product_name,
+         external_account_id,
+         customer_id
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and vendor_product_key is not null
+         and sync_run_id = (select id from latest_sync_run)
+       union all
+       select
+         vendor_product_key,
+         coalesce(nullif(product_name, ''), vendor_product_key) as vendor_product_name,
+         external_account_id,
+         customer_id
+       from invoice_line_items
+       where vendor_id = $1
+         and vendor_product_key is not null
+         and invoice_import_id = (select id from latest_invoice_import)
      )
      select
        vendor_product_key,
-       coalesce(
-         max(nullif(dimensions->>'productName', '')),
-         max(nullif(product_name, '')),
-         vendor_product_key
-       ) as vendor_product_name,
+       coalesce(max(nullif(vendor_product_name, '')), vendor_product_key) as vendor_product_name,
        count(*)::int as row_count,
        count(distinct coalesce(external_account_id, customer_id::text))::int as customer_count
-     from vendor_usage_snapshots
-     where vendor_id = $1
-       and vendor_product_key is not null
-       and sync_run_id = (select id from latest_sync_run)
+     from source_rows
      group by vendor_product_key
      order by vendor_product_name`,
     [vendorId],
@@ -1745,10 +1947,33 @@ async function loadExistingConnectWiseProductTarget(
 
 async function countUnmappedSnapshots(database: Queryable, vendorId: IntegrationId) {
   const result = await database.query<{ count: string | number }>(
-    `select count(*) as count
-     from vendor_usage_snapshots
-     where vendor_id = $1
-       and (customer_id is null or agreement_id is null)`,
+    `with latest_invoice_import as (
+       select id
+       from invoice_imports
+       where vendor_id = $1
+       order by invoice_date desc nulls last, imported_at desc
+       limit 1
+     )
+     select (
+       select count(*)
+       from vendor_usage_snapshots
+       left join sync_runs
+         on sync_runs.id = vendor_usage_snapshots.sync_run_id
+       where vendor_id = $1
+         and coalesce(sync_runs.metadata->>'source', '') <> 'invoice-table'
+         and (customer_id is null or agreement_id is null)
+     ) + (
+       select count(*)
+       from invoice_line_items
+       inner join invoice_imports
+          on invoice_imports.id = invoice_line_items.invoice_import_id
+       where invoice_line_items.vendor_id = $1
+         and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
+         and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+         and (invoice_line_items.customer_id is null
+           or invoice_line_items.agreement_id is null
+           or invoice_line_items.connectwise_product_code is null)
+     ) as count`,
     [vendorId],
   );
 
@@ -1824,6 +2049,7 @@ async function loadExternalAccountName(database: Queryable, vendorId: Integratio
        max(nullif(dimensions->>'coveCustomerName', '')),
        max(nullif(dimensions->>'ncentralCustomerName', '')),
        max(nullif(dimensions->>'customerName', '')),
+       max(nullif(dimensions->>'appRiverCustomerName', '')),
        max(nullif(dimensions->>'dattoCustomerName', '')),
        max(nullif(dimensions->>'domain', '')),
        external_account_id
@@ -1836,6 +2062,98 @@ async function loadExternalAccountName(database: Queryable, vendorId: Integratio
   );
 
   return result.rows[0]?.external_account_name ?? externalAccountId;
+}
+
+async function loadCanonicalVendorAccount(
+  database: Queryable,
+  vendorId: IntegrationId,
+  externalAccountId: string,
+  externalAccountName?: string,
+) {
+  if (vendorId !== 'opentext-appriver') {
+    return undefined;
+  }
+
+  const aliases = [externalAccountId, externalAccountName].filter(
+    (value): value is string => Boolean(value?.trim()),
+  );
+  if (aliases.length === 0) {
+    return undefined;
+  }
+
+  const result = await database.query<{ external_account_id: string; external_account_name: string | null }>(
+    `with alias_inputs as (
+       select lower(trim(value)) as alias_key
+       from unnest($2::text[]) as input(value)
+       where nullif(trim(value), '') is not null
+     ),
+     alias_rows as (
+       select
+         vendor_usage_snapshots.external_account_id,
+         coalesce(
+           nullif(vendor_usage_snapshots.dimensions->>'customerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'domain', ''),
+           vendor_usage_snapshots.external_account_id
+         ) as external_account_name
+       from vendor_usage_snapshots
+       left join sync_runs
+         on sync_runs.id = vendor_usage_snapshots.sync_run_id
+       cross join lateral (
+         values
+           (vendor_usage_snapshots.external_account_id),
+           (nullif(vendor_usage_snapshots.dimensions->>'externalCustomerAccountNumber', '')),
+           (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerId', '')),
+           (nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
+           (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
+           (nullif(vendor_usage_snapshots.dimensions->>'domain', ''))
+       ) aliases(alias_value)
+       where vendor_usage_snapshots.vendor_id = $1
+         and coalesce(sync_runs.metadata->>'source', '') <> 'invoice-table'
+         and nullif(vendor_usage_snapshots.external_account_id, '') is not null
+         and lower(trim(alias_value)) in (select alias_key from alias_inputs)
+     ),
+     unique_match as (
+       select count(distinct external_account_id)::int as account_count
+       from alias_rows
+     )
+     select
+       alias_rows.external_account_id,
+       max(alias_rows.external_account_name) as external_account_name
+     from alias_rows
+     cross join unique_match
+     where unique_match.account_count = 1
+     group by alias_rows.external_account_id
+     limit 1`,
+    [vendorId, aliases],
+  );
+  const row = result.rows[0];
+  if (!row?.external_account_id) {
+    return undefined;
+  }
+
+  return {
+    externalAccountId: row.external_account_id,
+    externalAccountName: row.external_account_name ?? row.external_account_id,
+  };
+}
+
+async function deactivateSupersededAccountAliasMapping(
+  database: Queryable,
+  vendorId: IntegrationId,
+  externalAccountId: string,
+  reviewedBy: string,
+) {
+  await database.query(
+    `update vendor_account_mappings
+     set active = false,
+         reviewed_by = $3,
+         reviewed_at = now(),
+         updated_at = now()
+     where vendor_id = $1
+       and external_account_id = $2`,
+    [vendorId, externalAccountId, reviewedBy],
+  );
 }
 
 async function setMissingVendorProductKeys(database: Queryable, vendorId: IntegrationId) {
@@ -1904,7 +2222,11 @@ function scoreAgainstCustomer(sourceName: string, customer: ConnectWiseCustomerC
   };
 }
 
-function chooseAgreement(agreements: AgreementCandidate[], preferredProductCodes: string[]) {
+function chooseAgreement(
+  agreements: AgreementCandidate[],
+  sourceProductCodes: string[],
+  preferredProductCodes: string[],
+) {
   const activeAgreements = agreements.filter((agreement) => !/expired|cancelled|inactive/i.test(agreement.status));
   const candidates = activeAgreements.length > 0 ? activeAgreements : agreements;
 
@@ -1916,11 +2238,19 @@ function chooseAgreement(agreements: AgreementCandidate[], preferredProductCodes
     };
   }
 
+  const withSourceProducts = sourceProductCodes.length
+    ? candidates.filter((agreement) => hasAnyProductCode(agreement.productCodes, sourceProductCodes))
+    : [];
   const withPreferredProducts = preferredProductCodes.length
-    ? candidates.filter((agreement) => agreement.productCodes.some((code) => preferredProductCodes.includes(code)))
+    ? candidates.filter((agreement) => hasAnyProductCode(agreement.productCodes, preferredProductCodes))
     : [];
 
-  const selectable = withPreferredProducts.length > 0 ? withPreferredProducts : candidates;
+  const selectable =
+    withSourceProducts.length > 0
+      ? withSourceProducts
+      : withPreferredProducts.length > 0
+        ? withPreferredProducts
+        : candidates;
   const ranked = [...selectable].sort(
     (left, right) =>
       Number(isMonthlyServiceAgreement(right)) - Number(isMonthlyServiceAgreement(left)) ||
@@ -1942,7 +2272,7 @@ function chooseAgreement(agreements: AgreementCandidate[], preferredProductCodes
     second &&
     isMonthlyServiceAgreement(second) === isMonthlyServiceAgreement(best) &&
     second.additionCount === best.additionCount &&
-    withPreferredProducts.length !== 1
+    selectable.length !== 1
   ) {
     return {
       status: 'ambiguous' as const,
@@ -1954,14 +2284,26 @@ function chooseAgreement(agreements: AgreementCandidate[], preferredProductCodes
   return {
     status: 'selected' as const,
     agreement: best,
-    reason: withPreferredProducts.length > 0
-      ? 'Selected active agreement containing a mapped product.'
-      : 'Selected active agreement with the most additions.',
+    reason:
+      withSourceProducts.length > 0
+        ? 'Selected active agreement containing a mapped source product.'
+        : withPreferredProducts.length > 0
+          ? 'Selected active agreement containing a mapped vendor product.'
+          : 'Selected active agreement with the most additions.',
   };
 }
 
 function isMonthlyServiceAgreement(agreement: AgreementCandidate) {
   return /monthly\s+services?/i.test(agreement.agreementName);
+}
+
+function hasAnyProductCode(leftCodes: string[], rightCodes: string[]) {
+  const normalizedRight = new Set(rightCodes.map(normalizeProductCode).filter(Boolean));
+  return leftCodes.some((code) => normalizedRight.has(normalizeProductCode(code)));
+}
+
+function normalizeProductCode(value: string) {
+  return value.trim().toLowerCase();
 }
 
 function productMappingCandidate(
@@ -2064,6 +2406,29 @@ function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
     reviewedAt: isoDate(row.reviewed_at),
     lastSeenAt: isoDate(row.last_seen_at),
   };
+}
+
+function dedupeAccountMappingsForDisplay(vendorId: IntegrationId, mappings: AccountMapping[]) {
+  if (vendorId !== 'opentext-appriver') {
+    return mappings;
+  }
+
+  const seen = new Set<string>();
+  return mappings.filter((mapping) => {
+    const key = [
+      mapping.externalAccountId,
+      mapping.customerId ?? '',
+      mapping.agreementId ?? '',
+      mapping.status,
+      String(mapping.active),
+    ].join('|');
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 function mapProductMappingRow(row: ProductMappingRow): ProductMapping {

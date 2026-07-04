@@ -49,6 +49,8 @@ import {
   integrationSettingsRegistry,
   validateIntegrationRegistry,
   type IntegrationCapability,
+  type IntegrationDataSourceDefinition,
+  type IntegrationDataSourceType,
   type IntegrationId,
   type IntegrationSettingsDefinition,
   type IntegrationNonSecretDefinition,
@@ -71,7 +73,7 @@ type IssueStatus =
   | 'blocked'
   | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
-type IntegrationTab = 'credentials' | 'sync';
+type IntegrationTab = 'api' | 'invoice';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 type ReconciliationCountSource = 'api' | 'invoice' | 'manual';
@@ -84,6 +86,9 @@ type AppliedReconciliationUpdate = {
 
 type ReconciliationMatchedAgreementAddition = {
   id: string;
+  agreementId?: string;
+  agreementName?: string;
+  connectWiseAgreementId?: string;
   connectWiseAdditionId: string;
   productCode: string;
   productName: string;
@@ -202,6 +207,7 @@ type Integration = {
   status: IntegrationStatus;
   auth: string;
   capabilities: IntegrationCapability[];
+  dataSources: IntegrationDataSourceDefinition[];
   description: string;
   lastSync?: string;
   lastSyncStatus?: string;
@@ -553,6 +559,23 @@ type InvoiceImportSummary = {
 };
 
 type InvoiceImportMode = 'overwrite' | 'merge';
+
+type InvoiceTableColumnMap = {
+  externalAccountId?: string;
+  externalAccountName?: string;
+  productCode?: string;
+  productName?: string;
+  quantity?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  chargeType?: string;
+  billedAmount?: string;
+  term?: string;
+  billingFrequency?: string;
+  billingPeriodStart?: string;
+  billingPeriodEnd?: string;
+  primaryDomain?: string;
+};
 
 type InvoiceImportsResponse = {
   imports: InvoiceImportSummary[];
@@ -1192,9 +1215,10 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
   },
 ];
 
-const reconciliationVendorIds: IntegrationId[] = ['cove', 'ncentral', 'microsoft-365', 'opentext-appriver'];
+const reconciliationVendorIds: IntegrationId[] = integrationSettingsRegistry
+  .filter((integration) => integration.integrationId !== 'connectwise' && integration.capabilities.includes('mapping'))
+  .map((integration) => integration.integrationId);
 const customerLicenseVendorIds: CustomerLicenseReportVendorId[] = ['all', 'microsoft-365', 'cove', 'ncentral', 'opentext-appriver'];
-const reconciliationVendors = ['All', 'Cove Data Protection', 'N-able N-central', 'Microsoft 365', 'AppRiver - OpenText'];
 const noAgreementSyncValue = '__no_agreement_sync__';
 
 const integrationSettingsStates: IntegrationSettingsState[] = [];
@@ -1220,6 +1244,10 @@ function hasRawSyncReportDataSignal(integration: Integration) {
 
 function hasAvailableRawSyncReport(integration: Integration) {
   return hasRawSyncReportDataSignal(integration) || (hasLiveIntegrationActions(integration.id) && integration.enabled);
+}
+
+function isEnabledReconciliationIntegration(integration: Integration) {
+  return integration.enabled && integration.id !== 'connectwise' && integrationHasCapability(integration.id, 'mapping');
 }
 
 function sortIntegrationsForDisplay(integrations: Integration[]) {
@@ -1270,6 +1298,7 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       status: validation?.configuredStatus ?? 'not-configured',
       auth: formatAuthMode(definition.authMode),
       capabilities: definition.capabilities,
+      dataSources: definition.dataSources,
       description: definition.description,
       lastSync: formatDateTime(operationalStatus?.lastSyncCompletedAt ?? operationalStatus?.lastSyncAt),
       lastSyncStatus: operationalStatus?.lastSyncStatus,
@@ -1383,6 +1412,17 @@ function selectedAgreementAddition(issue: ReconcileIssue) {
   return issue.matchedAgreementAdditions.length === 1 ? issue.matchedAgreementAdditions[0] : undefined;
 }
 
+function formatMatchedAgreementAdditionContext(addition: ReconciliationMatchedAgreementAddition) {
+  return [
+    addition.productName,
+    addition.agreementName ? `Agreement ${addition.agreementName}` : undefined,
+    `CW ${addition.connectWiseAdditionId}`,
+    `qty ${addition.quantity.toLocaleString()}`,
+  ]
+    .filter(Boolean)
+    .join(' / ');
+}
+
 function cwCountLabel(issue: ReconcileIssue) {
   const lessIncluded = currentLessIncluded(issue);
   return lessIncluded > 0
@@ -1440,8 +1480,8 @@ function buildAgreementAdditionUpdatePayload(
     vendorId: issue.vendorId,
     customerId: issue.clientId,
     customerName: issue.customer,
-    agreementId: issue.agreementId,
-    agreementName: issue.agreement,
+    agreementId: addition?.agreementId ?? issue.agreementId,
+    agreementName: addition?.agreementName ?? issue.agreement,
     connectWiseAdditionId: addition?.connectWiseAdditionId ?? 'unselected',
     productCode: issue.serviceCode,
     productName: issue.product,
@@ -1475,6 +1515,7 @@ function formatMoneyValue(value: number) {
 
 function formatAuthMode(value: string) {
   if (value === 'api-key') return 'api key';
+  if (value === 'none') return 'invoice table';
   return value;
 }
 
@@ -2571,6 +2612,36 @@ async function importInvoiceFile(file: File, importMode: InvoiceImportMode) {
   return body as unknown as InvoiceImportResponse;
 }
 
+async function importInvoiceTableFile(
+  integrationId: IntegrationId,
+  file: File,
+  columnMap: InvoiceTableColumnMap,
+  sourceType: IntegrationDataSourceType,
+  importMode: InvoiceImportMode,
+) {
+  const content = await file.text();
+  const response = await fetch(`/api/invoice-imports/${encodeURIComponent(integrationId)}/table`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      content,
+      columnMap,
+      sourceType,
+      importMode,
+    }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice table import failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceImportResponse;
+}
+
 async function fetchInvoiceImportExceptions(vendorId: IntegrationId, importId: string) {
   const response = await fetch(
     `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}/exceptions`,
@@ -3350,7 +3421,7 @@ function App() {
   const [ticketIssueIds, setTicketIssueIds] = useState<string[]>([]);
   const [ticketNotes, setTicketNotes] = useState('');
   const [selectedIntegration, setSelectedIntegration] = useState<Integration | null>(null);
-  const [integrationTab, setIntegrationTab] = useState<IntegrationTab>('credentials');
+  const [integrationTab, setIntegrationTab] = useState<IntegrationTab>('api');
   const [integrationSaveMessage, setIntegrationSaveMessage] = useState<string | null>(null);
   const [savingIntegrationId, setSavingIntegrationId] = useState<IntegrationId | null>(null);
   const [runtimeIntegrations, setRuntimeIntegrations] = useState<RuntimeIntegrationSummary[] | null>(null);
@@ -3411,6 +3482,7 @@ function App() {
   const [reconciliationRunMeta, setReconciliationRunMeta] = useState<ReconciliationRunMeta | null>(null);
   const [reconciliationProductOptions, setReconciliationProductOptions] = useState<ReconciliationProductOption[]>([]);
   const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
+  const [selectedInvoiceIntegrationId, setSelectedInvoiceIntegrationId] = useState<IntegrationId | ''>('');
   const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload a vendor invoice CSV.');
   const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
@@ -3667,18 +3739,20 @@ function App() {
     }
   };
 
-  const loadInvoiceImports = async () => {
+  const loadInvoiceImports = async (vendorId: IntegrationId | '' = selectedInvoiceIntegrationId) => {
     setInvoiceImportLoadState('loading');
     setInvoiceImportMessage('Loading invoice imports...');
 
     try {
-      const response = await fetchInvoiceImports();
+      const response = await fetchInvoiceImports(vendorId || undefined);
       setInvoiceImports(response.imports);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
         response.imports.length > 0
           ? `Loaded ${response.imports.length.toLocaleString()} vendor invoice imports.`
-          : 'No vendor invoices have been imported yet.',
+          : vendorId
+            ? `No ${integrationName(vendorId)} invoices have been imported yet.`
+            : 'No vendor invoices have been imported yet.',
       );
       return response;
     } catch (error) {
@@ -3699,7 +3773,7 @@ function App() {
 
     try {
       const response = await importInvoiceFile(file, importMode);
-      const importsResponse = await fetchInvoiceImports();
+      const importsResponse = await fetchInvoiceImports(selectedInvoiceIntegrationId || undefined);
       setInvoiceImports(importsResponse.imports);
       setInvoiceImportLoadState('ready');
       const vendorName = response.detectedVendor?.vendorName ?? integrationName(response.import.vendorId);
@@ -4087,12 +4161,12 @@ function App() {
   }, [selectedMappingIntegrationId, view]);
 
   useEffect(() => {
-    if (view !== 'imports') {
+    if (view !== 'imports' && view !== 'integrations') {
       return;
     }
 
-    void loadInvoiceImports();
-  }, [view]);
+    void loadInvoiceImports(selectedInvoiceIntegrationId);
+  }, [selectedInvoiceIntegrationId, view]);
 
   const filteredIssues = useMemo(() => {
     return issues.filter((issue) => {
@@ -4104,6 +4178,17 @@ function App() {
 
   const clientGroups = useMemo(() => groupIssuesByClient(filteredIssues), [filteredIssues]);
   const integrations = useMemo(() => buildIntegrations(runtimeIntegrations ?? undefined), [runtimeIntegrations]);
+  const enabledReconciliationIntegrations = useMemo(
+    () => sortIntegrationsForDisplay(integrations.filter(isEnabledReconciliationIntegration)),
+    [integrations],
+  );
+  const invoiceImportIntegrations = useMemo(
+    () =>
+      sortIntegrationsForDisplay(
+        integrations.filter((integration) => integrationHasCapability(integration.id, 'invoice-import')),
+      ),
+    [integrations],
+  );
   const rawSyncReportIntegrations = useMemo(() => {
     const availableIntegrations = integrations.filter(hasAvailableRawSyncReport);
     const selectedIntegration = selectedRawSyncIntegrationId
@@ -4153,6 +4238,29 @@ function App() {
     const validClientNames = new Set(clientGroups.map((client) => client.customer));
     setExpandedClientNames((currentNames) => currentNames.filter((clientName) => validClientNames.has(clientName)));
   }, [clientGroups]);
+
+  useEffect(() => {
+    const enabledReconciliationIds = new Set(enabledReconciliationIntegrations.map((integration) => integration.id));
+    const enabledVendorNames = new Set(['All', ...enabledReconciliationIntegrations.map((integration) => integration.name)]);
+
+    if (selectedReconciliationIntegrationId && !enabledReconciliationIds.has(selectedReconciliationIntegrationId)) {
+      setSelectedReconciliationIntegrationId('');
+      setIssues([]);
+      setReconciliationRunMeta(null);
+      setReconciliationProductOptions([]);
+      setExpandedClientNames([]);
+      setReconciliationLoadState('idle');
+      setReconciliationMessage(
+        enabledReconciliationIntegrations.length > 0
+          ? 'Choose an enabled vendor.'
+          : 'No enabled reconciliation integrations.',
+      );
+    }
+
+    if (!enabledVendorNames.has(vendorFilter)) {
+      setVendorFilter('All');
+    }
+  }, [enabledReconciliationIntegrations, selectedReconciliationIntegrationId, vendorFilter]);
 
   const approveIssue = (issueId: string) => {
     setIssues((currentIssues) =>
@@ -4350,8 +4458,44 @@ function App() {
 
   const openIntegrationModal = (integration: Integration) => {
     setSelectedIntegration(integration);
-    setIntegrationTab('credentials');
+    setIntegrationTab('api');
     setIntegrationSaveMessage(null);
+  };
+
+  const importMappedInvoiceTable = async (
+    integrationId: IntegrationId,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    sourceType: IntegrationDataSourceType,
+    importMode: InvoiceImportMode,
+  ) => {
+    setImportingInvoice(true);
+    setInvoiceImportLoadState('loading');
+    setInvoiceImportMessage(`${importMode === 'overwrite' ? 'Overwriting' : 'Importing'} ${file.name} for ${integrationName(integrationId)}...`);
+    setInvoiceExceptionReview(null);
+    setInvoiceExceptionLoadState('idle');
+    setInvoiceExceptionMessage('Select an invoice import to review exceptions.');
+
+    try {
+      const response = await importInvoiceTableFile(integrationId, file, columnMap, sourceType, importMode);
+      setSelectedInvoiceIntegrationId(integrationId);
+      const importsResponse = await fetchInvoiceImports(integrationId);
+      setInvoiceImports(importsResponse.imports);
+      setInvoiceImportLoadState('ready');
+      setInvoiceImportMessage(
+        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${integrationName(integrationId)} table rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+      );
+      if (selectedReconciliationIntegrationId === integrationId && reconciliationVendorIds.includes(integrationId)) {
+        void loadVendorReconciliation(integrationId);
+      }
+      return response.import;
+    } catch (error) {
+      setInvoiceImportLoadState('failed');
+      setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to import mapped invoice table.');
+      return null;
+    } finally {
+      setImportingInvoice(false);
+    }
   };
 
   const closeIntegrationModal = () => {
@@ -4978,7 +5122,7 @@ function App() {
       <div className="app-main">
         <header className="topbar">
           <div className="title-block">
-            <span className="section-kicker">Vendor API counts + ConnectWise additions</span>
+            <span className="section-kicker">Vendor API, invoice tables, and ConnectWise additions</span>
             <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view)}</h1>
           </div>
           <div className="top-actions">
@@ -5040,6 +5184,7 @@ function App() {
               pendingCount={pendingCount}
               query={query}
               reconciliationLoadState={reconciliationLoadState}
+              reconciliationIntegrations={enabledReconciliationIntegrations}
               reconciliationMessage={reconciliationMessage}
               selectedReconciliationIntegrationId={selectedReconciliationIntegrationId}
               setExpandedClientNames={setExpandedClientNames}
@@ -5076,11 +5221,37 @@ function App() {
             <IntegrationsView
               actionMessages={integrationActionMessages}
               busyAction={busyIntegrationAction}
+              busyInvoiceReviewAction={busyInvoiceExceptionAction}
+              invoiceCustomerOptions={invoiceExceptionCustomerOptions}
+              invoiceImportIntegrations={invoiceImportIntegrations}
+              invoiceImportMode={invoiceImportMode}
+              invoiceImports={invoiceImports}
+              invoiceImporting={importingInvoice}
+              invoiceLoadState={invoiceImportLoadState}
+              invoiceMessage={invoiceImportMessage}
+              invoiceReview={invoiceExceptionReview}
+              invoiceReviewLoadState={invoiceExceptionLoadState}
+              invoiceReviewMessage={invoiceExceptionMessage}
               loadMessage={integrationLoadMessage}
               loadState={integrationLoadState}
               runtimeMeta={integrationRuntimeMeta}
               integrations={integrations}
               onConfigure={openIntegrationModal}
+              onInvoiceAccountMappingSave={saveInvoiceExceptionAccountMapping}
+              onInvoiceCloseReview={closeInvoiceExceptionReview}
+              onInvoiceIntegrationChange={(integrationId) => {
+                setSelectedInvoiceIntegrationId(integrationId);
+                closeInvoiceExceptionReview();
+              }}
+              onInvoiceProductCatalogSearch={(query) => {
+                const vendorId = invoiceExceptionReview?.import.vendorId ?? selectedInvoiceIntegrationId;
+                return searchProductCatalog(vendorId || 'custom-table', query);
+              }}
+              onInvoiceProductMappingSave={saveInvoiceExceptionProductMapping}
+              onInvoiceRefreshReview={reloadInvoiceExceptionReview}
+              onInvoiceReviewImport={openInvoiceExceptionReview}
+              onInvoiceTableUpload={importMappedInvoiceTable}
+              onInvoiceUpload={importVendorInvoice}
               onOpenMappings={(integrationId) => {
                 setSelectedMappingIntegrationId(integrationId);
                 setMappingState(null);
@@ -5089,6 +5260,8 @@ function App() {
                 navigateToView('mappings');
               }}
               onRefresh={refreshRuntimeIntegrations}
+              selectedInvoiceIntegrationId={selectedInvoiceIntegrationId}
+              setInvoiceImportMode={setInvoiceImportMode}
               onSync={syncIntegration}
               onTest={testIntegration}
             />
@@ -5213,6 +5386,7 @@ function App() {
               importing={importingInvoice}
               importMode={invoiceImportMode}
               imports={invoiceImports}
+              integrations={invoiceImportIntegrations}
               loadState={invoiceImportLoadState}
               message={invoiceImportMessage}
               onAccountMappingSave={saveInvoiceExceptionAccountMapping}
@@ -5223,10 +5397,16 @@ function App() {
               onProductMappingSave={saveInvoiceExceptionProductMapping}
               onRefreshReview={reloadInvoiceExceptionReview}
               onReviewImport={openInvoiceExceptionReview}
+              onTableUpload={importMappedInvoiceTable}
               onUpload={importVendorInvoice}
+              onVendorChange={(integrationId) => {
+                setSelectedInvoiceIntegrationId(integrationId);
+                closeInvoiceExceptionReview();
+              }}
               review={invoiceExceptionReview}
               reviewLoadState={invoiceExceptionLoadState}
               reviewMessage={invoiceExceptionMessage}
+              selectedVendorId={selectedInvoiceIntegrationId}
               setImportMode={setInvoiceImportMode}
             />
           )}
@@ -6072,6 +6252,7 @@ function ReconcileView(props: {
   pendingCount: number;
   query: string;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  reconciliationIntegrations: Integration[];
   reconciliationMessage: string;
   selectedReconciliationIntegrationId: IntegrationId | '';
   setExpandedClientNames: (value: string[] | ((currentNames: string[]) => string[])) => void;
@@ -6106,6 +6287,7 @@ function ReconcileView(props: {
     pendingCount,
     query,
     reconciliationLoadState,
+    reconciliationIntegrations,
     reconciliationMessage,
     selectedReconciliationIntegrationId,
     setExpandedClientNames,
@@ -6124,6 +6306,10 @@ function ReconcileView(props: {
   const selectedSourceName = selectedReconciliationIntegrationId
     ? integrationName(selectedReconciliationIntegrationId)
     : 'Choose a vendor';
+  const reconciliationVendors = useMemo(
+    () => ['All', ...reconciliationIntegrations.map((integration) => integration.name)],
+    [reconciliationIntegrations],
+  );
   const workflowSteps = workflow.map((step) => {
     if (step.label === 'Vendor API Data') return { ...step, value: vendorDataSummary };
     if (step.label === 'Vendor Invoice') return { ...step, value: vendorInvoiceSummary };
@@ -6180,17 +6366,23 @@ function ReconcileView(props: {
         </div>
         <div className="integrations-live-meta">
           <div className="segmented-control compact-source-control" role="group" aria-label="Reconciliation source">
-            {reconciliationVendorIds.map((integrationId) => (
-              <button
-                className={selectedReconciliationIntegrationId === integrationId ? 'active' : ''}
-                disabled={reconciliationLoadState === 'loading'}
-                key={integrationId}
-                onClick={() => onReconciliationSourceChange(integrationId)}
-                type="button"
-              >
-                {integrationName(integrationId)}
+            {reconciliationIntegrations.length > 0 ? (
+              reconciliationIntegrations.map((integration) => (
+                <button
+                  className={selectedReconciliationIntegrationId === integration.id ? 'active' : ''}
+                  disabled={reconciliationLoadState === 'loading'}
+                  key={integration.id}
+                  onClick={() => onReconciliationSourceChange(integration.id)}
+                  type="button"
+                >
+                  {integration.name}
+                </button>
+              ))
+            ) : (
+              <button disabled type="button">
+                No enabled vendors
               </button>
-            ))}
+            )}
           </div>
           <span>{pendingCount.toLocaleString()} open</span>
           <button
@@ -6309,14 +6501,18 @@ function ReconcileView(props: {
               <div className="empty-state">
                 <Search size={20} />
                 <strong>
-                  {!selectedReconciliationIntegrationId
+                  {reconciliationIntegrations.length === 0
+                    ? 'No enabled reconciliation integrations.'
+                    : !selectedReconciliationIntegrationId
                     ? 'Choose a vendor to run reconciliation.'
                     : pendingCount === 0
                       ? `No ${selectedSourceName} discrepancies to review.`
                       : 'No client groups match these filters.'}
                 </strong>
                 <span>
-                  {!selectedReconciliationIntegrationId
+                  {reconciliationIntegrations.length === 0
+                    ? 'Enable and configure a reconciliation-capable integration before running a comparison.'
+                    : !selectedReconciliationIntegrationId
                     ? 'Pick a vendor above when you are ready to compare vendor API counts with CW data.'
                     : pendingCount === 0
                     ? reconciliationMessage
@@ -6920,7 +7116,7 @@ function AgreementUpdateReviewModal(props: {
                   </div>
                   <div>
                     <strong>{addition?.connectWiseAdditionId ?? 'Blocked'}</strong>
-                    <span>{blockReason ?? 'Ready'}</span>
+                    <span>{addition ? addition.agreementName ?? 'Mapped agreement' : blockReason ?? 'Ready'}</span>
                   </div>
                 </article>
               );
@@ -7229,10 +7425,7 @@ function ManualOverrideModal(props: {
           </div>
           <div className="cw-addition-context">
             {selectedAddition ? (
-              <span>
-                {selectedAddition.productName} / CW {selectedAddition.connectWiseAdditionId} / qty{' '}
-                {selectedAddition.quantity.toLocaleString()}
-              </span>
+              <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
             ) : (
               <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
             )}
@@ -7276,10 +7469,7 @@ function ManualOverrideModal(props: {
           </div>
           <div className="cw-addition-context">
             {selectedAddition ? (
-              <span>
-                {selectedAddition.productName} / CW {selectedAddition.connectWiseAdditionId} / qty{' '}
-                {selectedAddition.quantity.toLocaleString()}
-              </span>
+              <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
             ) : (
               <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
             )}
@@ -7387,6 +7577,17 @@ function ManualOverrideModal(props: {
 function IntegrationsView(props: {
   actionMessages: Partial<Record<IntegrationId, string>>;
   busyAction: IntegrationActionKey | null;
+  busyInvoiceReviewAction: string | null;
+  invoiceCustomerOptions: MappingCustomerOption[];
+  invoiceImportIntegrations: Integration[];
+  invoiceImportMode: InvoiceImportMode;
+  invoiceImports: InvoiceImportSummary[];
+  invoiceImporting: boolean;
+  invoiceLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  invoiceMessage: string;
+  invoiceReview: InvoiceImportExceptionReview | null;
+  invoiceReviewLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  invoiceReviewMessage: string;
   loadMessage: string;
   loadState: 'loading' | 'ready' | 'failed';
   runtimeMeta: {
@@ -7396,24 +7597,64 @@ function IntegrationsView(props: {
   };
   integrations: Integration[];
   onConfigure: (integration: Integration) => void;
+  onInvoiceAccountMappingSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
+  onInvoiceCloseReview: () => void;
+  onInvoiceIntegrationChange: (integrationId: IntegrationId | '') => void;
+  onInvoiceProductCatalogSearch: (query: string) => Promise<ProductCatalogSearchResponse>;
+  onInvoiceProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
+  onInvoiceRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
+  onInvoiceReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
+  onInvoiceTableUpload: (
+    integrationId: IntegrationId,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    sourceType: IntegrationDataSourceType,
+    importMode: InvoiceImportMode,
+  ) => Promise<InvoiceImportSummary | null>;
+  onInvoiceUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
   onOpenMappings: (integrationId: IntegrationId) => void;
   onRefresh: () => Promise<RuntimeIntegrationsResponse | null>;
+  selectedInvoiceIntegrationId: IntegrationId | '';
+  setInvoiceImportMode: (value: InvoiceImportMode) => void;
   onSync: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
   onTest: (integrationId: IntegrationId) => void;
 }) {
   const {
     actionMessages,
     busyAction,
+    busyInvoiceReviewAction,
+    invoiceCustomerOptions,
+    invoiceImportIntegrations,
+    invoiceImportMode,
+    invoiceImports,
+    invoiceImporting,
+    invoiceLoadState,
+    invoiceMessage,
+    invoiceReview,
+    invoiceReviewLoadState,
+    invoiceReviewMessage,
     integrations,
     loadMessage,
     loadState,
     onConfigure,
+    onInvoiceAccountMappingSave,
+    onInvoiceCloseReview,
+    onInvoiceIntegrationChange,
+    onInvoiceProductCatalogSearch,
+    onInvoiceProductMappingSave,
+    onInvoiceRefreshReview,
+    onInvoiceReviewImport,
+    onInvoiceTableUpload,
+    onInvoiceUpload,
     onOpenMappings,
     onRefresh,
     onSync,
     onTest,
     runtimeMeta,
+    selectedInvoiceIntegrationId,
+    setInvoiceImportMode,
   } = props;
+  const [managementTab, setManagementTab] = useState<'api' | 'invoice'>('api');
   const connectedCount = integrations.filter((integration) => integration.status === 'connected').length;
   const degradedCount = integrations.filter((integration) => integration.status === 'degraded').length;
   const activeIntegrations = sortIntegrationsForDisplay(
@@ -7446,32 +7687,30 @@ function IntegrationsView(props: {
         </div>
       </div>
 
-      <div className="integration-list" aria-label="Enabled integrations">
-        {activeIntegrations.map((integration) => (
-          <IntegrationCard
-            actionMessage={actionMessages[integration.id]}
-            busyAction={busyAction}
-            integration={integration}
-            key={integration.id}
-            onConfigure={onConfigure}
-            onOpenMappings={onOpenMappings}
-            onSync={onSync}
-            onTest={onTest}
-          />
-        ))}
+      <div className="integration-management-tabs">
+        <div className="segmented-control" role="tablist" aria-label="Integration management mode">
+          {([
+            { id: 'api' as const, label: 'API' },
+            { id: 'invoice' as const, label: 'Invoice' },
+          ]).map((tab) => (
+            <button
+              aria-selected={managementTab === tab.id}
+              className={managementTab === tab.id ? 'active' : ''}
+              key={tab.id}
+              onClick={() => setManagementTab(tab.id)}
+              role="tab"
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {availableIntegrations.length > 0 ? (
-        <details className="integration-drawer" open>
-          <summary>
-            <div>
-              <strong>Available Integrations</strong>
-              <span>{availableIntegrations.length} ready to configure</span>
-            </div>
-            <ChevronRight className="drawer-chevron" size={18} />
-          </summary>
-          <div className="integration-drawer-body">
-            {availableIntegrations.map((integration) => (
+      {managementTab === 'api' ? (
+        <>
+          <div className="integration-list" aria-label="Enabled integrations">
+            {activeIntegrations.map((integration) => (
               <IntegrationCard
                 actionMessage={actionMessages[integration.id]}
                 busyAction={busyAction}
@@ -7484,25 +7723,76 @@ function IntegrationsView(props: {
               />
             ))}
           </div>
-        </details>
-      ) : null}
 
-      {comingSoonIntegrations.length > 0 ? (
-        <details className="integration-drawer">
-          <summary>
-            <div>
-              <strong>Coming Soon Integrations</strong>
-              <span>{comingSoonIntegrations.length} disabled roadmap integrations</span>
-            </div>
-            <ChevronRight className="drawer-chevron" size={18} />
-          </summary>
-          <div className="integration-drawer-body">
-            {comingSoonIntegrations.map((integration) => (
-              <IntegrationCard comingSoon integration={integration} key={integration.id} />
-            ))}
-          </div>
-        </details>
-      ) : null}
+          {availableIntegrations.length > 0 ? (
+            <details className="integration-drawer">
+              <summary>
+                <div>
+                  <strong>Inactive Integrations</strong>
+                  <span>{availableIntegrations.length} not enabled</span>
+                </div>
+                <ChevronRight className="drawer-chevron" size={18} />
+              </summary>
+              <div className="integration-drawer-body">
+                {availableIntegrations.map((integration) => (
+                  <IntegrationCard
+                    actionMessage={actionMessages[integration.id]}
+                    busyAction={busyAction}
+                    integration={integration}
+                    key={integration.id}
+                    onConfigure={onConfigure}
+                    onOpenMappings={onOpenMappings}
+                    onSync={onSync}
+                    onTest={onTest}
+                  />
+                ))}
+              </div>
+            </details>
+          ) : null}
+
+          {comingSoonIntegrations.length > 0 ? (
+            <details className="integration-drawer">
+              <summary>
+                <div>
+                  <strong>Coming Soon Integrations</strong>
+                  <span>{comingSoonIntegrations.length} disabled roadmap integrations</span>
+                </div>
+                <ChevronRight className="drawer-chevron" size={18} />
+              </summary>
+              <div className="integration-drawer-body">
+                {comingSoonIntegrations.map((integration) => (
+                  <IntegrationCard comingSoon integration={integration} key={integration.id} />
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </>
+      ) : (
+        <ImportsView
+          busyReviewAction={busyInvoiceReviewAction}
+          customerOptions={invoiceCustomerOptions}
+          importing={invoiceImporting}
+          importMode={invoiceImportMode}
+          imports={invoiceImports}
+          integrations={invoiceImportIntegrations}
+          loadState={invoiceLoadState}
+          message={invoiceMessage}
+          onAccountMappingSave={onInvoiceAccountMappingSave}
+          onCloseReview={onInvoiceCloseReview}
+          onProductCatalogSearch={onInvoiceProductCatalogSearch}
+          onProductMappingSave={onInvoiceProductMappingSave}
+          onRefreshReview={onInvoiceRefreshReview}
+          onReviewImport={onInvoiceReviewImport}
+          onTableUpload={onInvoiceTableUpload}
+          onUpload={onInvoiceUpload}
+          onVendorChange={onInvoiceIntegrationChange}
+          review={invoiceReview}
+          reviewLoadState={invoiceReviewLoadState}
+          reviewMessage={invoiceReviewMessage}
+          selectedVendorId={selectedInvoiceIntegrationId}
+          setImportMode={setInvoiceImportMode}
+        />
+      )}
     </section>
   );
 }
@@ -7540,6 +7830,13 @@ function IntegrationCard(props: {
           </span>
         </div>
         <p>{integration.description}</p>
+
+        <div className="scope-list capability-list" aria-label={`${integration.name} capabilities`}>
+          {integration.capabilities.map((capability) => (
+            <span key={capability}>{integrationCapabilityLabel(capability)}</span>
+          ))}
+          {integration.capabilities.length === 0 ? <span>Roadmap</span> : null}
+        </div>
 
         <div className="integration-stats" aria-label={`${integration.name} integration status`}>
           <IntegrationStat label="Last sync" value={comingSoon ? 'Unavailable' : integration.lastSync ?? 'Never'} />
@@ -7666,6 +7963,12 @@ function IntegrationStat(props: { label: string; value: string }) {
       <strong>{props.value}</strong>
     </div>
   );
+}
+
+function integrationCapabilityLabel(capability: IntegrationCapability) {
+  if (capability === 'live-api') return 'API sync';
+  if (capability === 'invoice-import') return 'Invoice import';
+  return 'Mapping';
 }
 
 function integrationStatusLabel(status: IntegrationStatus) {
@@ -9506,8 +9809,8 @@ function IntegrationModal(props: {
 }) {
   const { integration, onClose, onSave, onTabChange, saving, saveMessage, tab } = props;
   const tabLabels: Array<{ id: IntegrationTab; label: string }> = [
-    { id: 'credentials', label: 'Credentials' },
-    { id: 'sync', label: 'Sync' },
+    { id: 'api', label: 'API' },
+    { id: 'invoice', label: 'Invoice' },
   ];
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -9563,8 +9866,11 @@ function IntegrationModal(props: {
           </div>
 
           <div className="integration-modal-body">
-          {tab === 'credentials' && (
+          {tab === 'api' && (
             <>
+              {integration.requiredNonSecrets.length === 0 && integration.requiredSecrets.length === 0 ? (
+                <p className="config-note">This integration does not require API credentials.</p>
+              ) : null}
               {integration.requiredNonSecrets.map((setting) => (
                 <label className="config-field" key={setting.key}>
                   <span>{setting.label}</span>
@@ -9589,15 +9895,25 @@ function IntegrationModal(props: {
                   ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
                   : 'All required settings are present. Blank secret fields keep the current Key Vault value.'}
               </p>
-            </>
-          )}
-
-          {tab === 'sync' && (
-            <>
               <p className="config-note">
                 Last sync {integration.lastSync ?? 'never'} / Records {integration.records ?? '0'}
               </p>
             </>
+          )}
+
+          {tab === 'invoice' && (
+            <div className="integration-invoice-settings">
+              <div>
+                <FileSpreadsheet size={18} />
+                <span>
+                  Invoice imports use CSV table mapping, customer mapping, and product mapping for this integration.
+                </span>
+              </div>
+              <div className="scope-list capability-list">
+                <span>{integrationHasCapability(integration.id, 'invoice-import') ? 'Invoice import enabled' : 'Invoice import unavailable'}</span>
+                <span>{integrationHasCapability(integration.id, 'mapping') ? 'Customer/product mapping enabled' : 'Mapping unavailable'}</span>
+              </div>
+            </div>
           )}
 
           </div>
@@ -9612,7 +9928,7 @@ function IntegrationModal(props: {
             <button className="button secondary" disabled={saving} onClick={onClose} type="button">
               Cancel
             </button>
-            <button className="button primary" disabled={saving} type="submit">
+            <button className="button primary" disabled={saving || tab !== 'api'} type="submit">
               {saving ? (
                 <>
                   <RefreshCcw size={17} />
@@ -9621,7 +9937,7 @@ function IntegrationModal(props: {
               ) : (
                 <>
                   <KeyRound size={17} />
-                  Save credentials
+                  Save API settings
                 </>
               )}
             </button>
@@ -10712,6 +11028,7 @@ function ImportsView(props: {
   importMode: InvoiceImportMode;
   imports: InvoiceImportSummary[];
   importing: boolean;
+  integrations: Integration[];
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   message: string;
   onAccountMappingSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
@@ -10720,10 +11037,19 @@ function ImportsView(props: {
   onProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
   onRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
   onReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
+  onTableUpload: (
+    integrationId: IntegrationId,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    sourceType: IntegrationDataSourceType,
+    importMode: InvoiceImportMode,
+  ) => Promise<InvoiceImportSummary | null>;
   onUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
+  onVendorChange: (integrationId: IntegrationId | '') => void;
   review: InvoiceImportExceptionReview | null;
   reviewLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reviewMessage: string;
+  selectedVendorId: IntegrationId | '';
   setImportMode: (value: InvoiceImportMode) => void;
 }) {
   const {
@@ -10732,6 +11058,7 @@ function ImportsView(props: {
     importMode,
     imports,
     importing,
+    integrations,
     loadState,
     message,
     onAccountMappingSave,
@@ -10740,15 +11067,21 @@ function ImportsView(props: {
     onProductMappingSave,
     onRefreshReview,
     onReviewImport,
+    onTableUpload,
     onUpload,
+    onVendorChange,
     review,
     reviewLoadState,
     reviewMessage,
+    selectedVendorId,
     setImportMode,
   } = props;
   const latestImport = imports[0];
   const totalRows = imports.reduce((total, item) => total + item.rowCount, 0);
   const totalExceptions = imports.reduce((total, item) => total + item.exceptionRows, 0);
+  const selectedVendor = selectedVendorId
+    ? integrations.find((integration) => integration.id === selectedVendorId)
+    : undefined;
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (file) {
@@ -10766,6 +11099,21 @@ function ImportsView(props: {
             <h2>Invoice intake</h2>
           </div>
           <div className="import-actions">
+            <label className="config-field import-vendor-select">
+              <span>Integration</span>
+              <select
+                disabled={importing}
+                onChange={(event) => onVendorChange(event.target.value as IntegrationId | '')}
+                value={selectedVendorId}
+              >
+                <option value="">All invoice imports</option>
+                {integrations.map((integration) => (
+                  <option key={integration.id} value={integration.id}>
+                    {integration.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="segmented-control import-mode-toggle" role="group" aria-label="Invoice import mode">
               {(['overwrite', 'merge'] as const).map((mode) => (
                 <button
@@ -10803,6 +11151,13 @@ function ImportsView(props: {
             <span>{loadState === 'failed' ? message : latestImport ? `${totalRows.toLocaleString()} total rows imported / ${totalExceptions.toLocaleString()} exceptions` : message}</span>
           </div>
         </div>
+
+        <InvoiceTableImportPanel
+          importMode={importMode}
+          importing={importing}
+          onImport={onTableUpload}
+          selectedVendor={selectedVendor}
+        />
 
         <div className="import-table">
           {imports.length === 0 ? (
@@ -10883,6 +11238,332 @@ function ImportsView(props: {
       </div>
     </section>
   );
+}
+
+const invoiceTableFieldDefinitions: Array<{
+  key: keyof InvoiceTableColumnMap;
+  label: string;
+  required?: boolean;
+  aliases: string[];
+}> = [
+  {
+    key: 'externalAccountId',
+    label: 'Customer/account',
+    aliases: ['customer account number', 'account id', 'account number', 'customer id', 'company id', 'tenant id'],
+  },
+  {
+    key: 'externalAccountName',
+    label: 'Customer name',
+    aliases: ['company name', 'customer name', 'account name', 'tenant name', 'client name'],
+  },
+  {
+    key: 'productCode',
+    label: 'Product code',
+    aliases: ['product code', 'sku', 'sku id', 'item code', 'part number'],
+  },
+  {
+    key: 'productName',
+    label: 'Product name',
+    required: true,
+    aliases: ['product', 'product name', 'sku name', 'item name', 'description', 'license'],
+  },
+  {
+    key: 'quantity',
+    label: 'Quantity',
+    required: true,
+    aliases: ['charge qty', 'quantity', 'qty', 'count', 'seats', 'licenses', 'usage quantity'],
+  },
+  {
+    key: 'invoiceNumber',
+    label: 'Invoice number',
+    aliases: ['invoice number', 'invoice #', 'invoice no', 'bill number'],
+  },
+  {
+    key: 'invoiceDate',
+    label: 'Invoice date',
+    aliases: ['invoice date', 'bill date', 'date'],
+  },
+  {
+    key: 'chargeType',
+    label: 'Charge type',
+    aliases: ['charge type', 'line type', 'transaction type', 'type'],
+  },
+  {
+    key: 'billedAmount',
+    label: 'Billed amount',
+    aliases: ['billed amount', 'amount', 'total', 'line total', 'extended amount'],
+  },
+  {
+    key: 'term',
+    label: 'Term',
+    aliases: ['term', 'subscription term', 'commitment term'],
+  },
+  {
+    key: 'billingFrequency',
+    label: 'Frequency',
+    aliases: ['billing frequency', 'frequency', 'billing cycle', 'cycle'],
+  },
+  {
+    key: 'billingPeriodStart',
+    label: 'Period start',
+    aliases: ['start', 'period start', 'billing period start', 'from'],
+  },
+  {
+    key: 'billingPeriodEnd',
+    label: 'Period end',
+    aliases: ['end', 'period end', 'billing period end', 'to'],
+  },
+  {
+    key: 'primaryDomain',
+    label: 'Domain',
+    aliases: ['primary domain', 'domain', 'tenant domain'],
+  },
+];
+
+function importableDataSources(integration: Integration | undefined) {
+  return (
+    integration?.dataSources.filter((source) =>
+      source.ingestionMethods.some((method) => method === 'csv' || method === 'excel'),
+    ) ?? []
+  );
+}
+
+function sourceLabel(source: IntegrationDataSourceDefinition) {
+  if (source.sourceType === 'reseller-product-total') {
+    return 'Product totals';
+  }
+  if (source.sourceType === 'user-license-detail') {
+    return 'User detail';
+  }
+  return 'Customer products';
+}
+
+function InvoiceTableImportPanel(props: {
+  importMode: InvoiceImportMode;
+  importing: boolean;
+  onImport: (
+    integrationId: IntegrationId,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    sourceType: IntegrationDataSourceType,
+    importMode: InvoiceImportMode,
+  ) => Promise<InvoiceImportSummary | null>;
+  selectedVendor?: Integration;
+}) {
+  const { importMode, importing, onImport, selectedVendor } = props;
+  const [file, setFile] = useState<File | null>(null);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [columnMap, setColumnMap] = useState<InvoiceTableColumnMap>({});
+  const [sourceType, setSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
+  const [message, setMessage] = useState('Choose a CSV table to map invoice columns.');
+  const importDataSources = importableDataSources(selectedVendor);
+  const selectedDataSource =
+    importDataSources.find((source) => source.sourceType === sourceType) ?? importDataSources[0];
+  const requiresCustomerMapping = selectedDataSource?.requiresCustomerMapping ?? true;
+  const requiredMapped = Boolean(
+    (!requiresCustomerMapping || columnMap.externalAccountId) && columnMap.productName && columnMap.quantity,
+  );
+  const canImport = Boolean(selectedVendor && file && requiredMapped && !importing);
+
+  useEffect(() => {
+    const nextSource = importDataSources[0]?.sourceType ?? 'customer-product-breakdown';
+    setSourceType((current) => (importDataSources.some((source) => source.sourceType === current) ? current : nextSource));
+  }, [selectedVendor?.id]);
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = '';
+    setFile(nextFile);
+    if (!nextFile) {
+      setHeaders([]);
+      setColumnMap({});
+      setMessage('Choose a CSV table to map invoice columns.');
+      return;
+    }
+
+    const content = await nextFile.text();
+    const nextHeaders = csvHeaders(content);
+    const nextMap = defaultInvoiceTableColumnMap(nextHeaders);
+    setHeaders(nextHeaders);
+    setColumnMap(nextMap);
+    setMessage(
+      nextHeaders.length > 0
+        ? `${nextHeaders.length.toLocaleString()} columns detected. Review the mapping before import.`
+        : 'No header row was detected in this CSV.',
+    );
+  };
+
+  const updateColumn = (key: keyof InvoiceTableColumnMap, value: string) => {
+    setColumnMap((current) => ({
+      ...current,
+      [key]: value || undefined,
+    }));
+  };
+
+  const importTable = async () => {
+    if (!selectedVendor || !file || !requiredMapped) {
+      setMessage(
+        requiresCustomerMapping
+          ? 'Select an integration, CSV file, customer column, product column, and quantity column.'
+          : 'Select an integration, CSV file, product column, and quantity column.',
+      );
+      return;
+    }
+
+    setMessage(`Importing ${file.name} for ${selectedVendor.name}...`);
+    const imported = await onImport(selectedVendor.id, file, columnMap, sourceType, importMode);
+    if (imported) {
+      setMessage(`${imported.rowCount.toLocaleString()} rows imported for ${selectedVendor.name}.`);
+    }
+  };
+
+  return (
+    <section className="invoice-table-import-panel" aria-label="Mapped invoice table import">
+      <div className="invoice-table-import-header">
+        <div>
+          <span className="section-kicker">Table import</span>
+          <h3>{selectedVendor ? selectedVendor.name : 'Select an integration'}</h3>
+        </div>
+        <label className={importing ? 'button secondary compact file-upload-button disabled' : 'button secondary compact file-upload-button'}>
+          <FileSpreadsheet size={16} />
+          Select CSV
+          <input accept=".csv,text/csv" disabled={importing} onChange={(event) => void handleFileChange(event)} type="file" />
+        </label>
+      </div>
+
+      <div className="invoice-table-import-body">
+        <div className="invoice-table-import-summary">
+          <strong>{file ? file.name : 'No table selected'}</strong>
+          <span>{message}</span>
+        </div>
+        {importDataSources.length > 1 ? (
+          <div className="segmented-control invoice-source-toggle" role="group" aria-label="Invoice source type">
+            {importDataSources.map((source) => (
+              <button
+                className={sourceType === source.sourceType ? 'active' : ''}
+                disabled={importing}
+                key={source.key}
+                onClick={() => setSourceType(source.sourceType)}
+                title={source.description}
+                type="button"
+              >
+                {sourceLabel(source)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="invoice-column-map-grid">
+          {invoiceTableFieldDefinitions.map((field) => {
+            const required = field.required || (field.key === 'externalAccountId' && requiresCustomerMapping);
+            return (
+              <label className="config-field" key={field.key}>
+                <span>{required ? `${field.label} *` : field.label}</span>
+                <select
+                  disabled={headers.length === 0 || importing}
+                  onChange={(event) => updateColumn(field.key, event.target.value)}
+                  value={columnMap[field.key] ?? ''}
+                >
+                  <option value="">Ignore</option>
+                  {headers.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+        <div className="invoice-table-import-actions">
+          <button className="button primary compact" disabled={!canImport} onClick={() => void importTable()} type="button">
+            <Upload size={15} />
+            {importing ? 'Importing' : 'Import mapped table'}
+          </button>
+          <span>{requiredMapped ? 'Required columns mapped' : 'Map required columns'}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function csvHeaders(content: string) {
+  const rows: string[][] = [];
+  let field = '';
+  let row: string[] = [];
+  let inQuotes = false;
+  const text = content.replace(/^\uFEFF/, '');
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (inQuotes) {
+      if (char === '"' && next === '"') {
+        field += '"';
+        index += 1;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === ',') {
+      row.push(field.trim());
+      field = '';
+      continue;
+    }
+    if (char === '\r' || char === '\n') {
+      row.push(field.trim());
+      if (row.some(Boolean)) rows.push(row);
+      break;
+    }
+    field += char;
+  }
+
+  if (rows.length === 0) {
+    row.push(field.trim());
+    if (row.some(Boolean)) rows.push(row);
+  }
+
+  return rows[0] ?? [];
+}
+
+function defaultInvoiceTableColumnMap(headers: string[]): InvoiceTableColumnMap {
+  return Object.fromEntries(
+    invoiceTableFieldDefinitions.flatMap((field) => {
+      const header = bestHeaderMatch(headers, field.aliases);
+      return header ? [[field.key, header]] : [];
+    }),
+  ) as InvoiceTableColumnMap;
+}
+
+function bestHeaderMatch(headers: string[], aliases: string[]) {
+  const normalizedHeaders = headers.map((header) => ({
+    header,
+    normalized: normalizeColumnLabel(header),
+  }));
+
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeColumnLabel(alias);
+    const exact = normalizedHeaders.find((item) => item.normalized === normalizedAlias);
+    if (exact) return exact.header;
+  }
+
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeColumnLabel(alias);
+    const partial = normalizedHeaders.find((item) => item.normalized.includes(normalizedAlias));
+    if (partial) return partial.header;
+  }
+
+  return undefined;
+}
+
+function normalizeColumnLabel(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function InvoiceExceptionReviewPanel(props: {

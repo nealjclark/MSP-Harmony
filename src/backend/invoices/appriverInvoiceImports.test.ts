@@ -3,6 +3,7 @@ import {
   detectInvoiceVendor,
   getInvoiceImportExceptionReview,
   importAppRiverInvoiceCsv,
+  importMappedInvoiceTableCsv,
   loadLatestInvoiceQuantitiesForLines,
   refreshInvoiceImportMappings,
   type InvoiceImportSummary,
@@ -62,6 +63,16 @@ async function run() {
       if (sql.includes('delete from invoice_imports')) {
         deletedImports.push({ sql, values });
         return { rows: [] as T[] };
+      }
+
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return {
+          rows: [
+            {
+              id: '44444444-4444-4444-4444-444444444444',
+            },
+          ] as T[],
+        };
       }
 
       if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
@@ -245,6 +256,16 @@ async function run() {
         return { rows: [] as T[] };
       }
 
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return {
+          rows: [
+            {
+              id: '77777777-7777-7777-7777-777777777777',
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
         const importValues = fallbackInsertedImports[0]?.values ?? [];
         return {
@@ -295,7 +316,12 @@ async function run() {
 
   const reviewDatabase: Queryable = {
     async query<T = unknown>(sql: string) {
-      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid') && sql.includes('and vendor_id = $2')) {
+      if (
+        sql.includes('from invoice_imports') &&
+        sql.includes('where id = $1::uuid') &&
+        sql.includes('and vendor_id = $2') &&
+        !sql.includes('update invoice_imports')
+      ) {
         return {
           rows: [
             {
@@ -316,7 +342,7 @@ async function run() {
         };
       }
 
-      if (sql.includes('from invoice_line_items') && sql.includes('customer_id is null or agreement_id is null or connectwise_product_code is null')) {
+      if (sql.includes('from invoice_line_items') && sql.includes("raw_summary->>'sourceType'")) {
         return {
           rows: [
             {
@@ -402,9 +428,16 @@ async function run() {
   assert.equal(review?.productExceptions[0]?.vendorProductKey, 'SAT-1|Monthly|Monthly');
   assert.equal(review?.productExceptions[0]?.quantity, 12);
 
+  const refreshQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const refreshDatabase: Queryable = {
-    async query<T = unknown>(sql: string) {
-      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid') && sql.includes('and vendor_id = $2')) {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      refreshQueries.push({ sql, values });
+      if (
+        sql.includes('from invoice_imports') &&
+        sql.includes('where id = $1::uuid') &&
+        sql.includes('and vendor_id = $2') &&
+        !sql.includes('update invoice_imports')
+      ) {
         return {
           rows: [
             {
@@ -454,6 +487,16 @@ async function run() {
         };
       }
 
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return {
+          rows: [
+            {
+              id: '66666666-6666-6666-6666-666666666666',
+            },
+          ] as T[],
+        };
+      }
+
       return { rows: [] as T[] };
     },
   };
@@ -465,6 +508,114 @@ async function run() {
   assert.equal(refresh?.accountRowsUpdated, 1);
   assert.equal(refresh?.productRowsUpdated, 1);
   assert.equal(refresh?.import.status, 'ready');
+  const refreshAccountQuery = refreshQueries.find((query) => query.sql.includes('approved_account_mapping_keys'));
+  assert.equal(refreshAccountQuery?.sql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
+  assert.equal(refreshAccountQuery?.values?.[2], 'opentext-appriver');
+
+  const totalInvoiceImports: Array<{ sql: string; values?: unknown[] }> = [];
+  const totalInvoiceLines: Array<{ sql: string; values?: unknown[] }> = [];
+  const totalInvoiceSyncQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const totalInvoiceDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from vendor_account_mappings')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_product_mappings')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'HUNTRESS-MDR',
+              target_index: 0,
+              connectwise_product_code: 'CW-HUNTRESS-MDR',
+              connectwise_product_name: 'Huntress MDR',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('insert into invoice_imports')) {
+        totalInvoiceImports.push({ sql, values });
+        return { rows: [{ id: '88888888-8888-8888-8888-888888888888' }] as T[] };
+      }
+
+      if (sql.includes('insert into invoice_line_items')) {
+        totalInvoiceLines.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return { rows: [{ id: '99999999-9999-9999-9999-999999999999' }] as T[] };
+      }
+
+      if (sql.includes('delete from vendor_usage_snapshots') || sql.includes('insert into vendor_usage_snapshots')) {
+        totalInvoiceSyncQueries.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('update sync_runs')) {
+        totalInvoiceSyncQueries.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
+        const importValues = totalInvoiceImports[0]?.values ?? [];
+        return {
+          rows: [
+            {
+              id: '88888888-8888-8888-8888-888888888888',
+              vendor_id: 'huntress',
+              file_name: importValues[1],
+              invoice_number: importValues[2],
+              imported_at: '2026-07-02T12:00:00Z',
+              invoice_date: importValues[3],
+              billing_period_start: importValues[4],
+              billing_period_end: importValues[5],
+              row_count: importValues[6],
+              matched_rows: importValues[7],
+              exception_rows: importValues[8],
+              status: importValues[9],
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+
+  const totalInvoice = await importMappedInvoiceTableCsv(totalInvoiceDatabase, {
+    vendorId: 'huntress',
+    fileName: 'Huntress Total Invoice.csv',
+    content: [
+      'SKU,Product,Qty,Invoice Number,Invoice Date,Amount',
+      'HUNTRESS-MDR,Huntress MDR,42,H-1001,2026-07-01,1260',
+    ].join('\n'),
+    columnMap: {
+      productCode: 'SKU',
+      productName: 'Product',
+      quantity: 'Qty',
+      invoiceNumber: 'Invoice Number',
+      invoiceDate: 'Invoice Date',
+      billedAmount: 'Amount',
+    },
+    sourceType: 'reseller-product-total',
+  });
+
+  assert.equal(totalInvoice.vendorId, 'huntress');
+  assert.equal(totalInvoice.status, 'ready');
+  assert.equal(totalInvoice.matchedRows, 1);
+  assert.equal(totalInvoice.exceptionRows, 0);
+  assert.equal(totalInvoiceLines[0]?.values?.[2], null);
+  assert.equal(totalInvoiceLines[0]?.values?.[3], null);
+  assert.equal(totalInvoiceLines[0]?.values?.[10], 'CW-HUNTRESS-MDR');
+  assert.equal(JSON.parse(String(totalInvoiceImports[0]?.values?.[10])).sourceType, 'reseller-product-total');
+  assert.equal(
+    totalInvoiceSyncQueries.some((query) =>
+      query.sql.includes("raw_summary->>'sourceType'") && query.sql.includes("'reseller-product-total'"),
+    ),
+    true,
+  );
 
   console.log('AppRiver invoice import tests passed');
 }

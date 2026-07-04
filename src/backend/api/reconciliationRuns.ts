@@ -11,7 +11,7 @@ import type {
   VendorRuleSet,
 } from '../shared/types';
 import type { ReconciliationAdjustment } from './reconciliationAdjustments';
-import type { IntegrationId } from '../../shared/integrationSettings';
+import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
 import { getVendorRuleSet } from './reconciliation';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
 import { loadDattoRuleSet } from '../vendor/datto/operations';
@@ -52,6 +52,8 @@ type AdditionRow = {
   id: string;
   customer_id: string;
   agreement_id: string;
+  source_agreement_name?: string | null;
+  source_connectwise_agreement_id?: string | null;
   connectwise_addition_id?: string;
   product_code: string;
   product_name: string;
@@ -84,6 +86,14 @@ type UsageOverrideRow = {
   reason: string | null;
 };
 
+type GenericRuleMappingRow = {
+  vendor_product_key: string;
+  target_index: string | number;
+  connectwise_product_code: string;
+  connectwise_product_name: string;
+  unit_price: string | number | null;
+};
+
 type UsageOverride = {
   id: string;
   customerId?: string;
@@ -114,6 +124,9 @@ export type DatabaseReconciliationLine = ReconciliationLine & {
 
 export type ReconciliationLineAgreementAddition = {
   id: string;
+  agreementId?: string;
+  agreementName?: string;
+  connectWiseAgreementId?: string;
   connectWiseAdditionId: string;
   productCode: string;
   productName: string;
@@ -320,10 +333,50 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
 
   const ruleSet = getVendorRuleSet(vendorId);
   if (!ruleSet) {
-    throw new Error(`No reconciliation rule set is configured for vendor "${vendorId}".`);
+    return loadMappedInvoiceRuleSet(database, vendorId);
   }
 
   return ruleSet;
+}
+
+async function loadMappedInvoiceRuleSet(database: Queryable, vendorId: string): Promise<VendorRuleSet> {
+  const result = await database.query<GenericRuleMappingRow>(
+    `select vendor_product_key,
+            target_index,
+            connectwise_product_code,
+            connectwise_product_name,
+            unit_price
+       from vendor_product_mappings
+      where vendor_id = $1
+        and active = true
+        and mapping_status = 'approved'
+      order by vendor_product_key, target_index, connectwise_product_code`,
+    [vendorId],
+  );
+  const displayName = getIntegrationSettingsDefinition(vendorId as IntegrationId)?.displayName ?? vendorId;
+  const rules = result.rows.map((row) => ({
+    id: `${vendorId}:${row.vendor_product_key}:${row.connectwise_product_code}:invoice-count`,
+    vendorId,
+    vendorProductKey: row.vendor_product_key,
+    productCode: row.connectwise_product_code,
+    productName: row.connectwise_product_name,
+    sourceMetric: 'snapshot-count' as const,
+    billableUnit: 'license' as const,
+    unitPrice:
+      row.unit_price === null
+        ? undefined
+        : {
+            amount: numericValue(row.unit_price),
+            currency: 'USD' as const,
+          },
+    notes: `${displayName} invoice table quantity for ${row.connectwise_product_name}.`,
+  }));
+
+  return {
+    vendorId,
+    vendorName: displayName,
+    rules,
+  };
 }
 
 async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
@@ -578,8 +631,8 @@ function applyProductBundles(
 }
 
 async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnapshot[]) {
-  const agreementIds = [...new Set(snapshots.map((snapshot) => snapshot.agreementId))];
-  if (agreementIds.length === 0) {
+  const customerIds = [...new Set(snapshots.map((snapshot) => snapshot.clientId))];
+  if (customerIds.length === 0) {
     return [];
   }
 
@@ -588,6 +641,8 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
        agreement_additions.id,
        agreement_additions.customer_id,
        agreement_additions.agreement_id,
+       agreements.name as source_agreement_name,
+       agreements.connectwise_agreement_id as source_connectwise_agreement_id,
        agreement_additions.connectwise_addition_id,
        agreement_additions.product_code,
        agreement_additions.product_name,
@@ -599,13 +654,13 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
      from agreement_additions
      inner join agreements
        on agreements.id = agreement_additions.agreement_id
-     where agreement_additions.agreement_id = any($1::uuid[])
+     where agreement_additions.customer_id = any($1::uuid[])
        and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'`,
-    [agreementIds],
+    [customerIds],
   );
 
   return result.rows.map(mapAdditionRow);
@@ -656,7 +711,7 @@ async function withLineDetails(
     ...line,
     ...labelsByLineKey.get(`${line.clientId}|${line.agreementId}`),
     ...invoiceDetailsForLine(invoiceQuantities, line),
-    matchedAgreementAdditions: matchedAgreementAdditionsForLine(line, agreementAdditions),
+    matchedAgreementAdditions: matchedAgreementAdditionsForLine(line, agreementAdditions, snapshots, ruleSet),
     devices: devicesForLine(line, snapshots, ruleSet),
   }));
 }
@@ -702,20 +757,26 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
 function matchedAgreementAdditionsForLine(
   line: ReconciliationLine,
   agreementAdditions: LoadedAgreementAddition[],
+  snapshots: UsageSnapshot[],
+  ruleSet: VendorRuleSet,
 ): ReconciliationLineAgreementAddition[] {
   if (line.lineType === 'unmapped-vendor') {
     return [];
   }
 
+  const shouldUseCustomerAgreementScope = hasSingleMappedRuleAgreement(line, snapshots, ruleSet);
   return agreementAdditions
     .filter(
       (addition) =>
         addition.clientId === line.clientId &&
-        addition.agreementId === line.agreementId &&
+        (shouldUseCustomerAgreementScope || addition.agreementId === line.agreementId) &&
         addition.productCode.trim().toLowerCase() === line.productCode.trim().toLowerCase(),
     )
     .map((addition) => ({
       id: addition.id,
+      agreementId: addition.sourceAgreementId ?? addition.agreementId,
+      agreementName: addition.sourceAgreementName,
+      connectWiseAgreementId: addition.sourceConnectWiseAgreementId,
       connectWiseAdditionId: addition.connectWiseAdditionId,
       productCode: addition.productCode,
       productName: addition.productName,
@@ -726,6 +787,26 @@ function matchedAgreementAdditionsForLine(
       additionStatus: addition.additionStatus,
       updatedAt: addition.updatedAt,
     }));
+}
+
+function hasSingleMappedRuleAgreement(line: ReconciliationLine, snapshots: UsageSnapshot[], ruleSet: VendorRuleSet) {
+  const rule = ruleSet.rules.find((candidate) => candidate.id === line.ruleId);
+  if (!rule) {
+    return false;
+  }
+
+  const agreementIds = new Set(
+    snapshots
+      .filter(
+        (snapshot) =>
+          snapshot.clientId === line.clientId &&
+          snapshot.vendorId === line.vendorId &&
+          snapshotMatchesRule(snapshot, rule),
+      )
+      .map((snapshot) => snapshot.agreementId),
+  );
+
+  return agreementIds.size === 1 && agreementIds.has(line.agreementId);
 }
 
 function snapshotMatchesUnmappedLine(snapshot: UsageSnapshot, line: ReconciliationLine) {
@@ -813,6 +894,9 @@ function mapAdditionRow(row: AdditionRow): LoadedAgreementAddition {
             currency: 'USD',
           },
     updatedAt: isoDate(row.updated_at),
+    sourceAgreementId: row.agreement_id,
+    sourceAgreementName: row.source_agreement_name ?? undefined,
+    sourceConnectWiseAgreementId: row.source_connectwise_agreement_id ?? undefined,
     lessIncluded: optionalNumericValue(raw.lessIncluded),
     billedQuantity: optionalNumericValue(raw.billedQuantity),
     additionStatus: row.addition_status,

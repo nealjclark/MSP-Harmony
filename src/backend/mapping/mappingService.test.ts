@@ -87,6 +87,27 @@ const monthlyAgreement = buildAccountMappingCandidates(
 assert.equal(monthlyAgreement?.status, 'approved');
 assert.equal(monthlyAgreement?.agreementId, 'agreement-7');
 
+const annualProductAgreement = buildAccountMappingCandidates(
+  'cove',
+  [
+    {
+      externalAccountId: '606',
+      externalAccountName: 'Annual Product LLC',
+      rowCount: 1,
+      productCodes: ['CW-ANNUAL-BACKUP'],
+    },
+  ],
+  [
+    customer('customer-7', 'Annual Product LLC', [
+      agreement('agreement-8', 'Monthly Services Agreement', 12, []),
+      agreement('agreement-9', 'Annual Backup Agreement', 2, ['CW-ANNUAL-BACKUP']),
+    ]),
+  ],
+)[0];
+assert.equal(annualProductAgreement?.status, 'approved');
+assert.equal(annualProductAgreement?.agreementId, 'agreement-9');
+assert.match(annualProductAgreement?.reason ?? '', /mapped source product/);
+
 const creativeCandidates = buildAccountMappingCandidates(
   'cove',
   [
@@ -177,6 +198,16 @@ async function run() {
   assert.equal(automapResult.reviewMappings, 1);
   assert.equal(automapResult.skippedExisting, 1);
   assert.equal(workflow.queries.some((query) => query.sql.includes('insert into vendor_account_mappings')), false);
+  const mappingSourceSql = workflow.queries.find((query) => query.sql.includes('source_account_names'))?.sql ?? '';
+  const accountSourceSql = workflow.queries.find((query) => query.sql.includes('source_rows'))?.sql ?? '';
+  assert.equal(mappingSourceSql.includes("coalesce(metadata->>'source', '') <> 'invoice-table'"), true);
+  assert.equal(mappingSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
+  assert.equal(mappingSourceSql.includes('app_river_account_aliases'), true);
+  assert.equal(accountSourceSql.includes("coalesce(metadata->>'source', '') <> 'invoice-table'"), true);
+  assert.equal(accountSourceSql.includes("dimensions->>'appRiverCustomerName'"), true);
+  assert.equal(accountSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
+  assert.equal(accountSourceSql.includes('app_river_account_aliases'), true);
+  assert.equal(accountSourceSql.includes('having count(distinct external_account_id) = 1'), true);
 
   const approveSuggestedResult = await approveSuggestedAccountMappings(workflow.database, 'cove', {
     actor: 'bulk-reviewer@example.com',
@@ -187,6 +218,41 @@ async function run() {
   assert.equal(accountInsertQueries.length, 1);
   assert.equal(accountInsertQueries[0]?.values?.[1], '303');
   assert.equal(accountInsertQueries[0]?.values?.[9], 'bulk-reviewer@example.com');
+
+  const appRiverAccountQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const appRiverAccountDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      appRiverAccountQueries.push({ sql, values });
+      if (sql.includes('alias_inputs')) {
+        return {
+          rows: [
+            {
+              external_account_id: 'app-river-api-customer-119793',
+              external_account_name: 'Absolute Electric, Inc.',
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  await updateAccountMapping(appRiverAccountDatabase, 'opentext-appriver', '119793', {
+    status: 'approved',
+    customerId: 'customer-absolute-electric',
+    agreementId: 'agreement-absolute-electric',
+    externalAccountName: 'Absolute Electric, Inc.',
+    reviewedBy: 'reviewer@example.com',
+  });
+  const appRiverAccountInsert = appRiverAccountQueries.find((query) =>
+    query.sql.includes('insert into vendor_account_mappings'),
+  );
+  const appRiverAliasDeactivate = appRiverAccountQueries.find((query) =>
+    query.sql.includes('set active = false') && query.sql.includes('external_account_id = $2'),
+  );
+  assert.equal(appRiverAccountInsert?.values?.[1], 'app-river-api-customer-119793');
+  assert.equal(appRiverAccountInsert?.values?.[2], 'Absolute Electric, Inc.');
+  assert.equal(appRiverAliasDeactivate?.values?.[1], '119793');
 
   await updateProductMapping(database, 'cove', 'cove-server', {
     status: 'approved',
@@ -473,6 +539,7 @@ function mappingWorkflowDatabase(existingMappings: unknown[]) {
             external_account_id: source.externalAccountId,
             external_account_name: source.externalAccountName,
             row_count: source.rowCount,
+            product_codes: source.productCodes ?? [],
             last_seen_at: '2026-06-15T00:00:00.000Z',
           })) as T[],
         };

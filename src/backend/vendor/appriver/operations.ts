@@ -901,7 +901,7 @@ async function insertAppRiverSyncWorkItem(database: Queryable, syncRunId: string
       customer.customerId,
       customer.name,
       customer.customerType ?? null,
-      JSON.stringify(customer.raw ?? {}),
+      JSON.stringify(rawPayloadForCustomerWorkItem(customer)),
     ],
   );
 }
@@ -1292,11 +1292,13 @@ function isPartnerCustomer(customer: AppRiverCustomer) {
 }
 
 function customerFromWorkItem(workItem: AppRiverSyncWorkItemRow): AppRiverCustomer {
+  const raw = recordFromJson(workItem.raw_payload);
   return {
     customerId: workItem.external_customer_id,
     name: workItem.customer_name ?? workItem.external_customer_id,
     customerType: workItem.customer_type ?? undefined,
-    raw: recordFromJson(workItem.raw_payload),
+    externalCustomerAccountNumber: appRiverCustomerAccountNumber(raw),
+    raw,
   };
 }
 
@@ -1324,6 +1326,31 @@ function dimensionsForSubscription(customer: AppRiverCustomer, detail: AppRiverS
     domain: detail.domain,
     notes: detail.notes,
   };
+}
+
+function rawPayloadForCustomerWorkItem(customer: AppRiverCustomer) {
+  const raw = recordFromJson(customer.raw);
+  const externalCustomerAccountNumber = customer.externalCustomerAccountNumber ?? appRiverCustomerAccountNumber(raw);
+  if (!externalCustomerAccountNumber) {
+    return raw;
+  }
+
+  return {
+    ...raw,
+    ExternalCustomerAccountNumber: raw.ExternalCustomerAccountNumber ?? externalCustomerAccountNumber,
+    externalCustomerAccountNumber: raw.externalCustomerAccountNumber ?? externalCustomerAccountNumber,
+  };
+}
+
+function appRiverCustomerAccountNumber(record: Record<string, unknown>) {
+  return (
+    stringFromUnknown(record.externalCustomerAccountNumber) ??
+    stringFromUnknown(record.ExternalCustomerAccountNumber) ??
+    stringFromUnknown(record.CustomerAccountNumber) ??
+    stringFromUnknown(record.customerAccountNumber) ??
+    stringFromUnknown(record.CWID) ??
+    stringFromUnknown(record.cwid)
+  );
 }
 
 function defaultProductMapping(vendorProductKey: string, detail: AppRiverSubscriptionDetail): AppRiverProductMapping {

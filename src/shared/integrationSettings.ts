@@ -7,12 +7,19 @@ export type IntegrationId =
   | 'datto'
   | 'microsoft-365'
   | 'opentext-appriver'
+  | 'huntress'
   | 'microsoft-azure'
-  | 'pax8';
+  | 'pax8'
+  | 'custom-table';
 
-export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic';
+export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic' | 'none';
 export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import';
 export type IntegrationConfiguredStatus = 'connected' | 'degraded' | 'not-configured';
+export type IntegrationDataIngestionMethod = 'live-api' | 'csv' | 'excel';
+export type IntegrationDataSourceType =
+  | 'user-license-detail'
+  | 'customer-product-breakdown'
+  | 'reseller-product-total';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
 
@@ -32,12 +39,23 @@ export type IntegrationNonSecretDefinition = {
   defaultValue?: string;
 };
 
+export type IntegrationDataSourceDefinition = {
+  key: string;
+  label: string;
+  sourceType: IntegrationDataSourceType;
+  ingestionMethods: IntegrationDataIngestionMethod[];
+  requiresCustomerMapping: boolean;
+  providesCosts: boolean;
+  description: string;
+};
+
 export type IntegrationSettingsDefinition = {
   integrationId: IntegrationId;
   displayName: string;
   category: string;
   authMode: IntegrationAuthMode;
   capabilities: IntegrationCapability[];
+  dataSources: IntegrationDataSourceDefinition[];
   description: string;
   endpoint: string;
   requiredSecrets: IntegrationSecretDefinition[];
@@ -72,6 +90,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     category: 'PSA',
     authMode: 'api-key',
     capabilities: ['live-api'],
+    dataSources: [],
     description: 'PSA companies, agreements, products, additions, tickets, and approved write-back.',
     endpoint: 'https://api-na.myconnectwise.net',
     requiredSecrets: [
@@ -92,7 +111,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Cove Data Protection',
     category: 'Backup',
     authMode: 'basic',
-    capabilities: ['live-api', 'mapping'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'cove-protected-systems',
+        'Protected systems',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Customer-level server, workstation, and selected-storage usage counts.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Protected-system counts and selected-storage usage for Cove backup billing.',
     endpoint: 'https://api.backup.management',
     requiredSecrets: [
@@ -112,7 +143,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'N-able N-central',
     category: 'RMM',
     authMode: 'token',
-    capabilities: ['live-api', 'mapping'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'ncentral-device-filters',
+        'Device filter counts',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Customer-level device and filter counts for server, workstation, and overlay billing.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Filter-driven managed server and workstation billing with custom overlay tags.',
     endpoint: 'https://ncentral.example.com',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
@@ -126,7 +169,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'SentinelOne',
     category: 'Security',
     authMode: 'token',
-    capabilities: [],
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'sentinelone-sites',
+        'Site agent counts',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        false,
+        'Customer or site-level endpoint agent counts from invoice tables or exports.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Endpoint, site, workstation, and server agent counts.',
     endpoint: 'https://usea1.sentinelone.net',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-sentinelone-api-token', 'SENTINELONE_API_TOKEN')],
@@ -140,7 +195,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Proofpoint Essentials',
     category: 'Email Security',
     authMode: 'basic',
-    capabilities: [],
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'proofpoint-domains',
+        'Domain user counts',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        false,
+        'Customer domain-level email security seat counts from invoice tables or exports.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Email security seat counts by customer domain.',
     endpoint: 'https://api.proofpointessentials.com',
     requiredSecrets: [
@@ -157,7 +224,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Datto Backup',
     category: 'Backup',
     authMode: 'basic',
-    capabilities: ['live-api', 'mapping'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'datto-product-lines',
+        'Product-line usage',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Customer-level BCDR protected agents and SaaS Protection product-line seat counts.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Kaseya Datto BCDR protected-agent counts and SaaS Protection seat counts.',
     endpoint: 'https://api.datto.com',
     requiredSecrets: [
@@ -176,7 +255,28 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Microsoft 365',
     category: 'Productivity',
     authMode: 'oauth2',
-    capabilities: ['live-api', 'mapping'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'microsoft365-user-licenses',
+        'User license detail',
+        'user-license-detail',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Tenant user and assigned-license detail, including licensed user counts and email/account details.',
+      ),
+      dataSource(
+        'microsoft365-product-totals',
+        'Tenant product counts',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Tenant-level Microsoft 365 SKU totals and subscription counts.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Assigned user license counts through Microsoft Graph application permissions.',
     endpoint: 'https://graph.microsoft.com',
     requiredSecrets: [
@@ -201,6 +301,18 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     category: 'Marketplace',
     authMode: 'oauth2',
     capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'appriver-customer-products',
+        'Customer products',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        true,
+        'SecureCloud customer subscriptions and invoice line counts by customer and product.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'SecureCloud reseller subscriptions and Microsoft 365 license quantities from AppRiver.',
     endpoint: 'https://unityapi.webrootcloudav.com',
     requiredSecrets: [
@@ -216,11 +328,49 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     webhookSupported: false,
   },
   {
+    integrationId: 'huntress',
+    displayName: 'Huntress',
+    category: 'Security',
+    authMode: 'none',
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'huntress-customer-products',
+        'Customer products',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        true,
+        'Customer and product breakdown from Huntress invoices or exports.',
+      ),
+      resellerInvoiceTotals(),
+    ],
+    description: 'Managed endpoint security counts by customer and product from invoice tables or exports.',
+    endpoint: '',
+    requiredSecrets: [],
+    requiredNonSecrets: [],
+    scopes: ['invoice-table.import'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
+  },
+  {
     integrationId: 'microsoft-azure',
     displayName: 'Microsoft Azure',
     category: 'Cloud',
     authMode: 'oauth2',
-    capabilities: [],
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'azure-subscription-consumption',
+        'Subscription consumption',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        true,
+        'Azure subscription consumption and invoice charges by customer or subscription.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Azure subscription consumption and configurable markup inputs.',
     endpoint: 'https://management.azure.com',
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-azure-client-secret', 'AZURE_CLIENT_SECRET')],
@@ -239,7 +389,19 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Pax8',
     category: 'Marketplace',
     authMode: 'oauth2',
-    capabilities: [],
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'pax8-customer-products',
+        'Customer products',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        true,
+        'Marketplace subscription counts by customer and product.',
+      ),
+      resellerInvoiceTotals(),
+    ],
     description: 'Marketplace subscriptions, SKU aliases, and customer product mapping.',
     endpoint: 'https://api.pax8.com',
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-pax8-client-secret', 'PAX8_CLIENT_SECRET')],
@@ -250,6 +412,32 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     scopes: ['companies.read', 'subscriptions.read', 'products.read'],
     syncFrequency: 'daily',
     webhookSupported: true,
+  },
+  {
+    integrationId: 'custom-table',
+    displayName: 'Custom Table Import',
+    category: 'Custom',
+    authMode: 'none',
+    capabilities: ['mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'custom-customer-products',
+        'Customer products',
+        'customer-product-breakdown',
+        ['csv', 'excel'],
+        true,
+        true,
+        'User-mapped invoice table with customer/account, product, quantity, and optional amount fields.',
+      ),
+      resellerInvoiceTotals(),
+    ],
+    description: 'User-defined invoice table imports for vendors that do not have a live API connection.',
+    endpoint: '',
+    requiredSecrets: [],
+    requiredNonSecrets: [],
+    scopes: ['invoice-table.import'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
   },
 ];
 
@@ -273,6 +461,22 @@ export function integrationIdsWithCapability(capability: IntegrationCapability) 
   return integrationSettingsRegistry
     .filter((definition) => definition.capabilities.includes(capability))
     .map((definition) => definition.integrationId);
+}
+
+export function listIntegrationDataSources(integrationId: IntegrationId) {
+  return getIntegrationSettingsDefinition(integrationId)?.dataSources ?? [];
+}
+
+export function getIntegrationDataSource(
+  integrationId: IntegrationId,
+  sourceType?: IntegrationDataSourceType,
+) {
+  const sources = listIntegrationDataSources(integrationId);
+  return sourceType ? sources.find((source) => source.sourceType === sourceType) : sources[0];
+}
+
+export function integrationDataSourceRequiresCustomerMapping(sourceType: IntegrationDataSourceType) {
+  return sourceType !== 'reseller-product-total';
 }
 
 export function validateIntegrationSettings(
@@ -337,6 +541,38 @@ function nonSecret(
     required: true,
     defaultValue,
   };
+}
+
+function dataSource(
+  key: string,
+  label: string,
+  sourceType: IntegrationDataSourceType,
+  ingestionMethods: IntegrationDataIngestionMethod[],
+  requiresCustomerMapping: boolean,
+  providesCosts: boolean,
+  description: string,
+): IntegrationDataSourceDefinition {
+  return {
+    key,
+    label,
+    sourceType,
+    ingestionMethods,
+    requiresCustomerMapping,
+    providesCosts,
+    description,
+  };
+}
+
+function resellerInvoiceTotals() {
+  return dataSource(
+    'reseller-product-totals',
+    'Reseller product totals',
+    'reseller-product-total',
+    ['csv', 'excel'],
+    false,
+    true,
+    'Invoice totals by product for the reseller account when customer-level detail comes from another API or export.',
+  );
 }
 
 function statusForValidation(

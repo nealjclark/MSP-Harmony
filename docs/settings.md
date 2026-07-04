@@ -10,6 +10,7 @@ MSP Harmony uses a typed settings registry as the source of truth for integratio
 - `endpoint`: Default API endpoint or base URL.
 - `requiredSecrets`: Secret references that must exist in Key Vault.
 - `requiredNonSecrets`: Required config values that are safe to store outside Key Vault.
+- `dataSources`: Declared source shapes the integration can normalize, such as user-license detail, customer/product breakdowns, or reseller-wide product totals.
 - `scopes`: Required API permissions or operational access scopes.
 - `syncFrequency`: Default sync cadence.
 - `webhookSupported`: Whether the integration can receive pushed events.
@@ -29,6 +30,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Datto Backup | `mspharmony-datto-api-key`, `mspharmony-datto-api-secret` |
 | Microsoft 365 | `mspharmony-microsoft365-client-secret` |
 | AppRiver - OpenText | `mspharmony-opentext-appriver-client-secret`, `mspharmony-opentext-appriver-refresh-token` |
+| Huntress | none for manual invoice imports |
 | Microsoft Azure | `mspharmony-azure-client-secret` |
 | Pax8 | `mspharmony-pax8-client-secret` |
 
@@ -43,8 +45,21 @@ Use these Key Vault secret names for the first implementation pass:
 | Datto Backup | `endpoint` |
 | Microsoft 365 | `endpoint`, `clientId`, `tenantId` |
 | AppRiver - OpenText | `endpoint`, `clientId` |
+| Huntress | none for manual invoice imports |
 | Microsoft Azure | `endpoint`, `tenantId`, `clientId`, `subscriptionId` |
 | Pax8 | `endpoint`, `clientId` |
+
+## Data Source Shapes
+
+The registry separates integration setup from the shape of data it contributes:
+
+| Source type | Meaning | Mapping requirement |
+| --- | --- | --- |
+| `user-license-detail` | Per-user license or mailbox detail, such as Microsoft 365 licensed users and email account details. | Customer/account mapping and product mapping |
+| `customer-product-breakdown` | Customer and product rows with counts, such as AppRiver customer subscriptions or Huntress customer/product exports. | Customer/account mapping and product mapping |
+| `reseller-product-total` | Invoice totals by product for the reseller account when customer detail comes from an API or separate export. | Product mapping only |
+
+Manual table imports must declare the source type. Customer/product imports can feed customer reconciliation after mappings are approved. Reseller product-total imports are retained as invoice cost/profit evidence and product mapping inputs, but they do not create customer usage snapshots.
 
 ## Setup Flow
 
