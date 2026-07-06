@@ -187,6 +187,7 @@ async function run() {
   assert.equal(linkedStandardLine?.writeAction, 'update-addition');
   assert.equal(linkedStandardLine?.linkedCount?.sources.length, 2);
   assert.equal(linkedStandardLine?.devices[0]?.dimensions.linkedCountAnchor, true);
+  assert.equal(appRiverLinkedResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
 
   appRiverLinkedFilteredMicrosoftQueries.splice(0, appRiverLinkedFilteredMicrosoftQueries.length);
   const appRiverFilteredLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedFilteredMicrosoftDatabase, 'opentext-appriver', { syncRunId });
@@ -204,6 +205,7 @@ async function run() {
   assert.equal(linkedThreatLine?.proposedQuantity, 2);
   assert.equal(linkedThreatLine?.agreementQuantity, 1);
   assert.equal(linkedThreatLine?.delta, 1);
+  assert.equal(appRiverFilteredLinkedResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
 
   const huntressLinkedResult = await reconcileVendorFromDatabase(huntressLinkedConnectWiseDatabase, 'huntress', { syncRunId });
   const huntressLine = huntressLinkedResult.lines.find((line) => line.productCode === 'HUNTRESS');

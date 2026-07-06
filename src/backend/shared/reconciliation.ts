@@ -54,7 +54,10 @@ function reconcileUnmappedSnapshots(request: ReconcileVendorUsageRequest): Recon
   );
   const mappedSnapshotIds = new Set(mappedSnapshots.map((snapshot) => snapshot.id));
   const unmappedSnapshots = request.snapshots.filter(
-    (snapshot) => snapshot.vendorId === request.vendorId && !mappedSnapshotIds.has(snapshot.id),
+    (snapshot) =>
+      snapshot.vendorId === request.vendorId &&
+      !mappedSnapshotIds.has(snapshot.id) &&
+      !isSyntheticReconciliationSnapshot(snapshot),
   );
   const groupedSnapshots = groupUnmappedSnapshots(unmappedSnapshots);
 
@@ -90,6 +93,10 @@ function reconcileUnmappedSnapshots(request: ReconcileVendorUsageRequest): Recon
       ],
     };
   });
+}
+
+function isSyntheticReconciliationSnapshot(snapshot: UsageSnapshot) {
+  return snapshot.dimensions.linkedCountAnchor === true;
 }
 
 function groupUnmappedSnapshots(snapshots: UsageSnapshot[]) {

@@ -7200,8 +7200,8 @@ function ReconcileView(props: {
                                 role="row"
                               >
                                 <span>Product</span>
-                                <span>API Count</span>
                                 {showLinkedCountColumn ? <span>Linked</span> : null}
+                                <span>API Count</span>
                                 <span>Inv. Count</span>
                                 <span>CW Count</span>
                                 <span>Delta</span>
@@ -7246,17 +7246,6 @@ function ReconcileView(props: {
                                       <strong>{issue.product}</strong>
                                       <em>{issue.serviceCode} / {issue.family}</em>
                                     </span>
-                                    <span className="count-cell">
-                                      <button
-                                        aria-pressed={selectedCountSource === 'api'}
-                                        className={countButtonClass('api')}
-                                        onClick={() => onCountSourceSelect(issue.id, 'api')}
-                                        title="Use API count"
-                                        type="button"
-                                      >
-                                        {issue.sourceCount.toLocaleString()}
-                                      </button>
-                                    </span>
                                     {showLinkedCountColumn ? (
                                       <span className="count-cell">
                                         {typeof linkedCount === 'number' ? (
@@ -7274,6 +7263,17 @@ function ReconcileView(props: {
                                         )}
                                       </span>
                                     ) : null}
+                                    <span className="count-cell">
+                                      <button
+                                        aria-pressed={selectedCountSource === 'api'}
+                                        className={countButtonClass('api')}
+                                        onClick={() => onCountSourceSelect(issue.id, 'api')}
+                                        title="Use API count"
+                                        type="button"
+                                      >
+                                        {issue.sourceCount.toLocaleString()}
+                                      </button>
+                                    </span>
                                     <span className="count-cell">
                                       <button
                                         aria-pressed={selectedCountSource === 'invoice'}

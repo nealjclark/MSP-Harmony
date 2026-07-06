@@ -90,6 +90,72 @@ assert.equal(unmappedE5Line?.agreementQuantity, 0);
 assert.equal(unmappedE5Line?.writeAction, undefined);
 assert.equal(unmappedAppRiverResult.totals.unmapped, 1);
 
+const linkedAnchorResult = reconcileVendorUsage({
+  vendorId: 'opentext-appriver',
+  rules: [
+    {
+      id: 'advanced-email-threat-protection-license-count',
+      vendorId: 'opentext-appriver',
+      vendorProductKey: 'Advanced Email Threat Protection|Monthly|Monthly',
+      productCode: 'Email Threat Protection',
+      productName: 'Email Threat Protection',
+      sourceMetric: 'snapshot-count',
+      billableUnit: 'license',
+      dimensions: {
+        subscriptionSource: 'appriver-securecloud-subscription',
+      },
+      notes: 'Advanced Email Threat Protection count comes from AppRiver subscription quantity.',
+    },
+  ],
+  snapshots: [
+    {
+      id: 'appriver-aetp-live',
+      vendorId: 'opentext-appriver',
+      clientId: 'all-american-metal',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'Advanced Email Threat Protection|Monthly|Monthly',
+      productCode: 'Email Threat Protection',
+      productName: 'Email Threat Protection',
+      quantity: 11,
+      observedAt: '2026-07-04T03:10:52.662Z',
+      dimensions: {
+        subscriptionSource: 'appriver-securecloud-subscription',
+      },
+    },
+    {
+      id: 'linked-aetp-anchor',
+      vendorId: 'opentext-appriver',
+      clientId: 'all-american-metal',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'Advanced Email Threat Protection|Monthly|Monthly',
+      productCode: 'Email Threat Protection',
+      productName: 'Email Threat Protection',
+      quantity: 0,
+      observedAt: '2026-07-04T03:10:52.662Z',
+      dimensions: {
+        linkedCountAnchor: true,
+        linkedCountRuleName: 'AETP - M365 Licensed Users',
+      },
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'addition-aetp',
+      clientId: 'all-american-metal',
+      agreementId: 'monthly-services',
+      productCode: 'Email Threat Protection',
+      productName: 'Email Threat Protection',
+      quantity: 12,
+    },
+  ],
+});
+const linkedAnchorLine = linkedAnchorResult.lines.find((line) => line.productCode === 'Email Threat Protection');
+assert.equal(linkedAnchorLine?.lineType, 'base-count');
+assert.equal(linkedAnchorLine?.sourceQuantity, 11);
+assert.equal(linkedAnchorLine?.delta, -1);
+assert.equal(linkedAnchorResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
+assert.equal(linkedAnchorResult.totals.unmapped, 0);
+
 console.log('backend reconciliation tests passed');
 
 function ncentralSnapshot(id: string): UsageSnapshot {
