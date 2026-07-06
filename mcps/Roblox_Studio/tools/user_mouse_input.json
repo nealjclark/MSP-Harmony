@@ -1,0 +1,69 @@
+{
+  "name": "user_mouse_input",
+  "description": "Send one or more mouse actions in order: moveTo, mouseButtonDown, mouseButtonUp, mouseButtonClick, scrollUp, scrollDown, or wait. For mouseButtonDown, mouseButtonUp, and mouseButtonClick, set mouse_button to \"left\" or \"right\". After the first step that sets position (x/y or instance_path), later steps may omit coordinates and reuse that position.",
+  "inputSchema": {
+    "properties": {
+      "actions": {
+        "description": "Ordered list of mouse actions to perform.",
+        "items": {
+          "properties": {
+            "action": {
+              "description": "The mouse action for this step.",
+              "enum": [
+                "moveTo",
+                "mouseButtonDown",
+                "mouseButtonUp",
+                "mouseButtonClick",
+                "scrollUp",
+                "scrollDown",
+                "wait"
+              ],
+              "type": "string"
+            },
+            "instance_path": {
+              "description": "The instance path that the mouse should be moved to. for example: \"LocalPlayer.PlayerGui.Frame\", \"game.Workspace.Folder.Frame\". The path should start with game, LocalPlayer, or Workspace. If instance_path is provided, x and y will be ignored, vice versa.",
+              "type": "string"
+            },
+            "mouse_button": {
+              "description": "Required when action is mouseButtonDown, mouseButtonUp, or mouseButtonClick.",
+              "enum": [
+                "left",
+                "right"
+              ],
+              "type": "string"
+            },
+            "wait_time_ms": {
+              "description": "Delay in milliseconds before the next step. Required for wait; range 0 to 10000.",
+              "type": "number"
+            },
+            "x": {
+              "description": "Screen X coordinate. Omit if instance_path is set or a prior step already established position (reused for scroll, mouse button actions, etc.).",
+              "type": "number"
+            },
+            "y": {
+              "description": "Screen Y coordinate. Omit if instance_path is set or a prior step already established position (reused for scroll, mouse button actions, etc.).",
+              "type": "number"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "datamodel_type": {
+        "description": "The target datamodel to operate on, the tool can only be performed in those datamodel types. call get_studio_state to get current available datamodel types. if the target datamodel is not available in current mode, consider using start_stop_play to switch to the desired mode and then use the tools. This is a required argument.",
+        "enum": [
+          "Client"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "actions",
+      "datamodel_type"
+    ],
+    "type": "object"
+  }
+}

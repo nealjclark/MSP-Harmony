@@ -1,4 +1,4 @@
-import type { IntegrationId } from '../../shared/integrationSettings';
+import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
 import { defaultCoveProductMappings, type CoveProductMappingKey } from '../vendor/cove/rules';
 import { defaultNcentralProductMappings } from '../vendor/ncentral/rules';
 
@@ -91,6 +91,82 @@ export type ProductBundle = {
   updatedAt?: string;
 };
 
+export type ProductLinkRuleSource =
+  | {
+      sourceType: 'vendor-product';
+      vendorId: IntegrationId;
+      vendorProductKey: string;
+      vendorProductName?: string;
+    }
+  | {
+      sourceType: 'connectwise-addition';
+      productCode: string;
+      productName?: string;
+    }
+  | {
+      sourceType: 'filtered-dataset';
+      vendorId: IntegrationId;
+      dataset?: 'users' | 'licenses';
+      label?: string;
+      filter: ProductLinkRuleFilterNode;
+      aggregation: ProductLinkRuleAggregation;
+    };
+
+export type ProductLinkRuleFilterOperator =
+  | 'contains'
+  | 'not-contains'
+  | 'equals'
+  | 'not-equals'
+  | 'starts-with'
+  | 'ends-with'
+  | 'is-empty'
+  | 'is-not-empty';
+
+export type ProductLinkRuleFilterNode =
+  | {
+      nodeType: 'group';
+      operator: 'and' | 'or';
+      children: ProductLinkRuleFilterNode[];
+    }
+  | {
+      nodeType: 'condition';
+      field: string;
+      operator: ProductLinkRuleFilterOperator;
+      value?: string;
+    };
+
+export type ProductLinkRuleAggregation =
+  | {
+      type: 'row-count';
+    }
+  | {
+      type: 'column-sum';
+      column: string;
+    };
+
+export type ProductLinkRule = {
+  id: string;
+  vendorId: IntegrationId;
+  sourceVendorProductKey: string;
+  ruleName: string;
+  sources: ProductLinkRuleSource[];
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type UpsertProductLinkRuleInput = {
+  id?: string;
+  sourceVendorProductKey?: string;
+  ruleName?: string;
+  sources?: ProductLinkRuleSource[];
+  active?: boolean;
+  reviewedBy?: string;
+};
+
 export type ProductCatalogSearchResult = ProductMappingTarget & {
   connectwiseProductId?: string;
   source: 'local' | 'connectwise';
@@ -130,6 +206,7 @@ export type MappingState = {
     approvedProductMappings: number;
     productCandidates: number;
     productBundles: number;
+    linkedProductRules: number;
     unmappedSnapshots: number;
   };
   accountMappings: AccountMapping[];
@@ -137,6 +214,7 @@ export type MappingState = {
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
   productBundles: ProductBundle[];
+  productLinkRules: ProductLinkRule[];
   customerOptions: ConnectWiseCustomerCandidate[];
 };
 
@@ -262,6 +340,20 @@ type ProductBundleRow = {
   connectwise_product_name: string;
   unit_price: string | number | null;
   quantity_strategy: ProductBundleQuantityStrategy | string;
+  mapping_status: MappingStatus;
+  active: boolean;
+  reviewed_by: string | null;
+  reviewed_at: Date | string | null;
+  created_at: Date | string | null;
+  updated_at: Date | string | null;
+};
+
+type ProductLinkRuleRow = {
+  id: string;
+  vendor_id: IntegrationId;
+  source_vendor_product_key: string;
+  rule_name: string;
+  sources: unknown;
   mapping_status: MappingStatus;
   active: boolean;
   reviewed_by: string | null;
@@ -414,6 +506,7 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
     productMappings,
     productCandidates,
     productBundles,
+    productLinkRules,
     unmappedSnapshots,
     customerOptions,
   ] = await Promise.all([
@@ -422,6 +515,7 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
     listProductMappings(database, vendorId),
     generateProductMappingCandidates(database, vendorId),
     listProductBundles(database, vendorId),
+    listProductLinkRules(database, vendorId),
     countUnmappedSnapshots(database, vendorId),
     loadConnectWiseCustomers(database),
   ]);
@@ -452,6 +546,7 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
       approvedProductMappings: productMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length,
       productCandidates: unmappedProductCandidates.length,
       productBundles: productBundles.filter((bundle) => bundle.status === 'approved' && bundle.active).length,
+      linkedProductRules: productLinkRules.filter((rule) => rule.status === 'approved' && rule.active).length,
       unmappedSnapshots,
     },
     accountMappings,
@@ -459,6 +554,7 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
     productMappings,
     productCandidates: unmappedProductCandidates,
     productBundles,
+    productLinkRules,
     customerOptions,
   };
 }
@@ -717,6 +813,35 @@ export async function listProductBundles(database: Queryable, vendorId: Integrat
   return result.rows.map(mapProductBundleRow);
 }
 
+export async function listProductLinkRules(database: Queryable, vendorId: IntegrationId): Promise<ProductLinkRule[]> {
+  const result = await database.query<ProductLinkRuleRow>(
+    `select
+       id,
+       vendor_id,
+       source_vendor_product_key,
+       rule_name,
+       sources,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at
+     from vendor_product_link_rules
+     where vendor_id = $1
+     order by active desc, rule_name, source_vendor_product_key, id`,
+    [vendorId],
+  ).catch((error: unknown) => {
+    if (isMissingDatabaseRelation(error)) {
+      return { rows: [] as ProductLinkRuleRow[] };
+    }
+
+    throw error;
+  });
+
+  return result.rows.map(mapProductLinkRuleRow);
+}
+
 export async function listProductMappingCustomers(
   database: Queryable,
   vendorId: IntegrationId,
@@ -733,37 +858,168 @@ export async function listProductMappingCustomers(
        order by completed_at desc nulls last, started_at desc
        limit 1
      ),
-     product_customers as (
+     latest_invoice_import as (
+       select id
+       from invoice_imports
+       where vendor_id = $1
+       order by invoice_date desc nulls last, imported_at desc
+       limit 1
+     ),
+     source_account_names as (
+       select
+         external_account_id,
+         coalesce(
+           max(nullif(dimensions->>'dattoExternalAccountName', '')),
+           max(nullif(dimensions->>'customerName', '')),
+           max(nullif(dimensions->>'appRiverCustomerName', '')),
+           max(nullif(dimensions->>'coveCustomerName', '')),
+           max(nullif(dimensions->>'ncentralCustomerName', '')),
+           max(nullif(dimensions->>'dattoCustomerName', '')),
+           max(nullif(dimensions->>'tenantName', '')),
+           max(nullif(dimensions->>'tenantDefaultDomainName', '')),
+           max(nullif(dimensions->>'domain', '')),
+           external_account_id
+         ) as external_account_name
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and external_account_id is not null
+         and sync_run_id = (select id from latest_sync_run)
+       group by external_account_id
+     ),
+     app_river_account_aliases as (
+       select
+         alias_key,
+         min(external_account_id) as external_account_id,
+         min(external_account_name) as external_account_name
+       from (
+         select
+           lower(trim(alias_value)) as alias_key,
+           source_account_names.external_account_id,
+           source_account_names.external_account_name
+         from vendor_usage_snapshots
+         inner join source_account_names
+           on source_account_names.external_account_id = vendor_usage_snapshots.external_account_id
+         cross join lateral (
+           values
+             (vendor_usage_snapshots.external_account_id),
+             (nullif(vendor_usage_snapshots.dimensions->>'externalCustomerAccountNumber', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerId', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
+             (nullif(vendor_usage_snapshots.dimensions->>'domain', ''))
+         ) aliases(alias_value)
+         where $1 = 'opentext-appriver'
+           and vendor_usage_snapshots.vendor_id = $1
+           and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+           and nullif(trim(alias_value), '') is not null
+       ) alias_rows
+       where alias_key is not null
+       group by alias_key
+       having count(distinct external_account_id) = 1
+     ),
+     source_rows as (
        select
          coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text) as source_account_key,
-         max(vendor_usage_snapshots.external_account_id) as external_account_id,
+         vendor_usage_snapshots.external_account_id,
          coalesce(
-           max(nullif(vendor_usage_snapshots.dimensions->>'dattoExternalAccountName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'customerName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'coveCustomerName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'ncentralCustomerName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'dattoCustomerName', '')),
-           max(nullif(vendor_usage_snapshots.dimensions->>'domain', '')),
-           max(snapshot_customers.name),
-           max(vendor_usage_snapshots.external_account_id),
-           max(vendor_usage_snapshots.customer_id::text)
+           nullif(vendor_usage_snapshots.dimensions->>'dattoExternalAccountName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'customerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'appRiverCustomerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'coveCustomerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'ncentralCustomerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'dattoCustomerName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'tenantName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'tenantDefaultDomainName', ''),
+           nullif(vendor_usage_snapshots.dimensions->>'domain', ''),
+           snapshot_customers.name,
+           vendor_usage_snapshots.external_account_id,
+           vendor_usage_snapshots.customer_id::text
          ) as external_account_name,
-         sum(vendor_usage_snapshots.quantity) as vendor_quantity,
-         max(vendor_usage_snapshots.observed_at) as observed_at,
+         vendor_usage_snapshots.quantity as vendor_quantity,
+         vendor_usage_snapshots.observed_at,
          coalesce(
-           max(nullif(vendor_usage_snapshots.dimensions->>'productName', '')),
-           max(nullif(vendor_usage_snapshots.product_name, '')),
+           nullif(vendor_usage_snapshots.dimensions->>'productName', ''),
+           nullif(vendor_usage_snapshots.product_name, ''),
            $2
-         ) as vendor_product_name
+         ) as vendor_product_name,
+         vendor_usage_snapshots.customer_id,
+         vendor_usage_snapshots.agreement_id
        from vendor_usage_snapshots
        left join customers snapshot_customers
          on snapshot_customers.id = vendor_usage_snapshots.customer_id
        where vendor_usage_snapshots.vendor_id = $1
-         and vendor_usage_snapshots.vendor_product_key = $2
+         and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
          and coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text) is not null
-       group by coalesce(vendor_usage_snapshots.external_account_id, vendor_usage_snapshots.customer_id::text)
+       union all
+       select
+         coalesce(
+           canonical_account.external_account_id,
+           nullif(invoice_line_items.external_account_id, ''),
+           invoice_line_items.customer_id::text
+         ) as source_account_key,
+         coalesce(canonical_account.external_account_id, nullif(invoice_line_items.external_account_id, '')) as external_account_id,
+         coalesce(
+           canonical_account.external_account_name,
+           nullif(invoice_line_items.external_account_name, ''),
+           invoice_customers.name,
+           nullif(invoice_line_items.external_account_id, ''),
+           invoice_line_items.customer_id::text
+         ) as external_account_name,
+         invoice_line_items.quantity as vendor_quantity,
+         coalesce(invoice_line_items.invoice_date::timestamptz, invoice_imports.imported_at, invoice_line_items.created_at) as observed_at,
+         coalesce(nullif(invoice_line_items.product_name, ''), invoice_line_items.vendor_product_key, $2) as vendor_product_name,
+         invoice_line_items.customer_id,
+         invoice_line_items.agreement_id
+       from invoice_line_items
+       inner join invoice_imports
+         on invoice_imports.id = invoice_line_items.invoice_import_id
+       left join customers invoice_customers
+         on invoice_customers.id = invoice_line_items.customer_id
+       left join lateral (
+         select
+           app_river_account_aliases.external_account_id,
+           app_river_account_aliases.external_account_name
+         from app_river_account_aliases
+         where app_river_account_aliases.alias_key in (
+           lower(trim(coalesce(invoice_line_items.external_account_id, ''))),
+           lower(trim(coalesce(invoice_line_items.external_account_name, '')))
+         )
+         order by
+           case
+             when app_river_account_aliases.alias_key = lower(trim(coalesce(invoice_line_items.external_account_id, ''))) then 0
+             else 1
+           end,
+           app_river_account_aliases.external_account_name
+         limit 1
+       ) canonical_account on true
+       where invoice_line_items.vendor_id = $1
+         and replace(replace(invoice_line_items.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+         and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
+         and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+         and coalesce(
+           canonical_account.external_account_id,
+           nullif(invoice_line_items.external_account_id, ''),
+           invoice_line_items.customer_id::text
+         ) is not null
+     ),
+     product_customers as (
+       select
+         source_account_key,
+         max(external_account_id) as external_account_id,
+         coalesce(
+           max(nullif(external_account_name, '')),
+           max(external_account_id),
+           source_account_key
+         ) as external_account_name,
+         sum(vendor_quantity) as vendor_quantity,
+         max(observed_at) as observed_at,
+         coalesce(max(nullif(vendor_product_name, '')), $2) as vendor_product_name,
+         max(customer_id::text)::uuid as customer_id,
+         max(agreement_id::text)::uuid as agreement_id
+       from source_rows
+       group by source_account_key
      )
      select
        product_customers.external_account_id,
@@ -771,9 +1027,9 @@ export async function listProductMappingCustomers(
        product_customers.vendor_quantity,
        product_customers.observed_at,
        product_customers.vendor_product_name,
-       vendor_account_mappings.customer_id,
+       coalesce(vendor_account_mappings.customer_id, product_customers.customer_id) as customer_id,
        customers.name as customer_name,
-       vendor_account_mappings.agreement_id,
+       coalesce(vendor_account_mappings.agreement_id, product_customers.agreement_id) as agreement_id,
        agreements.name as agreement_name,
        agreements.status as agreement_status,
        agreement_additions.id as addition_id,
@@ -791,11 +1047,11 @@ export async function listProductMappingCustomers(
       and vendor_account_mappings.active = true
       and vendor_account_mappings.mapping_status = 'approved'
      left join customers
-       on customers.id = vendor_account_mappings.customer_id
+       on customers.id = coalesce(vendor_account_mappings.customer_id, product_customers.customer_id)
      left join agreements
-       on agreements.id = vendor_account_mappings.agreement_id
+       on agreements.id = coalesce(vendor_account_mappings.agreement_id, product_customers.agreement_id)
      left join agreement_additions
-       on agreement_additions.agreement_id = vendor_account_mappings.agreement_id
+       on agreement_additions.agreement_id = coalesce(vendor_account_mappings.agreement_id, product_customers.agreement_id)
       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
@@ -811,6 +1067,143 @@ export async function listProductMappingCustomers(
   );
 
   return mapProductMappingCustomerReview(vendorId, canonicalProductKey, result.rows);
+}
+
+export async function upsertProductLinkRule(
+  database: Queryable,
+  vendorId: IntegrationId,
+  input: UpsertProductLinkRuleInput,
+): Promise<ProductLinkRule> {
+  const sourceVendorProductKey = canonicalVendorProductKey(input.sourceVendorProductKey?.trim() ?? '');
+  if (!sourceVendorProductKey) {
+    throw new Error('Linked count rule requires a source vendor product.');
+  }
+
+  const ruleName = input.ruleName?.trim() || `${sourceVendorProductKey} linked count`;
+  const sources = normalizeProductLinkRuleSources(input.sources ?? []);
+  if (sources.length === 0) {
+    throw new Error('Linked count rule requires at least one linked source.');
+  }
+
+  if (input.id) {
+    const result = await database.query<ProductLinkRuleRow>(
+      `update vendor_product_link_rules
+       set source_vendor_product_key = $3,
+           rule_name = $4,
+           sources = $5::jsonb,
+           mapping_status = 'approved',
+           active = $6,
+           reviewed_by = $7,
+           reviewed_at = now(),
+           updated_at = now()
+       where vendor_id = $1
+         and id = $2::uuid
+       returning
+         id,
+         vendor_id,
+         source_vendor_product_key,
+         rule_name,
+         sources,
+         mapping_status,
+         active,
+         reviewed_by,
+         reviewed_at,
+         created_at,
+         updated_at`,
+      [
+        vendorId,
+        input.id,
+        sourceVendorProductKey,
+        ruleName,
+        JSON.stringify(sources),
+        input.active ?? true,
+        input.reviewedBy ?? 'user',
+      ],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error('Linked count rule was not found.');
+    }
+
+    return mapProductLinkRuleRow(row);
+  }
+
+  await database.query(
+    `update vendor_product_link_rules
+     set active = false,
+         reviewed_by = $3,
+         reviewed_at = now(),
+         updated_at = now()
+     where vendor_id = $1
+       and source_vendor_product_key = $2
+       and active = true`,
+    [vendorId, sourceVendorProductKey, input.reviewedBy ?? 'user'],
+  );
+
+  const result = await database.query<ProductLinkRuleRow>(
+    `insert into vendor_product_link_rules (
+       vendor_id,
+       source_vendor_product_key,
+       rule_name,
+       sources,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       updated_at
+     )
+     values ($1, $2, $3, $4::jsonb, 'approved', $5, $6, now(), now())
+     returning
+       id,
+       vendor_id,
+       source_vendor_product_key,
+       rule_name,
+       sources,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at`,
+    [
+      vendorId,
+      sourceVendorProductKey,
+      ruleName,
+      JSON.stringify(sources),
+      input.active ?? true,
+      input.reviewedBy ?? 'user',
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('Unable to save linked count rule.');
+  }
+
+  return mapProductLinkRuleRow(row);
+}
+
+export async function deactivateProductLinkRule(
+  database: Queryable,
+  vendorId: IntegrationId,
+  ruleId: string,
+  options: { reviewedBy?: string } = {},
+): Promise<{ vendorId: IntegrationId; ruleId: string; active: false }> {
+  await database.query(
+    `update vendor_product_link_rules
+     set active = false,
+         reviewed_by = $3,
+         reviewed_at = now(),
+         updated_at = now()
+     where vendor_id = $1
+       and id = $2::uuid`,
+    [vendorId, ruleId, options.reviewedBy ?? 'user'],
+  );
+
+  return {
+    vendorId,
+    ruleId,
+    active: false,
+  };
 }
 
 export async function upsertProductBundle(
@@ -1068,6 +1461,7 @@ export async function applyApprovedMappings(
        from approved_product_mappings
        where vendor_usage_snapshots.vendor_id = $1
          and vendor_usage_snapshots.vendor_product_key = approved_product_mappings.vendor_product_key
+         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
          and (vendor_usage_snapshots.product_code is distinct from approved_product_mappings.connectwise_product_code
            or vendor_usage_snapshots.product_name is distinct from approved_product_mappings.connectwise_product_name)
        returning vendor_usage_snapshots.id
@@ -1411,6 +1805,8 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
            max(nullif(dimensions->>'dattoExternalAccountName', '')),
            max(nullif(dimensions->>'coveCustomerName', '')),
            max(nullif(dimensions->>'ncentralCustomerName', '')),
+           max(nullif(dimensions->>'tenantName', '')),
+           max(nullif(dimensions->>'tenantDefaultDomainName', '')),
            max(nullif(dimensions->>'customerName', '')),
            max(nullif(dimensions->>'appRiverCustomerName', '')),
            max(nullif(dimensions->>'dattoCustomerName', '')),
@@ -1560,14 +1956,43 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
            and coalesce(metadata->>'source', '') <> 'invoice-table'
          order by completed_at desc nulls last, started_at desc
          limit 1
+       ),
+       latest_invoice_import as (
+         select id
+         from invoice_imports
+         where vendor_id = $1
+         order by invoice_date desc nulls last, imported_at desc
+         limit 1
+       ),
+       source_rows as (
+         select
+           vendor_id,
+           replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
+           coalesce(nullif(external_account_id, ''), customer_id::text) as source_account_key
+         from vendor_usage_snapshots
+         where vendor_id = $1
+           and vendor_product_key is not null
+           and sync_run_id = (select id from latest_sync_run)
+           and lower(coalesce(dimensions->>'detailOnlySync', 'false')) <> 'true'
+         union all
+         select
+           invoice_line_items.vendor_id,
+           replace(replace(invoice_line_items.vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
+           case
+             when coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+             then coalesce(nullif(invoice_line_items.external_account_id, ''), invoice_line_items.customer_id::text)
+           end as source_account_key
+         from invoice_line_items
+         inner join invoice_imports
+           on invoice_imports.id = invoice_line_items.invoice_import_id
+         where invoice_line_items.vendor_id = $1
+           and invoice_line_items.vendor_product_key is not null
+           and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
        )
        select vendor_id,
               vendor_product_key,
-              count(distinct coalesce(external_account_id, customer_id::text))::int as customer_count
-       from vendor_usage_snapshots
-       where vendor_id = $1
-         and vendor_product_key is not null
-         and sync_run_id = (select id from latest_sync_run)
+              count(distinct source_account_key)::int as customer_count
+       from source_rows
        group by vendor_id, vendor_product_key
      ) vendor_product_usage_counts
        on vendor_product_usage_counts.vendor_id = vendor_product_mappings.vendor_id
@@ -1625,6 +2050,8 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
            nullif(dimensions->>'dattoExternalAccountName', ''),
            nullif(dimensions->>'coveCustomerName', ''),
            nullif(dimensions->>'ncentralCustomerName', ''),
+           nullif(dimensions->>'tenantName', ''),
+           nullif(dimensions->>'tenantDefaultDomainName', ''),
            nullif(dimensions->>'customerName', ''),
            nullif(dimensions->>'appRiverCustomerName', ''),
            nullif(dimensions->>'dattoCustomerName', ''),
@@ -1771,22 +2198,31 @@ async function loadVendorProductSources(
        where vendor_id = $1
          and vendor_product_key is not null
          and sync_run_id = (select id from latest_sync_run)
+         and lower(coalesce(dimensions->>'detailOnlySync', 'false')) <> 'true'
        union all
        select
-         vendor_product_key,
-         coalesce(nullif(product_name, ''), vendor_product_key) as vendor_product_name,
-         external_account_id,
-         customer_id
+         invoice_line_items.vendor_product_key,
+         coalesce(nullif(invoice_line_items.product_name, ''), invoice_line_items.vendor_product_key) as vendor_product_name,
+         case
+           when coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+           then invoice_line_items.external_account_id
+         end as external_account_id,
+         case
+           when coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+           then invoice_line_items.customer_id
+         end as customer_id
        from invoice_line_items
-       where vendor_id = $1
-         and vendor_product_key is not null
-         and invoice_import_id = (select id from latest_invoice_import)
+       inner join invoice_imports
+         on invoice_imports.id = invoice_line_items.invoice_import_id
+       where invoice_line_items.vendor_id = $1
+         and invoice_line_items.vendor_product_key is not null
+         and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
      )
      select
        vendor_product_key,
        coalesce(max(nullif(vendor_product_name, '')), vendor_product_key) as vendor_product_name,
        count(*)::int as row_count,
-       count(distinct coalesce(external_account_id, customer_id::text))::int as customer_count
+       count(distinct coalesce(nullif(external_account_id, ''), customer_id::text))::int as customer_count
      from source_rows
      group by vendor_product_key
      order by vendor_product_name`,
@@ -2048,6 +2484,8 @@ async function loadExternalAccountName(database: Queryable, vendorId: Integratio
        max(nullif(dimensions->>'dattoExternalAccountName', '')),
        max(nullif(dimensions->>'coveCustomerName', '')),
        max(nullif(dimensions->>'ncentralCustomerName', '')),
+       max(nullif(dimensions->>'tenantName', '')),
+       max(nullif(dimensions->>'tenantDefaultDomainName', '')),
        max(nullif(dimensions->>'customerName', '')),
        max(nullif(dimensions->>'appRiverCustomerName', '')),
        max(nullif(dimensions->>'dattoCustomerName', '')),
@@ -2484,6 +2922,22 @@ function mapProductBundleRow(row: ProductBundleRow): ProductBundle {
   };
 }
 
+function mapProductLinkRuleRow(row: ProductLinkRuleRow): ProductLinkRule {
+  return {
+    id: row.id,
+    vendorId: row.vendor_id,
+    sourceVendorProductKey: canonicalVendorProductKey(row.source_vendor_product_key),
+    ruleName: row.rule_name,
+    sources: normalizeProductLinkRuleSources(sourceArray(row.sources)),
+    status: row.mapping_status,
+    active: row.active,
+    reviewedBy: row.reviewed_by ?? undefined,
+    reviewedAt: isoDate(row.reviewed_at),
+    createdAt: isoDate(row.created_at),
+    updatedAt: isoDate(row.updated_at),
+  };
+}
+
 function mapProductMappingCustomerReview(
   vendorId: IntegrationId,
   vendorProductKey: string,
@@ -2576,13 +3030,172 @@ function normalizeBundleComponents(components: ProductBundleComponent[]) {
   );
 }
 
+function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
+  const byKey = new Map<string, ProductLinkRuleSource>();
+
+  for (const source of sources) {
+    if (source.sourceType === 'vendor-product') {
+      const vendorId = source.vendorId;
+      const vendorProductKey = canonicalVendorProductKey(source.vendorProductKey?.trim() ?? '');
+      if (!vendorId || !getIntegrationSettingsDefinition(vendorId) || !vendorProductKey) {
+        continue;
+      }
+
+      byKey.set(`vendor-product:${vendorId}:${vendorProductKey}`, {
+        sourceType: 'vendor-product',
+        vendorId,
+        vendorProductKey,
+        vendorProductName: source.vendorProductName?.trim() || vendorProductKey,
+      });
+      continue;
+    }
+
+    if (source.sourceType === 'connectwise-addition') {
+      const productCode = source.productCode?.trim();
+      if (!productCode) {
+        continue;
+      }
+
+      byKey.set(`connectwise-addition:${productCode.toLowerCase()}`, {
+        sourceType: 'connectwise-addition',
+        productCode,
+        productName: source.productName?.trim() || productCode,
+      });
+      continue;
+    }
+
+    if (source.sourceType === 'filtered-dataset') {
+      const vendorId = source.vendorId;
+      const filter = normalizeProductLinkFilterNode(source.filter);
+      const aggregation = normalizeProductLinkAggregation(source.aggregation);
+      if (!vendorId || !getIntegrationSettingsDefinition(vendorId) || !filter || !aggregation) {
+        continue;
+      }
+
+      const dataset = source.dataset === 'licenses' ? 'licenses' : source.dataset === 'users' ? 'users' : undefined;
+      const key = [
+        'filtered-dataset',
+        vendorId,
+        dataset ?? '',
+        source.label?.trim() ?? '',
+        JSON.stringify(filter),
+        JSON.stringify(aggregation),
+      ].join(':');
+      byKey.set(key, {
+        sourceType: 'filtered-dataset',
+        vendorId,
+        dataset,
+        label: source.label?.trim() || undefined,
+        filter,
+        aggregation,
+      });
+    }
+  }
+
+  return [...byKey.values()].sort(productLinkRuleSourceComparator);
+}
+
+function productLinkRuleSourceComparator(left: ProductLinkRuleSource, right: ProductLinkRuleSource) {
+  const leftLabel = productLinkRuleSourceSortLabel(left);
+  const rightLabel = productLinkRuleSourceSortLabel(right);
+  return left.sourceType.localeCompare(right.sourceType) || leftLabel.localeCompare(rightLabel);
+}
+
+function productLinkRuleSourceSortLabel(source: ProductLinkRuleSource) {
+  if (source.sourceType === 'vendor-product') {
+    return `${source.vendorId}:${source.vendorProductName ?? source.vendorProductKey}`;
+  }
+
+  if (source.sourceType === 'filtered-dataset') {
+    return `${source.vendorId}:${source.dataset ?? ''}:${source.label ?? ''}`;
+  }
+
+  return source.productName ?? source.productCode;
+}
+
+function normalizeProductLinkAggregation(value: ProductLinkRuleAggregation | undefined): ProductLinkRuleAggregation | undefined {
+  if (value?.type === 'row-count') {
+    return { type: 'row-count' };
+  }
+
+  if (value?.type === 'column-sum') {
+    const column = value.column?.trim();
+    return column ? { type: 'column-sum', column } : undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeProductLinkFilterNode(
+  value: ProductLinkRuleFilterNode | undefined,
+  depth = 0,
+): ProductLinkRuleFilterNode | undefined {
+  if (!value || depth > 6) {
+    return undefined;
+  }
+
+  if (value.nodeType === 'condition') {
+    const field = value.field?.trim();
+    const operator = normalizeProductLinkFilterOperator(value.operator);
+    if (!field || !operator) {
+      return undefined;
+    }
+
+    const normalized: ProductLinkRuleFilterNode = {
+      nodeType: 'condition',
+      field,
+      operator,
+    };
+    if (operator !== 'is-empty' && operator !== 'is-not-empty') {
+      normalized.value = String(value.value ?? '').trim();
+    }
+    return normalized;
+  }
+
+  if (value.nodeType === 'group') {
+    const children = (value.children ?? [])
+      .flatMap((child) => {
+        const normalized = normalizeProductLinkFilterNode(child, depth + 1);
+        return normalized ? [normalized] : [];
+      });
+    if (children.length === 0) {
+      return undefined;
+    }
+
+    return {
+      nodeType: 'group',
+      operator: value.operator === 'or' ? 'or' : 'and',
+      children,
+    };
+  }
+
+  return undefined;
+}
+
+function normalizeProductLinkFilterOperator(value: unknown): ProductLinkRuleFilterOperator | undefined {
+  return typeof value === 'string' && productLinkFilterOperators.includes(value as ProductLinkRuleFilterOperator)
+    ? value as ProductLinkRuleFilterOperator
+    : undefined;
+}
+
+const productLinkFilterOperators: ProductLinkRuleFilterOperator[] = [
+  'contains',
+  'not-contains',
+  'equals',
+  'not-equals',
+  'starts-with',
+  'ends-with',
+  'is-empty',
+  'is-not-empty',
+];
+
 function componentArray(value: unknown): ProductBundleComponent[] {
   const parsed = parseJson(value);
   if (!Array.isArray(parsed)) {
     return [];
   }
 
-  return parsed.flatMap((item) => {
+  return parsed.flatMap<ProductBundleComponent>((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       return [];
     }
@@ -2592,6 +3205,128 @@ function componentArray(value: unknown): ProductBundleComponent[] {
     const vendorProductName = typeof record.vendorProductName === 'string' ? record.vendorProductName : vendorProductKey;
     return vendorProductKey ? [{ vendorProductKey, vendorProductName: vendorProductName ?? vendorProductKey }] : [];
   });
+}
+
+function sourceArray(value: unknown): ProductLinkRuleSource[] {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.flatMap<ProductLinkRuleSource>((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return [];
+    }
+
+    const record = item as Record<string, unknown>;
+    const sourceType = typeof record.sourceType === 'string' ? record.sourceType : undefined;
+    if (sourceType === 'vendor-product') {
+      const vendorId = typeof record.vendorId === 'string' ? record.vendorId : undefined;
+      const vendorProductKey = typeof record.vendorProductKey === 'string' ? record.vendorProductKey : undefined;
+      if (!vendorId || !vendorProductKey || !getIntegrationSettingsDefinition(vendorId as IntegrationId)) {
+        return [];
+      }
+
+      return [
+        {
+          sourceType,
+          vendorId: vendorId as IntegrationId,
+          vendorProductKey,
+          vendorProductName: typeof record.vendorProductName === 'string' ? record.vendorProductName : undefined,
+        },
+      ];
+    }
+
+    if (sourceType === 'connectwise-addition') {
+      const productCode = typeof record.productCode === 'string' ? record.productCode : undefined;
+      if (!productCode) {
+        return [];
+      }
+
+      return [
+        {
+          sourceType,
+          productCode,
+          productName: typeof record.productName === 'string' ? record.productName : undefined,
+        },
+      ];
+    }
+
+    if (sourceType === 'filtered-dataset') {
+      const vendorId = typeof record.vendorId === 'string' ? record.vendorId : undefined;
+      const filter = parseProductLinkFilterNode(record.filter);
+      const aggregation = parseProductLinkAggregation(record.aggregation);
+      if (!vendorId || !getIntegrationSettingsDefinition(vendorId as IntegrationId) || !filter || !aggregation) {
+        return [];
+      }
+
+      const dataset = record.dataset === 'licenses' ? 'licenses' : record.dataset === 'users' ? 'users' : undefined;
+      return [
+        {
+          sourceType,
+          vendorId: vendorId as IntegrationId,
+          dataset,
+          label: typeof record.label === 'string' ? record.label : undefined,
+          filter,
+          aggregation,
+        },
+      ];
+    }
+
+    return [];
+  });
+}
+
+function parseProductLinkAggregation(value: unknown): ProductLinkRuleAggregation | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.type === 'row-count') {
+    return { type: 'row-count' };
+  }
+
+  if (record.type === 'column-sum' && typeof record.column === 'string') {
+    return {
+      type: 'column-sum',
+      column: record.column,
+    };
+  }
+
+  return undefined;
+}
+
+function parseProductLinkFilterNode(value: unknown): ProductLinkRuleFilterNode | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.nodeType === 'condition' && typeof record.field === 'string') {
+    const operator = normalizeProductLinkFilterOperator(record.operator);
+    return operator
+      ? {
+          nodeType: 'condition',
+          field: record.field,
+          operator,
+          value: typeof record.value === 'string' ? record.value : undefined,
+        }
+      : undefined;
+  }
+
+  if (record.nodeType === 'group' && Array.isArray(record.children)) {
+    return {
+      nodeType: 'group',
+      operator: record.operator === 'or' ? 'or' : 'and',
+      children: record.children.flatMap((child) => {
+        const parsed = parseProductLinkFilterNode(child);
+        return parsed ? [parsed] : [];
+      }),
+    };
+  }
+
+  return undefined;
 }
 
 function confidenceForScore(score: number, matchedOn: 'name' | 'alias'): MappingConfidence {
@@ -2641,6 +3376,10 @@ function parseJson(value: unknown): unknown {
   }
 
   return value;
+}
+
+function isMissingDatabaseRelation(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
 }
 
 function isPrimitiveEvidence(value: unknown): value is string | number | boolean {

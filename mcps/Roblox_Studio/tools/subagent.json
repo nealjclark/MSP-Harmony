@@ -1,0 +1,26 @@
+{
+  "name": "subagent",
+  "description": "Launch a specialized subagent to handle complex, multi-step tasks autonomously.\nSubagents are independent AI assistants with restricted tool access and specialized instructions.\n\n<available_subagents>\n  <subagent>\n    <name>explore</name>\n    <description>Fast agent specialized for exploring codebases and searching for information. Use this when you need to:\n- Find files by patterns (e.g., \"scripts with 'player' in the name\")\n- Search code for keywords or patterns (e.g., \"how are touch events handled?\")\n- Answer questions about the codebase structure\n- Query the current game state via Luau execution\n- Understand existing game architecture before making changes\n- Gather context from multiple files before deciding on an approach</description>\n  </subagent>\n</available_subagents>\n\nWhen to use subagents:\n1. When you need to explore the codebase before making decisions\n2. When a task requires multiple search/read steps across many files\n3. When you're uncertain about the right approach and need autonomous investigation\n4. To separate concerns (e.g., explore first, then modify)\n\nImportant:\n1. Subagents return a final text result summarizing their work\n2. You cannot have a back-and-forth conversation with a subagent\n3. Subagents cannot spawn other subagents (no nesting)\n4. Choose the most specific subagent for your task",
+  "inputSchema": {
+    "properties": {
+      "description": {
+        "description": "A short 3-5 word description of the task in present continuous tense (e.g., 'Exploring player spawn logic', 'Finding lighting scripts'). Used for display.",
+        "type": "string"
+      },
+      "subagent_type": {
+        "description": "The type of subagent to invoke. Options: explore, screen_capture",
+        "type": "string"
+      },
+      "task": {
+        "description": "Detailed task description and instructions for the subagent. Be specific about what you need the subagent to do and what information to return.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "task",
+      "description",
+      "subagent_type"
+    ],
+    "type": "object"
+  }
+}

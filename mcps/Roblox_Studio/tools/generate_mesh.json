@@ -1,0 +1,47 @@
+{
+  "name": "generate_mesh",
+  "description": "Generates a textured mesh from a prompt using AI.",
+  "inputSchema": {
+    "properties": {
+      "maxTriangles": {
+        "description": "The maximum number of triangles for the generated mesh. If provided, this must be between 12 and 20000 (inclusive).",
+        "type": "number"
+      },
+      "partNames": {
+        "description": "List of part names defining the schema for the generated mesh. Accepts a comma-separated string (e.g. 'body, left wheel, right wheel') or a JSON array of strings. When provided, a SchemaDefinition is used instead of the default PredefinedSchema.",
+        "type": "string"
+      },
+      "size": {
+        "description": "The generation's bounding box size. The generation will try to fit within this volume. Try to approximate a good size based on textPrompt.",
+        "properties": {
+          "x": {
+            "description": "X dimension scalar.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Y dimension scalar.",
+            "type": "number"
+          },
+          "z": {
+            "description": "Z dimension scalar.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z"
+        ],
+        "type": "object"
+      },
+      "textPrompt": {
+        "description": "The text prompt describing the mesh to generate.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "textPrompt"
+    ],
+    "type": "object"
+  }
+}

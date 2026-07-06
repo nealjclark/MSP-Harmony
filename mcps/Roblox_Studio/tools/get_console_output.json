@@ -1,0 +1,9 @@
+{
+  "name": "get_console_output",
+  "description": "Get the console output from the Studio output log.",
+  "inputSchema": {
+    "properties": {},
+    "required": [],
+    "type": "object"
+  }
+}

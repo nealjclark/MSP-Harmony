@@ -1,0 +1,16 @@
+{
+  "name": "skill",
+  "description": "Retrieve detailed knowledge, best practices, or reference material for a specific skill.\nSkills provide domain-specific expertise that helps you produce better, more accurate results.\n\n<available_skills>\n  <skill>\n    <name>rbx-device-simulator-lua</name>\n    <description>Control the Studio Device Simulator to test UI across device form factors. Use when switching devices, testing orientations, running multi-device comparisons, or verifying UI layout via MCP tools (execute_luau + screen_capture).</description>\n  </skill>\n  <skill>\n    <name>rbx-docs-search</name>\n    <description>Look up Roblox documentation using the http_get tool — Engine API reference, creator guides (avatar, characters, Studio workflows), cloud API, and docs indexes. Use when you need accurate API details or how-to guidance.</description>\n  </skill>\n  <skill>\n    <name>rbx-perf-profiling</name>\n    <description>Analyze fine-grained performance data provided by the MicroProfiler through the LibMP Luau module. Use it to investigate CPU and GPU bottlenecks, identify the causes of frame-time spikes, and analyze memory allocations by subsystem.</description>\n  </skill>\n  <skill>\n    <name>rbx-scene-analysis</name>\n    <description>Analyze and optimize Roblox scenes using SceneAnalysisService — rendering, memory, instance composition, unparented instances, and animation/audio assets. Use when investigating performance, memory, or leaks in a place.</description>\n  </skill>\n</available_skills>\n\nWhen to use skills:\n1. When the task involves a domain covered by an available skill\n2. When you need best practices or conventions before writing or reviewing code\n3. When you are unsure about the correct patterns or APIs for a specific area\n\nImportant:\n1. Invoke the skill BEFORE writing code or taking action, not after\n2. Follow the returned guidance closely in your response\n3. Do not mention a skill without actually invoking it first",
+  "inputSchema": {
+    "properties": {
+      "skill_name": {
+        "description": "The name of the skill to retrieve. Options: rbx-device-simulator-lua, rbx-docs-search, rbx-perf-profiling, rbx-scene-analysis",
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_name"
+    ],
+    "type": "object"
+  }
+}

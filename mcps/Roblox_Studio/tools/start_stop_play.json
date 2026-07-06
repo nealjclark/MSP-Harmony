@@ -1,0 +1,16 @@
+{
+  "name": "start_stop_play",
+  "description": "Start play the game or stop the play.",
+  "inputSchema": {
+    "properties": {
+      "is_start": {
+        "description": "true to start the game, false to stop the game and return to edit mode.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "is_start"
+    ],
+    "type": "object"
+  }
+}

@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS vendor_product_bundles (
   UNIQUE (vendor_id, bundle_key)
 );
 
+CREATE TABLE IF NOT EXISTS vendor_product_link_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  source_vendor_product_key text NOT NULL,
+  rule_name text NOT NULL,
+  sources jsonb NOT NULL DEFAULT '[]'::jsonb,
+  mapping_status text NOT NULL DEFAULT 'approved',
+  active boolean NOT NULL DEFAULT true,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS vendor_usage_overrides (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -516,6 +531,34 @@ ALTER TABLE vendor_product_bundles ADD COLUMN IF NOT EXISTS reviewed_at timestam
 ALTER TABLE vendor_product_bundles ADD COLUMN IF NOT EXISTS raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_bundles_vendor
   ON vendor_product_bundles(vendor_id, bundle_key)
+  WHERE active;
+
+CREATE TABLE IF NOT EXISTS vendor_product_link_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  source_vendor_product_key text NOT NULL,
+  rule_name text NOT NULL,
+  sources jsonb NOT NULL DEFAULT '[]'::jsonb,
+  mapping_status text NOT NULL DEFAULT 'approved',
+  active boolean NOT NULL DEFAULT true,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS source_vendor_product_key text NOT NULL DEFAULT '';
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS rule_name text NOT NULL DEFAULT '';
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS sources jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS mapping_status text NOT NULL DEFAULT 'approved';
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS reviewed_by text;
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE vendor_product_link_rules ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_vendor_product_link_rules_vendor
+  ON vendor_product_link_rules(vendor_id, source_vendor_product_key)
   WHERE active;
 
 ALTER TABLE vendor_usage_snapshots ADD COLUMN IF NOT EXISTS vendor_product_key text;

@@ -1,0 +1,20 @@
+{
+  "name": "wait_job_finished",
+  "description": "Wait for a primitive generation job to finish. Returns the final status and details when the job reaches a terminal state (Completed, Failed, or Cancelled).\n\nDO NOT call this tool automatically after generate_procedural_model. The generate_procedural_model tool already handles generation in the background and updates the UI.\n\nOnly call this tool when:\n- The user EXPLICITLY asks to wait for the generation to finish (e.g. \"wait for it to complete\", \"let me know when it's done\")\n- You need to confirm the generation result before performing a follow-up action that depends on it (e.g. the user says \"create a car with primitives and then change its color to red\")",
+  "inputSchema": {
+    "properties": {
+      "generationId": {
+        "description": "The generation ID returned by the generate_procedural_model tool.",
+        "type": "string"
+      },
+      "timeout": {
+        "description": "Maximum time in seconds to wait for the job to finish. Defaults to 600 (10 minutes).",
+        "type": "number"
+      }
+    },
+    "required": [
+      "generationId"
+    ],
+    "type": "object"
+  }
+}

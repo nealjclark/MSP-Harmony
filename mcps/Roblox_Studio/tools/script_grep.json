@@ -1,0 +1,16 @@
+{
+  "name": "script_grep",
+  "description": "Runs a search for a string pattern over all script contents in the game. To avoid overwhelming output, the results are capped at 50 matches.",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "description": "The string or Luau pattern to search for.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

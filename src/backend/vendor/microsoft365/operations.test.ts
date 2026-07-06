@@ -229,10 +229,12 @@ async function run() {
   assert.equal(snapshot?.[2], 'agreement-1');
   assert.equal(snapshot?.[3], 'tenant-1');
   assert.equal(snapshot?.[4], 'SPB');
-  assert.equal(snapshot?.[5], 'CW-M365-BUSINESS-PREMIUM');
+  assert.equal(snapshot?.[5], 'SPB');
   const dimensions = JSON.parse(String(snapshot?.[8]));
   assert.equal(dimensions.licenseSource, 'assigned-user-license');
   assert.equal(dimensions.authModel, 'graph-app-only');
+  assert.equal(dimensions.detailOnlySync, true);
+  assert.equal(dimensions.productMappingEnabled, false);
   assert.equal(dimensions.tenantDefaultDomainName, 'mapped.example');
   assert.equal(dimensions.tenantContractType, 'ResellerPartner');
   assert.equal(dimensions.userPrincipalName, 'licensed.user@mapped.example');
@@ -275,6 +277,7 @@ async function run() {
   const userMetadata = JSON.parse(String(completedRuns[0]?.[3]));
   assert.equal(userMetadata.entity, 'm365-users');
   assert.equal(userMetadata.dataset, 'users');
+  assert.equal(userMetadata.detailOnlySync, true);
   assert.equal(userMetadata.failedTenants, 1);
   assert.equal(userMetadata.failedTenantDetails[0]?.tenantId, 'tenant-no-consent');
 

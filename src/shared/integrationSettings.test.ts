@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   getIntegrationSettingsDefinition,
   getIntegrationDataSource,
+  integrationDetailOnlySyncEnabled,
   integrationDataSourceRequiresCustomerMapping,
   integrationHasAnyCapability,
   integrationHasCapability,
@@ -100,6 +101,9 @@ assert.equal(connectedMicrosoft365.configuredStatus, 'connected');
 assert.deepEqual(connectedMicrosoft365.missingSecrets, []);
 assert.deepEqual(connectedMicrosoft365.missingNonSecrets, []);
 assert.equal(getIntegrationDataSource('microsoft-365', 'user-license-detail')?.requiresCustomerMapping, true);
+assert.equal(microsoft365.optionalNonSecrets?.some((setting) => setting.key === 'detailOnlySync'), true);
+assert.equal(integrationDetailOnlySyncEnabled({}, microsoft365), true);
+assert.equal(integrationDetailOnlySyncEnabled({ detailOnlySync: 'false' }, microsoft365), false);
 
 const appRiver = getIntegrationSettingsDefinition('opentext-appriver');
 assert.ok(appRiver);
@@ -145,6 +149,7 @@ assert.equal(integrationDataSourceRequiresCustomerMapping('reseller-product-tota
 
 const datto = getIntegrationSettingsDefinition('datto');
 assert.ok(datto);
+assert.equal(integrationDetailOnlySyncEnabled({}, datto), false);
 
 const connectedDatto = validateIntegrationSettings(datto, {
   integrationId: 'datto',

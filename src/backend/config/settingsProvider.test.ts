@@ -23,6 +23,9 @@ async function run() {
   assert.equal(connectWise.secrets.publicKey, 'public-key');
   assert.equal(connectWise.validation.configuredStatus, 'connected');
 
+  const microsoft365 = await localProvider.getIntegrationSettings('microsoft-365');
+  assert.equal(microsoft365.nonSecrets.detailOnlySync, 'true');
+
   const databaseBackedProvider = createIntegrationSettingsProvider({
     env: {
       CONNECTWISE_COMPANY_ID: 'env-company',

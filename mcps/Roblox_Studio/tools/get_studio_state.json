@@ -1,0 +1,9 @@
+{
+  "name": "get_studio_state",
+  "description": "Get the state of the studio, including current play state and available datamodel types. If the studio state is not expected, please call start_stop_play tool to start or stop the play.",
+  "inputSchema": {
+    "properties": {},
+    "required": [],
+    "type": "object"
+  }
+}

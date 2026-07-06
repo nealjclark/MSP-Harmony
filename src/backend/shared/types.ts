@@ -104,6 +104,25 @@ export type ReconciliationEvidence = {
   value: string | number;
 };
 
+export type ReconciliationLinkedCountSource = {
+  sourceType: 'vendor-product' | 'connectwise-addition' | 'filtered-dataset';
+  label: string;
+  quantity: number;
+  rowCount: number;
+  vendorId?: string;
+  vendorProductKey?: string;
+  dataset?: string;
+  productCode?: string;
+};
+
+export type ReconciliationLinkedCount = {
+  ruleId: string;
+  ruleName: string;
+  sourceVendorProductKey: string;
+  quantity: number;
+  sources: ReconciliationLinkedCountSource[];
+};
+
 export type ReconciliationLine = {
   id: string;
   vendorId: string;
@@ -120,6 +139,7 @@ export type ReconciliationLine = {
   unit: BillingUnit;
   unitPrice?: MoneyAmount;
   financialImpact: MoneyAmount;
+  linkedCount?: ReconciliationLinkedCount;
   status: ReconciliationStatus;
   writeAction?: ReconciliationWriteAction;
   reason: string;

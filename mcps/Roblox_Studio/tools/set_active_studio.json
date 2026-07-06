@@ -1,0 +1,16 @@
+{
+  "name": "set_active_studio",
+  "description": "Set a specific Roblox Studio instance as active. All subsequent tool calls will be executed on the active Studio. MUST use the studio_id value returned by list_roblox_studios.",
+  "inputSchema": {
+    "properties": {
+      "studio_id": {
+        "description": "The id of the Studio instance to make active",
+        "type": "string"
+      }
+    },
+    "required": [
+      "studio_id"
+    ],
+    "type": "object"
+  }
+}

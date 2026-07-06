@@ -1,0 +1,54 @@
+{
+  "name": "multi_edit",
+  "description": "Makes multiple edits to a single script in one operation. More efficient than multiple single edits.\nCan also create new scripts if the path doesn't exist (will need to specify className).\n\nExample Call (correct):\n- Args: {\"file_path\":\"ReplicatedStorage.Platformer.Constants\",\"edits\":[{\"old_string\":\"JUMP_COOLDOWN = 0.15\",\"new_string\":\"JUMP_COOLDOWN = 0.3\"}]}\n\nPath Format:\n- Use dot notation like \"game.ServerScriptService.MyScript\"\n\nCreating New Scripts:\n- If the script doesn't exist, it will be created using the provided className\n- className is required when creating new scripts\n- First edit with empty old_string (\"\") sets the initial content\n- Subsequent edits work normally on the created content\n\nBefore Using:\n- Read or search file to understand existing script contents\n- For new scripts, provide className and start with empty old_string to set initial content\n\nImportant Notes:\n- All edits are applied in sequence, in the order provided\n- Each edit operates on the result of the previous edit\n- All edits must be valid for the operation to succeed - atomic operation\n- Plan edits carefully to avoid conflicts between sequential operations\n\nCritical Requirements:\n- old_string must match script contents exactly (including whitespace)\n- old_string and new_string must be different\n- className required only when creating new scripts\n- For new files: first edit can have empty old_string to set initial content\n\nWhen Making Edits:\n- Ensure all edits result in correct, runnable code\n- Don't leave code in a broken state\n- Use replace_all for renaming variables across the entire script\n",
+  "inputSchema": {
+    "properties": {
+      "className": {
+        "description": "The class name of the script to create (e.g., 'Script', 'LocalScript', 'ModuleScript'). Required only when creating new scripts, leave empty if script already exists.",
+        "type": "string"
+      },
+      "datamodel_type": {
+        "description": "The target datamodel to operate on, the tool can only be performed in those datamodel types. call get_studio_state to get current available datamodel types. if the target datamodel is not available in current mode, consider using start_stop_play to switch to the desired mode and then use the tools. This is a required argument.",
+        "enum": [
+          "Edit"
+        ],
+        "type": "string"
+      },
+      "edits": {
+        "description": "An array of edit operations. For new scripts, first edit can have empty old_string to set initial content.",
+        "items": {
+          "properties": {
+            "new_string": {
+              "description": "The text to replace it with (must be different from old_string)",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The text to replace (must match exactly). Use empty string for new script initial content.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace all occurrences of old_string (optional, defaults to false)",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "file_path": {
+        "description": "The dot-notation path of the script (e.g., 'game.ServerScriptService.MyScript'). Will be created if it doesn't exist.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "file_path",
+      "edits",
+      "datamodel_type"
+    ],
+    "type": "object"
+  }
+}

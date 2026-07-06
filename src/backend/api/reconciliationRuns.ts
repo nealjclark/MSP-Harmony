@@ -5,8 +5,11 @@ import type {
   DimensionValue,
   MoneyAmount,
   QuantityRule,
+  ReconciliationLinkedCount,
+  ReconciliationLinkedCountSource,
   ReconciliationLine,
   ReconciliationResult,
+  ReconciliationWriteAction,
   UsageSnapshot,
   VendorRuleSet,
 } from '../shared/types';
@@ -18,7 +21,15 @@ import { loadDattoRuleSet } from '../vendor/datto/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
-import { listProductBundles, type ProductBundle } from '../mapping/mappingService';
+import {
+  listProductBundles,
+  listProductLinkRules,
+  type ProductBundle,
+  type ProductLinkRuleAggregation,
+  type ProductLinkRuleFilterNode,
+  type ProductLinkRule,
+  type ProductLinkRuleSource,
+} from '../mapping/mappingService';
 import {
   invoiceQuantityKey,
   loadLatestInvoiceQuantitiesForLines,
@@ -92,6 +103,32 @@ type GenericRuleMappingRow = {
   connectwise_product_code: string;
   connectwise_product_name: string;
   unit_price: string | number | null;
+};
+
+type LinkedSourceQuantityRow = {
+  customer_id: string;
+  agreement_id: string;
+  quantity: string | number;
+  row_count: string | number;
+  observed_at: Date | string | null;
+};
+
+type LinkedTargetAdditionScopeRow = {
+  customer_id: string;
+  agreement_id: string;
+};
+
+type LinkedDatasetQuery = {
+  values: unknown[];
+  sql: string;
+  fieldSet: 'vendor-usage' | 'microsoft-365-licenses';
+  label: string;
+};
+
+type LinkedSqlContext = {
+  fieldSet: LinkedDatasetQuery['fieldSet'];
+  tableAlias: string;
+  values: unknown[];
 };
 
 type UsageOverride = {
@@ -203,8 +240,14 @@ export async function reconcileVendorFromDatabase(
 ): Promise<DatabaseReconciliationResult> {
   const syncRunId = options.syncRunId ?? (await loadLatestSyncRunId(database, vendorId));
   const ruleSet = await loadRuleSet(database, vendorId);
+  const linkedContext = await loadLinkedCountContext(
+    database,
+    vendorId as IntegrationId,
+    ruleSet,
+    await listProductLinkRules(database, vendorId as IntegrationId),
+  );
 
-  if (!syncRunId) {
+  if (!syncRunId && linkedContext.anchorSnapshots.length === 0) {
     const emptyResult = reconcileVendorUsage({
       vendorId,
       rules: ruleSet.rules,
@@ -224,30 +267,37 @@ export async function reconcileVendorFromDatabase(
     };
   }
 
-  const loadedSnapshots = await loadUsageSnapshots(database, vendorId, syncRunId);
+  const loadedSnapshots = syncRunId ? await loadUsageSnapshots(database, vendorId, syncRunId) : [];
   const overriddenSnapshots = applyUsageOverrides(
     loadedSnapshots,
     await loadUsageOverrides(database, vendorId, loadedSnapshots),
     ruleSet,
   );
-  const agreementAdditions = await loadAgreementAdditions(database, overriddenSnapshots);
-  const snapshots = applyProductBundles(
-    overriddenSnapshots,
-    await listProductBundles(database, vendorId as IntegrationId),
-    agreementAdditions,
-  );
+  const agreementAdditions = await loadAgreementAdditions(database, [
+    ...overriddenSnapshots,
+    ...linkedContext.anchorSnapshots,
+  ]);
+  const snapshots = [
+    ...applyProductBundles(
+      overriddenSnapshots,
+      await listProductBundles(database, vendorId as IntegrationId),
+      agreementAdditions,
+    ),
+    ...linkedContext.anchorSnapshots,
+  ];
   const result = reconcileVendorUsage({
     vendorId,
     rules: ruleSet.rules,
     snapshots,
     agreementAdditions,
   });
-  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, result.lines);
+  const linkedLines = applyLinkedCountsToLines(result.lines, linkedContext.countsByLineKey);
+  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, linkedLines);
 
   return {
     ...result,
-    totals: totalsForLines(result.lines),
-    lines: await withLineDetails(database, result.lines, snapshots, agreementAdditions, ruleSet, invoiceState.quantities),
+    totals: totalsForLines(linkedLines),
+    lines: await withLineDetails(database, linkedLines, snapshots, agreementAdditions, ruleSet, invoiceState.quantities),
     syncRunId,
     snapshotCount: snapshots.length,
     agreementAdditionCount: agreementAdditions.length,
@@ -452,6 +502,7 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
          when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
          else vendor_usage_snapshots.agreement_id
        end is not null
+       and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
        and ($2::uuid is null or vendor_usage_snapshots.sync_run_id = $2::uuid)
      order by customer_id, agreement_id, product_code, vendor_usage_snapshots.observed_at`,
     [vendorId, syncRunId ?? null],
@@ -664,6 +715,627 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
   );
 
   return result.rows.map(mapAdditionRow);
+}
+
+async function loadLinkedCountContext(
+  database: Queryable,
+  vendorId: IntegrationId,
+  ruleSet: VendorRuleSet,
+  rules: ProductLinkRule[],
+) {
+  const activeRules = rules.filter((rule) => rule.active && rule.status === 'approved' && rule.sources.length > 0);
+  const anchorSnapshots: UsageSnapshot[] = [];
+  const countsByLineKey = new Map<string, ReconciliationLinkedCount>();
+
+  for (const rule of activeRules) {
+    const sourceVendorProductKey = canonicalVendorProductKey(rule.sourceVendorProductKey);
+    const targetRule = ruleSet.rules.find((candidate) =>
+      ruleVendorProductKeys(candidate).map(canonicalVendorProductKey).includes(sourceVendorProductKey),
+    );
+    if (!targetRule) {
+      continue;
+    }
+
+    const totalsByScope = new Map<
+      string,
+      {
+        customerId: string;
+        agreementId: string;
+        quantity: number;
+        observedAt?: string;
+        sources: ReconciliationLinkedCountSource[];
+      }
+    >();
+
+    for (const source of rule.sources) {
+      const sourceTotals = await loadLinkedSourceTotals(database, source);
+      for (const sourceTotal of sourceTotals) {
+        const scopeKey = `${sourceTotal.customerId}|${sourceTotal.agreementId}`;
+        const total =
+          totalsByScope.get(scopeKey) ??
+          {
+            customerId: sourceTotal.customerId,
+            agreementId: sourceTotal.agreementId,
+            quantity: 0,
+            observedAt: sourceTotal.observedAt,
+            sources: [],
+          };
+        total.quantity += sourceTotal.quantity;
+        total.sources.push(sourceTotal.source);
+        if (sourceTotal.observedAt && (!total.observedAt || sourceTotal.observedAt > total.observedAt)) {
+          total.observedAt = sourceTotal.observedAt;
+        }
+        totalsByScope.set(scopeKey, total);
+      }
+    }
+
+    const targetAdditionScopes = await loadLinkedTargetAdditionScopes(database, targetProductCodes(targetRule));
+    for (const scope of targetAdditionScopes) {
+      const scopeKey = `${scope.customer_id}|${scope.agreement_id}`;
+      totalsByScope.set(
+        scopeKey,
+        totalsByScope.get(scopeKey) ?? {
+          customerId: scope.customer_id,
+          agreementId: scope.agreement_id,
+          quantity: 0,
+          sources: [],
+        },
+      );
+    }
+
+    for (const total of totalsByScope.values()) {
+      const lineKey = linkedLineKey(total.customerId, total.agreementId, targetRule.productCode);
+      countsByLineKey.set(lineKey, {
+        ruleId: rule.id,
+        ruleName: rule.ruleName,
+        sourceVendorProductKey,
+        quantity: total.quantity,
+        sources: total.sources.sort((left, right) => left.label.localeCompare(right.label)),
+      });
+      anchorSnapshots.push({
+        id: `linked:${rule.id}:${total.customerId}:${total.agreementId}:${targetRule.productCode}`,
+        vendorId,
+        clientId: total.customerId,
+        agreementId: total.agreementId,
+        vendorProductKey: sourceVendorProductKey,
+        productCode: targetRule.productCode,
+        productName: targetRule.productName,
+        quantity: 0,
+        observedAt: total.observedAt ?? new Date(0).toISOString(),
+        dimensions: {
+          linkedCountAnchor: true,
+          linkedCountRuleId: rule.id,
+          linkedCountRuleName: rule.ruleName,
+          linkedCountQuantity: total.quantity,
+          linkedCountSourceCount: total.sources.length,
+        },
+      });
+    }
+  }
+
+  return {
+    anchorSnapshots,
+    countsByLineKey,
+  };
+}
+
+async function loadLinkedSourceTotals(database: Queryable, source: ProductLinkRuleSource) {
+  if (source.sourceType === 'vendor-product') {
+    return loadVendorProductLinkedSourceTotals(database, source);
+  }
+
+  if (source.sourceType === 'filtered-dataset') {
+    return loadFilteredDatasetLinkedSourceTotals(database, source);
+  }
+
+  return loadConnectWiseAdditionLinkedSourceTotals(database, source);
+}
+
+async function loadVendorProductLinkedSourceTotals(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'vendor-product' }>,
+) {
+  const result = await database.query<LinkedSourceQuantityRow>(
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     approved_account_mappings as (
+       select vendor_id,
+              external_account_id,
+              customer_id,
+              agreement_id
+       from vendor_account_mappings
+       where vendor_id = $1
+         and active = true
+         and mapping_status = 'approved'
+     )
+     select
+       case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+         else vendor_usage_snapshots.customer_id
+       end as customer_id,
+       case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+         else vendor_usage_snapshots.agreement_id
+       end as agreement_id,
+       sum(vendor_usage_snapshots.quantity) as quantity,
+       count(*)::int as row_count,
+       max(vendor_usage_snapshots.observed_at) as observed_at
+     from vendor_usage_snapshots
+     left join approved_account_mappings
+       on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+      and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+     where vendor_usage_snapshots.vendor_id = $1
+       and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+       and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+       and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+       and exists (
+         select 1
+         from vendor_product_mappings
+         where vendor_product_mappings.vendor_id = $1
+           and vendor_product_mappings.active = true
+           and vendor_product_mappings.mapping_status = 'approved'
+           and replace(replace(vendor_product_mappings.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+       )
+       and case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+         else vendor_usage_snapshots.customer_id
+       end is not null
+       and case
+         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+         else vendor_usage_snapshots.agreement_id
+       end is not null
+     group by customer_id, agreement_id
+     order by customer_id, agreement_id`,
+    [source.vendorId, canonicalVendorProductKey(source.vendorProductKey)],
+  );
+
+  return result.rows.map((row) => ({
+    customerId: row.customer_id,
+    agreementId: row.agreement_id,
+    quantity: numericValue(row.quantity),
+    observedAt: isoDate(row.observed_at),
+    source: {
+      sourceType: 'vendor-product' as const,
+      label: `${integrationDisplayName(source.vendorId)} / ${source.vendorProductName ?? source.vendorProductKey}`,
+      quantity: numericValue(row.quantity),
+      rowCount: numericValue(row.row_count),
+      vendorId: source.vendorId,
+      vendorProductKey: canonicalVendorProductKey(source.vendorProductKey),
+    },
+  }));
+}
+
+async function loadFilteredDatasetLinkedSourceTotals(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>,
+) {
+  const query = linkedDatasetBaseQuery(source);
+  const context: LinkedSqlContext = {
+    fieldSet: query.fieldSet,
+    tableAlias: 'mapped_snapshots',
+    values: [...query.values],
+  };
+  const filterSql = linkedFilterSql(source.filter, context);
+  const aggregationSql = linkedAggregationSql(source.aggregation, {
+    ...context,
+    tableAlias: 'filtered_rows',
+  });
+  const result = await database.query<LinkedSourceQuantityRow>(
+    `${query.sql},
+     filtered_rows as (
+       select *
+       from mapped_snapshots
+       where effective_customer_id is not null
+         and effective_agreement_id is not null
+         and ${filterSql}
+     )
+     select
+       filtered_rows.effective_customer_id as customer_id,
+       filtered_rows.effective_agreement_id as agreement_id,
+       ${aggregationSql} as quantity,
+       count(*)::int as row_count,
+       max(filtered_rows.observed_at) as observed_at
+     from filtered_rows
+     group by filtered_rows.effective_customer_id, filtered_rows.effective_agreement_id
+     order by filtered_rows.effective_customer_id, filtered_rows.effective_agreement_id`,
+    context.values,
+  );
+
+  const label = source.label?.trim() || query.label;
+  return result.rows.map((row) => ({
+    customerId: row.customer_id,
+    agreementId: row.agreement_id,
+    quantity: numericValue(row.quantity),
+    observedAt: isoDate(row.observed_at),
+    source: {
+      sourceType: 'filtered-dataset' as const,
+      label,
+      quantity: numericValue(row.quantity),
+      rowCount: numericValue(row.row_count),
+      vendorId: source.vendorId,
+      dataset: source.dataset,
+      vendorProductKey: source.dataset ? `${source.vendorId}:${source.dataset}` : `${source.vendorId}:filtered`,
+    },
+  }));
+}
+
+function linkedDatasetBaseQuery(source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>): LinkedDatasetQuery {
+  if (source.vendorId === 'microsoft-365' && source.dataset === 'licenses') {
+    return microsoft365LicenseLinkedDatasetQuery();
+  }
+
+  return vendorUsageLinkedDatasetQuery(source);
+}
+
+function microsoft365LicenseLinkedDatasetQuery(): LinkedDatasetQuery {
+  return {
+    values: [microsoft365DatasetEntities('licenses')],
+    fieldSet: 'microsoft-365-licenses',
+    label: `${integrationDisplayName('microsoft-365')} / Licenses`,
+    sql: `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = 'microsoft-365'
+         and status = 'complete'
+         and metadata->>'entity' = any($1::text[])
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     mapped_snapshots as (
+       select
+         microsoft365_subscription_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else microsoft365_subscription_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else microsoft365_subscription_snapshots.agreement_id
+         end as effective_agreement_id
+       from microsoft365_subscription_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = 'microsoft-365'
+        and vendor_account_mappings.external_account_id = microsoft365_subscription_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where microsoft365_subscription_snapshots.sync_run_id = (select id from latest_sync_run)
+     )`,
+  };
+}
+
+function vendorUsageLinkedDatasetQuery(
+  source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>,
+): LinkedDatasetQuery {
+  const values: unknown[] = [source.vendorId];
+  const entityFilter =
+    source.vendorId === 'microsoft-365'
+      ? `and metadata->>'entity' = any(${pushLinkedParam(values, microsoft365DatasetEntities('users'))}::text[])`
+      : '';
+  return {
+    values,
+    fieldSet: 'vendor-usage',
+    label: `${integrationDisplayName(source.vendorId)} / ${source.dataset === 'users' ? 'Users' : 'Usage snapshots'}`,
+    sql: `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+         ${entityFilter}
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.vendor_id = $1
+         and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+     )`,
+  };
+}
+
+function linkedFilterSql(node: ProductLinkRuleFilterNode, context: LinkedSqlContext): string {
+  if (node.nodeType === 'group') {
+    const children = node.children.map((child) => linkedFilterSql(child, context)).filter(Boolean);
+    if (children.length === 0) {
+      return 'true';
+    }
+
+    return `(${children.join(node.operator === 'or' ? ' or ' : ' and ')})`;
+  }
+
+  const expression = `coalesce(${linkedDatasetFieldSql(node.field, context)}, '')`;
+  if (node.operator === 'is-empty') {
+    return `nullif(trim(${expression}), '') is null`;
+  }
+
+  if (node.operator === 'is-not-empty') {
+    return `nullif(trim(${expression}), '') is not null`;
+  }
+
+  const valueParam = pushLinkedParam(context.values, node.value ?? '');
+  if (node.operator === 'contains') {
+    return `${expression} ilike '%' || ${valueParam}::text || '%'`;
+  }
+
+  if (node.operator === 'not-contains') {
+    return `not (${expression} ilike '%' || ${valueParam}::text || '%')`;
+  }
+
+  if (node.operator === 'starts-with') {
+    return `${expression} ilike ${valueParam}::text || '%'`;
+  }
+
+  if (node.operator === 'ends-with') {
+    return `${expression} ilike '%' || ${valueParam}::text`;
+  }
+
+  if (node.operator === 'not-equals') {
+    return `lower(${expression}) <> lower(${valueParam}::text)`;
+  }
+
+  return `lower(${expression}) = lower(${valueParam}::text)`;
+}
+
+function linkedAggregationSql(aggregation: ProductLinkRuleAggregation, context: LinkedSqlContext) {
+  if (aggregation.type === 'row-count') {
+    return 'count(*)::numeric';
+  }
+
+  const expression = `trim(coalesce(${linkedDatasetFieldSql(aggregation.column, context)}, ''))`;
+  return `coalesce(sum(case when ${expression} ~ '^-?[0-9]+(\\.[0-9]+)?$' then ${expression}::numeric else 0 end), 0)`;
+}
+
+function linkedDatasetFieldSql(field: string, context: LinkedSqlContext) {
+  const normalized = normalizeLinkedField(field);
+  const source = context.tableAlias;
+  const commonFields: Record<string, string> = {
+    customerid: `${source}.effective_customer_id::text`,
+    agreementid: `${source}.effective_agreement_id::text`,
+    externalaccountid: `${source}.external_account_id`,
+    tenantid: `${source}.external_account_id`,
+    productkey: `${source}.vendor_product_key`,
+    vendorproductkey: `${source}.vendor_product_key`,
+    productcode: `${source}.product_code`,
+    productname: `${source}.product_name`,
+    quantity: `${source}.quantity::text`,
+    observedat: `${source}.observed_at::text`,
+  };
+  const microsoft365LicenseFields: Record<string, string> = {
+    customerid: `${source}.effective_customer_id::text`,
+    agreementid: `${source}.effective_agreement_id::text`,
+    externalaccountid: `${source}.external_account_id`,
+    tenantid: `${source}.external_account_id`,
+    tenantname: `${source}.tenant_name`,
+    tenantdefaultdomain: `${source}.tenant_default_domain_name`,
+    skuid: `${source}.sku_id`,
+    skupartnumber: `${source}.sku_part_number`,
+    skuname: `${source}.sku_name`,
+    licensename: `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id)`,
+    productname: `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id)`,
+    subscriptionstatus: `${source}.subscription_status`,
+    capabilitystatus: `${source}.capability_status`,
+    totalunits: `${source}.total_units::text`,
+    assignedunits: `${source}.assigned_units::text`,
+    unassignedunits: `${source}.unassigned_units::text`,
+    enabledunits: `${source}.enabled_units::text`,
+    suspendedunits: `${source}.suspended_units::text`,
+    warningunits: `${source}.warning_units::text`,
+    lockedoutunits: `${source}.locked_out_units::text`,
+    subscriptioncount: `${source}.subscription_count::text`,
+    istrial: `${source}.is_trial::text`,
+    nextlifecycleat: `${source}.next_lifecycle_at::text`,
+    billingtype: `${source}.billing_type`,
+    billingcycle: `${source}.billing_cycle`,
+    billingterm: `${source}.billing_term`,
+    observedat: `${source}.observed_at::text`,
+  };
+  const mappedField =
+    context.fieldSet === 'microsoft-365-licenses'
+      ? microsoft365LicenseFields[normalized]
+      : commonFields[normalized];
+  if (mappedField) {
+    return mappedField;
+  }
+
+  const fieldParam = pushLinkedParam(context.values, normalized);
+  return `coalesce(
+    (
+      select dimension_entry.value
+      from jsonb_each_text(${source}.dimensions) as dimension_entry(key, value)
+      where regexp_replace(lower(dimension_entry.key), '[^a-z0-9]+', '', 'g') = ${fieldParam}::text
+      limit 1
+    ),
+    (
+      select raw_entry.value
+      from jsonb_each_text(${source}.raw_payload) as raw_entry(key, value)
+      where regexp_replace(lower(raw_entry.key), '[^a-z0-9]+', '', 'g') = ${fieldParam}::text
+      limit 1
+    )
+  )`;
+}
+
+function pushLinkedParam(values: unknown[], value: unknown) {
+  values.push(value);
+  return `$${values.length}`;
+}
+
+function normalizeLinkedField(field: string) {
+  return field.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function microsoft365DatasetEntities(dataset: 'users' | 'licenses') {
+  return dataset === 'licenses'
+    ? ['m365-licenses', 'license-snapshots']
+    : ['m365-users', 'license-snapshots'];
+}
+
+async function loadConnectWiseAdditionLinkedSourceTotals(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'connectwise-addition' }>,
+) {
+  const result = await database.query<LinkedSourceQuantityRow>(
+    `select
+       agreement_additions.customer_id,
+       agreement_additions.agreement_id,
+       sum(agreement_additions.quantity) as quantity,
+       count(*)::int as row_count,
+       max(coalesce(agreement_additions.updated_at, agreement_additions.created_at)) as observed_at
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.product_code = $1
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     group by agreement_additions.customer_id, agreement_additions.agreement_id
+     order by agreement_additions.customer_id, agreement_additions.agreement_id`,
+    [source.productCode],
+  );
+
+  return result.rows.map((row) => ({
+    customerId: row.customer_id,
+    agreementId: row.agreement_id,
+    quantity: numericValue(row.quantity),
+    observedAt: isoDate(row.observed_at),
+    source: {
+      sourceType: 'connectwise-addition' as const,
+      label: `ConnectWise / ${source.productName ?? source.productCode}`,
+      quantity: numericValue(row.quantity),
+      rowCount: numericValue(row.row_count),
+      productCode: source.productCode,
+    },
+  }));
+}
+
+async function loadLinkedTargetAdditionScopes(database: Queryable, productCodes: string[]) {
+  if (productCodes.length === 0) {
+    return [];
+  }
+
+  const result = await database.query<LinkedTargetAdditionScopeRow>(
+    `select distinct
+       agreement_additions.customer_id,
+       agreement_additions.agreement_id
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.product_code = any($1::text[])
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'`,
+    [productCodes],
+  );
+
+  return result.rows;
+}
+
+function applyLinkedCountsToLines(
+  lines: ReconciliationLine[],
+  countsByLineKey: Map<string, ReconciliationLinkedCount>,
+): ReconciliationLine[] {
+  return lines.map((line) => {
+    if (line.lineType !== 'base-count') {
+      return line;
+    }
+
+    const linkedCount = countsByLineKey.get(linkedLineKey(line.clientId, line.agreementId, line.productCode));
+    if (!linkedCount) {
+      return line;
+    }
+
+    const delta = linkedCount.quantity - line.agreementQuantity;
+    const financialImpact = line.unitPrice
+      ? {
+          amount: delta * line.unitPrice.amount,
+          currency: line.unitPrice.currency,
+        }
+      : {
+          amount: 0,
+          currency: 'USD' as const,
+        };
+
+    return {
+      ...line,
+      proposedQuantity: linkedCount.quantity,
+      delta,
+      financialImpact,
+      linkedCount,
+      status: delta === 0 ? 'matched' : 'needs-review',
+      writeAction: linkedWriteAction(delta, line),
+      reason:
+        delta === 0
+          ? `${line.productName} linked count matches the agreement addition.`
+          : `${line.productName} linked count differs from the agreement addition.`,
+      evidence: [
+        ...line.evidence,
+        { label: 'Linked count rule', value: linkedCount.ruleName },
+        { label: 'Linked count', value: linkedCount.quantity },
+        ...linkedCount.sources.map((source) => ({
+          label: `Linked source: ${source.label}`,
+          value: source.quantity,
+        })),
+      ],
+    };
+  });
+}
+
+function linkedWriteAction(delta: number, line: ReconciliationLine): ReconciliationWriteAction | undefined {
+  if (delta === 0) {
+    return undefined;
+  }
+
+  const matchedAdditionCount = matchedAdditionCountFromEvidence(line);
+  if (matchedAdditionCount === 0) return 'create-addition';
+  if (matchedAdditionCount === 1) return 'update-addition';
+
+  return 'review-required';
+}
+
+function matchedAdditionCountFromEvidence(line: ReconciliationLine) {
+  const evidence = line.evidence.find((item) => item.label === 'Matched agreement additions');
+  return typeof evidence?.value === 'number' ? evidence.value : Number(evidence?.value ?? 0);
+}
+
+function linkedLineKey(customerId: string, agreementId: string, productCode: string) {
+  return `${customerId}|${agreementId}|${productCode.trim().toLowerCase()}`;
+}
+
+function canonicalVendorProductKey(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function integrationDisplayName(integrationId: IntegrationId) {
+  return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
 }
 
 async function withLineDetails(

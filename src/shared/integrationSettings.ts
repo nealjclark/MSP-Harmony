@@ -20,8 +20,11 @@ export type IntegrationDataSourceType =
   | 'user-license-detail'
   | 'customer-product-breakdown'
   | 'reseller-product-total';
+export type IntegrationNonSecretInputType = 'text' | 'checkbox';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
+
+export const detailOnlySyncSettingKey = 'detailOnlySync';
 
 export type IntegrationSecretDefinition = {
   key: string;
@@ -37,6 +40,8 @@ export type IntegrationNonSecretDefinition = {
   envVar: string;
   required: boolean;
   defaultValue?: string;
+  inputType?: IntegrationNonSecretInputType;
+  description?: string;
 };
 
 export type IntegrationDataSourceDefinition = {
@@ -60,6 +65,7 @@ export type IntegrationSettingsDefinition = {
   endpoint: string;
   requiredSecrets: IntegrationSecretDefinition[];
   requiredNonSecrets: IntegrationNonSecretDefinition[];
+  optionalNonSecrets?: IntegrationNonSecretDefinition[];
   scopes: string[];
   syncFrequency: IntegrationSyncFrequency;
   webhookSupported: boolean;
@@ -134,6 +140,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'API Endpoint', 'COVE_ENDPOINT', 'https://api.backup.management'),
       nonSecret('partnerName', 'Partner Name', 'COVE_PARTNER_NAME'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('COVE_DETAIL_ONLY_SYNC')],
     scopes: ['devices.read', 'usage.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -160,6 +167,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: 'https://ncentral.example.com',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
     requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'NCENTRAL_ENDPOINT', 'https://ncentral.example.com')],
+    optionalNonSecrets: [detailOnlySyncOption('NCENTRAL_DETAIL_ONLY_SYNC')],
     scopes: ['device-filters.read', 'devices.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -186,6 +194,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: 'https://usea1.sentinelone.net',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-sentinelone-api-token', 'SENTINELONE_API_TOKEN')],
     requiredNonSecrets: [nonSecret('endpoint', 'Management Console URL', 'SENTINELONE_ENDPOINT', 'https://usea1.sentinelone.net')],
+    optionalNonSecrets: [detailOnlySyncOption('SENTINELONE_DETAIL_ONLY_SYNC')],
     scopes: ['sites.read', 'agents.read'],
     syncFrequency: 'hourly',
     webhookSupported: true,
@@ -215,6 +224,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       secret('password', 'Password', 'mspharmony-proofpoint-password', 'PROOFPOINT_PASSWORD'),
     ],
     requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'PROOFPOINT_ENDPOINT', 'https://api.proofpointessentials.com')],
+    optionalNonSecrets: [detailOnlySyncOption('PROOFPOINT_DETAIL_ONLY_SYNC')],
     scopes: ['domains.read', 'users.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -246,6 +256,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     requiredNonSecrets: [
       nonSecret('endpoint', 'Datto REST API Endpoint', 'DATTO_ENDPOINT', 'https://api.datto.com'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('DATTO_DETAIL_ONLY_SYNC')],
     scopes: ['bcdr.status.read', 'saas.domains.read', 'saas.seats.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -287,6 +298,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('clientId', 'Application (Client) ID', 'MICROSOFT365_CLIENT_ID'),
       nonSecret('tenantId', 'Partner/Home Tenant ID', 'MICROSOFT365_TENANT_ID'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('MICROSOFT365_DETAIL_ONLY_SYNC', 'true')],
     scopes: [
       'Application: Directory.Read.All',
       'Application: User.Read.All',
@@ -323,6 +335,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'SecureCloud API Endpoint', 'OPENTEXT_APPRIVER_ENDPOINT', 'https://unityapi.webrootcloudav.com'),
       nonSecret('clientId', 'API Client ID', 'OPENTEXT_APPRIVER_CLIENT_ID'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('OPENTEXT_APPRIVER_DETAIL_ONLY_SYNC')],
     scopes: ['SecureCloud.Customers', 'SecureCloud.Usage'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -349,6 +362,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: '',
     requiredSecrets: [],
     requiredNonSecrets: [],
+    optionalNonSecrets: [detailOnlySyncOption('HUNTRESS_DETAIL_ONLY_SYNC')],
     scopes: ['invoice-table.import'],
     syncFrequency: 'manual',
     webhookSupported: false,
@@ -380,6 +394,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('clientId', 'Client ID', 'AZURE_CLIENT_ID'),
       nonSecret('subscriptionId', 'Subscription ID', 'AZURE_SUBSCRIPTION_ID'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('AZURE_DETAIL_ONLY_SYNC')],
     scopes: ['Billing.Read', 'Consumption.Read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -409,6 +424,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'API Endpoint', 'PAX8_ENDPOINT', 'https://api.pax8.com'),
       nonSecret('clientId', 'Client ID', 'PAX8_CLIENT_ID'),
     ],
+    optionalNonSecrets: [detailOnlySyncOption('PAX8_DETAIL_ONLY_SYNC')],
     scopes: ['companies.read', 'subscriptions.read', 'products.read'],
     syncFrequency: 'daily',
     webhookSupported: true,
@@ -435,6 +451,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: '',
     requiredSecrets: [],
     requiredNonSecrets: [],
+    optionalNonSecrets: [detailOnlySyncOption('CUSTOM_TABLE_DETAIL_ONLY_SYNC')],
     scopes: ['invoice-table.import'],
     syncFrequency: 'manual',
     webhookSupported: false,
@@ -477,6 +494,25 @@ export function getIntegrationDataSource(
 
 export function integrationDataSourceRequiresCustomerMapping(sourceType: IntegrationDataSourceType) {
   return sourceType !== 'reseller-product-total';
+}
+
+export function listIntegrationNonSecretDefinitions(definition: IntegrationSettingsDefinition) {
+  return [...definition.requiredNonSecrets, ...(definition.optionalNonSecrets ?? [])];
+}
+
+export function integrationDetailOnlySyncEnabled(
+  nonSecrets: Record<string, string | undefined> = {},
+  definition?: IntegrationSettingsDefinition,
+) {
+  const configuredValue =
+    nonSecrets[detailOnlySyncSettingKey] ??
+    definition?.optionalNonSecrets?.find((setting) => setting.key === detailOnlySyncSettingKey)?.defaultValue;
+
+  return booleanSettingEnabled(configuredValue);
+}
+
+export function integrationSupportsDetailOnlySync(definition: IntegrationSettingsDefinition) {
+  return Boolean(definition.optionalNonSecrets?.some((setting) => setting.key === detailOnlySyncSettingKey));
 }
 
 export function validateIntegrationSettings(
@@ -540,7 +576,38 @@ function nonSecret(
     envVar,
     required: true,
     defaultValue,
+    inputType: 'text',
   };
+}
+
+function optionalNonSecret(
+  key: string,
+  label: string,
+  envVar: string,
+  defaultValue: string | undefined,
+  inputType: IntegrationNonSecretInputType,
+  description?: string,
+): IntegrationNonSecretDefinition {
+  return {
+    key,
+    label,
+    envVar,
+    required: false,
+    defaultValue,
+    inputType,
+    description,
+  };
+}
+
+function detailOnlySyncOption(envVar: string, defaultValue = 'false') {
+  return optionalNonSecret(
+    detailOnlySyncSettingKey,
+    'Detail-only sync',
+    envVar,
+    defaultValue,
+    'checkbox',
+    'Customer-mapped detail is stored for reports and linked counts without product mapping.',
+  );
 }
 
 function dataSource(
@@ -591,4 +658,8 @@ function statusForValidation(
 
 function hasValue(value: string | undefined) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function booleanSettingEnabled(value: string | undefined) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }

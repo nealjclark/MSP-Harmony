@@ -1,0 +1,16 @@
+{
+  "name": "store_image",
+  "description": "Load an image from a local file path and return an IMAGEID_<id> URI that can be passed to other tools (e.g. as attachedImageUri for generate_procedural_model).\nUse this tool when you need to convert a local image file into an image URI that other tools accept.\nSupported formats: png, jpg, jpeg. Max file size: 5MB.",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "Absolute path to a local image file (png, jpg, or jpeg).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "filePath"
+    ],
+    "type": "object"
+  }
+}

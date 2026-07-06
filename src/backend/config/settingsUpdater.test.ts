@@ -48,6 +48,25 @@ async function run() {
   assert.deepEqual(result.savedNonSecretKeys, ['endpoint', 'companyId', 'clientId']);
   assert.equal(savedNonSecrets.length, 1);
 
+  const microsoftResult = await updateIntegrationSettings(
+    {
+      integrationId: 'microsoft-365',
+      actor: 'neal@bmbsolutions.com',
+      role: 'Admin',
+      nonSecrets: {
+        endpoint: 'https://graph.microsoft.com',
+        clientId: 'client-id',
+        tenantId: 'tenant-id',
+        detailOnlySync: 'false',
+      },
+      secrets: {},
+    },
+    secretWriter,
+    repository,
+  );
+  assert.equal(microsoftResult.savedNonSecretKeys.includes('detailOnlySync'), true);
+  assert.equal(savedNonSecrets[1]?.nonSecrets && (savedNonSecrets[1].nonSecrets as Record<string, string>).detailOnlySync, 'false');
+
   await assert.rejects(
     () =>
       updateIntegrationSettings(

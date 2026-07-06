@@ -3,6 +3,7 @@ import { SecretClient } from '@azure/keyvault-secrets';
 import { config as loadDotEnv } from 'dotenv';
 import {
   getIntegrationSettingsDefinition,
+  listIntegrationNonSecretDefinitions,
   listIntegrationSettingsDefinitions,
   validateIntegrationSettings,
   type IntegrationId,
@@ -139,8 +140,9 @@ async function loadIntegrationRuntimeSettings(
   loadSecrets = true,
 ): Promise<IntegrationRuntimeSettings> {
   const metadata = await metadataReader?.loadMetadata(definition.integrationId);
+  const nonSecretDefinitions = listIntegrationNonSecretDefinitions(definition);
   const nonSecretsFromEnvironment = Object.fromEntries(
-    definition.requiredNonSecrets.map((setting) => [
+    nonSecretDefinitions.map((setting) => [
       setting.key,
       env[setting.envVar] ?? setting.defaultValue,
     ]),

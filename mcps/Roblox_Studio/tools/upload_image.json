@@ -1,0 +1,19 @@
+{
+  "name": "upload_image",
+  "description": "Upload a batch of images from http server to Roblox Asset Server, returning imagePath to assetId map, such as {\"http://localhost/image.png\" : \"rbxassetid://12345678\", \"https://www.figma.com/api/mcp/asset/6dcff81e-b394-4640-b3b1-123456789\" : \"rbxassetid://12345679\"}.",
+  "inputSchema": {
+    "properties": {
+      "imagePaths": {
+        "description": "An array of image paths to be uploaded.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "imagePaths"
+    ],
+    "type": "object"
+  }
+}

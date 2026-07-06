@@ -1,0 +1,28 @@
+{
+  "name": "script_read",
+  "description": "Reads a script from the Roblox workspace. The output will be returned with line numbers in format: LINE_NUMBER→LINE_CONTENT.\nWhen using this tool to gather information, ensure you gather the COMPLETE context to fulfill the user's request.\n\nUsage:\n- This tool reads the entire script by default to provide complete context\n- You can read multiple scripts in parallel for efficiency\n- If you need to find specific symbols across multiple scripts, use the grep search tool\n- Avoid re-reading the same script unless the script may have changed since the last read\n- For very large scripts (thousands of lines), consider using grep_search to locate specific functions or patterns first\n\nPath Format:\n- The path needs to be a full path, with no wildcard matching\n- Use dot notation like \"game.ServerScriptService.MyScript\"\n- Script must already exist (use `file_search` or `grep_search` to find the script path first)\n- Will only read existing scripts, never creates new ones\n",
+  "inputSchema": {
+    "properties": {
+      "end_line_one_indexed_inclusive": {
+        "description": "The one-indexed line number to end reading at (inclusive). Required if should_read_entire_file is false.",
+        "type": "integer"
+      },
+      "should_read_entire_file": {
+        "description": "Whether to read the entire script. Defaults to true.",
+        "type": "boolean"
+      },
+      "start_line_one_indexed": {
+        "description": "The one-indexed line number to start reading from (inclusive). Required if should_read_entire_file is false.",
+        "type": "integer"
+      },
+      "target_file": {
+        "description": "The dot-notation path of the script to read (e.g., 'game.ServerScriptService.MyScript')",
+        "type": "string"
+      }
+    },
+    "required": [
+      "target_file"
+    ],
+    "type": "object"
+  }
+}

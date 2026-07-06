@@ -1,0 +1,32 @@
+{
+  "name": "screen_capture",
+  "description": "Capture current edit-time screen, return the image data. If camera_position and look_at_position are provided, the camera will be temporarily set to the camera_position and look at the look_at_position.",
+  "inputSchema": {
+    "properties": {
+      "camera_position": {
+        "description": "The position of the camera to capture the screen from.",
+        "items": {
+          "description": "The x, y, z coordinate of the camera position.",
+          "type": "number"
+        },
+        "type": "array"
+      },
+      "capture_id": {
+        "description": "Capture identifier such as 'ScreenCapture_1', 'ScreenCapture_2', etc.",
+        "type": "string"
+      },
+      "look_at_position": {
+        "description": "The position to look at.",
+        "items": {
+          "description": "The x, y, z coordinate of the look at position.",
+          "type": "number"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "capture_id"
+    ],
+    "type": "object"
+  }
+}

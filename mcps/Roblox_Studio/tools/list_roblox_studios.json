@@ -1,0 +1,8 @@
+{
+  "name": "list_roblox_studios",
+  "description": "List all connected Roblox Studio instances. Multiple Studio instances can be open on a user's machine, so this tool allows you to identify them. The result includes name, id, and active status. The active Studio instance will receive all subsequent tool calls. Before making modifications to a user's game, you MUST check that the active Studio instance is correctly set.",
+  "inputSchema": {
+    "properties": {},
+    "type": "object"
+  }
+}

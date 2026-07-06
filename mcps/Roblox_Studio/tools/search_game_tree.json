@@ -1,0 +1,30 @@
+{
+  "name": "search_game_tree",
+  "description": "Explore the Roblox game hierarchy tree with flat JSON output.\nReturns an array of JSON objects representing instances in the Data Model, showing names, paths, and relationships.\nUse optional filters to narrow down results by path, instance type, or keywords.\nFor detailed inspection of a specific instance's properties and attributes, use the Inspect Instance tool.\n\nOUTPUT FORMAT:\nArray of objects with:\n{\n  \"name\": \"InstanceName\",\n  \"className\": \"Part\", \n  \"fullPath\": \"Workspace.Folder.InstanceName\",\n  \"parentName\": \"Folder\",\n  \"childSummary\": \"5 children (3 Part, 2 Script)\",  // Present if depth limit reached and children exist\n  \"unexploredChildCount\": 5  // Present if depth limit reached with matching children\n}\n\nDEPTH LIMITING:\n- Default max_depth: 3 levels from start point (absolute traversal depth)\n- Absolute max: 10 levels\n- max_depth limits how deep into the hierarchy we traverse, regardless of filters\n- Beyond max_depth, children are summarized with counts by class type\n- Nodes at depth limit show: \"unexploredChildCount\" and \"childSummary\"\n\nEXAMPLES:\n- Full tree (3 levels): GameTree()\n- Workspace only: GameTree(path: \"Workspace\")\n- ServerScriptService: GameTree(path: \"ServerScriptService\")\n- All base scripts: GameTree(instance_type: \"BaseScript\")\n- All parts: GameTree(instance_type: \"Part\")\n- By keywords: GameTree(keywords: \"player, character\")\n- Deep exploration: GameTree(max_depth: 6)\n- Specific path: GameTree(path: \"Workspace.Models\")\n- Combined filters: GameTree(path: \"Workspace\", instance_type: \"Part\", keywords: \"red\")\n- Increase output: GameTree(head_limit: 1000, max_depth: 5)\n",
+  "inputSchema": {
+    "properties": {
+      "head_limit": {
+        "description": "Maximum number of results to return. Default: 200. Prevents overwhelming output for large trees.",
+        "type": "number"
+      },
+      "instance_type": {
+        "description": "Filter by ClassName using IsA() check. Examples: 'BasePart', 'BaseScript', 'GuiObject', 'Model', 'Folder'. Case sensitive.",
+        "type": "string"
+      },
+      "keywords": {
+        "description": "Filter by instance name keywords (case-insensitive). Separate multiple keywords with commas or spaces. Instance name must contain at least one keyword. Examples: 'player', 'red, blue', 'button door'",
+        "type": "string"
+      },
+      "max_depth": {
+        "description": "Maximum absolute depth to traverse from start point. Default: 3, Absolute max: 10. Limits how deep we explore in the hierarchy regardless of filters. Beyond this depth, children are summarized instead of expanded.",
+        "type": "number"
+      },
+      "path": {
+        "description": "Start exploration from this path. Examples: 'Workspace', 'ServerScriptService', 'Workspace.Models'. Path is case-sensitive.",
+        "type": "string"
+      }
+    },
+    "required": [],
+    "type": "object"
+  }
+}

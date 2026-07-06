@@ -1,0 +1,39 @@
+{
+  "name": "insert_asset",
+  "description": "Inserts an asset into the game by its numeric Roblox asset ID.\nUse this tool when you have a specific asset ID to insert directly, rather than searching the Creator Store.\nThe asset will be loaded, validated, and placed in the scene.\nAlways provide assetName when you know the name of the asset (e.g. from search results or user request). The inserted instance will be named using assetName — if omitted, it defaults to a generic name.\nSupports models, meshes, images/decals, audio, video, animations, and packages.\n",
+  "inputSchema": {
+    "properties": {
+      "assetId": {
+        "description": "Numeric Roblox asset ID to insert.",
+        "type": "string"
+      },
+      "assetName": {
+        "description": "Name for the inserted instance in the game tree. Always provide this when you know the asset name (e.g. from search_asset results). If omitted, defaults to a generic name.",
+        "type": "string"
+      },
+      "assetType": {
+        "description": "Asset type hint. If provided, skips the metadata API lookup and uses this type directly. Use when the caller already knows the asset type (e.g. from inventory search results). 'Image' and 'Decal' both insert as a Decal instance.",
+        "enum": [
+          "Model",
+          "Package",
+          "Mesh",
+          "MeshPart",
+          "Image",
+          "Decal",
+          "Audio",
+          "Video",
+          "Animation"
+        ],
+        "type": "string"
+      },
+      "parentPath": {
+        "description": "DataModel path to parent the asset under (e.g. game.Workspace.Folder1). Defaults to workspace.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "assetId"
+    ],
+    "type": "object"
+  }
+}

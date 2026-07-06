@@ -1,0 +1,73 @@
+{
+  "name": "generate_material",
+  "description": "Returns the BaseMaterial and Name of the generated MaterialVariant. To use, these must both be set to the Material and MaterialVariant properties of BaseParts, respectively.",
+  "inputSchema": {
+    "properties": {
+      "baseMaterial": {
+        "enum": [
+          "Plastic",
+          "SmoothPlastic",
+          "Wood",
+          "WoodPlanks",
+          "Marble",
+          "Basalt",
+          "Slate",
+          "CrackedLava",
+          "Concrete",
+          "Limestone",
+          "Granite",
+          "Pavement",
+          "Brick",
+          "Pebble",
+          "Cobblestone",
+          "Rock",
+          "Sandstone",
+          "CorrodedMetal",
+          "DiamondPlate",
+          "Foil",
+          "Metal",
+          "Grass",
+          "LeafyGrass",
+          "Sand",
+          "Fabric",
+          "Snow",
+          "Mud",
+          "Ground",
+          "Asphalt",
+          "Salt",
+          "Ice",
+          "Glacier",
+          "Cardboard",
+          "Carpet",
+          "CeramicTiles",
+          "ClayRoofTiles",
+          "RoofShingles",
+          "Leather",
+          "Plaster",
+          "Rubber"
+        ],
+        "type": "string"
+      },
+      "materialDescription": {
+        "type": "string"
+      },
+      "materialId": {
+        "type": "string"
+      },
+      "materialPattern": {
+        "enum": [
+          "Regular",
+          "Organic"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "materialPattern",
+      "materialId",
+      "baseMaterial",
+      "materialDescription"
+    ],
+    "type": "object"
+  }
+}

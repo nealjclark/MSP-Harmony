@@ -42,10 +42,12 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from 'react';
 import {
   integrationHasAnyCapability,
   integrationHasCapability,
+  integrationDetailOnlySyncEnabled,
   integrationSettingsRegistry,
   validateIntegrationRegistry,
   type IntegrationCapability,
@@ -76,7 +78,8 @@ type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'api' | 'invoice';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type ReconciliationCountSource = 'api' | 'invoice' | 'manual';
+type MappingSectionId = 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
+type ReconciliationCountSource = 'api' | 'invoice' | 'linked' | 'manual';
 
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
@@ -118,6 +121,7 @@ type ReconcileIssue = {
   lineType: 'base-count' | 'usage-add-on' | 'unmapped-vendor';
   measuredSourceCount: number;
   sourceCount: number;
+  linkedCount?: ReconciliationLinkedCount;
   vendorInvoiceCount?: number;
   vendorInvoiceLineCount?: number;
   invoiceImportId?: string;
@@ -217,6 +221,7 @@ type Integration = {
   nonSecrets: Record<string, string | undefined>;
   requiredSecrets: IntegrationSecretDefinition[];
   requiredNonSecrets: IntegrationNonSecretDefinition[];
+  optionalNonSecrets: IntegrationNonSecretDefinition[];
   missingSecrets: string[];
   missingNonSecrets: string[];
   webhookSupported: boolean;
@@ -534,6 +539,25 @@ type ReconciliationProductOption = {
   productName: string;
 };
 
+type ReconciliationLinkedCountSource = {
+  sourceType: 'vendor-product' | 'connectwise-addition' | 'filtered-dataset';
+  label: string;
+  quantity: number;
+  rowCount: number;
+  vendorId?: IntegrationId;
+  vendorProductKey?: string;
+  dataset?: RawSyncDataset;
+  productCode?: string;
+};
+
+type ReconciliationLinkedCount = {
+  ruleId: string;
+  ruleName: string;
+  sourceVendorProductKey: string;
+  quantity: number;
+  sources: ReconciliationLinkedCountSource[];
+};
+
 type ReconciliationRunMeta = {
   syncRunId?: string;
   generatedAt: string;
@@ -776,6 +800,7 @@ type ReconciliationLineResponse = {
     amount: number;
     currency: string;
   };
+  linkedCount?: ReconciliationLinkedCount;
   status: ReconciliationLineStatus;
   writeAction?: 'update-addition' | 'create-addition' | 'review-required';
   reason: string;
@@ -926,6 +951,73 @@ type ProductBundle = {
   updatedAt?: string;
 };
 
+type ProductLinkRuleSource =
+  | {
+      sourceType: 'vendor-product';
+      vendorId: IntegrationId;
+      vendorProductKey: string;
+      vendorProductName?: string;
+    }
+  | {
+      sourceType: 'connectwise-addition';
+      productCode: string;
+      productName?: string;
+    }
+  | {
+      sourceType: 'filtered-dataset';
+      vendorId: IntegrationId;
+      dataset?: RawSyncDataset;
+      label?: string;
+      filter: ProductLinkRuleFilterNode;
+      aggregation: ProductLinkRuleAggregation;
+    };
+
+type ProductLinkRuleFilterOperator =
+  | 'contains'
+  | 'not-contains'
+  | 'equals'
+  | 'not-equals'
+  | 'starts-with'
+  | 'ends-with'
+  | 'is-empty'
+  | 'is-not-empty';
+
+type ProductLinkRuleFilterNode =
+  | {
+      nodeType: 'group';
+      operator: 'and' | 'or';
+      children: ProductLinkRuleFilterNode[];
+    }
+  | {
+      nodeType: 'condition';
+      field: string;
+      operator: ProductLinkRuleFilterOperator;
+      value?: string;
+    };
+
+type ProductLinkRuleAggregation =
+  | {
+      type: 'row-count';
+    }
+  | {
+      type: 'column-sum';
+      column: string;
+    };
+
+type ProductLinkRule = {
+  id: string;
+  vendorId: IntegrationId;
+  sourceVendorProductKey: string;
+  ruleName: string;
+  sources: ProductLinkRuleSource[];
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 type ProductCatalogTarget = ProductMappingTarget & {
   connectwiseProductId?: string;
   source: 'local' | 'connectwise';
@@ -936,6 +1028,13 @@ type ProductCatalogSearchResponse = {
   targets: ProductCatalogTarget[];
   source: 'local' | 'connectwise';
   warning?: string;
+};
+
+type LinkedDatasetMetadata = {
+  columns: string[];
+  uniqueValuesByColumn: Record<string, string[]>;
+  syncRunId?: string;
+  rowCount: number;
 };
 
 type DimensionValue = string | number | boolean | null | undefined;
@@ -1049,6 +1148,7 @@ type MappingStateResponse = {
     approvedProductMappings: number;
     productCandidates: number;
     productBundles: number;
+    linkedProductRules: number;
     unmappedSnapshots: number;
   };
   accountMappings: AccountMapping[];
@@ -1056,6 +1156,7 @@ type MappingStateResponse = {
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
   productBundles: ProductBundle[];
+  productLinkRules: ProductLinkRule[];
   customerOptions: MappingCustomerOption[];
 };
 
@@ -1181,6 +1282,7 @@ const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }
 ];
 
 const defaultView: View = 'reconcile';
+const defaultMappingIntegrationId: IntegrationId = 'cove';
 
 const viewPaths: Record<View, string> = {
   reconcile: '/reconcile',
@@ -1308,11 +1410,16 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       nonSecrets: definition.nonSecrets ?? {},
       requiredSecrets: definition.requiredSecrets,
       requiredNonSecrets: definition.requiredNonSecrets,
+      optionalNonSecrets: definition.optionalNonSecrets ?? [],
       missingSecrets: validation?.missingSecrets.map((setting) => setting.label) ?? [],
       missingNonSecrets: validation?.missingNonSecrets.map((setting) => setting.label) ?? [],
       webhookSupported: definition.webhookSupported,
     };
   });
+}
+
+function checkboxSettingEnabled(value: string | undefined) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }
 
 function formatCurrency(value: number) {
@@ -1352,6 +1459,12 @@ function validVendorInvoiceCount(issue: Pick<ReconcileIssue, 'vendorInvoiceCount
     : undefined;
 }
 
+function validLinkedCount(issue: Pick<ReconcileIssue, 'linkedCount'>) {
+  return typeof issue.linkedCount?.quantity === 'number' && Number.isFinite(issue.linkedCount.quantity)
+    ? issue.linkedCount.quantity
+    : undefined;
+}
+
 function validManualOverrideTotal(issue: Pick<ReconcileIssue, 'manualOverrideTotal' | 'manualOverrideTotalTouched'>) {
   return issue.manualOverrideTotalTouched &&
     typeof issue.manualOverrideTotal === 'number' &&
@@ -1363,7 +1476,9 @@ function validManualOverrideTotal(issue: Pick<ReconcileIssue, 'manualOverrideTot
 function preferredReconciliationCountSource(
   apiCount: number,
   invoiceCount: number | undefined,
+  linkedCount?: number,
 ): ReconciliationCountSource {
+  if (typeof linkedCount === 'number') return 'linked';
   return typeof invoiceCount === 'number' && invoiceCount > apiCount ? 'invoice' : 'api';
 }
 
@@ -1374,6 +1489,10 @@ function reconciliationCountSource(issue: ReconcileIssue): ReconciliationCountSo
     return 'manual';
   }
 
+  if (issue.selectedCountSource === 'linked' && typeof validLinkedCount(issue) === 'number') {
+    return 'linked';
+  }
+
   return issue.selectedCountSource === 'invoice' && typeof invoiceCount === 'number' ? 'invoice' : 'api';
 }
 
@@ -1381,6 +1500,10 @@ function reconciliationSelectedCount(issue: ReconcileIssue) {
   const countSource = reconciliationCountSource(issue);
   if (countSource === 'manual') {
     return validManualOverrideTotal(issue) ?? issue.sourceCount;
+  }
+
+  if (countSource === 'linked') {
+    return validLinkedCount(issue) ?? issue.sourceCount;
   }
 
   return countSource === 'invoice' ? validVendorInvoiceCount(issue) ?? issue.sourceCount : issue.sourceCount;
@@ -2236,8 +2359,15 @@ function appliedUpdateDeltaLabel(update: AppliedReconciliationUpdate) {
 
 function reconciliationCountSourceLabel(source: ReconciliationCountSource) {
   if (source === 'invoice') return 'Vendor Invoice';
+  if (source === 'linked') return 'Linked Count';
   if (source === 'manual') return 'Manual Override';
   return 'Vendor API';
+}
+
+function linkedCountTitle(linkedCount: ReconciliationLinkedCount) {
+  return `${linkedCount.ruleName}: ${linkedCount.sources
+    .map((source) => `${source.label} ${source.quantity.toLocaleString()}`)
+    .join('; ')}`;
 }
 
 function isReviewableIssue(issue: ReconcileIssue) {
@@ -2246,6 +2376,10 @@ function isReviewableIssue(issue: ReconcileIssue) {
 
 function isReviewViewIssue(issue: ReconcileIssue) {
   return isReviewableIssue(issue) || issue.status === 'approved' || issue.status === 'updated';
+}
+
+function isProcessedReconciliationIssue(issue: ReconcileIssue) {
+  return issue.lineType !== 'unmapped-vendor' && issue.status !== 'unmapped';
 }
 
 function issueMatchesSearchAndVendor(issue: ReconcileIssue, query: string, vendorFilter: string) {
@@ -2265,6 +2399,10 @@ function initialView(): View {
   return viewFromLocation(window.location);
 }
 
+function initialMappingIntegrationId(): IntegrationId {
+  return mappingIntegrationIdFromLocation(window.location) ?? defaultMappingIntegrationId;
+}
+
 function viewFromLocation(location: Location): View {
   const queryView = new URLSearchParams(location.search).get('view');
   if (isView(queryView)) return queryView;
@@ -2274,33 +2412,78 @@ function viewFromLocation(location: Location): View {
 }
 
 function viewFromPath(pathname: string): View | null {
-  const normalizedPath = pathname.replace(/\/+$/, '') || '/';
+  const normalizedPath = normalizePathname(pathname);
+  if (mappingIntegrationIdFromPath(normalizedPath)) {
+    return 'mappings';
+  }
+
   const matchedEntry = Object.entries(viewPaths).find(([, path]) => path === normalizedPath);
   return matchedEntry ? (matchedEntry[0] as View) : normalizedPath === '/' ? defaultView : null;
 }
 
-function isView(value: string | null): value is View {
-  return Boolean(value && [...navItems, ...utilityNavItems].some((item) => item.id === value));
+function normalizePathname(pathname: string) {
+  return pathname.replace(/\/+$/, '') || '/';
 }
 
-function urlForView(view: View) {
+function isView(value: string | null): value is View {
+  return Boolean(value && Object.prototype.hasOwnProperty.call(viewPaths, value));
+}
+
+function isIntegrationId(value: string | null): value is IntegrationId {
+  return Boolean(value && integrationSettingsRegistry.some((integration) => integration.integrationId === value));
+}
+
+function mappingIntegrationIdFromLocation(location: Location) {
+  const queryVendor = new URLSearchParams(location.search).get('vendor');
+  if (isIntegrationId(queryVendor)) {
+    return queryVendor;
+  }
+
+  return mappingIntegrationIdFromPath(location.pathname);
+}
+
+function mappingIntegrationIdFromPath(pathname: string) {
+  const segments = normalizePathname(pathname).split('/').filter(Boolean);
+  if (segments.length !== 2 || segments[1] !== 'mappings') {
+    return null;
+  }
+
+  try {
+    const integrationId = decodeURIComponent(segments[0]);
+    return isIntegrationId(integrationId) ? integrationId : null;
+  } catch {
+    return null;
+  }
+}
+
+function urlForView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
+  if (view === 'mappings') {
+    return `/${encodeURIComponent(mappingIntegrationId)}/mappings`;
+  }
+
   return viewPaths[view];
 }
 
-function currentRouteMatchesView(view: View) {
+function currentRouteMatchesView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
   const currentView = viewFromPath(window.location.pathname);
   const queryView = new URLSearchParams(window.location.search).get('view');
-  return currentView === view && (!queryView || queryView === view);
+  const expectedPath = normalizePathname(urlForView(view, mappingIntegrationId));
+  return (
+    currentView === view &&
+    normalizePathname(window.location.pathname) === expectedPath &&
+    (!queryView || queryView === view)
+  );
 }
 
-function updateRouteForView(view: View) {
-  if (currentRouteMatchesView(view)) {
+function updateRouteForView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
+  if (currentRouteMatchesView(view, mappingIntegrationId)) {
     return;
   }
 
   const nextUrl = new URL(window.location.href);
-  nextUrl.pathname = urlForView(view);
+  nextUrl.pathname = urlForView(view, mappingIntegrationId);
   nextUrl.searchParams.delete('view');
+  nextUrl.searchParams.delete('vendor');
   window.history.pushState({ view }, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
 }
 
@@ -2852,6 +3035,50 @@ async function deactivateProductBundleRequest(integrationId: IntegrationId, bund
   }
 }
 
+async function saveProductLinkRuleRequest(
+  integrationId: IntegrationId,
+  payload: {
+    id?: string;
+    sourceVendorProductKey: string;
+    ruleName: string;
+    sources: ProductLinkRuleSource[];
+    active?: boolean;
+  },
+) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/linked-products`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ...payload, reviewedBy: 'frontend' }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Linked count rule save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { vendorId: IntegrationId; rule: ProductLinkRule };
+}
+
+async function deactivateProductLinkRuleRequest(integrationId: IntegrationId, ruleId: string) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}/deactivate`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ reviewedBy: 'frontend' }),
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Linked count rule deactivation failed with HTTP ${response.status}.`));
+  }
+}
+
 async function searchProductCatalog(integrationId: IntegrationId, query: string) {
   const params = new URLSearchParams();
   params.set('query', query);
@@ -3185,7 +3412,11 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
   return run.lines.map((line) => {
     const customer = line.customerName ?? `Customer ${shortId(line.clientId)}`;
     const agreement = line.agreementName ?? `Agreement ${shortId(line.agreementId)}`;
-    const selectedCountSource = preferredReconciliationCountSource(line.proposedQuantity, line.invoiceQuantity);
+    const selectedCountSource = preferredReconciliationCountSource(
+      line.sourceQuantity,
+      line.invoiceQuantity,
+      line.linkedCount?.quantity,
+    );
     const actionLabel =
       line.status === 'matched'
         ? 'No change needed; vendor and ConnectWise counts match.'
@@ -3228,7 +3459,8 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       serviceCode: line.productCode,
       lineType: line.lineType,
       measuredSourceCount: line.sourceQuantity,
-      sourceCount: line.proposedQuantity,
+      sourceCount: line.sourceQuantity,
+      linkedCount: line.linkedCount,
       vendorInvoiceCount: line.invoiceQuantity,
       vendorInvoiceLineCount: line.invoiceLineCount,
       invoiceImportId: line.invoiceImportId,
@@ -3252,9 +3484,12 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       recommendation: actionLabel,
       lastSeen: run.syncRunId ? `${sourceName} sync ${shortId(run.syncRunId)}` : `No completed ${sourceName} sync`,
       audit: [
-        `${sourceName} proposed quantity: ${line.proposedQuantity.toLocaleString()} ${line.unit}.`,
-        line.sourceQuantity !== line.proposedQuantity
-          ? `Measured source usage: ${line.sourceQuantity.toLocaleString()}.`
+        `${sourceName} API quantity: ${line.sourceQuantity.toLocaleString()} ${line.unit}.`,
+        line.linkedCount
+          ? `Linked count: ${line.linkedCount.quantity.toLocaleString()} (${line.linkedCount.ruleName}).`
+          : undefined,
+        line.linkedCount
+          ? `Linked sources: ${line.linkedCount.sources.map((source) => `${source.label} ${source.quantity}`).join('; ')}.`
           : undefined,
         `ConnectWise agreement quantity: ${line.agreementQuantity.toLocaleString()} ${line.unit}.`,
         ...line.evidence.map((item) => `${item.label}: ${item.value}.`),
@@ -3305,6 +3540,9 @@ function buildReconciliationExportRows(
         'Line Type': issue.family,
         Unit: issue.unit,
         'Vendor Measured Count': issue.measuredSourceCount,
+        'Linked Count': issue.linkedCount?.quantity ?? '',
+        'Linked Count Rule': issue.linkedCount?.ruleName ?? '',
+        'Linked Count Sources': issue.linkedCount?.sources.map((source) => `${source.label}: ${source.quantity}`).join('; ') ?? '',
         'Manual Less Count': manualLessCount,
         'Manual Less Count Reasons': lessCountAdjustments.map((adjustment) => adjustment.reason).filter(Boolean).join('; '),
         'Proposed Count After Less Count': issue.proposedCount,
@@ -3413,7 +3651,7 @@ function App() {
   const [expandedClientNames, setExpandedClientNames] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [vendorFilter, setVendorFilter] = useState('All');
-  const [selectedReconciliationIntegrationId, setSelectedReconciliationIntegrationId] = useState<IntegrationId | ''>('');
+  const [selectedReconciliationIntegrationIds, setSelectedReconciliationIntegrationIds] = useState<IntegrationId[]>([]);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
   const [productFilter, setProductFilter] = useState('All products');
   const [autoPost, setAutoPost] = useState(false);
@@ -3469,7 +3707,7 @@ function App() {
   const [customerLicenseReport, setCustomerLicenseReport] = useState<CustomerLicenseReportResponse | null>(null);
   const [customerLicenseLoadState, setCustomerLicenseLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [customerLicenseMessage, setCustomerLicenseMessage] = useState('Load customers, then generate a customer license report.');
-  const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<IntegrationId>('cove');
+  const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<IntegrationId>(() => initialMappingIntegrationId());
   const [mappingState, setMappingState] = useState<MappingStateResponse | null>(null);
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
   const [ncentralFilters, setNcentralFilters] = useState<NcentralFilter[]>([]);
@@ -3479,8 +3717,11 @@ function App() {
   const [busyMappingAction, setBusyMappingAction] = useState<string | null>(null);
   const [reconciliationLoadState, setReconciliationLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [reconciliationMessage, setReconciliationMessage] = useState('Choose a vendor.');
-  const [reconciliationRunMeta, setReconciliationRunMeta] = useState<ReconciliationRunMeta | null>(null);
-  const [reconciliationProductOptions, setReconciliationProductOptions] = useState<ReconciliationProductOption[]>([]);
+  const [reconciliationRunMetaByVendor, setReconciliationRunMetaByVendor] =
+    useState<Partial<Record<IntegrationId, ReconciliationRunMeta>>>({});
+  const [reconciliationProductOptionsByVendor, setReconciliationProductOptionsByVendor] =
+    useState<Partial<Record<IntegrationId, ReconciliationProductOption[]>>>({});
+  const [reconciliationComparisonRequested, setReconciliationComparisonRequested] = useState(false);
   const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
   const [selectedInvoiceIntegrationId, setSelectedInvoiceIntegrationId] = useState<IntegrationId | ''>('');
   const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
@@ -3504,10 +3745,25 @@ function App() {
   const [reviewingAgreementUpdates, setReviewingAgreementUpdates] = useState(false);
   const [applyingAgreementUpdates, setApplyingAgreementUpdates] = useState(false);
   const [agreementUpdateMessage, setAgreementUpdateMessage] = useState('');
+  const selectedReconciliationIntegrationId = selectedReconciliationIntegrationIds[0] ?? '';
+  const selectedReconciliationIntegrationSet = useMemo(
+    () => new Set(selectedReconciliationIntegrationIds),
+    [selectedReconciliationIntegrationIds],
+  );
+  const reconciliationRunMeta = selectedReconciliationIntegrationId
+    ? reconciliationRunMetaByVendor[selectedReconciliationIntegrationId] ?? null
+    : null;
 
-  const navigateToView = (nextView: View) => {
+  const navigateToView = (nextView: View, mappingIntegrationId: IntegrationId = selectedMappingIntegrationId) => {
     setView(nextView);
-    updateRouteForView(nextView);
+    updateRouteForView(nextView, mappingIntegrationId);
+  };
+
+  const selectMappingIntegration = (integrationId: IntegrationId) => {
+    setSelectedMappingIntegrationId(integrationId);
+    setMappingState(null);
+    setUsageOverrides([]);
+    setMappingMessage('Loading mapping state...');
   };
 
   const refreshRuntimeIntegrations = async () => {
@@ -3780,7 +4036,11 @@ function App() {
       setInvoiceImportMessage(
         `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${vendorName} invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
-      if (selectedReconciliationIntegrationId === response.import.vendorId && reconciliationVendorIds.includes(response.import.vendorId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(response.import.vendorId) &&
+        reconciliationVendorIds.includes(response.import.vendorId)
+      ) {
         void loadVendorReconciliation(response.import.vendorId);
       }
       return response.import;
@@ -3861,7 +4121,7 @@ function App() {
     const review = await fetchInvoiceImportExceptions(invoiceImport.vendorId, invoiceImport.id);
     setInvoiceExceptionReview(review);
     updateInvoiceImportSummary(review.import);
-    if (selectedReconciliationIntegrationId === 'opentext-appriver') {
+    if (reconciliationComparisonRequested && selectedReconciliationIntegrationSet.has('opentext-appriver')) {
       void loadVendorReconciliation('opentext-appriver');
     }
     return refresh;
@@ -3944,8 +4204,8 @@ function App() {
   ): Promise<VendorDataSelection> => {
     const dataset = rawSyncDatasetForVendorData(vendorId);
     let syncRunId =
-      vendorId === selectedReconciliationIntegrationId
-        ? reconciliationRunMeta?.syncRunId
+      selectedReconciliationIntegrationSet.has(vendorId)
+        ? reconciliationRunMetaByVendor[vendorId]?.syncRunId
         : undefined;
 
     if (!syncRunId) {
@@ -3987,7 +4247,7 @@ function App() {
       setMappingState(state);
       setMappingLoadState('ready');
       setMappingMessage(
-        `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings, ${state.summary.productMappings.toLocaleString()} product mappings, and ${(state.summary.productBundles ?? 0).toLocaleString()} product bundles.`,
+        `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings, ${state.summary.productMappings.toLocaleString()} product mappings, ${(state.summary.productBundles ?? 0).toLocaleString()} product bundles, and ${(state.summary.linkedProductRules ?? 0).toLocaleString()} linked count rules.`,
       );
       return state;
     } catch (error) {
@@ -4050,16 +4310,25 @@ function App() {
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
         [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
-      setIssues(nextIssues);
-      setReconciliationRunMeta({
+      setIssues((currentIssues) => [
+        ...currentIssues.filter((issue) => issue.vendorId !== integrationId),
+        ...nextIssues,
+      ]);
+      setReconciliationRunMetaByVendor((current) => ({
+        ...current,
+        [integrationId]: {
         syncRunId: run.syncRunId,
         generatedAt: run.generatedAt,
         snapshotCount: run.snapshotCount,
         agreementAdditionCount: run.agreementAdditionCount,
         latestInvoice: run.latestInvoice,
         productCheckCount: nextIssues.length,
-      });
-      setReconciliationProductOptions(run.productOptions ?? []);
+        },
+      }));
+      setReconciliationProductOptionsByVendor((current) => ({
+        ...current,
+        [integrationId]: run.productOptions ?? [],
+      }));
       setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
       setReconciliationLoadState('ready');
       setReconciliationMessage(
@@ -4071,12 +4340,85 @@ function App() {
       );
       return run;
     } catch (error) {
-      setIssues([]);
-      setReconciliationRunMeta(null);
-      setReconciliationProductOptions([]);
+      setIssues((currentIssues) => currentIssues.filter((issue) => issue.vendorId !== integrationId));
+      setReconciliationRunMetaByVendor((current) => {
+        const next = { ...current };
+        delete next[integrationId];
+        return next;
+      });
+      setReconciliationProductOptionsByVendor((current) => {
+        const next = { ...current };
+        delete next[integrationId];
+        return next;
+      });
       setExpandedClientNames([]);
       setReconciliationLoadState('failed');
       setReconciliationMessage(error instanceof Error ? error.message : `Unable to load ${sourceName} reconciliation.`);
+      return null;
+    }
+  };
+
+  const loadSelectedVendorReconciliations = async (integrationIds: IntegrationId[]) => {
+    const uniqueIntegrationIds = [...new Set(integrationIds)];
+    if (uniqueIntegrationIds.length === 0) {
+      setIssues([]);
+      setReconciliationRunMetaByVendor({});
+      setReconciliationProductOptionsByVendor({});
+      setReconciliationComparisonRequested(false);
+      setExpandedClientNames([]);
+      setReconciliationLoadState('idle');
+      setReconciliationMessage('Choose one or more vendors.');
+      return null;
+    }
+
+    setReconciliationComparisonRequested(true);
+    setReconciliationLoadState('loading');
+    setReconciliationMessage(
+      `Comparing ${uniqueIntegrationIds.map(integrationName).join(', ')} against ConnectWise additions...`,
+    );
+
+    try {
+      const runs = await Promise.all(uniqueIntegrationIds.map((integrationId) => fetchReconciliationRun(integrationId)));
+      const nextIssues = runs.flatMap(reconcileIssuesFromRun);
+      const nextReviewIssues = nextIssues.filter(isReviewableIssue);
+      const firstSelectedIssue =
+        [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
+      setIssues(nextIssues);
+      setReconciliationRunMetaByVendor(
+        Object.fromEntries(
+          runs.map((run) => [
+            run.vendorId,
+            {
+              syncRunId: run.syncRunId,
+              generatedAt: run.generatedAt,
+              snapshotCount: run.snapshotCount,
+              agreementAdditionCount: run.agreementAdditionCount,
+              latestInvoice: run.latestInvoice,
+              productCheckCount: run.lines.length,
+            },
+          ]),
+        ) as Partial<Record<IntegrationId, ReconciliationRunMeta>>,
+      );
+      setReconciliationProductOptionsByVendor(
+        Object.fromEntries(runs.map((run) => [run.vendorId, run.productOptions ?? []])) as Partial<
+          Record<IntegrationId, ReconciliationProductOption[]>
+        >,
+      );
+      setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
+      setReconciliationLoadState('ready');
+      setReconciliationMessage(
+        nextReviewIssues.length > 0
+          ? `${nextReviewIssues.length.toLocaleString()} discrepancies ready for review.`
+          : 'No selected vendor discrepancies found in the latest syncs.',
+      );
+      return runs;
+    } catch (error) {
+      setIssues([]);
+      setReconciliationRunMetaByVendor({});
+      setReconciliationProductOptionsByVendor({});
+      setExpandedClientNames([]);
+      setReconciliationLoadState('failed');
+      setReconciliationMessage(error instanceof Error ? error.message : 'Unable to load selected vendor reconciliation.');
       return null;
     }
   };
@@ -4097,7 +4439,16 @@ function App() {
 
   useEffect(() => {
     const handlePopState = () => {
-      setView(viewFromLocation(window.location));
+      const nextView = viewFromLocation(window.location);
+      const nextMappingIntegrationId = mappingIntegrationIdFromLocation(window.location);
+
+      setView(nextView);
+      if (nextMappingIntegrationId) {
+        setSelectedMappingIntegrationId(nextMappingIntegrationId);
+        setMappingState(null);
+        setUsageOverrides([]);
+        setMappingMessage('Loading mapping state...');
+      }
     };
 
     window.addEventListener('popstate', handlePopState);
@@ -4105,6 +4456,14 @@ function App() {
       window.removeEventListener('popstate', handlePopState);
     };
   }, []);
+
+  useEffect(() => {
+    if (view !== 'mappings') {
+      return;
+    }
+
+    updateRouteForView('mappings', selectedMappingIntegrationId);
+  }, [selectedMappingIntegrationId, view]);
 
   useEffect(() => {
     if (view !== 'reports' || reportSection !== 'raw-sync' || !selectedRawSyncIntegrationId) {
@@ -4170,6 +4529,10 @@ function App() {
 
   const filteredIssues = useMemo(() => {
     return issues.filter((issue) => {
+      if (!isProcessedReconciliationIssue(issue)) {
+        return false;
+      }
+
       const matchesSearchAndVendor = issueMatchesSearchAndVendor(issue, query, vendorFilter);
       const matchesStatus = !needsReviewOnly || isReviewViewIssue(issue);
       return matchesSearchAndVendor && matchesStatus;
@@ -4204,7 +4567,7 @@ function App() {
         : availableIntegrations,
     );
   }, [integrations, selectedRawSyncIntegrationId]);
-  const pendingCount = issues.filter(isReviewableIssue).length;
+  const pendingCount = issues.filter((issue) => isProcessedReconciliationIssue(issue) && isReviewableIssue(issue)).length;
   const selectedReconciliationIntegration = integrations.find((integration) => integration.id === selectedReconciliationIntegrationId);
   const connectWiseIntegration = integrations.find((integration) => integration.id === 'connectwise');
   const vendorDataSummary = formatSyncSummary(
@@ -4221,7 +4584,7 @@ function App() {
     ? `Last sync ${connectWiseIntegration.lastSync}`
     : 'No sync date';
   const totalExposure = issues
-    .filter(isReviewableIssue)
+    .filter((issue) => isProcessedReconciliationIssue(issue) && isReviewableIssue(issue))
     .reduce((total, issue) => total + reconciliationIssueImpact(issue), 0);
   const queuedAgreementUpdateIssues = useMemo(
     () => issues.filter((issue) => issue.status === 'approved'),
@@ -4243,16 +4606,23 @@ function App() {
     const enabledReconciliationIds = new Set(enabledReconciliationIntegrations.map((integration) => integration.id));
     const enabledVendorNames = new Set(['All', ...enabledReconciliationIntegrations.map((integration) => integration.name)]);
 
-    if (selectedReconciliationIntegrationId && !enabledReconciliationIds.has(selectedReconciliationIntegrationId)) {
-      setSelectedReconciliationIntegrationId('');
+    const nextSelectedIds = selectedReconciliationIntegrationIds.filter((integrationId) =>
+      enabledReconciliationIds.has(integrationId),
+    );
+
+    if (nextSelectedIds.length !== selectedReconciliationIntegrationIds.length) {
+      setSelectedReconciliationIntegrationIds(nextSelectedIds);
       setIssues([]);
-      setReconciliationRunMeta(null);
-      setReconciliationProductOptions([]);
+      setReconciliationRunMetaByVendor({});
+      setReconciliationProductOptionsByVendor({});
+      setReconciliationComparisonRequested(false);
       setExpandedClientNames([]);
       setReconciliationLoadState('idle');
       setReconciliationMessage(
         enabledReconciliationIntegrations.length > 0
-          ? 'Choose an enabled vendor.'
+          ? nextSelectedIds.length > 0
+            ? 'Click Compare to load selected vendors.'
+            : 'Choose one or more enabled vendors.'
           : 'No enabled reconciliation integrations.',
       );
     }
@@ -4260,7 +4630,11 @@ function App() {
     if (!enabledVendorNames.has(vendorFilter)) {
       setVendorFilter('All');
     }
-  }, [enabledReconciliationIntegrations, selectedReconciliationIntegrationId, vendorFilter]);
+  }, [
+    enabledReconciliationIntegrations,
+    selectedReconciliationIntegrationIds,
+    vendorFilter,
+  ]);
 
   const approveIssue = (issueId: string) => {
     setIssues((currentIssues) =>
@@ -4299,6 +4673,10 @@ function App() {
         }
 
         if (countSource === 'invoice' && typeof validVendorInvoiceCount(issue) !== 'number') {
+          return issue;
+        }
+
+        if (countSource === 'linked' && typeof validLinkedCount(issue) !== 'number') {
           return issue;
         }
 
@@ -4346,7 +4724,7 @@ function App() {
   };
 
   const exportSelectedReconciliationReport = async () => {
-    if (!selectedReconciliationIntegrationId || issues.length === 0) {
+    if (selectedReconciliationIntegrationIds.length === 0 || issues.length === 0) {
       window.alert('Choose a vendor with reconciliation data before exporting a report.');
       return;
     }
@@ -4354,7 +4732,10 @@ function App() {
     setExportingReconciliationReport(true);
 
     try {
-      const sourceName = integrationName(selectedReconciliationIntegrationId);
+      const sourceName =
+        selectedReconciliationIntegrationIds.length === 1
+          ? integrationName(selectedReconciliationIntegrationIds[0])
+          : selectedReconciliationIntegrationIds.map(integrationName).join(' + ');
       const agreementIds = [...new Set(issues.map((issue) => issue.agreementId))];
       const nextCache: Record<string, AgreementAddition[]> = {};
       const additionEntries = await Promise.all(
@@ -4485,7 +4866,11 @@ function App() {
       setInvoiceImportMessage(
         `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${integrationName(integrationId)} table rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
-      if (selectedReconciliationIntegrationId === integrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         void loadVendorReconciliation(integrationId);
       }
       return response.import;
@@ -4609,16 +4994,21 @@ function App() {
       if (!queuedSync && selectedRawSyncIntegrationId === integrationId) {
         await loadRawSyncRuns(integrationId, selectedRawSyncDataset);
       }
-      if (!queuedSync && integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        !queuedSync &&
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         await loadVendorReconciliation(integrationId);
       }
       if (
         !queuedSync &&
+        reconciliationComparisonRequested &&
         integrationId === 'connectwise' &&
-        selectedReconciliationIntegrationId &&
-        reconciliationVendorIds.includes(selectedReconciliationIntegrationId)
+        selectedReconciliationIntegrationIds.length > 0
       ) {
-        await loadVendorReconciliation(selectedReconciliationIntegrationId);
+        await loadSelectedVendorReconciliations(selectedReconciliationIntegrationIds);
       }
     } catch (error) {
       setIntegrationActionMessages((messages) => ({
@@ -4733,6 +5123,13 @@ function App() {
       });
       await loadMappings(integrationId);
       setMappingMessage(`Saved ${targetProducts.length} product target${targetProducts.length === 1 ? '' : 's'} for ${vendorProductKey}.`);
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
+        await loadVendorReconciliation(integrationId);
+      }
     } catch (error) {
       setMappingLoadState('failed');
       setMappingMessage(error instanceof Error ? error.message : 'Product mapping save failed.');
@@ -4758,7 +5155,11 @@ function App() {
       });
       await loadMappings(integrationId);
       setMappingMessage(`Saved bundle mapping for ${payload.bundleName}.`);
-      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         await loadVendorReconciliation(integrationId);
       }
       return true;
@@ -4778,12 +5179,72 @@ function App() {
       await deactivateProductBundleRequest(integrationId, bundleKey);
       await loadMappings(integrationId);
       setMappingMessage('Product bundle disabled.');
-      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         await loadVendorReconciliation(integrationId);
       }
     } catch (error) {
       setMappingLoadState('failed');
       setMappingMessage(error instanceof Error ? error.message : 'Product bundle deactivation failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const saveProductLinkRule = async (
+    integrationId: IntegrationId,
+    payload: {
+      id?: string;
+      sourceVendorProductKey: string;
+      ruleName: string;
+      sources: ProductLinkRuleSource[];
+    },
+  ) => {
+    setBusyMappingAction(payload.id ? `link:${payload.id}` : 'link:new');
+    try {
+      await saveProductLinkRuleRequest(integrationId, {
+        ...payload,
+        active: true,
+      });
+      await loadMappings(integrationId);
+      setMappingMessage(`Saved linked count rule for ${payload.sourceVendorProductKey}.`);
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
+        await loadVendorReconciliation(integrationId);
+      }
+      return true;
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Linked count rule save failed.');
+      return false;
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const deactivateProductLinkRule = async (integrationId: IntegrationId, ruleId: string) => {
+    const actionKey = `link:${ruleId}`;
+    setBusyMappingAction(actionKey);
+    try {
+      await deactivateProductLinkRuleRequest(integrationId, ruleId);
+      await loadMappings(integrationId);
+      setMappingMessage('Linked count rule disabled.');
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
+        await loadVendorReconciliation(integrationId);
+      }
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Linked count rule deactivation failed.');
     } finally {
       setBusyMappingAction(null);
     }
@@ -4812,7 +5273,11 @@ function App() {
       await createUsageOverrideRequest(integrationId, payload);
       await loadUsageOverrides(integrationId);
       setMappingMessage('Saved usage override.');
-      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         await loadVendorReconciliation(integrationId);
       }
       return true;
@@ -4832,7 +5297,11 @@ function App() {
       await deactivateUsageOverrideRequest(integrationId, overrideId);
       await loadUsageOverrides(integrationId);
       setMappingMessage('Usage override removed.');
-      if (integrationId === selectedReconciliationIntegrationId && reconciliationVendorIds.includes(integrationId)) {
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
         await loadVendorReconciliation(integrationId);
       }
     } catch (error) {
@@ -5171,22 +5640,31 @@ function App() {
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
               onLoadVendorData={loadCustomerVendorData}
-              onRefreshReconciliation={() =>
-                selectedReconciliationIntegrationId
-                  ? loadVendorReconciliation(selectedReconciliationIntegrationId)
-                  : Promise.resolve(null)
-              }
-              onReconciliationSourceChange={(integrationId) => {
-                setSelectedReconciliationIntegrationId(integrationId);
+              onCompareReconciliation={() => loadSelectedVendorReconciliations(selectedReconciliationIntegrationIds)}
+              onReconciliationSourceToggle={(integrationId) => {
+                const nextSelectedIds = selectedReconciliationIntegrationIds.includes(integrationId)
+                  ? selectedReconciliationIntegrationIds.filter((selectedId) => selectedId !== integrationId)
+                  : [...selectedReconciliationIntegrationIds, integrationId];
+                setSelectedReconciliationIntegrationIds(nextSelectedIds);
                 setVendorFilter('All');
-                  void loadVendorReconciliation(integrationId);
-                }}
+                setIssues([]);
+                setReconciliationRunMetaByVendor({});
+                setReconciliationProductOptionsByVendor({});
+                setExpandedClientNames([]);
+                setReconciliationComparisonRequested(false);
+                setReconciliationLoadState('idle');
+                setReconciliationMessage(
+                  nextSelectedIds.length > 0
+                    ? 'Click Compare to load selected vendors.'
+                    : 'Choose one or more vendors.',
+                );
+              }}
               pendingCount={pendingCount}
               query={query}
               reconciliationLoadState={reconciliationLoadState}
               reconciliationIntegrations={enabledReconciliationIntegrations}
               reconciliationMessage={reconciliationMessage}
-              selectedReconciliationIntegrationId={selectedReconciliationIntegrationId}
+              selectedReconciliationIntegrationIds={selectedReconciliationIntegrationIds}
               setExpandedClientNames={setExpandedClientNames}
               setNeedsReviewOnly={setNeedsReviewOnly}
               setQuery={setQuery}
@@ -5253,11 +5731,8 @@ function App() {
               onInvoiceTableUpload={importMappedInvoiceTable}
               onInvoiceUpload={importVendorInvoice}
               onOpenMappings={(integrationId) => {
-                setSelectedMappingIntegrationId(integrationId);
-                setMappingState(null);
-                setUsageOverrides([]);
-                setMappingMessage('Loading mapping state...');
-                navigateToView('mappings');
+                selectMappingIntegration(integrationId);
+                navigateToView('mappings', integrationId);
               }}
               onRefresh={refreshRuntimeIntegrations}
               selectedInvoiceIntegrationId={selectedInvoiceIntegrationId}
@@ -5280,14 +5755,14 @@ function App() {
               onApproveSuggested={() => runMappingAction('approve-suggested')}
               onAutomap={() => runMappingAction('automap')}
               onIntegrationChange={(integrationId) => {
-                setSelectedMappingIntegrationId(integrationId);
-                setMappingState(null);
-                setUsageOverrides([]);
-                setMappingMessage('Loading mapping state...');
+                selectMappingIntegration(integrationId);
+                updateRouteForView('mappings', integrationId);
               }}
               onProductTargetsSave={saveProductTargets}
               onProductBundleDeactivate={deactivateProductBundle}
               onProductBundleSave={saveProductBundle}
+              onProductLinkRuleDeactivate={deactivateProductLinkRule}
+              onProductLinkRuleSave={saveProductLinkRule}
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
               onUsageOverrideCreate={saveUsageOverride}
@@ -5476,7 +5951,7 @@ function App() {
           onLessCountSave={queueLessIncludedUpdate}
           onManualTotalSave={queueManualTotalUpdate}
           onDeviceRemap={remapReconciliationDevice}
-          productOptions={reconciliationProductOptions}
+          productOptions={reconciliationProductOptionsByVendor[manualOverrideIssue.vendorId] ?? []}
           saving={savingManualOverride}
         />
       )}
@@ -6247,14 +6722,14 @@ function ReconcileView(props: {
   onManualOverride: (issue: ReconcileIssue) => void;
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
-  onRefreshReconciliation: () => Promise<ReconciliationRunResponse | null>;
-  onReconciliationSourceChange: (integrationId: IntegrationId) => void;
+  onCompareReconciliation: () => Promise<ReconciliationRunResponse[] | null>;
+  onReconciliationSourceToggle: (integrationId: IntegrationId) => void;
   pendingCount: number;
   query: string;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reconciliationIntegrations: Integration[];
   reconciliationMessage: string;
-  selectedReconciliationIntegrationId: IntegrationId | '';
+  selectedReconciliationIntegrationIds: IntegrationId[];
   setExpandedClientNames: (value: string[] | ((currentNames: string[]) => string[])) => void;
   setNeedsReviewOnly: (value: boolean) => void;
   setQuery: (value: string) => void;
@@ -6282,14 +6757,14 @@ function ReconcileView(props: {
     onManualOverride,
     onOpenAgreementAdditions,
     onOpenTicket,
-    onRefreshReconciliation,
-    onReconciliationSourceChange,
+    onCompareReconciliation,
+    onReconciliationSourceToggle,
     pendingCount,
     query,
     reconciliationLoadState,
     reconciliationIntegrations,
     reconciliationMessage,
-    selectedReconciliationIntegrationId,
+    selectedReconciliationIntegrationIds,
     setExpandedClientNames,
     setNeedsReviewOnly,
     setQuery,
@@ -6303,9 +6778,13 @@ function ReconcileView(props: {
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
   const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
   const filteredReviewCount = filteredIssues.filter(isReviewViewIssue).length;
-  const selectedSourceName = selectedReconciliationIntegrationId
-    ? integrationName(selectedReconciliationIntegrationId)
-    : 'Choose a vendor';
+  const hasSelectedReconciliationVendors = selectedReconciliationIntegrationIds.length > 0;
+  const selectedSourceName =
+    selectedReconciliationIntegrationIds.length === 0
+      ? 'Choose vendors'
+      : selectedReconciliationIntegrationIds.length === 1
+        ? integrationName(selectedReconciliationIntegrationIds[0])
+        : `${selectedReconciliationIntegrationIds.length} vendors`;
   const reconciliationVendors = useMemo(
     () => ['All', ...reconciliationIntegrations.map((integration) => integration.name)],
     [reconciliationIntegrations],
@@ -6356,23 +6835,28 @@ function ReconcileView(props: {
               ? `${selectedSourceName} reconciliation issue`
               : reconciliationLoadState === 'loading'
                 ? `Comparing ${selectedSourceName}`
-                : selectedReconciliationIntegrationId
+                : hasSelectedReconciliationVendors
                   ? `${selectedSourceName} vs ConnectWise`
                   : selectedSourceName}
           </strong>
-          {reconciliationLoadState !== 'ready' || !selectedReconciliationIntegrationId ? (
+          {reconciliationLoadState !== 'ready' || !hasSelectedReconciliationVendors ? (
             <span>{reconciliationMessage}</span>
           ) : null}
         </div>
         <div className="integrations-live-meta">
-          <div className="segmented-control compact-source-control" role="group" aria-label="Reconciliation source">
+          <div
+            className="segmented-control compact-source-control reconciliation-source-control"
+            role="group"
+            aria-label="Reconciliation source"
+          >
             {reconciliationIntegrations.length > 0 ? (
               reconciliationIntegrations.map((integration) => (
                 <button
-                  className={selectedReconciliationIntegrationId === integration.id ? 'active' : ''}
+                  className={selectedReconciliationIntegrationIds.includes(integration.id) ? 'active' : ''}
+                  aria-pressed={selectedReconciliationIntegrationIds.includes(integration.id)}
                   disabled={reconciliationLoadState === 'loading'}
                   key={integration.id}
-                  onClick={() => onReconciliationSourceChange(integration.id)}
+                  onClick={() => onReconciliationSourceToggle(integration.id)}
                   type="button"
                 >
                   {integration.name}
@@ -6387,12 +6871,12 @@ function ReconcileView(props: {
           <span>{pendingCount.toLocaleString()} open</span>
           <button
             className="button secondary compact"
-            disabled={reconciliationLoadState === 'loading' || !selectedReconciliationIntegrationId}
-            onClick={() => void onRefreshReconciliation()}
+            disabled={reconciliationLoadState === 'loading' || !hasSelectedReconciliationVendors}
+            onClick={() => void onCompareReconciliation()}
             type="button"
           >
-            <RefreshCcw size={16} />
-            Refresh
+            <Search size={16} />
+            {reconciliationLoadState === 'loading' ? 'Comparing' : 'Compare'}
           </button>
         </div>
       </section>
@@ -6463,7 +6947,7 @@ function ReconcileView(props: {
                 disabled={
                   exportingReport ||
                   reconciliationLoadState === 'loading' ||
-                  !selectedReconciliationIntegrationId ||
+                  !hasSelectedReconciliationVendors ||
                   issues.length === 0
                 }
                 onClick={() => void onExportReport()}
@@ -6503,8 +6987,8 @@ function ReconcileView(props: {
                 <strong>
                   {reconciliationIntegrations.length === 0
                     ? 'No enabled reconciliation integrations.'
-                    : !selectedReconciliationIntegrationId
-                    ? 'Choose a vendor to run reconciliation.'
+                    : !hasSelectedReconciliationVendors
+                    ? 'Choose vendors to run reconciliation.'
                     : pendingCount === 0
                       ? `No ${selectedSourceName} discrepancies to review.`
                       : 'No client groups match these filters.'}
@@ -6512,8 +6996,8 @@ function ReconcileView(props: {
                 <span>
                   {reconciliationIntegrations.length === 0
                     ? 'Enable and configure a reconciliation-capable integration before running a comparison.'
-                    : !selectedReconciliationIntegrationId
-                    ? 'Pick a vendor above when you are ready to compare vendor API counts with CW data.'
+                    : !hasSelectedReconciliationVendors
+                    ? 'Pick one or more vendors above when you are ready to compare vendor API counts with CW data.'
                     : pendingCount === 0
                     ? reconciliationMessage
                     : 'Adjust the vendor, status, or exposure filters to bring product checks back.'}
@@ -6583,7 +7067,10 @@ function ReconcileView(props: {
                         const hiddenCount = Math.max(0, allVendorIssues.length - vendorIssues.length);
                         const matchedCount = allVendorIssues.filter((issue) => issue.status === 'matched').length;
                         const visibleVendorIssues = isExpanded ? allVendorIssues : vendorIssues;
-                        const vendorId = allVendorIssues[0]?.vendorId ?? selectedReconciliationIntegrationId;
+                        const vendorId = allVendorIssues[0]?.vendorId ?? selectedReconciliationIntegrationIds[0] ?? '';
+                        const showLinkedCountColumn = visibleVendorIssues.some(
+                          (issue) => typeof validLinkedCount(issue) === 'number',
+                        );
 
                         return (
                           <section className="vendor-license-group" key={vendor}>
@@ -6607,9 +7094,13 @@ function ReconcileView(props: {
                               </div>
                             </div>
                             <div className="license-table" role="table" aria-label={`${client.customer} ${vendor} license checks`}>
-                              <div className="license-row heading" role="row">
+                              <div
+                                className={`license-row heading ${showLinkedCountColumn ? 'with-linked-count' : 'without-linked-count'}`}
+                                role="row"
+                              >
                                 <span>Product</span>
                                 <span>API Count</span>
+                                {showLinkedCountColumn ? <span>Linked</span> : null}
                                 <span>Inv. Count</span>
                                 <span>CW Count</span>
                                 <span>Delta</span>
@@ -6619,8 +7110,9 @@ function ReconcileView(props: {
                               </div>
                               {visibleVendorIssues.map((issue) => {
                                 const invoiceCount = validVendorInvoiceCount(issue);
+                                const linkedCount = validLinkedCount(issue);
                                 const selectedCountSource = reconciliationCountSource(issue);
-                                const preferredCountSource = preferredReconciliationCountSource(issue.sourceCount, invoiceCount);
+                                const preferredCountSource = preferredReconciliationCountSource(issue.sourceCount, invoiceCount, linkedCount);
                                 const delta = reconciliationDelta(issue);
                                 const lessDelta = lessIncludedDelta(issue);
                                 const impact = reconciliationIssueImpact(issue);
@@ -6644,7 +7136,11 @@ function ReconcileView(props: {
                                           ? 'Map product'
                                           : 'No change';
                                 return (
-                                  <div className="license-row" key={issue.id} role="row">
+                                  <div
+                                    className={`license-row ${showLinkedCountColumn ? 'with-linked-count' : 'without-linked-count'}`}
+                                    key={issue.id}
+                                    role="row"
+                                  >
                                     <span className="license-product">
                                       <strong>{issue.product}</strong>
                                       <em>{issue.serviceCode} / {issue.family}</em>
@@ -6660,6 +7156,23 @@ function ReconcileView(props: {
                                         {issue.sourceCount.toLocaleString()}
                                       </button>
                                     </span>
+                                    {showLinkedCountColumn ? (
+                                      <span className="count-cell">
+                                        {typeof linkedCount === 'number' ? (
+                                          <button
+                                            aria-pressed={selectedCountSource === 'linked'}
+                                            className={countButtonClass('linked')}
+                                            onClick={() => onCountSourceSelect(issue.id, 'linked')}
+                                            title={issue.linkedCount ? linkedCountTitle(issue.linkedCount) : 'Linked count'}
+                                            type="button"
+                                          >
+                                            {formatOptionalCount(linkedCount)}
+                                          </button>
+                                        ) : (
+                                          <span className="count-select-empty" aria-label="No linked count" />
+                                        )}
+                                      </span>
+                                    ) : null}
                                     <span className="count-cell">
                                       <button
                                         aria-pressed={selectedCountSource === 'invoice'}
@@ -7984,6 +8497,49 @@ function integrationStatusLabel(status: IntegrationStatus) {
   }
 }
 
+function MappingSectionDrawer(props: {
+  children: ReactNode;
+  defaultOpen: boolean;
+  meta: string;
+  onOpenChange: (sectionId: MappingSectionId, open: boolean) => void;
+  openState: Partial<Record<MappingSectionId, boolean>>;
+  sectionId: MappingSectionId;
+  status: string;
+  statusTone?: 'approved' | 'blocked' | 'needs-review' | 'ready';
+  title: string;
+}) {
+  const {
+    children,
+    defaultOpen,
+    meta,
+    onOpenChange,
+    openState,
+    sectionId,
+    status,
+    statusTone = 'ready',
+    title,
+  } = props;
+  const open = openState[sectionId] ?? defaultOpen;
+
+  return (
+    <details
+      className="mapping-section-drawer"
+      onToggle={(event) => onOpenChange(sectionId, event.currentTarget.open)}
+      open={open}
+    >
+      <summary>
+        <ChevronRight className="drawer-chevron" size={18} />
+        <div>
+          <strong>{title}</strong>
+          <span>{meta}</span>
+        </div>
+        <span className={`status-pill ${statusTone}`}>{status}</span>
+      </summary>
+      <div className="mapping-section-body">{children}</div>
+    </details>
+  );
+}
+
 function MappingsView(props: {
   busyAction: string | null;
   integrations: Integration[];
@@ -8012,6 +8568,16 @@ function MappingsView(props: {
       targetProduct: ProductMappingTarget;
     },
   ) => Promise<boolean>;
+  onProductLinkRuleDeactivate: (integrationId: IntegrationId, ruleId: string) => Promise<void>;
+  onProductLinkRuleSave: (
+    integrationId: IntegrationId,
+    payload: {
+      id?: string;
+      sourceVendorProductKey: string;
+      ruleName: string;
+      sources: ProductLinkRuleSource[];
+    },
+  ) => Promise<boolean>;
   onRefresh: () => Promise<MappingStateResponse | null>;
   onNcentralFilterMappingSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
   onUsageOverrideCreate: (integrationId: IntegrationId, payload: CreateUsageOverridePayload) => Promise<boolean>;
@@ -8035,6 +8601,8 @@ function MappingsView(props: {
     onProductTargetsSave,
     onProductBundleDeactivate,
     onProductBundleSave,
+    onProductLinkRuleDeactivate,
+    onProductLinkRuleSave,
     onRefresh,
     onNcentralFilterMappingSave,
     onUsageOverrideCreate,
@@ -8044,6 +8612,7 @@ function MappingsView(props: {
   } = props;
   const [showMappedAccounts, setShowMappedAccounts] = useState(false);
   const [showMappedProducts, setShowMappedProducts] = useState(false);
+  const [mappingSectionOpen, setMappingSectionOpen] = useState<Partial<Record<MappingSectionId, boolean>>>({});
   const [dattoMappingDataset, setDattoMappingDataset] = useState<DattoMappingDataset>('saas');
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [manualCustomerId, setManualCustomerId] = useState('');
@@ -8067,6 +8636,32 @@ function MappingsView(props: {
   const [bundleCatalogResults, setBundleCatalogResults] = useState<ProductCatalogTarget[]>([]);
   const [bundleCatalogMessage, setBundleCatalogMessage] = useState('');
   const [bundleCatalogLoading, setBundleCatalogLoading] = useState(false);
+  const [editingLinkRuleId, setEditingLinkRuleId] = useState<string | null>(null);
+  const [linkTargetProductKey, setLinkTargetProductKey] = useState('');
+  const [linkRuleName, setLinkRuleName] = useState('');
+  const [linkSourceMode, setLinkSourceMode] = useState<ProductLinkRuleSource['sourceType']>('vendor-product');
+  const [linkSourceVendorId, setLinkSourceVendorId] = useState<IntegrationId>('microsoft-365');
+  const [linkSourceDataset, setLinkSourceDataset] = useState<RawSyncDataset>('licenses');
+  const [linkSourceLabel, setLinkSourceLabel] = useState('');
+  const [linkAggregationType, setLinkAggregationType] = useState<ProductLinkRuleAggregation['type']>('row-count');
+  const [linkAggregationColumn, setLinkAggregationColumn] = useState('TotalUnits');
+  const [linkFilterRoot, setLinkFilterRoot] = useState<ProductLinkRuleFilterNode>(() => defaultLinkedCountFilter());
+  const [linkDatasetMetadata, setLinkDatasetMetadata] = useState<LinkedDatasetMetadata>({
+    columns: [],
+    uniqueValuesByColumn: {},
+    rowCount: 0,
+  });
+  const [linkDatasetLoadState, setLinkDatasetLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [linkDatasetMessage, setLinkDatasetMessage] = useState('');
+  const [linkSourceMappingStates, setLinkSourceMappingStates] = useState<Partial<Record<IntegrationId, MappingStateResponse>>>({});
+  const [linkSourceLoadState, setLinkSourceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [linkSourceMessage, setLinkSourceMessage] = useState('');
+  const [linkVendorProductKeys, setLinkVendorProductKeys] = useState<string[]>([]);
+  const [linkCatalogQuery, setLinkCatalogQuery] = useState('');
+  const [linkCatalogTarget, setLinkCatalogTarget] = useState<ProductCatalogTarget | null>(null);
+  const [linkCatalogResults, setLinkCatalogResults] = useState<ProductCatalogTarget[]>([]);
+  const [linkCatalogMessage, setLinkCatalogMessage] = useState('');
+  const [linkCatalogLoading, setLinkCatalogLoading] = useState(false);
   const [overrideCustomerId, setOverrideCustomerId] = useState('');
   const [overrideAgreementId, setOverrideAgreementId] = useState('');
   const [overrideSourceProductKey, setOverrideSourceProductKey] = useState('cove-workstation');
@@ -8087,9 +8682,13 @@ function MappingsView(props: {
   const visibleProductRows = showMappedProducts ? allProductRows : productCandidates;
   const allProductGroups = useMemo(() => buildProductGroups(allProductRows), [allProductRows]);
   const productGroups = useMemo(() => buildProductGroups(visibleProductRows), [visibleProductRows]);
+  const unmatchedProductGroupCount = useMemo(() => buildProductGroups(productCandidates).length, [productCandidates]);
   const productSelectionDefaults = useMemo(() => buildProductSelectionDefaults(productGroups), [productGroups]);
   const productBundles = (mappingState?.productBundles ?? []).filter((bundle) =>
     dattoBundleMatchesDataset(bundle, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  );
+  const productLinkRules = (mappingState?.productLinkRules ?? []).filter((rule) =>
+    dattoProductMatchesDataset(rule.sourceVendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
   );
   const bundleProductOptions = useMemo(
     () =>
@@ -8116,10 +8715,84 @@ function MappingsView(props: {
   ).length;
   const canBulkApproveSuggested = !isDattoMappingWorkspace && suggestedAccountCount > 0;
   const selectedDatasetLabel = isDattoMappingWorkspace ? dattoMappingDatasetLabel(dattoMappingDataset) : selectedIntegrationName;
+  const approvedAccountMappingCount = accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length;
+  const approvedProductMappingCount = productMappings.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length;
+  const activeLinkRuleCount = productLinkRules.filter((rule) => rule.active).length;
+  const activeBundleCount = productBundles.filter((bundle) => bundle.active).length;
   const bundleActionKey = editingBundleKey ? `bundle:${editingBundleKey}` : 'bundle:new';
   const bundleTargetOptions = dedupeProductTargets(
     bundleTarget ? [bundleTarget, ...bundleCatalogResults] : bundleCatalogResults,
   );
+  const linkSourceIntegrationOptions = useMemo(
+    () =>
+      integrations.filter(
+        (integration) => integration.id !== 'connectwise' && integrationHasCapability(integration.id, 'mapping'),
+      ),
+    [integrations],
+  );
+  const linkSourceMappingState =
+    linkSourceVendorId === selectedIntegrationId && mappingState
+      ? mappingState
+      : linkSourceMappingStates[linkSourceVendorId];
+  const linkSourceProductOptions = useMemo(
+    () =>
+      buildProductGroups(
+        (linkSourceMappingState?.productMappings ?? []).filter(
+          (row) => row.active && row.status === 'approved',
+        ),
+      )
+        .map((group) => ({
+          vendorProductKey: group.vendorProductKey,
+          vendorProductName: group.vendorProductName,
+          rowCount: Math.max(...group.rows.map((row) => row.additionCount), 0),
+        }))
+        .sort(
+          (left, right) =>
+            left.vendorProductName.localeCompare(right.vendorProductName) ||
+            left.vendorProductKey.localeCompare(right.vendorProductKey),
+        ),
+    [linkSourceMappingState],
+  );
+  const linkCatalogTargetOptions = dedupeProductTargets(
+    linkCatalogTarget ? [linkCatalogTarget, ...linkCatalogResults] : linkCatalogResults,
+  );
+  const linkFilterColumnOptions = uniqueStrings([
+    ...linkDatasetMetadata.columns,
+    ...linkedDatasetColumnOptions(linkSourceVendorId, linkSourceDataset),
+  ]);
+  const linkRuleActionKey = editingLinkRuleId ? `link:${editingLinkRuleId}` : 'link:new';
+
+  const setMappingSection = (sectionId: MappingSectionId, open: boolean) => {
+    setMappingSectionOpen((current) =>
+      current[sectionId] === open
+        ? current
+        : {
+            ...current,
+            [sectionId]: open,
+          },
+    );
+  };
+
+  const resetLinkRuleForm = () => {
+    setEditingLinkRuleId(null);
+    setLinkTargetProductKey('');
+    setLinkRuleName('');
+    setLinkSourceMode('vendor-product');
+    setLinkSourceDataset('licenses');
+    setLinkSourceLabel('');
+    setLinkAggregationType('row-count');
+    setLinkAggregationColumn('TotalUnits');
+    setLinkFilterRoot(defaultLinkedCountFilter());
+    setLinkDatasetMetadata({ columns: [], uniqueValuesByColumn: {}, rowCount: 0 });
+    setLinkDatasetLoadState('idle');
+    setLinkDatasetMessage('');
+    setLinkVendorProductKeys([]);
+    setLinkCatalogQuery('');
+    setLinkCatalogTarget(null);
+    setLinkCatalogResults([]);
+    setLinkCatalogMessage('');
+    setLinkCatalogLoading(false);
+  };
 
   const resetBundleForm = () => {
     setEditingBundleKey(null);
@@ -8144,7 +8817,81 @@ function MappingsView(props: {
     setProductCustomerReviewMessage('');
     setSelectedProductCustomerId('');
     resetBundleForm();
+    resetLinkRuleForm();
   }, [dattoMappingDataset, mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
+
+  useEffect(() => {
+    setMappingSectionOpen({});
+  }, [dattoMappingDataset, mappingState?.vendorId, selectedIntegrationId]);
+
+  useEffect(() => {
+    if (
+      linkSourceIntegrationOptions.length > 0 &&
+      !linkSourceIntegrationOptions.some((integration) => integration.id === linkSourceVendorId)
+    ) {
+      setLinkSourceVendorId(linkSourceIntegrationOptions[0].id);
+    }
+  }, [linkSourceIntegrationOptions, linkSourceVendorId]);
+
+  useEffect(() => {
+    if (linkSourceMode !== 'filtered-dataset' || !linkSourceVendorId) {
+      return;
+    }
+
+    let cancelled = false;
+    const dataset = linkSourceVendorId === 'microsoft-365' ? linkSourceDataset : undefined;
+
+    setLinkDatasetLoadState('loading');
+    setLinkDatasetMessage('Loading dataset columns and values...');
+
+    fetchRawSyncRuns(linkSourceVendorId, dataset)
+      .then(async (runsResponse) => {
+        const latestRun = runsResponse.runs[0];
+        if (!latestRun) {
+          return {
+            metadata: { columns: [], uniqueValuesByColumn: {}, rowCount: 0 } satisfies LinkedDatasetMetadata,
+            message: 'No completed raw sync rows are available for this dataset yet.',
+          };
+        }
+
+        const details = await fetchRawSyncDetails(linkSourceVendorId, latestRun.id, dataset);
+        return {
+          metadata: linkedDatasetMetadataFromDetails(details),
+          message: `Loaded ${details.columns.length.toLocaleString()} columns and ${details.rows.length.toLocaleString()} rows from latest sync.`,
+        };
+      })
+      .then(({ metadata, message }) => {
+        if (cancelled) {
+          return;
+        }
+
+        setLinkDatasetMetadata(metadata);
+        setLinkDatasetLoadState(metadata.columns.length > 0 ? 'ready' : 'failed');
+        setLinkDatasetMessage(message);
+        if (metadata.columns.length > 0) {
+          const preferredField = metadata.columns.includes('LicenseName')
+            ? 'LicenseName'
+            : metadata.columns.includes('ProductName')
+              ? 'ProductName'
+              : metadata.columns[0];
+          setLinkFilterRoot((current) => alignLinkedFilterFields(current, metadata.columns, preferredField));
+          setLinkAggregationColumn((current) => current && metadata.columns.includes(current) ? current : metadata.columns[0]);
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+
+        setLinkDatasetMetadata({ columns: [], uniqueValuesByColumn: {}, rowCount: 0 });
+        setLinkDatasetLoadState('failed');
+        setLinkDatasetMessage(error instanceof Error ? error.message : 'Unable to load dataset columns and values.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [linkSourceDataset, linkSourceMode, linkSourceVendorId]);
 
   const openAccountEditor = (row: AccountMappingCandidate) => {
     const customerId = row.customerId ?? '';
@@ -8260,6 +9007,191 @@ function MappingsView(props: {
     setBundleCatalogQuery(bundle.target.connectwiseProductCode);
     setBundleCatalogResults([]);
     setBundleCatalogMessage('');
+  };
+
+  const loadLinkSourceProducts = async (integrationId = linkSourceVendorId) => {
+    if (!integrationId) {
+      setLinkSourceMessage('Choose a source vendor.');
+      return;
+    }
+
+    setLinkSourceLoadState('loading');
+    setLinkSourceMessage('');
+    try {
+      const state =
+        integrationId === selectedIntegrationId && mappingState
+          ? mappingState
+          : await fetchMappingState(integrationId);
+      setLinkSourceMappingStates((current) => ({ ...current, [integrationId]: state }));
+      const approvedProductCount = state.productMappings.filter((row) => row.active && row.status === 'approved').length;
+      setLinkSourceLoadState('ready');
+      setLinkSourceMessage(
+        `Loaded ${approvedProductCount.toLocaleString()} approved source product${approvedProductCount === 1 ? '' : 's'}.`,
+      );
+    } catch (error) {
+      setLinkSourceLoadState('failed');
+      setLinkSourceMessage(error instanceof Error ? error.message : 'Unable to load source vendor products.');
+    }
+  };
+
+  const toggleLinkVendorProductKey = (vendorProductKey: string) => {
+    setLinkVendorProductKeys((current) =>
+      current.includes(vendorProductKey)
+        ? current.filter((currentKey) => currentKey !== vendorProductKey)
+        : [...current, vendorProductKey],
+    );
+  };
+
+  const runLinkCatalogSearch = async () => {
+    const query = linkCatalogQuery.trim();
+    if (!query) {
+      setLinkCatalogMessage('Enter a product code or name to search ConnectWise.');
+      return;
+    }
+
+    setLinkCatalogLoading(true);
+    setLinkCatalogMessage('');
+    try {
+      const response = await searchProductCatalog(selectedIntegrationId, query);
+      setLinkCatalogResults(response.targets);
+      setLinkCatalogMessage(
+        response.warning ?? `${response.targets.length} catalog item${response.targets.length === 1 ? '' : 's'} found.`,
+      );
+    } catch (error) {
+      setLinkCatalogResults([]);
+      setLinkCatalogMessage(error instanceof Error ? error.message : 'Product catalog search failed.');
+    } finally {
+      setLinkCatalogLoading(false);
+    }
+  };
+
+  const editLinkRule = (rule: ProductLinkRule) => {
+    setEditingLinkRuleId(rule.id);
+    setLinkTargetProductKey(rule.sourceVendorProductKey);
+    setLinkRuleName(rule.ruleName);
+    const firstSource = rule.sources[0];
+    if (firstSource?.sourceType === 'filtered-dataset') {
+      setLinkSourceMode('filtered-dataset');
+      setLinkSourceVendorId(firstSource.vendorId);
+      setLinkSourceDataset(firstSource.dataset ?? 'users');
+      setLinkSourceLabel(firstSource.label ?? '');
+      setLinkAggregationType(firstSource.aggregation.type);
+      setLinkAggregationColumn(firstSource.aggregation.type === 'column-sum' ? firstSource.aggregation.column : 'TotalUnits');
+      setLinkFilterRoot(firstSource.filter);
+      setLinkVendorProductKeys([]);
+      setLinkCatalogTarget(null);
+      setLinkCatalogResults([]);
+      setLinkCatalogMessage('');
+      return;
+    }
+
+    if (firstSource?.sourceType === 'connectwise-addition') {
+      setLinkSourceMode('connectwise-addition');
+      setLinkVendorProductKeys([]);
+      setLinkCatalogTarget({
+        connectwiseProductCode: firstSource.productCode,
+        connectwiseProductName: firstSource.productName ?? firstSource.productCode,
+        source: 'local',
+      });
+      setLinkCatalogQuery(firstSource.productCode);
+      setLinkCatalogResults([]);
+      setLinkCatalogMessage('');
+      return;
+    }
+
+    setLinkSourceMode('vendor-product');
+    if (firstSource?.sourceType === 'vendor-product') {
+      setLinkSourceVendorId(firstSource.vendorId);
+    }
+    setLinkSourceDataset('licenses');
+    setLinkSourceLabel('');
+    setLinkAggregationType('row-count');
+    setLinkAggregationColumn('TotalUnits');
+    setLinkFilterRoot(defaultLinkedCountFilter());
+    setLinkVendorProductKeys(
+      rule.sources.flatMap((source) => (source.sourceType === 'vendor-product' ? [source.vendorProductKey] : [])),
+    );
+    setLinkCatalogTarget(null);
+    setLinkCatalogResults([]);
+    setLinkCatalogMessage('');
+  };
+
+  const saveLinkRule = async () => {
+    const targetOption = bundleProductOptions.find((option) => option.vendorProductKey === linkTargetProductKey);
+    if (!targetOption) {
+      setLinkSourceMessage('Choose the vendor product that should receive the linked count.');
+      return;
+    }
+
+    let sources: ProductLinkRuleSource[] = [];
+    if (linkSourceMode === 'vendor-product') {
+      sources = linkVendorProductKeys.flatMap((vendorProductKey) => {
+        const option = linkSourceProductOptions.find((candidate) => candidate.vendorProductKey === vendorProductKey);
+        return option
+          ? [
+              {
+                sourceType: 'vendor-product' as const,
+                vendorId: linkSourceVendorId,
+                vendorProductKey: option.vendorProductKey,
+                vendorProductName: option.vendorProductName,
+              },
+            ]
+          : [];
+      });
+    } else if (linkSourceMode === 'filtered-dataset') {
+      const aggregation: ProductLinkRuleAggregation =
+        linkAggregationType === 'column-sum'
+          ? { type: 'column-sum', column: linkAggregationColumn.trim() }
+          : { type: 'row-count' };
+      sources = hasLinkedFilterCondition(linkFilterRoot) &&
+        (aggregation.type === 'row-count' || aggregation.column)
+        ? [
+            {
+              sourceType: 'filtered-dataset' as const,
+              vendorId: linkSourceVendorId,
+              dataset: linkSourceVendorId === 'microsoft-365' ? linkSourceDataset : undefined,
+              label: linkSourceLabel.trim() || undefined,
+              filter: linkFilterRoot,
+              aggregation,
+            },
+          ]
+        : [];
+    } else if (linkCatalogTarget) {
+      sources = [
+        {
+          sourceType: 'connectwise-addition' as const,
+          productCode: linkCatalogTarget.connectwiseProductCode,
+          productName: linkCatalogTarget.connectwiseProductName,
+        },
+      ];
+    }
+
+    if (sources.length === 0) {
+      const message = linkSourceMode === 'vendor-product'
+        ? 'Choose at least one approved source vendor product.'
+        : linkSourceMode === 'filtered-dataset'
+          ? 'Complete the dataset filter and aggregation.'
+          : 'Choose a ConnectWise agreement addition product.';
+      if (linkSourceMode === 'vendor-product') {
+        setLinkSourceMessage(message);
+      } else if (linkSourceMode === 'filtered-dataset') {
+        setLinkSourceMessage(message);
+      } else {
+        setLinkCatalogMessage(message);
+      }
+      return;
+    }
+
+    const saved = await onProductLinkRuleSave(selectedIntegrationId, {
+      id: editingLinkRuleId ?? undefined,
+      sourceVendorProductKey: targetOption.vendorProductKey,
+      ruleName: linkRuleName.trim() || `${targetOption.vendorProductName} linked count`,
+      sources,
+    });
+
+    if (saved) {
+      resetLinkRuleForm();
+    }
   };
 
   const runBundleCatalogSearch = async () => {
@@ -8433,26 +9365,46 @@ function MappingsView(props: {
       ) : null}
 
       <section className="metric-grid mapping-metrics" aria-label="Mapping summary">
-        <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length)} />
+        <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(approvedAccountMappingCount)} />
         <MetricCard icon={ClipboardCheck} label="Client review" tone="warn" value={formatCount(accountCandidates.filter((candidate) => candidate.status === 'needs-review').length)} />
-        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(productMappings.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length)} />
+        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(approvedProductMappingCount)} />
         <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productCandidates.length)} />
       </section>
 
       {selectedIntegrationId === 'ncentral' ? (
-        <NcentralFilterMappingPanel
-          busyAction={busyAction}
-          filters={ncentralFilters}
-          mappings={ncentralFilterMappings}
-          onSave={onNcentralFilterMappingSave}
-        />
+        <MappingSectionDrawer
+          defaultOpen
+          meta={`${ncentralFilters.length.toLocaleString()} discovered filters`}
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="ncentral"
+          status={`${ncentralFilterMappings.length.toLocaleString()} mapped`}
+          title="N-central filters"
+        >
+          <NcentralFilterMappingPanel
+            busyAction={busyAction}
+            filters={ncentralFilters}
+            mappings={ncentralFilterMappings}
+            onSave={onNcentralFilterMappingSave}
+          />
+        </MappingSectionDrawer>
       ) : null}
 
       <section className="mapping-review-grid">
-        <div className="work-surface">
+        <MappingSectionDrawer
+          defaultOpen={accountCandidates.length > 0}
+          meta={`${approvedAccountMappingCount.toLocaleString()} mapped customers`}
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="customer"
+          status={`${accountCandidates.length.toLocaleString()} unmatched`}
+          statusTone={accountCandidates.length > 0 ? 'needs-review' : 'approved'}
+          title="Customer mapping"
+        >
+          <div className="work-surface">
           <div className="surface-header">
             <div>
-              <span className="section-kicker">Account mapping</span>
+              <span className="section-kicker">Customer mapping</span>
               <h2>
                 {showMappedAccounts
                   ? `${accountRows.length.toLocaleString()} ${selectedDatasetLabel} accounts`
@@ -8597,9 +9549,20 @@ function MappingsView(props: {
               );
             })}
           </div>
-        </div>
+          </div>
+        </MappingSectionDrawer>
 
-        <div className="work-surface">
+        <MappingSectionDrawer
+          defaultOpen={unmatchedProductGroupCount > 0}
+          meta={`${approvedProductMappingCount.toLocaleString()} mapped products`}
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="product"
+          status={`${unmatchedProductGroupCount.toLocaleString()} unmatched`}
+          statusTone={unmatchedProductGroupCount > 0 ? 'needs-review' : 'approved'}
+          title="Product mapping"
+        >
+          <div className="work-surface">
           <div className="surface-header">
             <div>
               <span className="section-kicker">Product mapping</span>
@@ -8619,7 +9582,7 @@ function MappingsView(props: {
             </label>
           </div>
 
-          <div className="mapping-review-list">
+          <div className="mapping-review-list product-mapping-list">
             <div className="mapping-review-header product" role="row">
               <span>{selectedIntegrationName} product</span>
               <span aria-hidden="true" />
@@ -8666,6 +9629,8 @@ function MappingsView(props: {
                 : selectedRows;
               const bestScore = Math.max(...group.rows.map((row) => row.matchScore), 0);
               const approvedCount = group.rows.filter((row) => 'active' in row && row.active && row.status === 'approved').length;
+              const approvedLabel = approvedCount > 0 ? `${approvedCount} mapped` : 'Suggested';
+              const customerCountLabel = `${group.customerCount.toLocaleString()} customer${group.customerCount === 1 ? '' : 's'}`;
               return (
                 <article className="mapping-review-row product product-group-row" key={group.vendorProductKey}>
                   <div>
@@ -8679,7 +9644,7 @@ function MappingsView(props: {
                       type="button"
                     >
                       <Users size={14} />
-                      {group.customerCount.toLocaleString()} customer{group.customerCount === 1 ? '' : 's'}
+                      {customerCountLabel}
                     </button>
                   </div>
                   <ArrowRight size={16} />
@@ -8758,7 +9723,7 @@ function MappingsView(props: {
                     </button>
                   </div>
                   <span className={`status-pill ${approvedCount > 0 ? 'approved' : 'ready'}`}>
-                    {approvedCount > 0 ? `${approvedCount} mapped` : 'Suggested'}
+                    {approvedLabel}
                   </span>
                   <strong>{Math.round(bestScore)}%</strong>
                   <span className="mapping-actions">
@@ -8777,15 +9742,334 @@ function MappingsView(props: {
               );
             })}
           </div>
-        </div>
+          </div>
+        </MappingSectionDrawer>
       </section>
 
+      <MappingSectionDrawer
+        defaultOpen
+        meta={`${productLinkRules.length.toLocaleString()} saved linked count rules`}
+        onOpenChange={setMappingSection}
+        openState={mappingSectionOpen}
+        sectionId="linked-counts"
+        status={`${activeLinkRuleCount.toLocaleString()} active`}
+        title="Linked counts"
+      >
+        <section className="work-surface product-bundle-surface linked-count-surface" aria-label="Linked count rules">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">Linked counts</span>
+            <h2>{activeLinkRuleCount.toLocaleString()} active linked count rules</h2>
+          </div>
+          {editingLinkRuleId ? (
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={resetLinkRuleForm} type="button">
+              Cancel edit
+            </button>
+          ) : null}
+        </div>
+
+        <div className="product-bundle-form linked-count-form">
+          <label>
+            <span>{selectedIntegrationName} product</span>
+            <select onChange={(event) => setLinkTargetProductKey(event.target.value)} value={linkTargetProductKey}>
+              <option value="">Select product</option>
+              {bundleProductOptions.map((option) => (
+                <option key={option.vendorProductKey} value={option.vendorProductKey}>
+                  {option.vendorProductName}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span>{editingLinkRuleId ? 'Editing rule' : 'Rule name'}</span>
+            <input
+              onChange={(event) => setLinkRuleName(event.target.value)}
+              placeholder="Email Threat Protection linked count"
+              value={linkRuleName}
+            />
+          </label>
+
+          <label>
+            <span>Source type</span>
+            <select
+              onChange={(event) => {
+                const nextMode = event.target.value as ProductLinkRuleSource['sourceType'];
+                setLinkSourceMode(nextMode);
+                setLinkSourceMessage('');
+                setLinkCatalogMessage('');
+              }}
+              value={linkSourceMode}
+            >
+              <option value="vendor-product">Vendor product</option>
+              <option value="filtered-dataset">Vendor dataset</option>
+              <option value="connectwise-addition">ConnectWise addition</option>
+            </select>
+          </label>
+
+          {linkSourceMode === 'vendor-product' ? (
+            <div className="product-bundle-target linked-count-source">
+              <label>
+                <span>Source vendor</span>
+                <div className="product-catalog-search-row">
+                  <select
+                    onChange={(event) => {
+                      setLinkSourceVendorId(event.target.value as IntegrationId);
+                      setLinkVendorProductKeys([]);
+                      setLinkSourceMessage('');
+                    }}
+                    value={linkSourceVendorId}
+                  >
+                    {linkSourceIntegrationOptions.map((integration) => (
+                      <option key={integration.id} value={integration.id}>
+                        {integration.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="button secondary compact"
+                    disabled={linkSourceLoadState === 'loading'}
+                    onClick={() => void loadLinkSourceProducts()}
+                    type="button"
+                  >
+                    <RefreshCcw size={14} />
+                    {linkSourceLoadState === 'loading' ? 'Loading' : 'Load'}
+                  </button>
+                </div>
+              </label>
+              {linkSourceMessage ? <span className="product-catalog-message">{linkSourceMessage}</span> : null}
+              <div className="product-bundle-target-list">
+                {linkSourceProductOptions.length === 0 ? (
+                  <span className="product-target-empty">Load a vendor with approved product mappings.</span>
+                ) : null}
+                {linkSourceProductOptions.map((option) => (
+                  <label className="product-bundle-component-option" key={option.vendorProductKey}>
+                    <input
+                      checked={linkVendorProductKeys.includes(option.vendorProductKey)}
+                      onChange={() => toggleLinkVendorProductKey(option.vendorProductKey)}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{option.vendorProductName}</strong>
+                      <em>
+                        {option.vendorProductKey}
+                        {option.rowCount > 0 ? ` / ${option.rowCount.toLocaleString()} additions` : ''}
+                      </em>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : linkSourceMode === 'filtered-dataset' ? (
+            <div className="product-bundle-target linked-count-source linked-filter-source">
+              <div className="linked-filter-grid">
+                <label>
+                  <span>Source vendor</span>
+                  <select
+                    onChange={(event) => {
+                      setLinkSourceVendorId(event.target.value as IntegrationId);
+                      setLinkSourceMessage('');
+                    }}
+                    value={linkSourceVendorId}
+                  >
+                    {linkSourceIntegrationOptions.map((integration) => (
+                      <option key={integration.id} value={integration.id}>
+                        {integration.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Dataset</span>
+                  <select
+                    disabled={linkSourceVendorId !== 'microsoft-365'}
+                    onChange={(event) => setLinkSourceDataset(event.target.value as RawSyncDataset)}
+                    value={linkSourceVendorId === 'microsoft-365' ? linkSourceDataset : 'users'}
+                  >
+                    <option value="licenses">Licenses</option>
+                    <option value="users">Users</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Aggregation</span>
+                  <select
+                    onChange={(event) => setLinkAggregationType(event.target.value as ProductLinkRuleAggregation['type'])}
+                    value={linkAggregationType}
+                  >
+                    <option value="row-count">Row count</option>
+                    <option value="column-sum">Column sum</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Sum column</span>
+                  <select
+                    disabled={linkAggregationType !== 'column-sum'}
+                    onChange={(event) => setLinkAggregationColumn(event.target.value)}
+                    value={linkAggregationColumn}
+                  >
+                    {uniqueStrings([linkAggregationColumn, ...linkFilterColumnOptions]).map((column) => (
+                      <option key={column} value={column}>
+                        {column}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Source label</span>
+                  <input
+                    onChange={(event) => setLinkSourceLabel(event.target.value)}
+                    placeholder="Microsoft Business license rows"
+                    value={linkSourceLabel}
+                  />
+                </label>
+              </div>
+              {Object.entries(linkDatasetMetadata.uniqueValuesByColumn).map(([column, values]) => (
+                <datalist id={`linked-filter-values-${safeDomId(column)}`} key={column}>
+                  {values.map((value) => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+              ))}
+              <LinkedFilterGroupEditor
+                node={linkFilterRoot}
+                onChange={setLinkFilterRoot}
+                columns={linkFilterColumnOptions}
+                uniqueValuesByColumn={linkDatasetMetadata.uniqueValuesByColumn}
+              />
+              {linkDatasetMessage ? (
+                <span className="product-catalog-message">{linkDatasetLoadState === 'loading' ? 'Loading dataset values...' : linkDatasetMessage}</span>
+              ) : null}
+              {linkSourceMessage ? <span className="product-catalog-message">{linkSourceMessage}</span> : null}
+            </div>
+          ) : (
+            <div className="product-bundle-target linked-count-source">
+              <label>
+                <span>ConnectWise product</span>
+                <div className="product-catalog-search-row">
+                  <input
+                    onChange={(event) => setLinkCatalogQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void runLinkCatalogSearch();
+                      }
+                    }}
+                    placeholder="Sync product code or name"
+                    value={linkCatalogQuery}
+                  />
+                  <button
+                    className="button secondary compact"
+                    disabled={linkCatalogLoading}
+                    onClick={() => void runLinkCatalogSearch()}
+                    type="button"
+                  >
+                    <Search size={14} />
+                    {linkCatalogLoading ? 'Searching' : 'Search'}
+                  </button>
+                </div>
+              </label>
+              {linkCatalogMessage ? <span className="product-catalog-message">{linkCatalogMessage}</span> : null}
+              <div className="product-bundle-target-list">
+                {linkCatalogTargetOptions.map((target) => (
+                  <label className="product-target-option" key={target.connectwiseProductCode}>
+                    <input
+                      checked={linkCatalogTarget?.connectwiseProductCode === target.connectwiseProductCode}
+                      onChange={() => setLinkCatalogTarget({ ...target, source: 'local' })}
+                      type="radio"
+                    />
+                    <span>
+                      <strong>{target.connectwiseProductName}</strong>
+                      <em>{target.connectwiseProductCode}</em>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="product-bundle-actions">
+            <button
+              className="button primary compact"
+              disabled={
+                Boolean(busyAction) ||
+                !linkTargetProductKey ||
+                (linkSourceMode === 'vendor-product' && linkVendorProductKeys.length === 0) ||
+                (linkSourceMode === 'filtered-dataset' &&
+                  (!hasLinkedFilterCondition(linkFilterRoot) ||
+                    (linkAggregationType === 'column-sum' && !linkAggregationColumn.trim()))) ||
+                (linkSourceMode === 'connectwise-addition' && !linkCatalogTarget)
+              }
+              onClick={() => void saveLinkRule()}
+              type="button"
+            >
+              <Link2 size={16} />
+              {busyAction === linkRuleActionKey ? 'Saving' : editingLinkRuleId ? 'Update rule' : 'Save rule'}
+            </button>
+          </div>
+        </div>
+
+        <div className="product-bundle-list">
+          {productLinkRules.length === 0 ? (
+            <div className="empty-state">
+              <Link2 size={20} />
+              <strong>No linked count rules saved.</strong>
+            </div>
+          ) : null}
+          {productLinkRules.map((rule) => (
+            <article className="product-bundle-row linked-count-row" key={rule.id}>
+              <div>
+                <strong>{productLinkRuleTargetLabel(rule, bundleProductOptions)}</strong>
+                <span>{rule.sourceVendorProductKey}</span>
+              </div>
+              <ArrowRight size={16} />
+              <div>
+                <strong>{rule.ruleName}</strong>
+                <span>{rule.sources.map(productLinkRuleSourceLabel).join('; ')}</span>
+              </div>
+              <span className={`status-pill ${rule.active ? 'approved' : 'blocked'}`}>
+                {rule.active ? 'Active' : 'Disabled'}
+              </span>
+              <span>{rule.sources.length.toLocaleString()} source{rule.sources.length === 1 ? '' : 's'}</span>
+              <div className="product-bundle-row-actions">
+                <button
+                  className="button secondary compact"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => editLinkRule(rule)}
+                  type="button"
+                >
+                  <Pencil size={15} />
+                  Edit
+                </button>
+                <button
+                  className="button secondary compact"
+                  disabled={!rule.active || busyAction === `link:${rule.id}`}
+                  onClick={() => void onProductLinkRuleDeactivate(selectedIntegrationId, rule.id)}
+                  type="button"
+                >
+                  Disable
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+      </MappingSectionDrawer>
+
       {selectedIntegrationId === 'opentext-appriver' ? (
-        <section className="work-surface product-bundle-surface" aria-label="AppRiver product bundles">
+        <MappingSectionDrawer
+          defaultOpen
+          meta={`${productBundles.length.toLocaleString()} saved AppRiver bundles`}
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="bundles"
+          status={`${activeBundleCount.toLocaleString()} active`}
+          title="Bundles"
+        >
+          <section className="work-surface product-bundle-surface" aria-label="AppRiver product bundles">
           <div className="surface-header">
             <div>
               <span className="section-kicker">Bundles</span>
-              <h2>{productBundles.filter((bundle) => bundle.active).length.toLocaleString()} active AppRiver bundles</h2>
+              <h2>{activeBundleCount.toLocaleString()} active AppRiver bundles</h2>
             </div>
             {editingBundleKey ? (
               <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={resetBundleForm} type="button">
@@ -8936,9 +10220,19 @@ function MappingsView(props: {
             ))}
           </div>
         </section>
+        </MappingSectionDrawer>
       ) : null}
 
-      <section className="work-surface usage-overrides-surface" aria-label="Usage overrides">
+      <MappingSectionDrawer
+        defaultOpen
+        meta={`${selectedIntegrationName} product count adjustments`}
+        onOpenChange={setMappingSection}
+        openState={mappingSectionOpen}
+        sectionId="usage-overrides"
+        status={`${usageOverrides.length.toLocaleString()} active`}
+        title="Usage overrides"
+      >
+        <section className="work-surface usage-overrides-surface" aria-label="Usage overrides">
         <div className="surface-header">
           <div>
             <span className="section-kicker">Usage overrides</span>
@@ -9069,6 +10363,7 @@ function MappingsView(props: {
           ))}
         </div>
       </section>
+      </MappingSectionDrawer>
 
       {productCustomerReview ? (
         <ProductCustomerReviewModal
@@ -9741,6 +11036,359 @@ function productRowSourceLabel(row: ProductMappingRow) {
   return `${row.additionCount.toLocaleString()} additions`;
 }
 
+function linkedDatasetMetadataFromDetails(details: RawSyncDetailsResponse): LinkedDatasetMetadata {
+  const baseColumns = details.columns.filter((column) => !['Customer', 'Agreement', 'Mapped', 'RawPayload'].includes(column));
+  const columns = uniqueStrings([
+    ...(details.integrationId === 'microsoft-365' && details.dataset === 'licenses' ? ['LicenseName'] : []),
+    ...baseColumns,
+  ]);
+  const uniqueValuesByColumn = Object.fromEntries(
+    columns.map((column) => [column, uniqueColumnValues(details.rows, column)]),
+  );
+
+  return {
+    columns,
+    uniqueValuesByColumn,
+    syncRunId: details.syncRun.id,
+    rowCount: details.rows.length,
+  };
+}
+
+function uniqueColumnValues(rows: RawSyncRow[], column: string) {
+  const values = new Set<string>();
+  for (const row of rows) {
+    const value = linkedDatasetRowValue(row, column);
+    if (value === null || typeof value === 'undefined' || value === '') {
+      continue;
+    }
+
+    values.add(String(value));
+    if (values.size >= 250) {
+      break;
+    }
+  }
+
+  return [...values].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+}
+
+function linkedDatasetRowValue(row: RawSyncRow, column: string) {
+  if (column === 'LicenseName') {
+    return row.LicenseName ?? row.SkuName ?? row.SkuPartNumber ?? row.ProductName ?? row.SkuId ?? null;
+  }
+
+  return row[column] ?? null;
+}
+
+function alignLinkedFilterFields(
+  node: ProductLinkRuleFilterNode,
+  columns: string[],
+  preferredField: string,
+): ProductLinkRuleFilterNode {
+  if (node.nodeType === 'condition') {
+    return columns.includes(node.field)
+      ? node
+      : {
+          ...node,
+          field: preferredField,
+          value: '',
+        };
+  }
+
+  return {
+    ...node,
+    children: node.children.map((child) => alignLinkedFilterFields(child, columns, preferredField)),
+  };
+}
+
+function uniqueStrings(values: Array<string | undefined>) {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function safeDomId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+}
+
+function defaultLinkedCountFilter(): ProductLinkRuleFilterNode {
+  return {
+    nodeType: 'group',
+    operator: 'or',
+    children: [
+      {
+        nodeType: 'condition',
+        field: 'LicenseName',
+        operator: 'contains',
+        value: '',
+      },
+    ],
+  };
+}
+
+function hasLinkedFilterCondition(node: ProductLinkRuleFilterNode): boolean {
+  if (node.nodeType === 'condition') {
+    if (!node.field.trim()) {
+      return false;
+    }
+
+    return node.operator === 'is-empty' ||
+      node.operator === 'is-not-empty' ||
+      Boolean(node.value?.trim());
+  }
+
+  return node.children.some(hasLinkedFilterCondition);
+}
+
+function linkedDatasetColumnOptions(vendorId: IntegrationId, dataset: RawSyncDataset) {
+  if (vendorId === 'microsoft-365' && dataset === 'licenses') {
+    return [
+      'LicenseName',
+      'SkuName',
+      'SkuPartNumber',
+      'SkuId',
+      'SubscriptionStatus',
+      'CapabilityStatus',
+      'TotalUnits',
+      'AssignedUnits',
+      'UnassignedUnits',
+      'EnabledUnits',
+      'SuspendedUnits',
+      'WarningUnits',
+      'LockedOutUnits',
+      'SubscriptionCount',
+      'BillingType',
+      'BillingCycle',
+      'BillingTerm',
+      'TenantName',
+      'TenantId',
+      'TenantDefaultDomain',
+    ];
+  }
+
+  if (vendorId === 'microsoft-365') {
+    return [
+      'ProductName',
+      'SkuName',
+      'SkuId',
+      'ProductKey',
+      'Quantity',
+      'ConsumedUnits',
+      'UserState',
+      'TenantName',
+      'TenantId',
+      'UserPrincipalName',
+      'DisplayName',
+    ];
+  }
+
+  return [
+    'ProductName',
+    'ProductCode',
+    'ProductKey',
+    'VendorProductKey',
+    'Quantity',
+    'ExternalAccountId',
+    'CustomerId',
+    'AgreementId',
+    'ObservedAt',
+    'TotalLicenses',
+    'AssignedLicenses',
+    'UnassignedLicenses',
+    'SubscriptionTerm',
+    'BillingFrequency',
+  ];
+}
+
+function LinkedFilterGroupEditor(props: {
+  columns: string[];
+  depth?: number;
+  node: ProductLinkRuleFilterNode;
+  onChange: (node: ProductLinkRuleFilterNode) => void;
+  onRemove?: () => void;
+  uniqueValuesByColumn: Record<string, string[]>;
+}) {
+  const { columns, depth = 0, node, onChange, onRemove, uniqueValuesByColumn } = props;
+
+  if (node.nodeType === 'condition') {
+    const requiresValue = node.operator !== 'is-empty' && node.operator !== 'is-not-empty';
+    const fieldOptions = uniqueStrings([node.field, ...columns]).filter(Boolean);
+    const valueOptions = uniqueValuesByColumn[node.field] ?? [];
+    const usesValueDropdown = (node.operator === 'equals' || node.operator === 'not-equals') && valueOptions.length > 0;
+    return (
+      <div className="linked-filter-condition">
+        <select
+          aria-label="Filter field"
+          onChange={(event) => onChange({ ...node, field: event.target.value, value: '' })}
+          value={node.field}
+        >
+          {fieldOptions.map((column) => (
+            <option key={column} value={column}>
+              {column}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter operator"
+          onChange={(event) =>
+            onChange({
+              ...node,
+              operator: event.target.value as ProductLinkRuleFilterOperator,
+            })
+          }
+          value={node.operator}
+        >
+          <option value="contains">contains</option>
+          <option value="not-contains">does not contain</option>
+          <option value="equals">equals</option>
+          <option value="not-equals">does not equal</option>
+          <option value="starts-with">starts with</option>
+          <option value="ends-with">ends with</option>
+          <option value="is-empty">is empty</option>
+          <option value="is-not-empty">is not empty</option>
+        </select>
+        {usesValueDropdown ? (
+          <select
+            aria-label="Filter value"
+            onChange={(event) => onChange({ ...node, value: event.target.value })}
+            value={node.value ?? ''}
+          >
+            <option value="">Select value</option>
+            {uniqueStrings([node.value ?? '', ...valueOptions]).filter(Boolean).map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        ) : requiresValue ? (
+          <input
+            aria-label="Filter value"
+            list={`linked-filter-values-${safeDomId(node.field)}`}
+            onChange={(event) => onChange({ ...node, value: event.target.value })}
+            placeholder="Value"
+            value={node.value ?? ''}
+          />
+        ) : (
+          <span className="linked-filter-value-placeholder" />
+        )}
+        {onRemove ? (
+          <button className="icon-button small" onClick={onRemove} title="Remove condition" type="button">
+            <X size={14} />
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  const updateChild = (index: number, child: ProductLinkRuleFilterNode) => {
+    onChange({
+      ...node,
+      children: node.children.map((currentChild, currentIndex) =>
+        currentIndex === index ? child : currentChild,
+      ),
+    });
+  };
+  const removeChild = (index: number) => {
+    onChange({
+      ...node,
+      children: node.children.filter((_, currentIndex) => currentIndex !== index),
+    });
+  };
+  const addCondition = () => {
+    onChange({
+      ...node,
+      children: [
+        ...node.children,
+        {
+          nodeType: 'condition',
+          field: columns[0] ?? 'ProductName',
+          operator: 'contains',
+          value: '',
+        },
+      ],
+    });
+  };
+  const addGroup = () => {
+    onChange({
+      ...node,
+      children: [
+        ...node.children,
+        {
+          nodeType: 'group',
+          operator: 'and',
+          children: [
+            {
+              nodeType: 'condition',
+              field: columns[0] ?? 'ProductName',
+              operator: 'contains',
+              value: '',
+            },
+          ],
+        },
+      ],
+    });
+  };
+
+  return (
+    <div className={depth > 0 ? 'linked-filter-group nested' : 'linked-filter-group'}>
+      <div className="linked-filter-group-bar">
+        <select
+          aria-label="Filter group mode"
+          onChange={(event) => onChange({ ...node, operator: event.target.value === 'or' ? 'or' : 'and' })}
+          value={node.operator}
+        >
+          <option value="and">All</option>
+          <option value="or">Any</option>
+        </select>
+        <button className="button secondary compact" onClick={addCondition} type="button">
+          <ListChecks size={14} />
+          Condition
+        </button>
+        <button className="button secondary compact" onClick={addGroup} type="button">
+          <Layers3 size={14} />
+          Group
+        </button>
+        {onRemove ? (
+          <button className="icon-button small" onClick={onRemove} title="Remove group" type="button">
+            <X size={14} />
+          </button>
+        ) : null}
+      </div>
+      <div className="linked-filter-children">
+        {node.children.map((child, index) => (
+          <LinkedFilterGroupEditor
+            columns={columns}
+            depth={depth + 1}
+            key={`${child.nodeType}-${index}`}
+            node={child}
+            onChange={(nextChild) => updateChild(index, nextChild)}
+            onRemove={node.children.length > 1 ? () => removeChild(index) : undefined}
+            uniqueValuesByColumn={uniqueValuesByColumn}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function productLinkRuleTargetLabel(
+  rule: ProductLinkRule,
+  options: Array<{ vendorProductKey: string; vendorProductName: string }>,
+) {
+  return options.find((option) => option.vendorProductKey === rule.sourceVendorProductKey)?.vendorProductName ?? rule.sourceVendorProductKey;
+}
+
+function productLinkRuleSourceLabel(source: ProductLinkRuleSource) {
+  if (source.sourceType === 'connectwise-addition') {
+    return `ConnectWise: ${source.productName ?? source.productCode}`;
+  }
+
+  if (source.sourceType === 'filtered-dataset') {
+    const dataset = source.dataset === 'licenses' ? 'Licenses' : source.dataset === 'users' ? 'Users' : 'Usage';
+    const aggregation = source.aggregation.type === 'row-count' ? 'row count' : `sum ${source.aggregation.column}`;
+    return `${integrationName(source.vendorId)} ${dataset}: ${source.label ?? aggregation}`;
+  }
+
+  return `${integrationName(source.vendorId)}: ${source.vendorProductName ?? source.vendorProductKey}`;
+}
+
 function buildProductGroups(rows: ProductMappingRow[]): ProductMappingGroup[] {
   const groups = new Map<string, ProductMappingGroup>();
 
@@ -9816,12 +11464,17 @@ function IntegrationModal(props: {
     event.preventDefault();
 
     const formData = new FormData(event.currentTarget);
-    const nonSecrets = Object.fromEntries(
-      integration.requiredNonSecrets.map((setting) => [
-        setting.key,
-        String(formData.get(`nonSecret:${setting.key}`) ?? '').trim(),
-      ]),
-    );
+    const requiredNonSecrets = integration.requiredNonSecrets.map((setting) => [
+      setting.key,
+      String(formData.get(`nonSecret:${setting.key}`) ?? '').trim(),
+    ] as const);
+    const optionalNonSecrets = integration.optionalNonSecrets.map((setting) => [
+      setting.key,
+      setting.inputType === 'checkbox'
+        ? (formData.get(`nonSecret:${setting.key}`) === 'on' ? 'true' : 'false')
+        : String(formData.get(`nonSecret:${setting.key}`) ?? '').trim(),
+    ] as const);
+    const nonSecrets = Object.fromEntries([...requiredNonSecrets, ...optionalNonSecrets]);
     const secrets = Object.fromEntries(
       integration.requiredSecrets.map((setting) => [
         setting.key,
@@ -9866,55 +11519,74 @@ function IntegrationModal(props: {
           </div>
 
           <div className="integration-modal-body">
-          {tab === 'api' && (
-            <>
-              {integration.requiredNonSecrets.length === 0 && integration.requiredSecrets.length === 0 ? (
-                <p className="config-note">This integration does not require API credentials.</p>
-              ) : null}
-              {integration.requiredNonSecrets.map((setting) => (
-                <label className="config-field" key={setting.key}>
-                  <span>{setting.label}</span>
-                  <input
-                    defaultValue={
-                      integration.nonSecrets[setting.key] ??
-                      setting.defaultValue ??
-                      (setting.key === 'endpoint' ? integration.endpoint : '')
-                    }
-                    name={`nonSecret:${setting.key}`}
-                  />
-                </label>
-              ))}
-              {integration.requiredSecrets.map((setting) => (
-                <label className="config-field" key={setting.key}>
-                  <span>{setting.label}</span>
-                  <input name={`secret:${setting.key}`} placeholder="Leave blank to keep the existing Key Vault value" type="password" />
-                </label>
-              ))}
-              <p className="config-note">
-                {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
-                  ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
-                  : 'All required settings are present. Blank secret fields keep the current Key Vault value.'}
-              </p>
-              <p className="config-note">
-                Last sync {integration.lastSync ?? 'never'} / Records {integration.records ?? '0'}
-              </p>
-            </>
-          )}
+            {tab === 'api' && (
+              <>
+                {integration.requiredNonSecrets.length === 0 &&
+                integration.requiredSecrets.length === 0 &&
+                integration.optionalNonSecrets.length === 0 ? (
+                  <p className="config-note">This integration does not require API credentials.</p>
+                ) : null}
+                {integration.requiredNonSecrets.map((setting) => (
+                  <label className="config-field" key={setting.key}>
+                    <span>{setting.label}</span>
+                    <input
+                      defaultValue={
+                        integration.nonSecrets[setting.key] ??
+                        setting.defaultValue ??
+                        (setting.key === 'endpoint' ? integration.endpoint : '')
+                      }
+                      name={`nonSecret:${setting.key}`}
+                    />
+                  </label>
+                ))}
+                {integration.requiredSecrets.map((setting) => (
+                  <label className="config-field" key={setting.key}>
+                    <span>{setting.label}</span>
+                    <input name={`secret:${setting.key}`} placeholder="Leave blank to keep the existing Key Vault value" type="password" />
+                  </label>
+                ))}
+                {integration.optionalNonSecrets.map((setting) => (
+                  <label className="config-checkbox" key={setting.key}>
+                    <input
+                      defaultChecked={
+                        setting.key === 'detailOnlySync'
+                          ? integrationDetailOnlySyncEnabled(integration.nonSecrets, { optionalNonSecrets: [setting] } as IntegrationSettingsDefinition)
+                          : checkboxSettingEnabled(integration.nonSecrets[setting.key] ?? setting.defaultValue)
+                      }
+                      name={`nonSecret:${setting.key}`}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{setting.label}</strong>
+                      {setting.description ? <small>{setting.description}</small> : null}
+                    </span>
+                  </label>
+                ))}
+                <p className="config-note">
+                  {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
+                    ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
+                    : 'All required settings are present. Blank secret fields keep the current Key Vault value.'}
+                </p>
+                <p className="config-note">
+                  Last sync {integration.lastSync ?? 'never'} / Records {integration.records ?? '0'}
+                </p>
+              </>
+            )}
 
-          {tab === 'invoice' && (
-            <div className="integration-invoice-settings">
-              <div>
-                <FileSpreadsheet size={18} />
-                <span>
-                  Invoice imports use CSV table mapping, customer mapping, and product mapping for this integration.
-                </span>
+            {tab === 'invoice' && (
+              <div className="integration-invoice-settings">
+                <div>
+                  <FileSpreadsheet size={18} />
+                  <span>
+                    Invoice imports use CSV table mapping, customer mapping, and product mapping for this integration.
+                  </span>
+                </div>
+                <div className="scope-list capability-list">
+                  <span>{integrationHasCapability(integration.id, 'invoice-import') ? 'Invoice import enabled' : 'Invoice import unavailable'}</span>
+                  <span>{integrationHasCapability(integration.id, 'mapping') ? 'Customer/product mapping enabled' : 'Mapping unavailable'}</span>
+                </div>
               </div>
-              <div className="scope-list capability-list">
-                <span>{integrationHasCapability(integration.id, 'invoice-import') ? 'Invoice import enabled' : 'Invoice import unavailable'}</span>
-                <span>{integrationHasCapability(integration.id, 'mapping') ? 'Customer/product mapping enabled' : 'Mapping unavailable'}</span>
-              </div>
-            </div>
-          )}
+            )}
 
           </div>
 

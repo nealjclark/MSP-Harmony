@@ -1,0 +1,28 @@
+{
+  "name": "http_get",
+  "description": "Fetches the content of a URL via HTTP GET request. Returns the response body as text.\n\nOptionally searches the fetched content for a keyword (query parameter). When a query is provided:\n- Returns only the matching sections with surrounding context lines, saving context window space.\n- Returns a short \"no match\" message if the keyword isn't found.\n- Use context_lines to control how many lines of context around each match (default: 3).\n- Use return_full: true to get the entire document when the keyword matches.\n\nWithout a query, the full response body is returned.\n\nOnly the following URL patterns are allowed:\n- https://create.roblox.com/docs/reference/engine (Roblox Engine API docs — URLs must end with .md or be llms.txt)\n- https://create.roblox.com/docs/cloud (Roblox Cloud API docs — URLs must end with .md or be llms.txt)\n- https://create.roblox.com/docs/performance-optimization (Roblox Performance Optimization docs — URLs must end with .md or be llms.txt)\n- https://github.com/Roblox/libmp (Roblox LibMP repository — URLs must end with .md or be llms.txt)\n- https://create.roblox.com/docs (Roblox Creator docs (guides, tutorials, etc.) — URLs must end with .md or be llms.txt)\n\nAny URL that does not match one of the above rules will be rejected.\nOnly GET requests are supported. The full URL must be provided.\n\nExamples:\n- http_get(url: \"https://create.roblox.com/docs/reference/engine/classes/Part.md\")\n- http_get(url: \"https://create.roblox.com/docs/reference/engine/classes/Part.md\", query: \"Anchored\")\n- http_get(url: \"https://create.roblox.com/docs/reference/engine/classes/BasePart.md\", query: \"Position\", context_lines: 10)\n- http_get(url: \"https://create.roblox.com/docs/reference/engine/classes/Part.md\", query: \"Anchored\", return_full: true)\n",
+  "inputSchema": {
+    "properties": {
+      "context_lines": {
+        "description": "Lines of surrounding context per match. Only meaningful when query is provided. Default: 3.",
+        "type": "number"
+      },
+      "query": {
+        "description": "Optional keyword to search for in the fetched content (case-insensitive literal match). When provided, only matching sections are returned.",
+        "type": "string"
+      },
+      "return_full": {
+        "description": "If true and query matches, return the entire document instead of just matched sections. Only meaningful when query is provided. Default: false.",
+        "type": "boolean"
+      },
+      "url": {
+        "description": "The full URL to fetch. Must match one of the allowed URL patterns.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "type": "object"
+  }
+}

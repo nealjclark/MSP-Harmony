@@ -1,0 +1,26 @@
+{
+  "name": "execute_luau",
+  "description": "Executes Luau code in Roblox Studio. Returns the result of the executed code or an error message if the code fails to execute.",
+  "inputSchema": {
+    "properties": {
+      "code": {
+        "description": "The Luau code to execute.",
+        "type": "string"
+      },
+      "datamodel_type": {
+        "description": "The target datamodel to operate on, the tool can only be performed in those datamodel types. call get_studio_state to get current available datamodel types. if the target datamodel is not available in current mode, consider using start_stop_play to switch to the desired mode and then use the tools. This is a required argument.",
+        "enum": [
+          "Edit",
+          "Client",
+          "Server"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "datamodel_type"
+    ],
+    "type": "object"
+  }
+}

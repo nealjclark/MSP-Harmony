@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   approveSuggestedAccountMappings,
   buildAccountMappingCandidates,
+  deactivateProductLinkRule,
   generateProductMappingCandidates,
+  listProductLinkRules,
   listProductMappingCustomers,
   listMappingState,
   normalizeEntityName,
@@ -11,6 +13,7 @@ import {
   scoreEntityName,
   updateAccountMapping,
   updateProductMapping,
+  upsertProductLinkRule,
   upsertProductBundle,
   type ConnectWiseCustomerCandidate,
   type Queryable,
@@ -202,10 +205,14 @@ async function run() {
   const accountSourceSql = workflow.queries.find((query) => query.sql.includes('source_rows'))?.sql ?? '';
   assert.equal(mappingSourceSql.includes("coalesce(metadata->>'source', '') <> 'invoice-table'"), true);
   assert.equal(mappingSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
+  assert.equal(mappingSourceSql.includes("dimensions->>'tenantName'"), true);
+  assert.equal(mappingSourceSql.includes("dimensions->>'tenantDefaultDomainName'"), true);
   assert.equal(mappingSourceSql.includes('app_river_account_aliases'), true);
   assert.equal(accountSourceSql.includes("coalesce(metadata->>'source', '') <> 'invoice-table'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'appRiverCustomerName'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
+  assert.equal(accountSourceSql.includes("dimensions->>'tenantName'"), true);
+  assert.equal(accountSourceSql.includes("dimensions->>'tenantDefaultDomainName'"), true);
   assert.equal(accountSourceSql.includes('app_river_account_aliases'), true);
   assert.equal(accountSourceSql.includes('having count(distinct external_account_id) = 1'), true);
 
@@ -377,6 +384,166 @@ async function run() {
   assert.equal(bundleInsertQuery?.values?.[8], true);
   assert.equal(bundleInsertQuery?.values?.[9], 'reviewer@example.com');
 
+  const linkRuleQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const linkRuleRows: unknown[] = [];
+  const linkRuleDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      linkRuleQueries.push({ sql, values });
+
+      if (sql.includes('update vendor_product_link_rules') && sql.includes('returning')) {
+        const row = {
+          id: values?.[1],
+          vendor_id: values?.[0],
+          source_vendor_product_key: values?.[2],
+          rule_name: values?.[3],
+          sources: values?.[4],
+          mapping_status: 'approved',
+          active: values?.[5],
+          reviewed_by: values?.[6],
+          reviewed_at: '2026-06-24T12:00:00.000Z',
+          created_at: '2026-06-24T12:00:00.000Z',
+          updated_at: '2026-06-24T12:00:00.000Z',
+        };
+        linkRuleRows.splice(0, linkRuleRows.length, row);
+        return { rows: [row] as T[] };
+      }
+
+      if (sql.includes('insert into vendor_product_link_rules')) {
+        const row = {
+          id: 'link-rule-1',
+          vendor_id: values?.[0],
+          source_vendor_product_key: values?.[1],
+          rule_name: values?.[2],
+          sources: values?.[3],
+          mapping_status: 'approved',
+          active: values?.[4],
+          reviewed_by: values?.[5],
+          reviewed_at: '2026-06-24T12:00:00.000Z',
+          created_at: '2026-06-24T12:00:00.000Z',
+          updated_at: '2026-06-24T12:00:00.000Z',
+        };
+        linkRuleRows.splice(0, linkRuleRows.length, row);
+        return { rows: [row] as T[] };
+      }
+
+      if (sql.includes('update vendor_product_link_rules')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_product_link_rules')) {
+        return { rows: linkRuleRows as T[] };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  const linkedRule = await upsertProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    sourceVendorProductKey: 'Email Threat Protection|Monthly|Monthly',
+    ruleName: 'Email Threat Protection follows Exchange licenses',
+    reviewedBy: 'reviewer@example.com',
+    sources: [
+      {
+        sourceType: 'vendor-product',
+        vendorId: 'microsoft-365',
+        vendorProductKey: 'exchange-online-plan-1',
+        vendorProductName: 'Exchange Online Plan 1',
+      },
+      {
+        sourceType: 'vendor-product',
+        vendorId: 'microsoft-365',
+        vendorProductKey: 'microsoft-365-business-standard',
+        vendorProductName: 'Microsoft 365 Business Standard',
+      },
+    ],
+  });
+  assert.equal(linkedRule.sourceVendorProductKey, 'Email Threat Protection|Monthly|Monthly');
+  assert.equal(linkedRule.sources.length, 2);
+  assert.equal(
+    linkRuleQueries.some((query) => query.sql.includes('insert into vendor_product_link_rules')),
+    true,
+  );
+
+  const listedLinkRules = await listProductLinkRules(linkRuleDatabase, 'opentext-appriver');
+  assert.equal(listedLinkRules[0]?.id, 'link-rule-1');
+  assert.equal(listedLinkRules[0]?.sources[0]?.sourceType, 'vendor-product');
+
+  const filteredLinkedRule = await upsertProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    sourceVendorProductKey: 'Email Threat Protection|Monthly|Monthly',
+    ruleName: 'Email Threat Protection follows Microsoft Business licenses',
+    reviewedBy: 'reviewer@example.com',
+    sources: [
+      {
+        sourceType: 'filtered-dataset',
+        vendorId: 'microsoft-365',
+        dataset: 'licenses',
+        label: 'Microsoft Business licenses',
+        aggregation: { type: 'row-count' },
+        filter: {
+          nodeType: 'group',
+          operator: 'or',
+          children: [
+            {
+              nodeType: 'condition',
+              field: 'LicenseName',
+              operator: 'contains',
+              value: 'Microsoft 365 Business',
+            },
+            {
+              nodeType: 'condition',
+              field: 'LicenseName',
+              operator: 'contains',
+              value: 'Office 365',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(filteredLinkedRule.sources[0]?.sourceType, 'filtered-dataset');
+  if (filteredLinkedRule.sources[0]?.sourceType === 'filtered-dataset') {
+    assert.equal(filteredLinkedRule.sources[0].aggregation.type, 'row-count');
+    assert.equal(filteredLinkedRule.sources[0].filter.nodeType, 'group');
+  }
+
+  const missingLinkRuleTableRules = await listProductLinkRules(
+    {
+      async query<T = unknown>() {
+        const error = new Error('relation "vendor_product_link_rules" does not exist') as Error & { code: string };
+        error.code = '42P01';
+        throw error;
+      },
+    },
+    'opentext-appriver',
+  );
+  assert.equal(missingLinkRuleTableRules.length, 0);
+
+  const editedLinkRule = await upsertProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    id: linkedRule.id,
+    sourceVendorProductKey: linkedRule.sourceVendorProductKey,
+    ruleName: 'Email Threat Protection follows sync product',
+    reviewedBy: 'reviewer@example.com',
+    sources: [
+      {
+        sourceType: 'connectwise-addition',
+        productCode: 'HUNTRESS-SYNC',
+        productName: 'Huntress Sync',
+      },
+    ],
+  });
+  assert.equal(editedLinkRule.sources[0]?.sourceType, 'connectwise-addition');
+  assert.equal(editedLinkRule.ruleName, 'Email Threat Protection follows sync product');
+
+  const deactivated = await deactivateProductLinkRule(linkRuleDatabase, 'opentext-appriver', linkedRule.id, {
+    reviewedBy: 'reviewer@example.com',
+  });
+  assert.equal(deactivated.active, false);
+  assert.equal(
+    linkRuleQueries.some(
+      (query) => query.sql.includes('id = $2::uuid') && query.values?.[1] === linkedRule.id,
+    ),
+    true,
+  );
+
   const productCandidateDatabase: Queryable = {
     async query<T = unknown>(sql: string) {
       if (sql.includes('from vendor_usage_snapshots')) {
@@ -496,6 +663,38 @@ async function run() {
   assert.equal(appRiverProductCustomers.customers[0]?.additions[0]?.productCode, 'MS Copilot for Microsoft 365 - AM -Add-On');
   assert.equal(appRiverProductCustomers.customers[1]?.externalAccountName, 'Unmapped Legal');
   assert.equal(appRiverProductCustomers.customers[1]?.additions.length, 0);
+
+  const invoiceProductCustomerQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const invoiceProductCustomers = await listProductMappingCustomers(
+    invoiceProductCustomerReviewDatabase(invoiceProductCustomerQueries),
+    'opentext-appriver',
+    'Microsoft 365 E5 (no Teams)|Monthly|Monthly',
+  );
+  assert.equal(invoiceProductCustomerQueries[0]?.sql.includes('from invoice_line_items'), true);
+  assert.equal(invoiceProductCustomerQueries[0]?.sql.includes("raw_summary->>'sourceType'"), true);
+  assert.equal(invoiceProductCustomerQueries[0]?.values?.[1], 'Microsoft 365 E5 (no Teams)|Monthly|Monthly');
+  assert.equal(invoiceProductCustomers.customerCount, 1);
+  assert.equal(invoiceProductCustomers.customers[0]?.externalAccountName, 'Invoice Legal');
+  assert.equal(invoiceProductCustomers.vendorProductName, 'Microsoft 365 E5 (no Teams)');
+
+  const annualCallingPlanQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const annualCallingPlanCustomers = await listProductMappingCustomers(
+    invoiceProductCustomerReviewDatabase(
+      annualCallingPlanQueries,
+      'Microsoft Teams Domestic Calling Plan (customers in US/UK/CA) (Add-on)',
+      'Payroll Dynamics',
+    ),
+    'opentext-appriver',
+    'O365CSP-354|Annual|Annual',
+  );
+  assert.equal(annualCallingPlanQueries[0]?.sql.includes('from invoice_line_items'), true);
+  assert.equal(annualCallingPlanQueries[0]?.values?.[1], 'O365CSP-354|Annual|Annual');
+  assert.equal(annualCallingPlanCustomers.customerCount, 1);
+  assert.equal(annualCallingPlanCustomers.customers[0]?.externalAccountName, 'Payroll Dynamics');
+  assert.equal(
+    annualCallingPlanCustomers.vendorProductName,
+    'Microsoft Teams Domestic Calling Plan (customers in US/UK/CA) (Add-on)',
+  );
 
   const catalogSearchQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const catalogSearchDatabase: Queryable = {
@@ -702,6 +901,42 @@ function appRiverProductCustomerReviewDatabase(): Queryable {
             vendor_product_name: 'Microsoft 365 Copilot (Annual term required) (Add-on)',
             customer_id: null,
             customer_name: null,
+            agreement_id: null,
+            agreement_name: null,
+            agreement_status: null,
+            addition_id: null,
+            connectwise_addition_id: null,
+            product_code: null,
+            product_name: null,
+            quantity: null,
+            unit_price: null,
+            addition_status: null,
+            addition_updated_at: null,
+          },
+        ] as T[],
+      };
+    },
+  };
+}
+
+function invoiceProductCustomerReviewDatabase(
+  queries: Array<{ sql: string; values?: unknown[] }>,
+  productName = 'Microsoft 365 E5 (no Teams)',
+  externalAccountName = 'Invoice Legal',
+): Queryable {
+  return {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      queries.push({ sql, values });
+      return {
+        rows: [
+          {
+            external_account_id: 'invoice-account-1',
+            external_account_name: externalAccountName,
+            vendor_quantity: '1',
+            observed_at: '2026-06-30T00:00:00.000Z',
+            vendor_product_name: productName,
+            customer_id: 'invoice-customer',
+            customer_name: `${externalAccountName}, LLP`,
             agreement_id: null,
             agreement_name: null,
             agreement_status: null,

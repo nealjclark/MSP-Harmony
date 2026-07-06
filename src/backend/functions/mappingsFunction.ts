@@ -11,6 +11,7 @@ import { assertConnectWiseReady } from '../connectwise/operations';
 import {
   applyApprovedMappings,
   approveSuggestedAccountMappings,
+  deactivateProductLinkRule,
   deactivateProductBundle,
   listProductMappingCustomers,
   listMappingState,
@@ -18,10 +19,12 @@ import {
   searchConnectWiseProductCatalog,
   updateAccountMapping,
   updateProductMapping,
+  upsertProductLinkRule,
   upsertProductBundle,
   upsertConnectWiseCatalogProducts,
   type ProductCatalogSearchResult,
   type ProductBundleComponent,
+  type UpsertProductLinkRuleInput,
   type MappingStatus,
   type ProductMappingTarget,
 } from '../mapping/mappingService';
@@ -65,6 +68,8 @@ type ProductBundleBody = {
   reviewedBy?: string;
   active?: boolean;
 };
+
+type ProductLinkRuleBody = UpsertProductLinkRuleInput;
 
 type UsageOverrideBody = CreateUsageOverrideInput & {
   reviewedBy?: string;
@@ -355,6 +360,88 @@ export async function deactivateProductBundleHttp(
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to deactivate product bundle mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertProductLinkRuleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+
+  const body = (await request.json().catch(() => ({}))) as ProductLinkRuleBody;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Linked count rule creation needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      vendorId: integrationId,
+      rule: await upsertProductLinkRule(repositoryContext.pool, integrationId, {
+        id: body.id,
+        sourceVendorProductKey: body.sourceVendorProductKey,
+        ruleName: body.ruleName,
+        sources: body.sources,
+        active: body.active,
+        reviewedBy: auth.principal.name,
+      }),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save linked count rule.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deactivateProductLinkRuleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const ruleId = decodedRouteParam(request.params.ruleId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!ruleId) {
+    return jsonResponse(400, { error: 'Linked count rule deactivation requires ruleId.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Linked count rule deactivation needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(
+      200,
+      await deactivateProductLinkRule(repositoryContext.pool, integrationId, ruleId, {
+        reviewedBy: auth.principal.name,
+      }),
+    );
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to deactivate linked count rule.',
     });
   } finally {
     await repositoryContext.close();
@@ -762,6 +849,20 @@ app.http('deactivateProductBundle', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/bundles/{bundleKey}/deactivate',
   handler: deactivateProductBundleHttp,
+});
+
+app.http('upsertProductLinkRule', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/linked-products',
+  handler: upsertProductLinkRuleHttp,
+});
+
+app.http('deactivateProductLinkRule', {
+  methods: ['DELETE', 'POST'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/linked-products/{ruleId}/deactivate',
+  handler: deactivateProductLinkRuleHttp,
 });
 
 app.http('searchProductCatalog', {

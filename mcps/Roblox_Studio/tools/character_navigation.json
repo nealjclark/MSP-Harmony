@@ -1,0 +1,39 @@
+{
+  "name": "character_navigation",
+  "description": "Navigate the character to the given position, or instance.",
+  "inputSchema": {
+    "properties": {
+      "datamodel_type": {
+        "description": "The target datamodel to operate on, the tool can only be performed in those datamodel types. call get_studio_state to get current available datamodel types. if the target datamodel is not available in current mode, consider using start_stop_play to switch to the desired mode and then use the tools. This is a required argument.",
+        "enum": [
+          "Client"
+        ],
+        "type": "string"
+      },
+      "instance_path": {
+        "description": "The instance path that the character should be moved to. for example: \"game.Workspace.Part\",\"game.Workspace.Model\". The path should start with game, LocalPlayer, or Workspace.",
+        "type": "string"
+      },
+      "speed_multiplier": {
+        "description": "speed multiplier, default is 1.0, 0.5 is half speed, 2.0 is double speed. minimum is 0.1, maximum is 10.0.",
+        "type": "number"
+      },
+      "x": {
+        "description": "The x coordinate to move the character to. Required if instance_path is not provided.",
+        "type": "number"
+      },
+      "y": {
+        "description": "The y coordinate to move the character to. Required if instance_path is not provided.",
+        "type": "number"
+      },
+      "z": {
+        "description": "The z coordinate to move the character to. Required if instance_path is not provided.",
+        "type": "number"
+      }
+    },
+    "required": [
+      "datamodel_type"
+    ],
+    "type": "object"
+  }
+}

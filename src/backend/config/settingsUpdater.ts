@@ -2,6 +2,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { SecretClient } from '@azure/keyvault-secrets';
 import {
   getIntegrationSettingsDefinition,
+  listIntegrationNonSecretDefinitions,
   validateIntegrationSettings,
   type IntegrationId,
   type IntegrationSettingsValidation,
@@ -71,7 +72,7 @@ export async function updateIntegrationSettings(
 
   assertKnownKeys(
     request.nonSecrets,
-    definition.requiredNonSecrets.map((setting) => setting.key),
+    listIntegrationNonSecretDefinitions(definition).map((setting) => setting.key),
     'non-secret',
   );
   assertKnownKeys(

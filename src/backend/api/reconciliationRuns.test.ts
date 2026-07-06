@@ -176,6 +176,37 @@ async function run() {
   assert.equal(unmappedE5Line?.devices[0]?.vendorProductKey, 'Microsoft 365 E5 (no Teams)|Monthly|Monthly');
   assert.equal(appRiverUnmappedResult.totals.unmapped, 1);
 
+  const appRiverLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedMicrosoftDatabase, 'opentext-appriver', { syncRunId });
+  const linkedStandardLine = appRiverLinkedResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
+  assert.equal(linkedStandardLine?.sourceQuantity, 0);
+  assert.equal(linkedStandardLine?.linkedCount?.quantity, 12);
+  assert.equal(linkedStandardLine?.proposedQuantity, 12);
+  assert.equal(linkedStandardLine?.agreementQuantity, 10);
+  assert.equal(linkedStandardLine?.delta, 2);
+  assert.equal(linkedStandardLine?.status, 'needs-review');
+  assert.equal(linkedStandardLine?.writeAction, 'update-addition');
+  assert.equal(linkedStandardLine?.linkedCount?.sources.length, 2);
+  assert.equal(linkedStandardLine?.devices[0]?.dimensions.linkedCountAnchor, true);
+
+  const appRiverFilteredLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedFilteredMicrosoftDatabase, 'opentext-appriver', { syncRunId });
+  const linkedThreatLine = appRiverFilteredLinkedResult.lines.find((line) => line.productCode === 'EMAIL-THREAT-PROTECTION');
+  assert.equal(linkedThreatLine?.sourceQuantity, 0);
+  assert.equal(linkedThreatLine?.linkedCount?.quantity, 2);
+  assert.equal(linkedThreatLine?.linkedCount?.sources[0]?.sourceType, 'filtered-dataset');
+  assert.equal(linkedThreatLine?.linkedCount?.sources[0]?.rowCount, 2);
+  assert.equal(linkedThreatLine?.proposedQuantity, 2);
+  assert.equal(linkedThreatLine?.agreementQuantity, 1);
+  assert.equal(linkedThreatLine?.delta, 1);
+
+  const huntressLinkedResult = await reconcileVendorFromDatabase(huntressLinkedConnectWiseDatabase, 'huntress', { syncRunId });
+  const huntressLine = huntressLinkedResult.lines.find((line) => line.productCode === 'HUNTRESS');
+  assert.equal(huntressLine?.sourceQuantity, 0);
+  assert.equal(huntressLine?.linkedCount?.quantity, 9);
+  assert.equal(huntressLine?.proposedQuantity, 9);
+  assert.equal(huntressLine?.agreementQuantity, 8);
+  assert.equal(huntressLine?.delta, 1);
+  assert.equal(huntressLine?.linkedCount?.sources[0]?.sourceType, 'connectwise-addition');
+
   console.log('database reconciliation tests passed');
 }
 
@@ -630,6 +661,400 @@ const appRiverUnmappedProductDatabase: Queryable = {
 
     if (sql.includes('from invoice_imports')) {
       return { rows: [] as T[] };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const appRiverLinkedMicrosoftDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_product_link_rules')) {
+      return {
+        rows: [
+          {
+            id: 'link-rule-appriver-m365',
+            vendor_id: 'opentext-appriver',
+            source_vendor_product_key: 'Microsoft 365 Business Standard|Monthly|Monthly',
+            rule_name: 'Business Standard follows Exchange-capable Microsoft licenses',
+            sources: [
+              {
+                sourceType: 'vendor-product',
+                vendorId: 'microsoft-365',
+                vendorProductKey: 'exchange-online-plan-1',
+                vendorProductName: 'Exchange Online Plan 1',
+              },
+              {
+                sourceType: 'vendor-product',
+                vendorId: 'microsoft-365',
+                vendorProductKey: 'microsoft-365-business-standard',
+                vendorProductName: 'Microsoft 365 Business Standard',
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-01T12:00:00Z',
+            created_at: '2026-07-01T12:00:00Z',
+            updated_at: '2026-07-01T12:00:00Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('sum(vendor_usage_snapshots.quantity)') && values?.[0] === 'microsoft-365') {
+      const quantity = values?.[1] === 'exchange-online-plan-1' ? '7' : '5';
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            quantity,
+            row_count: quantity,
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'opentext-appriver') {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_product_mappings') && values?.[0] === 'opentext-appriver') {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Microsoft 365 Business Standard|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'Microsoft 365 Business Standard-M',
+            connectwise_product_name: 'Microsoft 365 Business Standard-M',
+            unit_price: '14',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_bundles')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from target_names')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('select distinct') && sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-business-standard-linked',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            connectwise_addition_id: 'cw-business-standard-linked',
+            product_code: 'Microsoft 365 Business Standard-M',
+            product_name: 'Microsoft 365 Business Standard-M',
+            quantity: '10',
+            unit_price: '14',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-01T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements') && sql.includes('inner join customers')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            customer_name: 'Linked Legal',
+            connectwise_company_id: 'LINKED',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            agreement_name: 'Linked Legal Monthly Services',
+            connectwise_agreement_id: '8800',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from invoice_imports') || sql.includes('from invoice_line_items')) {
+      return { rows: [] as T[] };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const appRiverLinkedFilteredMicrosoftDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_product_link_rules')) {
+      return {
+        rows: [
+          {
+            id: 'link-rule-appriver-filtered-m365',
+            vendor_id: 'opentext-appriver',
+            source_vendor_product_key: 'Email Threat Protection|Monthly|Monthly',
+            rule_name: 'Email Threat Protection follows Business license rows',
+            sources: [
+              {
+                sourceType: 'filtered-dataset',
+                vendorId: 'microsoft-365',
+                dataset: 'licenses',
+                label: 'Microsoft Business license rows',
+                aggregation: { type: 'row-count' },
+                filter: {
+                  nodeType: 'group',
+                  operator: 'or',
+                  children: [
+                    {
+                      nodeType: 'condition',
+                      field: 'LicenseName',
+                      operator: 'contains',
+                      value: 'Microsoft 365 Business',
+                    },
+                    {
+                      nodeType: 'condition',
+                      field: 'LicenseName',
+                      operator: 'contains',
+                      value: 'Office 365',
+                    },
+                  ],
+                },
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-01T12:00:00Z',
+            created_at: '2026-07-01T12:00:00Z',
+            updated_at: '2026-07-01T12:00:00Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from microsoft365_subscription_snapshots')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            quantity: '2',
+            row_count: '2',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'opentext-appriver') {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_product_mappings') && values?.[0] === 'opentext-appriver') {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'Email Threat Protection|Monthly|Monthly',
+            target_index: 0,
+            connectwise_product_code: 'EMAIL-THREAT-PROTECTION',
+            connectwise_product_name: 'Email Threat Protection',
+            unit_price: '5',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_bundles')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from target_names')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('select distinct') && sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-email-threat-protection',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            connectwise_addition_id: 'cw-email-threat-protection',
+            product_code: 'EMAIL-THREAT-PROTECTION',
+            product_name: 'Email Threat Protection',
+            quantity: '1',
+            unit_price: '5',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-01T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements') && sql.includes('inner join customers')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            customer_name: 'Linked Legal',
+            connectwise_company_id: 'LINKED',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            agreement_name: 'Linked Legal Monthly Services',
+            connectwise_agreement_id: '8800',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from invoice_imports') || sql.includes('from invoice_line_items')) {
+      return { rows: [] as T[] };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const huntressLinkedConnectWiseDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_product_link_rules')) {
+      return {
+        rows: [
+          {
+            id: 'link-rule-huntress-sync',
+            vendor_id: 'huntress',
+            source_vendor_product_key: 'huntress-agent',
+            rule_name: 'Huntress follows sync product',
+            sources: [
+              {
+                sourceType: 'connectwise-addition',
+                productCode: 'HUNTRESS-SYNC',
+                productName: 'Huntress Sync',
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-01T12:00:00Z',
+            created_at: '2026-07-01T12:00:00Z',
+            updated_at: '2026-07-01T12:00:00Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('sum(agreement_additions.quantity)') && values?.[0] === 'HUNTRESS-SYNC') {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            quantity: '9',
+            row_count: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'huntress') {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_product_mappings') && values?.[0] === 'huntress') {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'huntress-agent',
+            target_index: 0,
+            connectwise_product_code: 'HUNTRESS',
+            connectwise_product_name: 'Huntress Managed EDR',
+            unit_price: '5',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('select distinct') && sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-huntress',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            connectwise_addition_id: 'cw-huntress',
+            product_code: 'HUNTRESS',
+            product_name: 'Huntress Managed EDR',
+            quantity: '8',
+            unit_price: '5',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-01T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements') && sql.includes('inner join customers')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            customer_name: 'Managed Security Co',
+            connectwise_company_id: 'SECURITY',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            agreement_name: 'Managed Security Monthly Services',
+            connectwise_agreement_id: '9900',
+          },
+        ] as T[],
+      };
     }
 
     return { rows: [] as T[] };

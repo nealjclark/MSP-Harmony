@@ -1,7 +1,7 @@
 import type { ConnectWiseAgreementAddition } from '../connectwise/client';
 import type { Queryable } from '../vendor/cove/operations';
 
-export type ReconciliationCountSelection = 'api' | 'invoice' | 'manual';
+export type ReconciliationCountSelection = 'api' | 'invoice' | 'linked' | 'manual';
 
 export type ReconciliationAgreementAdditionUpdateInput = {
   sourceLineId: string;
@@ -524,7 +524,7 @@ function normalizeUpdateInput(input: ReconciliationAgreementAdditionUpdateInput)
     productCode: requiredString(input.productCode, 'productCode'),
     productName: requiredString(input.productName, 'productName'),
     selectedSource:
-      input.selectedSource === 'invoice' || input.selectedSource === 'manual'
+      input.selectedSource === 'invoice' || input.selectedSource === 'linked' || input.selectedSource === 'manual'
         ? input.selectedSource
         : 'api',
     quantity: requiredNonNegativeNumber(input.quantity, 'quantity'),

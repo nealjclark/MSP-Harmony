@@ -1,0 +1,16 @@
+{
+  "name": "script_search",
+  "description": "Fast script search based on fuzzy matching against script names.\nUse if you know part of the script name but don't know where it's located exactly.\nResponse will be capped to 10 results.\nMake your query more specific if need to filter results further.\nNote: Pattern matching is not supported such as asterisk (*) or question mark (?) wildcards.\n",
+  "inputSchema": {
+    "properties": {
+      "keywords": {
+        "description": "The comma-separated keywords string to search for in the game's scripts. Each keyword is case-insensitive.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "keywords"
+    ],
+    "type": "object"
+  }
+}

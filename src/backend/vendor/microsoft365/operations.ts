@@ -1,3 +1,4 @@
+import { integrationDetailOnlySyncEnabled } from '../../../shared/integrationSettings';
 import {
   createIntegrationSettingsProvider,
   type IntegrationRuntimeSettings,
@@ -191,11 +192,15 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
   const observedAt = input.now ?? new Date().toISOString();
   const syncRunId = await startMicrosoft365SyncRun(input.pool, microsoft365UserSyncEntity);
   const client = input.client ?? new Microsoft365Client(microsoft365CredentialsFromSettings(settings));
+  const detailOnlySync = integrationDetailOnlySyncEnabled(settings.nonSecrets, settings.definition);
 
   try {
+    const productMappingsPromise: Promise<Record<string, Microsoft365ProductMapping>> = detailOnlySync
+      ? Promise.resolve({})
+      : loadMicrosoft365ProductMappings(input.pool);
     const [accountMappings, productMappings] = await Promise.all([
       loadMicrosoft365AccountMappings(input.pool),
-      loadMicrosoft365ProductMappings(input.pool),
+      productMappingsPromise,
     ]);
     const tenants = await loadMicrosoft365TenantTargets(client, input.pool);
 
@@ -247,7 +252,9 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
             continue;
           }
 
-          const productMapping = productMappings[vendorProductKey] ?? defaultProductMapping(license);
+          const productMapping = detailOnlySync
+            ? defaultProductMapping(license)
+            : productMappings[vendorProductKey] ?? defaultProductMapping(license);
 
           if (accountMapping?.customerId && accountMapping.agreementId) {
             mappedSnapshots += 1;
@@ -270,6 +277,7 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
             user,
             license,
             subscribedSku,
+            detailOnlySync,
           });
           recordsWritten += 1;
         }
@@ -287,6 +295,7 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
       productSnapshots,
       failedTenants: failedTenantDetails.length,
       failedTenantDetails,
+      detailOnlySync,
     });
 
     return {
@@ -547,6 +556,7 @@ async function insertMicrosoft365LicenseSnapshot(
     user: Microsoft365CustomerUser;
     license: Microsoft365AssignedLicense;
     subscribedSku?: Microsoft365SubscribedSku;
+    detailOnlySync: boolean;
   },
 ) {
   await database.query(
@@ -948,10 +958,13 @@ function dimensionsForLicense(input: {
   user: Microsoft365CustomerUser;
   license: Microsoft365AssignedLicense;
   subscribedSku?: Microsoft365SubscribedSku;
+  detailOnlySync: boolean;
 }) {
   return {
     licenseSource: 'assigned-user-license',
     authModel: 'graph-app-only',
+    detailOnlySync: input.detailOnlySync,
+    productMappingEnabled: !input.detailOnlySync,
     tenantId: input.tenant.tenantId,
     tenantName: input.tenant.displayName,
     tenantDefaultDomainName: input.tenant.defaultDomainName,
