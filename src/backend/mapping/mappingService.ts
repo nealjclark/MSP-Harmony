@@ -270,6 +270,43 @@ export type ProductMappingCustomerReview = {
   customers: ProductMappingCustomer[];
 };
 
+export type ProductLinkRuleTestRow = {
+  sourceType: ProductLinkRuleSource['sourceType'];
+  sourceLabel: string;
+  rowId: string;
+  rowLabel: string;
+  customerId?: string;
+  agreementId?: string;
+  externalAccountId?: string;
+  productKey?: string;
+  productCode?: string;
+  productName?: string;
+  quantity: number;
+  observedAt?: string;
+  details: Record<string, string | number | boolean | null | undefined>;
+};
+
+export type ProductLinkRuleTestSourceTotal = {
+  sourceType: ProductLinkRuleSource['sourceType'];
+  label: string;
+  quantity: number;
+  rowCount: number;
+};
+
+export type ProductLinkRuleTestResult = {
+  vendorId: IntegrationId;
+  ruleId: string;
+  ruleName: string;
+  sourceVendorProductKey: string;
+  customerId: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  total: number;
+  rows: ProductLinkRuleTestRow[];
+  sourceTotals: ProductLinkRuleTestSourceTotal[];
+};
+
 type AccountMappingRow = {
   id: string;
   vendor_id: IntegrationId;
@@ -362,6 +399,25 @@ type ProductLinkRuleRow = {
   updated_at: Date | string | null;
 };
 
+type ProductLinkRuleTestScopeRow = {
+  customer_name: string | null;
+  agreement_name: string | null;
+};
+
+type ProductLinkRuleTestRowRecord = {
+  row_id: string;
+  customer_id: string | null;
+  agreement_id: string | null;
+  external_account_id: string | null;
+  product_key: string | null;
+  product_code: string | null;
+  product_name: string | null;
+  row_label: string | null;
+  quantity: string | number | null;
+  observed_at: Date | string | null;
+  details: unknown;
+};
+
 type ConnectWiseProductRow = {
   product_code: string;
   product_name: string;
@@ -409,6 +465,97 @@ type ProductClass = {
 
 const aggressiveAutoMapThreshold = 70;
 const ambiguityMargin = 10;
+
+const SQL_GUID_PATTERN = "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'";
+
+function sqlFriendlyLabel(valueExpression: string, accountIdExpression: string) {
+  return `case
+    when nullif(trim(${valueExpression}), '') is null then null
+    when lower(trim(${valueExpression})) ~ ${SQL_GUID_PATTERN} then null
+    when lower(trim(${valueExpression})) = lower(trim(coalesce(${accountIdExpression}::text, ''))) then null
+    else trim(${valueExpression})
+  end`;
+}
+
+function sqlLatestVendorUsageSyncRunCte() {
+  return `latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+         and (
+           $1::text <> 'microsoft-365'
+           or coalesce(metadata->>'entity', 'license-snapshots') = any(array['m365-users', 'license-snapshots']::text[])
+         )
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     )`;
+}
+
+function sqlLatestMicrosoft365LicenseSyncRunCte() {
+  return `latest_m365_license_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = 'microsoft-365'
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+         and coalesce(metadata->>'entity', 'license-snapshots') = any(array['m365-licenses', 'license-snapshots']::text[])
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     )`;
+}
+
+function sqlMicrosoft365SubscriptionAccountNamesCte() {
+  return `microsoft365_subscription_account_names as (
+       select
+         microsoft365_subscription_snapshots.external_account_id,
+         coalesce(
+           max(${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_name', 'microsoft365_subscription_snapshots.external_account_id')}),
+           max(${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_default_domain_name', 'microsoft365_subscription_snapshots.external_account_id')}),
+           max(${sqlFriendlyLabel("microsoft365_subscription_snapshots.dimensions->>'tenantName'", 'microsoft365_subscription_snapshots.external_account_id')}),
+           max(${sqlFriendlyLabel("microsoft365_subscription_snapshots.dimensions->>'tenantDefaultDomainName'", 'microsoft365_subscription_snapshots.external_account_id')})
+         ) as external_account_name
+       from microsoft365_subscription_snapshots
+       inner join latest_m365_license_sync_run
+         on latest_m365_license_sync_run.id = microsoft365_subscription_snapshots.sync_run_id
+       where $1::text = 'microsoft-365'
+       group by microsoft365_subscription_snapshots.external_account_id
+     )`;
+}
+
+function sqlUsageSnapshotAccountNameAggregate() {
+  return `coalesce(
+           max(${sqlFriendlyLabel("dimensions->>'dattoExternalAccountName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'coveCustomerName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'ncentralCustomerName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'tenantName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'tenantDefaultDomainName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'customerName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'appRiverCustomerName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'dattoCustomerName'", 'external_account_id')}),
+           max(${sqlFriendlyLabel("dimensions->>'domain'", 'external_account_id')})
+         )`;
+}
+
+function sqlUsageSnapshotAccountNameRow() {
+  return `coalesce(
+           ${sqlFriendlyLabel("dimensions->>'dattoExternalAccountName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'coveCustomerName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'ncentralCustomerName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'tenantName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'tenantDefaultDomainName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'customerName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'appRiverCustomerName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'dattoCustomerName'", 'external_account_id')},
+           ${sqlFriendlyLabel("dimensions->>'domain'", 'external_account_id')}
+         )`;
+}
+
+function sqlMicrosoft365AccountNameCtes() {
+  return `${sqlLatestMicrosoft365LicenseSyncRunCte()},
+     ${sqlMicrosoft365SubscriptionAccountNamesCte()}`;
+}
 
 const coveProductClasses: ProductClass[] = [
   {
@@ -500,6 +647,10 @@ const ncentralProductClasses: ProductClass[] = [
 ];
 
 export async function listMappingState(database: Queryable, vendorId: IntegrationId): Promise<MappingState> {
+  if (vendorId === 'microsoft-365') {
+    await refreshMicrosoft365AccountMappingNames(database);
+  }
+
   const [
     accountMappings,
     accountCandidates,
@@ -849,15 +1000,8 @@ export async function listProductMappingCustomers(
 ): Promise<ProductMappingCustomerReview> {
   const canonicalProductKey = canonicalVendorProductKey(vendorProductKey);
   const result = await database.query<ProductMappingCustomerReviewRow>(
-    `with latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-       order by completed_at desc nulls last, started_at desc
-       limit 1
-     ),
+    `with ${sqlLatestVendorUsageSyncRunCte()},
+     ${sqlMicrosoft365AccountNameCtes()},
      latest_invoice_import as (
        select id
        from invoice_imports
@@ -867,24 +1011,24 @@ export async function listProductMappingCustomers(
      ),
      source_account_names as (
        select
-         external_account_id,
+         usage_account_names.external_account_id,
          coalesce(
-           max(nullif(dimensions->>'dattoExternalAccountName', '')),
-           max(nullif(dimensions->>'customerName', '')),
-           max(nullif(dimensions->>'appRiverCustomerName', '')),
-           max(nullif(dimensions->>'coveCustomerName', '')),
-           max(nullif(dimensions->>'ncentralCustomerName', '')),
-           max(nullif(dimensions->>'dattoCustomerName', '')),
-           max(nullif(dimensions->>'tenantName', '')),
-           max(nullif(dimensions->>'tenantDefaultDomainName', '')),
-           max(nullif(dimensions->>'domain', '')),
-           external_account_id
+           usage_account_names.usage_external_account_name,
+           microsoft365_subscription_account_names.external_account_name,
+           usage_account_names.external_account_id
          ) as external_account_name
-       from vendor_usage_snapshots
-       where vendor_id = $1
-         and external_account_id is not null
-         and sync_run_id = (select id from latest_sync_run)
-       group by external_account_id
+       from (
+         select
+           external_account_id,
+           ${sqlUsageSnapshotAccountNameAggregate()} as usage_external_account_name
+         from vendor_usage_snapshots
+         where vendor_id = $1
+           and external_account_id is not null
+           and sync_run_id = (select id from latest_sync_run)
+         group by external_account_id
+       ) usage_account_names
+       left join microsoft365_subscription_account_names
+         on microsoft365_subscription_account_names.external_account_id = usage_account_names.external_account_id
      ),
      app_river_account_aliases as (
        select
@@ -1188,22 +1332,787 @@ export async function deactivateProductLinkRule(
   ruleId: string,
   options: { reviewedBy?: string } = {},
 ): Promise<{ vendorId: IntegrationId; ruleId: string; active: false }> {
+  return setProductLinkRuleActive(database, vendorId, ruleId, false, options) as Promise<{
+    vendorId: IntegrationId;
+    ruleId: string;
+    active: false;
+  }>;
+}
+
+export async function setProductLinkRuleActive(
+  database: Queryable,
+  vendorId: IntegrationId,
+  ruleId: string,
+  active: boolean,
+  options: { reviewedBy?: string } = {},
+): Promise<{ vendorId: IntegrationId; ruleId: string; active: boolean }> {
   await database.query(
     `update vendor_product_link_rules
-     set active = false,
-         reviewed_by = $3,
+     set active = $3,
+         mapping_status = 'approved',
+         reviewed_by = $4,
          reviewed_at = now(),
          updated_at = now()
      where vendor_id = $1
        and id = $2::uuid`,
-    [vendorId, ruleId, options.reviewedBy ?? 'user'],
+    [vendorId, ruleId, active, options.reviewedBy ?? 'user'],
   );
 
   return {
     vendorId,
     ruleId,
-    active: false,
+    active,
   };
+}
+
+export async function deleteProductLinkRule(
+  database: Queryable,
+  vendorId: IntegrationId,
+  ruleId: string,
+): Promise<{ vendorId: IntegrationId; ruleId: string; deleted: boolean }> {
+  const result = await database.query<{ id: string }>(
+    `delete from vendor_product_link_rules
+     where vendor_id = $1
+       and id = $2::uuid
+     returning id`,
+    [vendorId, ruleId],
+  );
+
+  return {
+    vendorId,
+    ruleId,
+    deleted: result.rows.length > 0,
+  };
+}
+
+export async function testProductLinkRule(
+  database: Queryable,
+  vendorId: IntegrationId,
+  input: { ruleId?: string; customerId?: string; agreementId?: string },
+): Promise<ProductLinkRuleTestResult> {
+  const ruleId = input.ruleId?.trim();
+  const customerId = input.customerId?.trim();
+  const agreementId = input.agreementId?.trim() || undefined;
+  if (!ruleId) {
+    throw new Error('Linked count test requires a rule.');
+  }
+  if (!customerId) {
+    throw new Error('Linked count test requires a customer.');
+  }
+
+  const rule = await loadProductLinkRule(database, vendorId, ruleId);
+  if (!rule) {
+    throw new Error('Linked count rule was not found.');
+  }
+
+  const rows: ProductLinkRuleTestRow[] = [];
+  for (const source of rule.sources) {
+    rows.push(...await loadProductLinkRuleTestRows(database, source, customerId, agreementId));
+  }
+
+  const rowsBySourceLabel = new Map<string, ProductLinkRuleTestRow[]>();
+  for (const row of rows) {
+    const key = `${row.sourceType}:${row.sourceLabel}`;
+    rowsBySourceLabel.set(key, [...(rowsBySourceLabel.get(key) ?? []), row]);
+  }
+  const sourceTotals = [...rowsBySourceLabel.values()].map((sourceRows) => ({
+    sourceType: sourceRows[0]?.sourceType ?? 'filtered-dataset',
+    label: sourceRows[0]?.sourceLabel ?? 'Linked source',
+    quantity: dedupedProductLinkRuleTestQuantity(sourceRows),
+    rowCount: sourceRows.length,
+  } satisfies ProductLinkRuleTestSourceTotal));
+
+  const scope = await loadProductLinkRuleTestScope(database, customerId, agreementId);
+  return {
+    vendorId,
+    ruleId: rule.id,
+    ruleName: rule.ruleName,
+    sourceVendorProductKey: rule.sourceVendorProductKey,
+    customerId,
+    customerName: scope.customerName,
+    agreementId,
+    agreementName: scope.agreementName,
+    total: dedupedProductLinkRuleTestQuantity(rows),
+    rows: rows.sort(
+      (left, right) =>
+        left.sourceLabel.localeCompare(right.sourceLabel) ||
+        (left.productName ?? '').localeCompare(right.productName ?? '') ||
+        left.rowLabel.localeCompare(right.rowLabel) ||
+        left.rowId.localeCompare(right.rowId),
+    ),
+    sourceTotals: sourceTotals.sort((left, right) => left.label.localeCompare(right.label)),
+  };
+}
+
+function dedupedProductLinkRuleTestQuantity(rows: ProductLinkRuleTestRow[]) {
+  const quantityByDedupeKey = new Map<string, number>();
+  for (const row of rows) {
+    const dedupeKey = productLinkRuleTestDedupeKey(row);
+    quantityByDedupeKey.set(dedupeKey, Math.max(quantityByDedupeKey.get(dedupeKey) ?? 0, row.quantity));
+  }
+
+  return [...quantityByDedupeKey.values()].reduce((sum, quantity) => sum + quantity, 0);
+}
+
+function productLinkRuleTestDedupeKey(row: ProductLinkRuleTestRow) {
+  const emailIdentity = firstLinkedTestDetailValue(row.details, [
+    'userPrincipalName',
+    'upn',
+    'email',
+    'mail',
+    'userEmail',
+    'username',
+  ]);
+  if (emailIdentity) {
+    return `email:${emailIdentity.toLowerCase()}`;
+  }
+
+  const scopedPrefix = `${row.sourceType}:${row.externalAccountId ?? 'unknown'}`;
+  const userIdentity = firstLinkedTestDetailValue(row.details, [
+    'userId',
+    'aadUserId',
+    'azureAdUserId',
+    'objectId',
+    'remoteId',
+    'contactId',
+    'seatId',
+  ]);
+  if (userIdentity) {
+    return `${scopedPrefix}:user:${userIdentity.toLowerCase()}`;
+  }
+
+  const deviceIdentity = firstLinkedTestDetailValue(row.details, [
+    'deviceId',
+    'ncentralDeviceId',
+    'endpointId',
+    'protectedSystemId',
+    'machineId',
+    'computerId',
+    'assetId',
+    'systemId',
+  ]);
+  if (deviceIdentity) {
+    return `${scopedPrefix}:device:${deviceIdentity.toLowerCase()}`;
+  }
+
+  const hostnameIdentity = firstLinkedTestDetailValue(row.details, [
+    'hostname',
+    'deviceName',
+    'computerName',
+    'agentHostname',
+    'deviceHostname',
+  ]);
+  if (hostnameIdentity) {
+    return `${scopedPrefix}:host:${hostnameIdentity.toLowerCase()}`;
+  }
+
+  const serialIdentity = firstLinkedTestDetailValue(row.details, ['serialNumber', 'serial']);
+  if (serialIdentity) {
+    return `${scopedPrefix}:serial:${serialIdentity.toLowerCase()}`;
+  }
+
+  return `${row.sourceType}:row:${row.rowId}`;
+}
+
+function firstLinkedTestDetailValue(
+  details: Record<string, string | number | boolean | null | undefined>,
+  keys: string[],
+) {
+  const normalizedKeys = new Set(keys.map(normalizeLinkedField));
+  for (const [key, value] of Object.entries(details)) {
+    if (!normalizedKeys.has(normalizeLinkedField(key))) {
+      continue;
+    }
+
+    const normalizedValue = String(value ?? '').trim();
+    if (normalizedValue) {
+      return normalizedValue;
+    }
+  }
+
+  return undefined;
+}
+
+type LinkedDatasetQuery = {
+  values: unknown[];
+  sql: string;
+  fieldSet: 'vendor-usage' | 'microsoft-365-licenses';
+  label: string;
+};
+
+type LinkedSqlContext = {
+  fieldSet: LinkedDatasetQuery['fieldSet'];
+  tableAlias: string;
+  values: unknown[];
+};
+
+async function loadProductLinkRule(
+  database: Queryable,
+  vendorId: IntegrationId,
+  ruleId: string,
+) {
+  const result = await database.query<ProductLinkRuleRow>(
+    `select
+       id,
+       vendor_id,
+       source_vendor_product_key,
+       rule_name,
+       sources,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at
+     from vendor_product_link_rules
+     where vendor_id = $1
+       and id = $2::uuid`,
+    [vendorId, ruleId],
+  );
+
+  return result.rows[0] ? mapProductLinkRuleRow(result.rows[0]) : undefined;
+}
+
+async function loadProductLinkRuleTestScope(
+  database: Queryable,
+  customerId: string,
+  agreementId?: string,
+) {
+  const result = await database.query<ProductLinkRuleTestScopeRow>(
+    `select
+       customers.name as customer_name,
+       agreements.name as agreement_name
+     from customers
+     left join agreements
+       on agreements.id = $2::uuid
+      and agreements.customer_id = customers.id
+     where customers.id = $1::uuid
+     limit 1`,
+    [customerId, agreementId ?? null],
+  );
+  const row = result.rows[0];
+
+  return {
+    customerName: row?.customer_name ?? undefined,
+    agreementName: row?.agreement_name ?? undefined,
+  };
+}
+
+async function loadProductLinkRuleTestRows(
+  database: Queryable,
+  source: ProductLinkRuleSource,
+  customerId: string,
+  agreementId?: string,
+) {
+  if (source.sourceType === 'vendor-product') {
+    return loadVendorProductLinkRuleTestRows(database, source, customerId, agreementId);
+  }
+
+  if (source.sourceType === 'filtered-dataset') {
+    return loadFilteredDatasetLinkRuleTestRows(database, source, customerId, agreementId);
+  }
+
+  return loadConnectWiseAdditionLinkRuleTestRows(database, source, customerId, agreementId);
+}
+
+async function loadVendorProductLinkRuleTestRows(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'vendor-product' }>,
+  customerId: string,
+  agreementId?: string,
+): Promise<ProductLinkRuleTestRow[]> {
+  const result = await database.query<ProductLinkRuleTestRowRecord>(
+    `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     approved_account_mappings as (
+       select vendor_id,
+              external_account_id,
+              customer_id,
+              agreement_id
+       from vendor_account_mappings
+       where vendor_id = $1
+         and active = true
+         and mapping_status = 'approved'
+     ),
+     mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join approved_account_mappings
+         on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+       where vendor_usage_snapshots.vendor_id = $1
+         and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+         and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         and exists (
+           select 1
+           from vendor_product_mappings
+           where vendor_product_mappings.vendor_id = $1
+             and vendor_product_mappings.active = true
+             and vendor_product_mappings.mapping_status = 'approved'
+             and replace(replace(vendor_product_mappings.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+         )
+     )
+     select
+       mapped_snapshots.id::text as row_id,
+       mapped_snapshots.effective_customer_id::text as customer_id,
+       mapped_snapshots.effective_agreement_id::text as agreement_id,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.vendor_product_key as product_key,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       coalesce(nullif(mapped_snapshots.product_name, ''), mapped_snapshots.vendor_product_key, mapped_snapshots.id::text) as row_label,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       jsonb_strip_nulls(
+         jsonb_build_object(
+           'External account', mapped_snapshots.external_account_id,
+           'Product key', mapped_snapshots.vendor_product_key,
+           'Product code', mapped_snapshots.product_code,
+           'Product name', mapped_snapshots.product_name,
+           'Quantity', mapped_snapshots.quantity
+         ) || coalesce(mapped_snapshots.dimensions, '{}'::jsonb)
+       ) as details
+     from mapped_snapshots
+     where mapped_snapshots.effective_customer_id = $3::uuid
+       and ($4::uuid is null or mapped_snapshots.effective_agreement_id = $4::uuid)
+     order by mapped_snapshots.product_name, mapped_snapshots.external_account_id, mapped_snapshots.id`,
+    [source.vendorId, canonicalVendorProductKey(source.vendorProductKey), customerId, agreementId ?? null],
+  );
+
+  return mapProductLinkRuleTestRowRecords(result.rows, source, productLinkRuleTestSourceLabel(source));
+}
+
+async function loadFilteredDatasetLinkRuleTestRows(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>,
+  customerId: string,
+  agreementId?: string,
+): Promise<ProductLinkRuleTestRow[]> {
+  const query = linkedDatasetBaseQuery(source);
+  const context: LinkedSqlContext = {
+    fieldSet: query.fieldSet,
+    tableAlias: 'mapped_snapshots',
+    values: [...query.values],
+  };
+  const filterSql = linkedFilterSql(source.filter, context);
+  const contributionSql = linkedRowContributionSql(source.aggregation, {
+    ...context,
+    tableAlias: 'filtered_rows',
+  });
+  const customerParam = pushLinkedParam(context.values, customerId);
+  const agreementParam = pushLinkedParam(context.values, agreementId ?? null);
+  const detailSql = linkedTestDetailSql(query.fieldSet, 'filtered_rows');
+  const productKeySql = linkedTestProductKeySql(query.fieldSet, 'filtered_rows');
+  const productCodeSql = linkedTestProductCodeSql(query.fieldSet, 'filtered_rows');
+  const productNameSql = linkedTestProductNameSql(query.fieldSet, 'filtered_rows');
+  const rowLabelSql = linkedTestRowLabelSql(query.fieldSet, 'filtered_rows');
+
+  const result = await database.query<ProductLinkRuleTestRowRecord>(
+    `${query.sql},
+     filtered_rows as (
+       select *
+       from mapped_snapshots
+       where mapped_snapshots.effective_customer_id = ${customerParam}::uuid
+         and (${agreementParam}::uuid is null or mapped_snapshots.effective_agreement_id = ${agreementParam}::uuid)
+         and ${filterSql}
+     )
+     select
+       filtered_rows.id::text as row_id,
+       filtered_rows.effective_customer_id::text as customer_id,
+       filtered_rows.effective_agreement_id::text as agreement_id,
+       filtered_rows.external_account_id,
+       ${productKeySql} as product_key,
+       ${productCodeSql} as product_code,
+       ${productNameSql} as product_name,
+       ${rowLabelSql} as row_label,
+       ${contributionSql} as quantity,
+       filtered_rows.observed_at,
+       ${detailSql} as details
+     from filtered_rows
+     order by row_label, external_account_id, row_id`,
+    context.values,
+  );
+
+  return mapProductLinkRuleTestRowRecords(result.rows, source, productLinkRuleTestSourceLabel(source, query.label));
+}
+
+async function loadConnectWiseAdditionLinkRuleTestRows(
+  database: Queryable,
+  source: Extract<ProductLinkRuleSource, { sourceType: 'connectwise-addition' }>,
+  customerId: string,
+  agreementId?: string,
+): Promise<ProductLinkRuleTestRow[]> {
+  const result = await database.query<ProductLinkRuleTestRowRecord>(
+    `select
+       agreement_additions.id::text as row_id,
+       agreement_additions.customer_id::text as customer_id,
+       agreement_additions.agreement_id::text as agreement_id,
+       null::text as external_account_id,
+       null::text as product_key,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       coalesce(nullif(agreement_additions.product_name, ''), agreement_additions.product_code, agreement_additions.id::text) as row_label,
+       agreement_additions.quantity,
+       coalesce(agreement_additions.updated_at, agreement_additions.created_at) as observed_at,
+       jsonb_strip_nulls(
+         jsonb_build_object(
+           'ConnectWise addition ID', agreement_additions.connectwise_addition_id,
+           'Product code', agreement_additions.product_code,
+           'Product name', agreement_additions.product_name,
+           'Quantity', agreement_additions.quantity,
+           'Unit price', agreement_additions.unit_price,
+           'Status', agreement_additions.addition_status
+         )
+       ) as details
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where agreement_additions.product_code = $1
+       and agreement_additions.customer_id = $2::uuid
+       and ($3::uuid is null or agreement_additions.agreement_id = $3::uuid)
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     order by agreement_additions.product_name, agreement_additions.connectwise_addition_id, agreement_additions.id`,
+    [source.productCode, customerId, agreementId ?? null],
+  );
+
+  return mapProductLinkRuleTestRowRecords(result.rows, source, productLinkRuleTestSourceLabel(source));
+}
+
+function mapProductLinkRuleTestRowRecords(
+  rows: ProductLinkRuleTestRowRecord[],
+  source: ProductLinkRuleSource,
+  sourceLabel: string,
+): ProductLinkRuleTestRow[] {
+  return rows.map((row) => ({
+    sourceType: source.sourceType,
+    sourceLabel,
+    rowId: row.row_id,
+    rowLabel: row.row_label ?? row.row_id,
+    customerId: row.customer_id ?? undefined,
+    agreementId: row.agreement_id ?? undefined,
+    externalAccountId: row.external_account_id ?? undefined,
+    productKey: row.product_key ? canonicalVendorProductKey(row.product_key) : undefined,
+    productCode: row.product_code ?? undefined,
+    productName: row.product_name ?? undefined,
+    quantity: nullableNumber(row.quantity) ?? 0,
+    observedAt: isoDate(row.observed_at),
+    details: primitiveRecord(row.details),
+  }));
+}
+
+function productLinkRuleTestSourceLabel(source: ProductLinkRuleSource, fallbackLabel?: string) {
+  if (source.sourceType === 'connectwise-addition') {
+    return `ConnectWise / ${source.productName ?? source.productCode}`;
+  }
+
+  if (source.sourceType === 'filtered-dataset') {
+    return source.label?.trim() || fallbackLabel || `${integrationDisplayName(source.vendorId)} / Filtered dataset`;
+  }
+
+  return `${integrationDisplayName(source.vendorId)} / ${source.vendorProductName ?? source.vendorProductKey}`;
+}
+
+function linkedDatasetBaseQuery(source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>): LinkedDatasetQuery {
+  if (source.vendorId === 'microsoft-365' && source.dataset === 'licenses') {
+    return microsoft365LicenseLinkedDatasetQuery();
+  }
+
+  return vendorUsageLinkedDatasetQuery(source);
+}
+
+function microsoft365LicenseLinkedDatasetQuery(): LinkedDatasetQuery {
+  return {
+    values: [microsoft365DatasetEntities('licenses')],
+    fieldSet: 'microsoft-365-licenses',
+    label: `${integrationDisplayName('microsoft-365')} / Licenses`,
+    sql: `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = 'microsoft-365'
+         and status = 'complete'
+         and metadata->>'entity' = any($1::text[])
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     mapped_snapshots as (
+       select
+         microsoft365_subscription_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else microsoft365_subscription_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else microsoft365_subscription_snapshots.agreement_id
+         end as effective_agreement_id
+       from microsoft365_subscription_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = 'microsoft-365'
+        and vendor_account_mappings.external_account_id = microsoft365_subscription_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where microsoft365_subscription_snapshots.sync_run_id = (select id from latest_sync_run)
+     )`,
+  };
+}
+
+function vendorUsageLinkedDatasetQuery(
+  source: Extract<ProductLinkRuleSource, { sourceType: 'filtered-dataset' }>,
+): LinkedDatasetQuery {
+  const values: unknown[] = [source.vendorId];
+  const entityFilter =
+    source.vendorId === 'microsoft-365'
+      ? `and metadata->>'entity' = any(${pushLinkedParam(values, microsoft365DatasetEntities('users'))}::text[])`
+      : '';
+  return {
+    values,
+    fieldSet: 'vendor-usage',
+    label: `${integrationDisplayName(source.vendorId)} / ${source.dataset === 'users' ? 'Users' : 'Usage snapshots'}`,
+    sql: `with latest_sync_run as (
+       select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'complete'
+         and coalesce(metadata->>'source', '') <> 'invoice-table'
+         ${entityFilter}
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.vendor_id = $1
+         and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+     )`,
+  };
+}
+
+function linkedFilterSql(node: ProductLinkRuleFilterNode, context: LinkedSqlContext): string {
+  if (node.nodeType === 'group') {
+    const children = node.children.map((child) => linkedFilterSql(child, context)).filter(Boolean);
+    if (children.length === 0) {
+      return 'true';
+    }
+
+    return `(${children.join(node.operator === 'or' ? ' or ' : ' and ')})`;
+  }
+
+  const expression = `coalesce(${linkedDatasetFieldSql(node.field, context)}, '')`;
+  if (node.operator === 'is-empty') {
+    return `nullif(trim(${expression}), '') is null`;
+  }
+
+  if (node.operator === 'is-not-empty') {
+    return `nullif(trim(${expression}), '') is not null`;
+  }
+
+  const valueParam = pushLinkedParam(context.values, node.value ?? '');
+  if (node.operator === 'contains') {
+    return `${expression} ilike '%' || ${valueParam}::text || '%'`;
+  }
+
+  if (node.operator === 'not-contains') {
+    return `not (${expression} ilike '%' || ${valueParam}::text || '%')`;
+  }
+
+  if (node.operator === 'starts-with') {
+    return `${expression} ilike ${valueParam}::text || '%'`;
+  }
+
+  if (node.operator === 'ends-with') {
+    return `${expression} ilike '%' || ${valueParam}::text`;
+  }
+
+  if (node.operator === 'not-equals') {
+    return `lower(${expression}) <> lower(${valueParam}::text)`;
+  }
+
+  return `lower(${expression}) = lower(${valueParam}::text)`;
+}
+
+function linkedRowContributionSql(aggregation: ProductLinkRuleAggregation, context: LinkedSqlContext) {
+  if (aggregation.type === 'row-count') {
+    return '1::numeric';
+  }
+
+  const expression = `trim(coalesce(${linkedDatasetFieldSql(aggregation.column, context)}, ''))`;
+  return `case when ${expression} ~ '^-?[0-9]+(\\.[0-9]+)?$' then ${expression}::numeric else 0 end`;
+}
+
+function linkedDatasetFieldSql(field: string, context: LinkedSqlContext) {
+  const normalized = normalizeLinkedField(field);
+  const source = context.tableAlias;
+  const commonFields: Record<string, string> = {
+    customerid: `${source}.effective_customer_id::text`,
+    agreementid: `${source}.effective_agreement_id::text`,
+    externalaccountid: `${source}.external_account_id`,
+    tenantid: `${source}.external_account_id`,
+    productkey: `${source}.vendor_product_key`,
+    vendorproductkey: `${source}.vendor_product_key`,
+    productcode: `${source}.product_code`,
+    productname: `${source}.product_name`,
+    quantity: `${source}.quantity::text`,
+    observedat: `${source}.observed_at::text`,
+  };
+  const microsoft365LicenseFields: Record<string, string> = {
+    customerid: `${source}.effective_customer_id::text`,
+    agreementid: `${source}.effective_agreement_id::text`,
+    externalaccountid: `${source}.external_account_id`,
+    tenantid: `${source}.external_account_id`,
+    tenantname: `${source}.tenant_name`,
+    tenantdefaultdomain: `${source}.tenant_default_domain_name`,
+    skuid: `${source}.sku_id`,
+    skupartnumber: `${source}.sku_part_number`,
+    skuname: `${source}.sku_name`,
+    licensename: `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id)`,
+    productname: `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id)`,
+    subscriptionstatus: `${source}.subscription_status`,
+    capabilitystatus: `${source}.capability_status`,
+    totalunits: `${source}.total_units::text`,
+    assignedunits: `${source}.assigned_units::text`,
+    unassignedunits: `${source}.unassigned_units::text`,
+    enabledunits: `${source}.enabled_units::text`,
+    suspendedunits: `${source}.suspended_units::text`,
+    warningunits: `${source}.warning_units::text`,
+    lockedoutunits: `${source}.locked_out_units::text`,
+    subscriptioncount: `${source}.subscription_count::text`,
+    istrial: `${source}.is_trial::text`,
+    nextlifecycleat: `${source}.next_lifecycle_at::text`,
+    billingtype: `${source}.billing_type`,
+    billingcycle: `${source}.billing_cycle`,
+    billingterm: `${source}.billing_term`,
+    observedat: `${source}.observed_at::text`,
+  };
+  const mappedField =
+    context.fieldSet === 'microsoft-365-licenses'
+      ? microsoft365LicenseFields[normalized]
+      : commonFields[normalized];
+  if (mappedField) {
+    return mappedField;
+  }
+
+  const fieldParam = pushLinkedParam(context.values, normalized);
+  return `coalesce(
+    (
+      select dimension_entry.value
+      from jsonb_each_text(${source}.dimensions) as dimension_entry(key, value)
+      where regexp_replace(lower(dimension_entry.key), '[^a-z0-9]+', '', 'g') = ${fieldParam}::text
+      limit 1
+    ),
+    (
+      select raw_entry.value
+      from jsonb_each_text(${source}.raw_payload) as raw_entry(key, value)
+      where regexp_replace(lower(raw_entry.key), '[^a-z0-9]+', '', 'g') = ${fieldParam}::text
+      limit 1
+    )
+  )`;
+}
+
+function linkedTestProductKeySql(fieldSet: LinkedDatasetQuery['fieldSet'], source: string) {
+  return fieldSet === 'microsoft-365-licenses'
+    ? `coalesce(${source}.sku_part_number, ${source}.sku_id)`
+    : `${source}.vendor_product_key`;
+}
+
+function linkedTestProductCodeSql(fieldSet: LinkedDatasetQuery['fieldSet'], source: string) {
+  return fieldSet === 'microsoft-365-licenses'
+    ? `coalesce(${source}.sku_part_number, ${source}.sku_id)`
+    : `${source}.product_code`;
+}
+
+function linkedTestProductNameSql(fieldSet: LinkedDatasetQuery['fieldSet'], source: string) {
+  return fieldSet === 'microsoft-365-licenses'
+    ? `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id)`
+    : `${source}.product_name`;
+}
+
+function linkedTestRowLabelSql(fieldSet: LinkedDatasetQuery['fieldSet'], source: string) {
+  return fieldSet === 'microsoft-365-licenses'
+    ? `coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id, ${source}.id::text)`
+    : `coalesce(nullif(${source}.product_name, ''), ${source}.vendor_product_key, ${source}.id::text)`;
+}
+
+function linkedTestDetailSql(fieldSet: LinkedDatasetQuery['fieldSet'], source: string) {
+  if (fieldSet === 'microsoft-365-licenses') {
+    return `jsonb_strip_nulls(
+      jsonb_build_object(
+        'Tenant', ${source}.tenant_name,
+        'Default domain', ${source}.tenant_default_domain_name,
+        'SKU', coalesce(${source}.sku_name, ${source}.sku_part_number, ${source}.sku_id),
+        'SKU part number', ${source}.sku_part_number,
+        'Total units', ${source}.total_units,
+        'Assigned units', ${source}.assigned_units,
+        'Subscription status', ${source}.subscription_status,
+        'Capability status', ${source}.capability_status,
+        'Billing cycle', ${source}.billing_cycle,
+        'Billing term', ${source}.billing_term
+      ) || coalesce(${source}.dimensions, '{}'::jsonb)
+    )`;
+  }
+
+  return `jsonb_strip_nulls(
+    jsonb_build_object(
+      'External account', ${source}.external_account_id,
+      'Product key', ${source}.vendor_product_key,
+      'Product code', ${source}.product_code,
+      'Product name', ${source}.product_name,
+      'Quantity', ${source}.quantity
+    ) || coalesce(${source}.dimensions, '{}'::jsonb)
+  )`;
+}
+
+function pushLinkedParam(values: unknown[], value: unknown) {
+  values.push(value);
+  return `$${values.length}`;
+}
+
+function normalizeLinkedField(field: string) {
+  return field.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function microsoft365DatasetEntities(dataset: 'users' | 'licenses') {
+  return dataset === 'licenses'
+    ? ['m365-licenses', 'license-snapshots']
+    : ['m365-users', 'license-snapshots'];
+}
+
+function integrationDisplayName(integrationId: IntegrationId) {
+  return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
 }
 
 export async function upsertProductBundle(
@@ -1789,36 +2698,43 @@ function isContainedPhrase(longer: string, shorter: string) {
 
 async function listAccountMappings(database: Queryable, vendorId: IntegrationId): Promise<AccountMapping[]> {
   const result = await database.query<AccountMappingRow>(
-    `with latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-       order by completed_at desc nulls last, started_at desc
-       limit 1
-     ),
+    `with ${sqlLatestVendorUsageSyncRunCte()},
+     ${sqlMicrosoft365AccountNameCtes()},
      source_account_names as (
        select
-         external_account_id,
+         usage_account_names.external_account_id,
          coalesce(
-           max(nullif(dimensions->>'dattoExternalAccountName', '')),
-           max(nullif(dimensions->>'coveCustomerName', '')),
-           max(nullif(dimensions->>'ncentralCustomerName', '')),
-           max(nullif(dimensions->>'tenantName', '')),
-           max(nullif(dimensions->>'tenantDefaultDomainName', '')),
-           max(nullif(dimensions->>'customerName', '')),
-           max(nullif(dimensions->>'appRiverCustomerName', '')),
-           max(nullif(dimensions->>'dattoCustomerName', '')),
-           max(nullif(dimensions->>'domain', '')),
-           external_account_id
+           usage_account_names.usage_external_account_name,
+           microsoft365_subscription_account_names.external_account_name,
+           usage_account_names.external_account_id
          ) as external_account_name,
-         max(observed_at) as last_seen_at
-       from vendor_usage_snapshots
-       where vendor_id = $1
-         and external_account_id is not null
-         and sync_run_id = (select id from latest_sync_run)
-       group by external_account_id
+         usage_account_names.last_seen_at
+       from (
+         select
+           external_account_id,
+           ${sqlUsageSnapshotAccountNameAggregate()} as usage_external_account_name,
+           max(observed_at) as last_seen_at
+         from vendor_usage_snapshots
+         where vendor_id = $1
+           and external_account_id is not null
+           and sync_run_id = (select id from latest_sync_run)
+         group by external_account_id
+       ) usage_account_names
+       left join microsoft365_subscription_account_names
+         on microsoft365_subscription_account_names.external_account_id = usage_account_names.external_account_id
+       union all
+       select
+         microsoft365_subscription_account_names.external_account_id,
+         microsoft365_subscription_account_names.external_account_name,
+         null::timestamptz as last_seen_at
+       from microsoft365_subscription_account_names
+       where not exists (
+         select 1
+         from vendor_usage_snapshots
+         where vendor_id = $1
+           and vendor_usage_snapshots.external_account_id = microsoft365_subscription_account_names.external_account_id
+           and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+       )
      ),
      app_river_account_aliases as (
        select
@@ -1858,7 +2774,9 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
        coalesce(
          source_account_names.external_account_name,
          app_river_account_aliases.external_account_name,
-         vendor_account_mappings.external_account_name
+         ${sqlFriendlyLabel('vendor_account_mappings.external_account_name', 'vendor_account_mappings.external_account_id')},
+         microsoft365_subscription_account_names.external_account_name,
+         vendor_account_mappings.external_account_id
        ) as external_account_name,
        vendor_account_mappings.customer_id,
        customers.name as customer_name,
@@ -1898,11 +2816,22 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
          app_river_account_aliases.external_account_id,
          vendor_account_mappings.external_account_id
        )
+     left join microsoft365_subscription_account_names
+       on microsoft365_subscription_account_names.external_account_id = coalesce(
+         app_river_account_aliases.external_account_id,
+         vendor_account_mappings.external_account_id
+       )
      where vendor_account_mappings.vendor_id = $1
        and ($1 <> 'datto' or source_account_names.external_account_id is not null)
      order by
        vendor_account_mappings.mapping_status,
-       coalesce(source_account_names.external_account_name, app_river_account_aliases.external_account_name, vendor_account_mappings.external_account_name),
+       coalesce(
+         source_account_names.external_account_name,
+         app_river_account_aliases.external_account_name,
+         ${sqlFriendlyLabel('vendor_account_mappings.external_account_name', 'vendor_account_mappings.external_account_id')},
+         microsoft365_subscription_account_names.external_account_name,
+         vendor_account_mappings.external_account_id
+       ),
        case
          when app_river_account_aliases.external_account_id is not null
           and app_river_account_aliases.external_account_id <> vendor_account_mappings.external_account_id then 1
@@ -1948,15 +2877,7 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
           and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
       )
      left join (
-       with latest_sync_run as (
-         select id
-         from sync_runs
-         where integration_id = $1
-           and status = 'complete'
-           and coalesce(metadata->>'source', '') <> 'invoice-table'
-         order by completed_at desc nulls last, started_at desc
-         limit 1
-       ),
+       with ${sqlLatestVendorUsageSyncRunCte()},
        latest_invoice_import as (
          select id
          from invoice_imports
@@ -2027,15 +2948,8 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
 
 async function loadVendorAccountSources(database: Queryable, vendorId: IntegrationId): Promise<VendorAccountSource[]> {
   const result = await database.query<AccountSourceRow>(
-    `with latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-       order by completed_at desc nulls last, started_at desc
-       limit 1
-     ),
+    `with ${sqlLatestVendorUsageSyncRunCte()},
+     ${sqlMicrosoft365AccountNameCtes()},
      latest_invoice_import as (
        select id
        from invoice_imports
@@ -2046,18 +2960,7 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
      api_account_rows as (
        select
          external_account_id,
-         coalesce(
-           nullif(dimensions->>'dattoExternalAccountName', ''),
-           nullif(dimensions->>'coveCustomerName', ''),
-           nullif(dimensions->>'ncentralCustomerName', ''),
-           nullif(dimensions->>'tenantName', ''),
-           nullif(dimensions->>'tenantDefaultDomainName', ''),
-           nullif(dimensions->>'customerName', ''),
-           nullif(dimensions->>'appRiverCustomerName', ''),
-           nullif(dimensions->>'dattoCustomerName', ''),
-           nullif(dimensions->>'domain', ''),
-           external_account_id
-         ) as external_account_name,
+         ${sqlUsageSnapshotAccountNameRow()} as external_account_name,
          observed_at,
          nullif(product_code, '') as source_product_code,
          nullif(dimensions->>'externalCustomerAccountNumber', '') as external_customer_account_number,
@@ -2138,18 +3041,33 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
          and nullif(invoice_line_items.external_account_id, '') is not null
          and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
          and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+     ),
+     aggregated_accounts as (
+       select
+         external_account_id,
+         coalesce(max(nullif(external_account_name, '')), external_account_id) as usage_external_account_name,
+         count(*)::int as row_count,
+         coalesce(
+           jsonb_agg(distinct source_product_code) filter (where source_product_code is not null),
+           '[]'::jsonb
+         ) as product_codes,
+         max(observed_at) as last_seen_at
+       from source_rows
+       group by external_account_id
      )
      select
-       external_account_id,
-       coalesce(max(nullif(external_account_name, '')), external_account_id) as external_account_name,
-       count(*)::int as row_count,
+       coalesce(aggregated_accounts.external_account_id, microsoft365_subscription_account_names.external_account_id) as external_account_id,
        coalesce(
-         jsonb_agg(distinct source_product_code) filter (where source_product_code is not null),
-         '[]'::jsonb
-       ) as product_codes,
-       max(observed_at) as last_seen_at
-     from source_rows
-     group by external_account_id
+         aggregated_accounts.usage_external_account_name,
+         microsoft365_subscription_account_names.external_account_name,
+         coalesce(aggregated_accounts.external_account_id, microsoft365_subscription_account_names.external_account_id)
+       ) as external_account_name,
+       coalesce(aggregated_accounts.row_count, 0) as row_count,
+       coalesce(aggregated_accounts.product_codes, '[]'::jsonb) as product_codes,
+       aggregated_accounts.last_seen_at
+     from aggregated_accounts
+     full outer join microsoft365_subscription_account_names
+       on microsoft365_subscription_account_names.external_account_id = aggregated_accounts.external_account_id
      order by external_account_name`,
     [vendorId],
   );
@@ -2168,15 +3086,7 @@ async function loadVendorProductSources(
   vendorId: IntegrationId,
 ): Promise<Array<{ vendorProductKey: string; vendorProductName: string; rowCount: number; customerCount: number }>> {
   const result = await database.query<VendorProductSourceRow>(
-    `with latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-       order by completed_at desc nulls last, started_at desc
-       limit 1
-     ),
+    `with ${sqlLatestVendorUsageSyncRunCte()},
      latest_invoice_import as (
        select id
        from invoice_imports
@@ -2480,26 +3390,76 @@ async function upsertAccountMapping(
 
 async function loadExternalAccountName(database: Queryable, vendorId: IntegrationId, externalAccountId: string) {
   const result = await database.query<{ external_account_name: string | null }>(
-     `select coalesce(
-       max(nullif(dimensions->>'dattoExternalAccountName', '')),
-       max(nullif(dimensions->>'coveCustomerName', '')),
-       max(nullif(dimensions->>'ncentralCustomerName', '')),
-       max(nullif(dimensions->>'tenantName', '')),
-       max(nullif(dimensions->>'tenantDefaultDomainName', '')),
-       max(nullif(dimensions->>'customerName', '')),
-       max(nullif(dimensions->>'appRiverCustomerName', '')),
-       max(nullif(dimensions->>'dattoCustomerName', '')),
-       max(nullif(dimensions->>'domain', '')),
-       external_account_id
-     ) as external_account_name
-     from vendor_usage_snapshots
-     where vendor_id = $1
-       and external_account_id = $2
-     group by external_account_id`,
+    `with usage_account_name as (
+       select ${sqlUsageSnapshotAccountNameAggregate()} as external_account_name
+       from vendor_usage_snapshots
+       where vendor_id = $1
+         and external_account_id = $2
+       group by external_account_id
+     ),
+     subscription_account_name as (
+       select coalesce(
+         ${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_name', 'microsoft365_subscription_snapshots.external_account_id')},
+         ${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_default_domain_name', 'microsoft365_subscription_snapshots.external_account_id')},
+         ${sqlFriendlyLabel("microsoft365_subscription_snapshots.dimensions->>'tenantName'", 'microsoft365_subscription_snapshots.external_account_id')},
+         ${sqlFriendlyLabel("microsoft365_subscription_snapshots.dimensions->>'tenantDefaultDomainName'", 'microsoft365_subscription_snapshots.external_account_id')}
+       ) as external_account_name
+       from microsoft365_subscription_snapshots
+       where $1::text = 'microsoft-365'
+         and external_account_id = $2
+       order by observed_at desc nulls last
+       limit 1
+     )
+     select coalesce(
+       (select external_account_name from usage_account_name),
+       (select external_account_name from subscription_account_name),
+       $2::text
+     ) as external_account_name`,
     [vendorId, externalAccountId],
   );
 
   return result.rows[0]?.external_account_name ?? externalAccountId;
+}
+
+async function refreshMicrosoft365AccountMappingNames(database: Queryable) {
+  await database.query(
+    `with ${sqlLatestVendorUsageSyncRunCte()},
+     ${sqlMicrosoft365AccountNameCtes()},
+     usage_account_names as (
+       select
+         external_account_id,
+         ${sqlUsageSnapshotAccountNameAggregate()} as external_account_name
+       from vendor_usage_snapshots
+       where vendor_id = 'microsoft-365'
+         and external_account_id is not null
+         and sync_run_id = (select id from latest_sync_run)
+       group by external_account_id
+     ),
+     resolved_names as (
+       select
+         coalesce(usage_account_names.external_account_id, microsoft365_subscription_account_names.external_account_id) as external_account_id,
+         coalesce(
+           usage_account_names.external_account_name,
+           microsoft365_subscription_account_names.external_account_name
+         ) as external_account_name
+       from usage_account_names
+       full outer join microsoft365_subscription_account_names
+         on microsoft365_subscription_account_names.external_account_id = usage_account_names.external_account_id
+     )
+     update vendor_account_mappings
+     set external_account_name = resolved_names.external_account_name,
+         updated_at = now()
+     from resolved_names
+     where vendor_account_mappings.vendor_id = 'microsoft-365'
+       and vendor_account_mappings.external_account_id = resolved_names.external_account_id
+       and nullif(resolved_names.external_account_name, '') is not null
+       and (
+         vendor_account_mappings.external_account_name is null
+         or lower(trim(vendor_account_mappings.external_account_name)) ~ ${SQL_GUID_PATTERN}
+         or lower(trim(vendor_account_mappings.external_account_name)) = lower(trim(vendor_account_mappings.external_account_id))
+       )`,
+    ['microsoft-365'],
+  );
 }
 
 async function loadCanonicalVendorAccount(
@@ -3378,12 +4338,29 @@ function parseJson(value: unknown): unknown {
   return value;
 }
 
+function primitiveRecord(value: unknown): Record<string, string | number | boolean | null | undefined> {
+  const parsed = parseJson(value);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(parsed as Record<string, unknown>).flatMap(([key, entry]) =>
+      isPrimitiveDetail(entry) || typeof entry === 'undefined' ? [[key, entry]] : [],
+    ),
+  );
+}
+
 function isMissingDatabaseRelation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
 }
 
 function isPrimitiveEvidence(value: unknown): value is string | number | boolean {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function isPrimitiveDetail(value: unknown): value is string | number | boolean | null {
+  return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
 }
 
 function isoDate(value: Date | string | null | undefined) {

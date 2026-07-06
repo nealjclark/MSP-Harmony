@@ -49,6 +49,16 @@ This is the living execution backlog. The README stays high-level; this file tra
 - Add Pax8 SKU mapping and marketplace import support.
 - Expand mapping and bundle rules only after the first MVP path is stable.
 
+## Mappings UX
+
+- Add a **Test** button to linked count rules on the mappings **Linked counts** section (`/microsoft-365/mappings` and other integration mapping pages).
+- The test flow should let the reviewer pick a **customer** (from mapped ConnectWise customers / customer options already loaded in the mappings workspace).
+- Run the selected rule's source evaluation for that customer only and show the **rows returned** that drive the linked count (not just the final quantity).
+- Include enough row detail to debug filtered-dataset rules: matched columns/values, source label, dataset, and aggregation result.
+- Reuse the same backend evaluation path as reconciliation where possible (`loadLinkedSourceTotals` / `loadLinkedCountContext` in `src/backend/api/reconciliationRuns.ts`) so test results match reconcile behavior.
+- Show an empty-state message when the rule matches zero rows for the selected customer.
+- Add API support if needed (for example `GET /api/mappings/{vendorId}/linked-products/{ruleId}/test?customerId=...`) plus a unit test for customer-scoped rule evaluation.
+
 ## Current Definition of Done
 
 - `npm test` passes.

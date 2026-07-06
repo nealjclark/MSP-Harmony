@@ -1018,6 +1018,43 @@ type ProductLinkRule = {
   updatedAt?: string;
 };
 
+type ProductLinkRuleTestRow = {
+  sourceType: ProductLinkRuleSource['sourceType'];
+  sourceLabel: string;
+  rowId: string;
+  rowLabel: string;
+  customerId?: string;
+  agreementId?: string;
+  externalAccountId?: string;
+  productKey?: string;
+  productCode?: string;
+  productName?: string;
+  quantity: number;
+  observedAt?: string;
+  details: DimensionMap;
+};
+
+type ProductLinkRuleTestSourceTotal = {
+  sourceType: ProductLinkRuleSource['sourceType'];
+  label: string;
+  quantity: number;
+  rowCount: number;
+};
+
+type ProductLinkRuleTestResult = {
+  vendorId: IntegrationId;
+  ruleId: string;
+  ruleName: string;
+  sourceVendorProductKey: string;
+  customerId: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  total: number;
+  rows: ProductLinkRuleTestRow[];
+  sourceTotals: ProductLinkRuleTestSourceTotal[];
+};
+
 type ProductCatalogTarget = ProductMappingTarget & {
   connectwiseProductId?: string;
   source: 'local' | 'connectwise';
@@ -3061,9 +3098,9 @@ async function saveProductLinkRuleRequest(
   return body as unknown as { vendorId: IntegrationId; rule: ProductLinkRule };
 }
 
-async function deactivateProductLinkRuleRequest(integrationId: IntegrationId, ruleId: string) {
+async function setProductLinkRuleActiveRequest(integrationId: IntegrationId, ruleId: string, active: boolean) {
   const response = await fetch(
-    `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}/deactivate`,
+    `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}/${active ? 'activate' : 'deactivate'}`,
     {
       method: 'POST',
       headers: {
@@ -3075,8 +3112,49 @@ async function deactivateProductLinkRuleRequest(integrationId: IntegrationId, ru
   const body = await responseJson(response);
 
   if (!response.ok) {
-    throw new Error(String(body.error ?? `Linked count rule deactivation failed with HTTP ${response.status}.`));
+    throw new Error(String(body.error ?? `Linked count rule update failed with HTTP ${response.status}.`));
   }
+}
+
+async function deleteProductLinkRuleRequest(integrationId: IntegrationId, ruleId: string) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Linked count rule deletion failed with HTTP ${response.status}.`));
+  }
+}
+
+async function testProductLinkRuleRequest(
+  integrationId: IntegrationId,
+  ruleId: string,
+  payload: { customerId: string; agreementId?: string },
+) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}/test`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Linked count rule test failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as ProductLinkRuleTestResult;
 }
 
 async function searchProductCatalog(integrationId: IntegrationId, query: string) {
@@ -5228,13 +5306,13 @@ function App() {
     }
   };
 
-  const deactivateProductLinkRule = async (integrationId: IntegrationId, ruleId: string) => {
+  const setProductLinkRuleActive = async (integrationId: IntegrationId, ruleId: string, active: boolean) => {
     const actionKey = `link:${ruleId}`;
     setBusyMappingAction(actionKey);
     try {
-      await deactivateProductLinkRuleRequest(integrationId, ruleId);
+      await setProductLinkRuleActiveRequest(integrationId, ruleId, active);
       await loadMappings(integrationId);
-      setMappingMessage('Linked count rule disabled.');
+      setMappingMessage(active ? 'Linked count rule re-enabled.' : 'Linked count rule disabled.');
       if (
         reconciliationComparisonRequested &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
@@ -5244,7 +5322,29 @@ function App() {
       }
     } catch (error) {
       setMappingLoadState('failed');
-      setMappingMessage(error instanceof Error ? error.message : 'Linked count rule deactivation failed.');
+      setMappingMessage(error instanceof Error ? error.message : 'Linked count rule update failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const deleteProductLinkRule = async (integrationId: IntegrationId, ruleId: string) => {
+    const actionKey = `link-delete:${ruleId}`;
+    setBusyMappingAction(actionKey);
+    try {
+      await deleteProductLinkRuleRequest(integrationId, ruleId);
+      await loadMappings(integrationId);
+      setMappingMessage('Linked count rule deleted.');
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
+        await loadVendorReconciliation(integrationId);
+      }
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Linked count rule deletion failed.');
     } finally {
       setBusyMappingAction(null);
     }
@@ -5761,7 +5861,8 @@ function App() {
               onProductTargetsSave={saveProductTargets}
               onProductBundleDeactivate={deactivateProductBundle}
               onProductBundleSave={saveProductBundle}
-              onProductLinkRuleDeactivate={deactivateProductLinkRule}
+              onProductLinkRuleActiveChange={setProductLinkRuleActive}
+              onProductLinkRuleDelete={deleteProductLinkRule}
               onProductLinkRuleSave={saveProductLinkRule}
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
@@ -7787,6 +7888,183 @@ function ProductCustomerReviewModal(props: {
   );
 }
 
+function LinkedCountTestModal(props: {
+  customers: MappingCustomerOption[];
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onAgreementChange: (agreementId: string) => void;
+  onClose: () => void;
+  onCustomerChange: (customerId: string) => void;
+  onRun: () => void;
+  result: ProductLinkRuleTestResult | null;
+  rule: ProductLinkRule;
+  selectedAgreementId: string;
+  selectedCustomerId: string;
+}) {
+  const {
+    customers,
+    loadState,
+    message,
+    onAgreementChange,
+    onClose,
+    onCustomerChange,
+    onRun,
+    result,
+    rule,
+    selectedAgreementId,
+    selectedCustomerId,
+  } = props;
+  const selectedCustomer = customers.find((customer) => customer.customerId === selectedCustomerId);
+  const agreementOptions = selectedCustomer?.agreements ?? [];
+  const statusState = loadState === 'idle' ? 'ready' : loadState;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="linked-count-test-modal" role="dialog" aria-modal="true" aria-labelledby="linked-count-test-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="linked-count-test-title">
+              <Search size={18} />
+              Test Linked Count
+            </h2>
+            <p>{rule.ruleName}</p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="linked-count-test-controls">
+          <label>
+            <span>Customer</span>
+            <select
+              disabled={loadState === 'loading'}
+              onChange={(event) => onCustomerChange(event.target.value)}
+              value={selectedCustomerId}
+            >
+              <option value="">Select customer</option>
+              {customers.map((customer) => (
+                <option key={customer.customerId} value={customer.customerId}>
+                  {customer.customerName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Agreement</span>
+            <select
+              disabled={loadState === 'loading' || !selectedCustomer}
+              onChange={(event) => onAgreementChange(event.target.value)}
+              value={selectedAgreementId}
+            >
+              <option value="">All agreements</option>
+              {agreementOptions.map((agreement) => (
+                <option key={agreement.agreementId} value={agreement.agreementId}>
+                  {agreement.agreementName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="button primary compact"
+            disabled={loadState === 'loading' || !selectedCustomerId}
+            onClick={onRun}
+            type="button"
+          >
+            <Search size={15} />
+            {loadState === 'loading' ? 'Testing' : 'Run test'}
+          </button>
+        </div>
+
+        <div className={`agreement-additions-status ${statusState}`}>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+          <span>{message}</span>
+        </div>
+
+        <div className="linked-count-test-summary">
+          <IntegrationStat label="Total" value={(result?.total ?? 0).toLocaleString()} />
+          <IntegrationStat label="Rows" value={(result?.rows.length ?? 0).toLocaleString()} />
+          <IntegrationStat label="Sources" value={(result?.sourceTotals.length ?? rule.sources.length).toLocaleString()} />
+        </div>
+
+        <div className="linked-count-source-totals" aria-label="Linked count source totals">
+          {result ? (
+            (result.sourceTotals.length > 0
+              ? result.sourceTotals
+              : rule.sources.map((source) => ({
+                  sourceType: source.sourceType,
+                  label: productLinkRuleSourceLabel(source),
+                  quantity: 0,
+                  rowCount: 0,
+                }))
+            ).map((sourceTotal) => (
+              <article key={`${sourceTotal.sourceType}-${sourceTotal.label}`}>
+                <strong>{sourceTotal.label}</strong>
+                <span>
+                  {sourceTotal.quantity.toLocaleString()} from {sourceTotal.rowCount.toLocaleString()} row
+                  {sourceTotal.rowCount === 1 ? '' : 's'}
+                </span>
+              </article>
+            ))
+          ) : (
+            (rule.sources.length > 0 ? rule.sources : [{ sourceType: 'connectwise-addition' as const, productCode: 'Source' }]).map(
+              (source, index) => (
+                <article key={`${source.sourceType}-${index}`}>
+                  <strong>{productLinkRuleSourceLabel(source)}</strong>
+                  <span>Run the test to load source totals.</span>
+                </article>
+              ),
+            )
+          )}
+        </div>
+
+        <div className="agreement-additions-table-scroll linked-count-test-table-scroll">
+          <table className="agreement-additions-table linked-count-test-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Row</th>
+                <th>Product</th>
+                <th>Qty</th>
+                <th>Observed</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result?.rows.map((row) => (
+                <tr key={`${row.sourceType}-${row.rowId}`}>
+                  <td>{row.sourceLabel}</td>
+                  <td>
+                    <strong>{row.rowLabel}</strong>
+                    <span>{row.externalAccountId ?? row.rowId}</span>
+                  </td>
+                  <td>
+                    <strong>{row.productName ?? row.productCode ?? row.productKey ?? '-'}</strong>
+                    <span>{row.productCode ?? row.productKey ?? '-'}</span>
+                  </td>
+                  <td>{row.quantity.toLocaleString()}</td>
+                  <td>{formatDateTime(row.observedAt) ?? '-'}</td>
+                  <td>{formatLinkedCountTestDetails(row.details)}</td>
+                </tr>
+              ))}
+              {result && result.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>No rows contributed to this linked count for the selected scope.</td>
+                </tr>
+              ) : null}
+              {!result ? (
+                <tr>
+                  <td colSpan={6}>Run the test to show the rows behind this linked count.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function MetricCard(props: {
   icon: typeof Activity;
   label: string;
@@ -8568,7 +8846,8 @@ function MappingsView(props: {
       targetProduct: ProductMappingTarget;
     },
   ) => Promise<boolean>;
-  onProductLinkRuleDeactivate: (integrationId: IntegrationId, ruleId: string) => Promise<void>;
+  onProductLinkRuleActiveChange: (integrationId: IntegrationId, ruleId: string, active: boolean) => Promise<void>;
+  onProductLinkRuleDelete: (integrationId: IntegrationId, ruleId: string) => Promise<void>;
   onProductLinkRuleSave: (
     integrationId: IntegrationId,
     payload: {
@@ -8601,7 +8880,8 @@ function MappingsView(props: {
     onProductTargetsSave,
     onProductBundleDeactivate,
     onProductBundleSave,
-    onProductLinkRuleDeactivate,
+    onProductLinkRuleActiveChange,
+    onProductLinkRuleDelete,
     onProductLinkRuleSave,
     onRefresh,
     onNcentralFilterMappingSave,
@@ -8642,7 +8922,6 @@ function MappingsView(props: {
   const [linkSourceMode, setLinkSourceMode] = useState<ProductLinkRuleSource['sourceType']>('vendor-product');
   const [linkSourceVendorId, setLinkSourceVendorId] = useState<IntegrationId>('microsoft-365');
   const [linkSourceDataset, setLinkSourceDataset] = useState<RawSyncDataset>('licenses');
-  const [linkSourceLabel, setLinkSourceLabel] = useState('');
   const [linkAggregationType, setLinkAggregationType] = useState<ProductLinkRuleAggregation['type']>('row-count');
   const [linkAggregationColumn, setLinkAggregationColumn] = useState('TotalUnits');
   const [linkFilterRoot, setLinkFilterRoot] = useState<ProductLinkRuleFilterNode>(() => defaultLinkedCountFilter());
@@ -8662,6 +8941,12 @@ function MappingsView(props: {
   const [linkCatalogResults, setLinkCatalogResults] = useState<ProductCatalogTarget[]>([]);
   const [linkCatalogMessage, setLinkCatalogMessage] = useState('');
   const [linkCatalogLoading, setLinkCatalogLoading] = useState(false);
+  const [linkTestRule, setLinkTestRule] = useState<ProductLinkRule | null>(null);
+  const [linkTestCustomerId, setLinkTestCustomerId] = useState('');
+  const [linkTestAgreementId, setLinkTestAgreementId] = useState('');
+  const [linkTestResult, setLinkTestResult] = useState<ProductLinkRuleTestResult | null>(null);
+  const [linkTestLoadState, setLinkTestLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [linkTestMessage, setLinkTestMessage] = useState('');
   const [overrideCustomerId, setOverrideCustomerId] = useState('');
   const [overrideAgreementId, setOverrideAgreementId] = useState('');
   const [overrideSourceProductKey, setOverrideSourceProductKey] = useState('cove-workstation');
@@ -8779,7 +9064,6 @@ function MappingsView(props: {
     setLinkRuleName('');
     setLinkSourceMode('vendor-product');
     setLinkSourceDataset('licenses');
-    setLinkSourceLabel('');
     setLinkAggregationType('row-count');
     setLinkAggregationColumn('TotalUnits');
     setLinkFilterRoot(defaultLinkedCountFilter());
@@ -8816,6 +9100,12 @@ function MappingsView(props: {
     setProductCustomerReviewLoadState('ready');
     setProductCustomerReviewMessage('');
     setSelectedProductCustomerId('');
+    setLinkTestRule(null);
+    setLinkTestCustomerId('');
+    setLinkTestAgreementId('');
+    setLinkTestResult(null);
+    setLinkTestLoadState('idle');
+    setLinkTestMessage('');
     resetBundleForm();
     resetLinkRuleForm();
   }, [dattoMappingDataset, mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
@@ -8972,6 +9262,83 @@ function MappingsView(props: {
     setSelectedProductCustomerId('');
   };
 
+  const openLinkRuleTest = (rule: ProductLinkRule) => {
+    const firstCustomer = customerOptions[0];
+    setLinkTestRule(rule);
+    setLinkTestCustomerId(firstCustomer?.customerId ?? '');
+    setLinkTestAgreementId('');
+    setLinkTestResult(null);
+    setLinkTestLoadState('idle');
+    setLinkTestMessage(
+      firstCustomer
+        ? 'Choose a customer scope and run the linked count test.'
+        : 'No mapped ConnectWise customers are available yet.',
+    );
+  };
+
+  const closeLinkRuleTest = () => {
+    setLinkTestRule(null);
+    setLinkTestCustomerId('');
+    setLinkTestAgreementId('');
+    setLinkTestResult(null);
+    setLinkTestLoadState('idle');
+    setLinkTestMessage('');
+  };
+
+  const selectLinkTestCustomer = (customerId: string) => {
+    setLinkTestCustomerId(customerId);
+    setLinkTestAgreementId('');
+    setLinkTestResult(null);
+    setLinkTestLoadState('idle');
+    setLinkTestMessage('Run the linked count test for the selected customer.');
+  };
+
+  const runLinkRuleTest = async () => {
+    if (!linkTestRule) {
+      return;
+    }
+
+    if (!linkTestCustomerId) {
+      setLinkTestLoadState('failed');
+      setLinkTestMessage('Choose a customer before running the test.');
+      return;
+    }
+
+    setLinkTestLoadState('loading');
+    setLinkTestMessage('Calculating linked count rows...');
+    try {
+      const result = await testProductLinkRuleRequest(selectedIntegrationId, linkTestRule.id, {
+        customerId: linkTestCustomerId,
+        agreementId: linkTestAgreementId || undefined,
+      });
+      setLinkTestResult(result);
+      setLinkTestLoadState('ready');
+      setLinkTestMessage(
+        `Found ${result.rows.length.toLocaleString()} row${result.rows.length === 1 ? '' : 's'} contributing ${result.total.toLocaleString()} total.`,
+      );
+    } catch (error) {
+      setLinkTestResult(null);
+      setLinkTestLoadState('failed');
+      setLinkTestMessage(error instanceof Error ? error.message : 'Linked count test failed.');
+    }
+  };
+
+  const deleteLinkRule = async (rule: ProductLinkRule) => {
+    const confirmed = window.confirm(`Delete linked count rule "${rule.ruleName}"? This cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    if (editingLinkRuleId === rule.id) {
+      resetLinkRuleForm();
+    }
+    if (linkTestRule?.id === rule.id) {
+      closeLinkRuleTest();
+    }
+
+    await onProductLinkRuleDelete(selectedIntegrationId, rule.id);
+  };
+
   const toggleProductTarget = (vendorProductKey: string, target: ProductMappingTarget) => {
     const targetCode = target.connectwiseProductCode;
     setProductTargetOverrides((current) => ({
@@ -9074,7 +9441,6 @@ function MappingsView(props: {
       setLinkSourceMode('filtered-dataset');
       setLinkSourceVendorId(firstSource.vendorId);
       setLinkSourceDataset(firstSource.dataset ?? 'users');
-      setLinkSourceLabel(firstSource.label ?? '');
       setLinkAggregationType(firstSource.aggregation.type);
       setLinkAggregationColumn(firstSource.aggregation.type === 'column-sum' ? firstSource.aggregation.column : 'TotalUnits');
       setLinkFilterRoot(firstSource.filter);
@@ -9104,7 +9470,6 @@ function MappingsView(props: {
       setLinkSourceVendorId(firstSource.vendorId);
     }
     setLinkSourceDataset('licenses');
-    setLinkSourceLabel('');
     setLinkAggregationType('row-count');
     setLinkAggregationColumn('TotalUnits');
     setLinkFilterRoot(defaultLinkedCountFilter());
@@ -9150,7 +9515,6 @@ function MappingsView(props: {
               sourceType: 'filtered-dataset' as const,
               vendorId: linkSourceVendorId,
               dataset: linkSourceVendorId === 'microsoft-365' ? linkSourceDataset : undefined,
-              label: linkSourceLabel.trim() || undefined,
               filter: linkFilterRoot,
               aggregation,
             },
@@ -9768,7 +10132,7 @@ function MappingsView(props: {
           ) : null}
         </div>
 
-        <div className="product-bundle-form linked-count-form">
+        <div className={`product-bundle-form linked-count-form${linkSourceMode === 'filtered-dataset' ? ' filtered-dataset' : ''}`}>
           <label>
             <span>{selectedIntegrationName} product</span>
             <select onChange={(event) => setLinkTargetProductKey(event.target.value)} value={linkTargetProductKey}>
@@ -9914,32 +10278,26 @@ function MappingsView(props: {
                     ))}
                   </select>
                 </label>
-                <label>
-                  <span>Source label</span>
-                  <input
-                    onChange={(event) => setLinkSourceLabel(event.target.value)}
-                    placeholder="Microsoft Business license rows"
-                    value={linkSourceLabel}
-                  />
-                </label>
               </div>
-              {Object.entries(linkDatasetMetadata.uniqueValuesByColumn).map(([column, values]) => (
-                <datalist id={`linked-filter-values-${safeDomId(column)}`} key={column}>
-                  {values.map((value) => (
-                    <option key={value} value={value} />
-                  ))}
-                </datalist>
-              ))}
-              <LinkedFilterGroupEditor
-                node={linkFilterRoot}
-                onChange={setLinkFilterRoot}
-                columns={linkFilterColumnOptions}
-                uniqueValuesByColumn={linkDatasetMetadata.uniqueValuesByColumn}
-              />
-              {linkDatasetMessage ? (
-                <span className="product-catalog-message">{linkDatasetLoadState === 'loading' ? 'Loading dataset values...' : linkDatasetMessage}</span>
-              ) : null}
-              {linkSourceMessage ? <span className="product-catalog-message">{linkSourceMessage}</span> : null}
+              <div className="linked-filter-builder">
+                {Object.entries(linkDatasetMetadata.uniqueValuesByColumn).map(([column, values]) => (
+                  <datalist id={`linked-filter-values-${safeDomId(column)}`} key={column}>
+                    {values.map((value) => (
+                      <option key={value} value={value} />
+                    ))}
+                  </datalist>
+                ))}
+                <LinkedFilterGroupEditor
+                  node={linkFilterRoot}
+                  onChange={setLinkFilterRoot}
+                  columns={linkFilterColumnOptions}
+                  uniqueValuesByColumn={linkDatasetMetadata.uniqueValuesByColumn}
+                />
+                {linkDatasetMessage ? (
+                  <span className="product-catalog-message">{linkDatasetLoadState === 'loading' ? 'Loading dataset values...' : linkDatasetMessage}</span>
+                ) : null}
+                {linkSourceMessage ? <span className="product-catalog-message">{linkSourceMessage}</span> : null}
+              </div>
             </div>
           ) : (
             <div className="product-bundle-target linked-count-source">
@@ -10033,6 +10391,15 @@ function MappingsView(props: {
               <div className="product-bundle-row-actions">
                 <button
                   className="button secondary compact"
+                  disabled={linkTestLoadState === 'loading'}
+                  onClick={() => openLinkRuleTest(rule)}
+                  type="button"
+                >
+                  <Search size={15} />
+                  Test
+                </button>
+                <button
+                  className="button secondary compact"
                   disabled={Boolean(busyAction)}
                   onClick={() => editLinkRule(rule)}
                   type="button"
@@ -10042,11 +10409,21 @@ function MappingsView(props: {
                 </button>
                 <button
                   className="button secondary compact"
-                  disabled={!rule.active || busyAction === `link:${rule.id}`}
-                  onClick={() => void onProductLinkRuleDeactivate(selectedIntegrationId, rule.id)}
+                  disabled={busyAction === `link:${rule.id}`}
+                  onClick={() => void onProductLinkRuleActiveChange(selectedIntegrationId, rule.id, !rule.active)}
                   type="button"
                 >
-                  Disable
+                  {rule.active ? <X size={15} /> : <Check size={15} />}
+                  {rule.active ? 'Disable' : 'Re-enable'}
+                </button>
+                <button
+                  className="button secondary compact danger"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => void deleteLinkRule(rule)}
+                  type="button"
+                >
+                  <X size={15} />
+                  Delete
                 </button>
               </div>
             </article>
@@ -10373,6 +10750,21 @@ function MappingsView(props: {
           onSelectCustomer={setSelectedProductCustomerId}
           review={productCustomerReview}
           selectedCustomerId={selectedProductCustomerId}
+        />
+      ) : null}
+      {linkTestRule ? (
+        <LinkedCountTestModal
+          customers={customerOptions}
+          loadState={linkTestLoadState}
+          message={linkTestMessage}
+          onAgreementChange={setLinkTestAgreementId}
+          onClose={closeLinkRuleTest}
+          onCustomerChange={selectLinkTestCustomer}
+          onRun={runLinkRuleTest}
+          result={linkTestResult}
+          rule={linkTestRule}
+          selectedAgreementId={linkTestAgreementId}
+          selectedCustomerId={linkTestCustomerId}
         />
       ) : null}
     </section>
@@ -11387,6 +11779,17 @@ function productLinkRuleSourceLabel(source: ProductLinkRuleSource) {
   }
 
   return `${integrationName(source.vendorId)}: ${source.vendorProductName ?? source.vendorProductKey}`;
+}
+
+function formatLinkedCountTestDetails(details: DimensionMap) {
+  const entries = Object.entries(details)
+    .filter(([, value]) => typeof value !== 'undefined' && value !== null && String(value).trim().length > 0)
+    .slice(0, 4);
+  if (entries.length === 0) {
+    return '-';
+  }
+
+  return entries.map(([key, value]) => `${key}: ${String(value)}`).join(' / ');
 }
 
 function buildProductGroups(rows: ProductMappingRow[]): ProductMappingGroup[] {

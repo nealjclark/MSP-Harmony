@@ -11,12 +11,15 @@ import { assertConnectWiseReady } from '../connectwise/operations';
 import {
   applyApprovedMappings,
   approveSuggestedAccountMappings,
+  deleteProductLinkRule,
   deactivateProductLinkRule,
   deactivateProductBundle,
   listProductMappingCustomers,
   listMappingState,
   runAccountAutomap,
   searchConnectWiseProductCatalog,
+  setProductLinkRuleActive,
+  testProductLinkRule,
   updateAccountMapping,
   updateProductMapping,
   upsertProductLinkRule,
@@ -448,6 +451,127 @@ export async function deactivateProductLinkRuleHttp(
   }
 }
 
+export async function activateProductLinkRuleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const ruleId = decodedRouteParam(request.params.ruleId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!ruleId) {
+    return jsonResponse(400, { error: 'Linked count rule activation requires ruleId.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Linked count rule activation needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(
+      200,
+      await setProductLinkRuleActive(repositoryContext.pool, integrationId, ruleId, true, {
+        reviewedBy: auth.principal.name,
+      }),
+    );
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to activate linked count rule.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deleteProductLinkRuleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const ruleId = decodedRouteParam(request.params.ruleId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!ruleId) {
+    return jsonResponse(400, { error: 'Linked count rule deletion requires ruleId.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Linked count rule deletion needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, await deleteProductLinkRule(repositoryContext.pool, integrationId, ruleId));
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to delete linked count rule.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function testProductLinkRuleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const ruleId = decodedRouteParam(request.params.ruleId);
+  if (!integrationId) {
+    return unsupportedVendorResponse(request.params.vendorId);
+  }
+  if (!ruleId) {
+    return jsonResponse(400, { error: 'Linked count rule test requires ruleId.' });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as {
+    customerId?: string;
+    agreementId?: string;
+  };
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Linked count rule test needs PostgreSQL settings before it can evaluate rows.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(
+      200,
+      await testProductLinkRule(repositoryContext.pool, integrationId, {
+        ruleId,
+        customerId: body.customerId,
+        agreementId: body.agreementId,
+      }),
+    );
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to test linked count rule.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function searchProductCatalogHttp(
   request: HttpRequest,
   _context: InvocationContext,
@@ -863,6 +987,27 @@ app.http('deactivateProductLinkRule', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/linked-products/{ruleId}/deactivate',
   handler: deactivateProductLinkRuleHttp,
+});
+
+app.http('activateProductLinkRule', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/linked-products/{ruleId}/activate',
+  handler: activateProductLinkRuleHttp,
+});
+
+app.http('deleteProductLinkRule', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/linked-products/{ruleId}',
+  handler: deleteProductLinkRuleHttp,
+});
+
+app.http('testProductLinkRule', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/linked-products/{ruleId}/test',
+  handler: testProductLinkRuleHttp,
 });
 
 app.http('searchProductCatalog', {

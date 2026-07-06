@@ -7,6 +7,7 @@ infra/azure/*.json
 .env.*
 !.env.example
 .runtime/
+terminals/
 local.settings.json
 .DS_Store
 *.log

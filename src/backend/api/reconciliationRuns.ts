@@ -111,6 +111,7 @@ type LinkedSourceQuantityRow = {
   quantity: string | number;
   row_count: string | number;
   observed_at: Date | string | null;
+  dedupe_key?: string | null;
 };
 
 type LinkedTargetAdditionScopeRow = {
@@ -743,7 +744,8 @@ async function loadLinkedCountContext(
         agreementId: string;
         quantity: number;
         observedAt?: string;
-        sources: ReconciliationLinkedCountSource[];
+        dedupedQuantities: Map<string, number>;
+        sourcesByKey: Map<string, ReconciliationLinkedCountSource>;
       }
     >();
 
@@ -758,10 +760,30 @@ async function loadLinkedCountContext(
             agreementId: sourceTotal.agreementId,
             quantity: 0,
             observedAt: sourceTotal.observedAt,
-            sources: [],
+            dedupedQuantities: new Map<string, number>(),
+            sourcesByKey: new Map<string, ReconciliationLinkedCountSource>(),
           };
-        total.quantity += sourceTotal.quantity;
-        total.sources.push(sourceTotal.source);
+        const sourceKey = `${sourceTotal.source.sourceType}:${sourceTotal.source.label}`;
+        const sourceSummary =
+          total.sourcesByKey.get(sourceKey) ??
+          {
+            ...sourceTotal.source,
+            quantity: 0,
+            rowCount: 0,
+          };
+        sourceSummary.quantity += sourceTotal.source.quantity;
+        sourceSummary.rowCount += sourceTotal.source.rowCount;
+        total.sourcesByKey.set(sourceKey, sourceSummary);
+        const dedupeKey = 'dedupeKey' in sourceTotal ? sourceTotal.dedupeKey : undefined;
+        if (dedupeKey) {
+          const previousQuantity = total.dedupedQuantities.get(dedupeKey) ?? 0;
+          if (sourceTotal.quantity > previousQuantity) {
+            total.quantity += sourceTotal.quantity - previousQuantity;
+            total.dedupedQuantities.set(dedupeKey, sourceTotal.quantity);
+          }
+        } else {
+          total.quantity += sourceTotal.quantity;
+        }
         if (sourceTotal.observedAt && (!total.observedAt || sourceTotal.observedAt > total.observedAt)) {
           total.observedAt = sourceTotal.observedAt;
         }
@@ -778,19 +800,21 @@ async function loadLinkedCountContext(
           customerId: scope.customer_id,
           agreementId: scope.agreement_id,
           quantity: 0,
-          sources: [],
+          dedupedQuantities: new Map<string, number>(),
+          sourcesByKey: new Map<string, ReconciliationLinkedCountSource>(),
         },
       );
     }
 
     for (const total of totalsByScope.values()) {
+      const sources = [...total.sourcesByKey.values()].sort((left, right) => left.label.localeCompare(right.label));
       const lineKey = linkedLineKey(total.customerId, total.agreementId, targetRule.productCode);
       countsByLineKey.set(lineKey, {
         ruleId: rule.id,
         ruleName: rule.ruleName,
         sourceVendorProductKey,
         quantity: total.quantity,
-        sources: total.sources.sort((left, right) => left.label.localeCompare(right.label)),
+        sources,
       });
       anchorSnapshots.push({
         id: `linked:${rule.id}:${total.customerId}:${total.agreementId}:${targetRule.productCode}`,
@@ -807,7 +831,7 @@ async function loadLinkedCountContext(
           linkedCountRuleId: rule.id,
           linkedCountRuleName: rule.ruleName,
           linkedCountQuantity: total.quantity,
-          linkedCountSourceCount: total.sources.length,
+          linkedCountSourceCount: sources.length,
         },
       });
     }
@@ -835,6 +859,7 @@ async function loadVendorProductLinkedSourceTotals(
   database: Queryable,
   source: Extract<ProductLinkRuleSource, { sourceType: 'vendor-product' }>,
 ) {
+  const dedupeKeySql = linkedDatasetDedupeKeySql('vendor_usage_snapshots', 'vendor-usage');
   const result = await database.query<LinkedSourceQuantityRow>(
     `with latest_sync_run as (
        select id
@@ -854,45 +879,65 @@ async function loadVendorProductLinkedSourceTotals(
        where vendor_id = $1
          and active = true
          and mapping_status = 'approved'
+     ),
+     matched_rows as (
+       select
+         case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as customer_id,
+         case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as agreement_id,
+         ${dedupeKeySql} as dedupe_key,
+         vendor_usage_snapshots.quantity,
+         vendor_usage_snapshots.observed_at
+       from vendor_usage_snapshots
+       left join approved_account_mappings
+         on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+       where vendor_usage_snapshots.vendor_id = $1
+         and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+         and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
+         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         and exists (
+           select 1
+           from vendor_product_mappings
+           where vendor_product_mappings.vendor_id = $1
+             and vendor_product_mappings.active = true
+             and vendor_product_mappings.mapping_status = 'approved'
+             and replace(replace(vendor_product_mappings.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
+         )
+         and case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end is not null
+         and case
+           when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end is not null
+     ),
+     deduped_rows as (
+       select
+         matched_rows.customer_id,
+         matched_rows.agreement_id,
+         matched_rows.dedupe_key,
+         max(matched_rows.quantity) as quantity,
+         count(*)::int as row_count,
+         max(matched_rows.observed_at) as observed_at
+       from matched_rows
+       group by matched_rows.customer_id, matched_rows.agreement_id, matched_rows.dedupe_key
      )
      select
-       case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
-         else vendor_usage_snapshots.customer_id
-       end as customer_id,
-       case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
-         else vendor_usage_snapshots.agreement_id
-       end as agreement_id,
-       sum(vendor_usage_snapshots.quantity) as quantity,
-       count(*)::int as row_count,
-       max(vendor_usage_snapshots.observed_at) as observed_at
-     from vendor_usage_snapshots
-     left join approved_account_mappings
-       on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
-      and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
-     where vendor_usage_snapshots.vendor_id = $1
-       and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
-       and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
-       and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
-       and exists (
-         select 1
-         from vendor_product_mappings
-         where vendor_product_mappings.vendor_id = $1
-           and vendor_product_mappings.active = true
-           and vendor_product_mappings.mapping_status = 'approved'
-           and replace(replace(vendor_product_mappings.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
-       )
-       and case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
-         else vendor_usage_snapshots.customer_id
-       end is not null
-       and case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
-         else vendor_usage_snapshots.agreement_id
-       end is not null
-     group by customer_id, agreement_id
-     order by customer_id, agreement_id`,
+       deduped_rows.customer_id,
+       deduped_rows.agreement_id,
+       deduped_rows.dedupe_key,
+       deduped_rows.quantity,
+       deduped_rows.row_count,
+       deduped_rows.observed_at
+     from deduped_rows
+     order by deduped_rows.customer_id, deduped_rows.agreement_id, deduped_rows.dedupe_key`,
     [source.vendorId, canonicalVendorProductKey(source.vendorProductKey)],
   );
 
@@ -901,6 +946,7 @@ async function loadVendorProductLinkedSourceTotals(
     agreementId: row.agreement_id,
     quantity: numericValue(row.quantity),
     observedAt: isoDate(row.observed_at),
+    dedupeKey: row.dedupe_key ?? undefined,
     source: {
       sourceType: 'vendor-product' as const,
       label: `${integrationDisplayName(source.vendorId)} / ${source.vendorProductName ?? source.vendorProductKey}`,
@@ -923,10 +969,11 @@ async function loadFilteredDatasetLinkedSourceTotals(
     values: [...query.values],
   };
   const filterSql = linkedFilterSql(source.filter, context);
-  const aggregationSql = linkedAggregationSql(source.aggregation, {
+  const contributionSql = linkedRowContributionSql(source.aggregation, {
     ...context,
     tableAlias: 'filtered_rows',
   });
+  const dedupeKeySql = linkedDatasetDedupeKeySql('filtered_rows', query.fieldSet);
   const result = await database.query<LinkedSourceQuantityRow>(
     `${query.sql},
      filtered_rows as (
@@ -935,16 +982,27 @@ async function loadFilteredDatasetLinkedSourceTotals(
        where effective_customer_id is not null
          and effective_agreement_id is not null
          and ${filterSql}
+     ),
+     deduped_rows as (
+       select
+         filtered_rows.effective_customer_id,
+         filtered_rows.effective_agreement_id,
+         ${dedupeKeySql} as dedupe_key,
+         max(${contributionSql}) as quantity,
+         count(*)::int as row_count,
+         max(filtered_rows.observed_at) as observed_at
+       from filtered_rows
+       group by filtered_rows.effective_customer_id, filtered_rows.effective_agreement_id, dedupe_key
      )
      select
-       filtered_rows.effective_customer_id as customer_id,
-       filtered_rows.effective_agreement_id as agreement_id,
-       ${aggregationSql} as quantity,
-       count(*)::int as row_count,
-       max(filtered_rows.observed_at) as observed_at
-     from filtered_rows
-     group by filtered_rows.effective_customer_id, filtered_rows.effective_agreement_id
-     order by filtered_rows.effective_customer_id, filtered_rows.effective_agreement_id`,
+       deduped_rows.effective_customer_id as customer_id,
+       deduped_rows.effective_agreement_id as agreement_id,
+       deduped_rows.dedupe_key,
+       deduped_rows.quantity,
+       deduped_rows.row_count,
+       deduped_rows.observed_at
+     from deduped_rows
+     order by deduped_rows.effective_customer_id, deduped_rows.effective_agreement_id, deduped_rows.dedupe_key`,
     context.values,
   );
 
@@ -954,6 +1012,7 @@ async function loadFilteredDatasetLinkedSourceTotals(
     agreementId: row.agreement_id,
     quantity: numericValue(row.quantity),
     observedAt: isoDate(row.observed_at),
+    dedupeKey: row.dedupe_key ?? undefined,
     source: {
       sourceType: 'filtered-dataset' as const,
       label,
@@ -1098,13 +1157,13 @@ function linkedFilterSql(node: ProductLinkRuleFilterNode, context: LinkedSqlCont
   return `lower(${expression}) = lower(${valueParam}::text)`;
 }
 
-function linkedAggregationSql(aggregation: ProductLinkRuleAggregation, context: LinkedSqlContext) {
+function linkedRowContributionSql(aggregation: ProductLinkRuleAggregation, context: LinkedSqlContext) {
   if (aggregation.type === 'row-count') {
-    return 'count(*)::numeric';
+    return '1::numeric';
   }
 
   const expression = `trim(coalesce(${linkedDatasetFieldSql(aggregation.column, context)}, ''))`;
-  return `coalesce(sum(case when ${expression} ~ '^-?[0-9]+(\\.[0-9]+)?$' then ${expression}::numeric else 0 end), 0)`;
+  return `case when ${expression} ~ '^-?[0-9]+(\\.[0-9]+)?$' then ${expression}::numeric else 0 end`;
 }
 
 function linkedDatasetFieldSql(field: string, context: LinkedSqlContext) {
@@ -1174,6 +1233,62 @@ function linkedDatasetFieldSql(field: string, context: LinkedSqlContext) {
       limit 1
     )
   )`;
+}
+
+function linkedDatasetDedupeKeySql(source: string, fieldSet: LinkedDatasetQuery['fieldSet']) {
+  const emailIdentity = linkedJsonTextValueSql(source, [
+    'userPrincipalName',
+    'upn',
+    'email',
+    'mail',
+    'userEmail',
+    'username',
+  ]);
+  const userIdentity = linkedJsonTextValueSql(source, [
+    'userId',
+    'aadUserId',
+    'azureAdUserId',
+    'objectId',
+    'remoteId',
+    'contactId',
+    'seatId',
+  ]);
+  const deviceIdentity = linkedJsonTextValueSql(source, [
+    'deviceId',
+    'ncentralDeviceId',
+    'endpointId',
+    'protectedSystemId',
+    'machineId',
+    'computerId',
+    'assetId',
+    'systemId',
+  ]);
+  const hostnameIdentity = linkedJsonTextValueSql(source, [
+    'hostname',
+    'deviceName',
+    'computerName',
+    'agentHostname',
+    'deviceHostname',
+  ]);
+  const serialIdentity = linkedJsonTextValueSql(source, ['serialNumber', 'serial']);
+
+  const vendorScope = fieldSet === 'microsoft-365-licenses' ? "'microsoft-365'" : `coalesce(${source}.vendor_id, 'unknown')`;
+
+  return `coalesce(
+    case when ${emailIdentity} is not null then 'email:' || lower(${emailIdentity}) end,
+    case when ${userIdentity} is not null then 'user:' || ${vendorScope} || ':' || coalesce(${source}.external_account_id, 'unknown') || ':' || lower(${userIdentity}) end,
+    case when ${deviceIdentity} is not null then 'device:' || ${vendorScope} || ':' || coalesce(${source}.external_account_id, 'unknown') || ':' || lower(${deviceIdentity}) end,
+    case when ${hostnameIdentity} is not null then 'host:' || ${vendorScope} || ':' || coalesce(${source}.external_account_id, 'unknown') || ':' || lower(${hostnameIdentity}) end,
+    case when ${serialIdentity} is not null then 'serial:' || ${vendorScope} || ':' || coalesce(${source}.external_account_id, 'unknown') || ':' || lower(${serialIdentity}) end,
+    'row:' || ${source}.id::text
+  )`;
+}
+
+function linkedJsonTextValueSql(source: string, keys: string[]) {
+  return `nullif(trim(coalesce(${keys.flatMap((key) => [
+    `${source}.dimensions->>'${key}'`,
+    `${source}.raw_payload->>'${key}'`,
+  ]).join(', ')})), '')`;
 }
 
 function pushLinkedParam(values: unknown[], value: unknown) {

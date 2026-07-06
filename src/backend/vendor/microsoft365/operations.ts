@@ -490,6 +490,14 @@ async function loadMicrosoft365TenantTargets(client: Microsoft365LicenseClient, 
   return [...tenantsById.values()];
 }
 
+function looksLikeExternalAccountGuid(value: string | null | undefined) {
+  if (!value?.trim()) {
+    return false;
+  }
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
 async function loadMicrosoft365MappingTenants(database: Queryable) {
   const result = await database.query<VendorAccountMappingRow>(
     `select external_account_id, external_account_name, customer_id, agreement_id
@@ -501,7 +509,11 @@ async function loadMicrosoft365MappingTenants(database: Queryable) {
 
   return result.rows.map((row) => ({
     tenantId: row.external_account_id,
-    displayName: row.external_account_name ?? undefined,
+    displayName:
+      looksLikeExternalAccountGuid(row.external_account_name) ||
+      row.external_account_name?.trim().toLowerCase() === row.external_account_id.trim().toLowerCase()
+        ? undefined
+        : row.external_account_name ?? undefined,
   }));
 }
 

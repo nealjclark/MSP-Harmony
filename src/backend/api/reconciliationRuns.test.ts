@@ -188,12 +188,19 @@ async function run() {
   assert.equal(linkedStandardLine?.linkedCount?.sources.length, 2);
   assert.equal(linkedStandardLine?.devices[0]?.dimensions.linkedCountAnchor, true);
 
+  appRiverLinkedFilteredMicrosoftQueries.splice(0, appRiverLinkedFilteredMicrosoftQueries.length);
   const appRiverFilteredLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedFilteredMicrosoftDatabase, 'opentext-appriver', { syncRunId });
   const linkedThreatLine = appRiverFilteredLinkedResult.lines.find((line) => line.productCode === 'EMAIL-THREAT-PROTECTION');
   assert.equal(linkedThreatLine?.sourceQuantity, 0);
   assert.equal(linkedThreatLine?.linkedCount?.quantity, 2);
   assert.equal(linkedThreatLine?.linkedCount?.sources[0]?.sourceType, 'filtered-dataset');
   assert.equal(linkedThreatLine?.linkedCount?.sources[0]?.rowCount, 2);
+  assert.equal(
+    appRiverLinkedFilteredMicrosoftQueries.some((query) =>
+      query.sql.includes('deduped_rows') && query.sql.includes('dedupe_key'),
+    ),
+    true,
+  );
   assert.equal(linkedThreatLine?.proposedQuantity, 2);
   assert.equal(linkedThreatLine?.agreementQuantity, 1);
   assert.equal(linkedThreatLine?.delta, 1);
@@ -702,7 +709,7 @@ const appRiverLinkedMicrosoftDatabase: Queryable = {
       };
     }
 
-    if (sql.includes('sum(vendor_usage_snapshots.quantity)') && values?.[0] === 'microsoft-365') {
+    if (sql.includes('from deduped_rows') && sql.includes('vendor_usage_snapshots.vendor_id = $1') && values?.[0] === 'microsoft-365') {
       const quantity = values?.[1] === 'exchange-online-plan-1' ? '7' : '5';
       return {
         rows: [
@@ -801,8 +808,11 @@ const appRiverLinkedMicrosoftDatabase: Queryable = {
   },
 };
 
+const appRiverLinkedFilteredMicrosoftQueries: Array<{ sql: string; values?: unknown[] }> = [];
 const appRiverLinkedFilteredMicrosoftDatabase: Queryable = {
   async query<T = unknown>(sql: string, values?: unknown[]) {
+    appRiverLinkedFilteredMicrosoftQueries.push({ sql, values });
+
     if (sql.includes('from vendor_product_link_rules')) {
       return {
         rows: [

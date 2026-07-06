@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   approveSuggestedAccountMappings,
   buildAccountMappingCandidates,
+  deleteProductLinkRule,
   deactivateProductLinkRule,
   generateProductMappingCandidates,
   listProductLinkRules,
@@ -11,6 +12,8 @@ import {
   runAccountAutomap,
   searchConnectWiseProductCatalog,
   scoreEntityName,
+  setProductLinkRuleActive,
+  testProductLinkRule,
   updateAccountMapping,
   updateProductMapping,
   upsertProductLinkRule,
@@ -213,6 +216,8 @@ async function run() {
   assert.equal(accountSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'tenantName'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'tenantDefaultDomainName'"), true);
+  assert.equal(accountSourceSql.includes("array['m365-users', 'license-snapshots']"), true);
+  assert.equal(accountSourceSql.includes('microsoft365_subscription_account_names'), true);
   assert.equal(accountSourceSql.includes('app_river_account_aliases'), true);
   assert.equal(accountSourceSql.includes('having count(distinct external_account_id) = 1'), true);
 
@@ -430,8 +435,94 @@ async function run() {
         return { rows: [] as T[] };
       }
 
+      if (sql.includes('delete from vendor_product_link_rules')) {
+        const deletedId = values?.[1];
+        const deleteIndex = linkRuleRows.findIndex((row) =>
+          typeof row === 'object' && row !== null && 'id' in row && row.id === deletedId,
+        );
+        if (deleteIndex >= 0) {
+          linkRuleRows.splice(deleteIndex, 1);
+        }
+        return { rows: deletedId ? [{ id: deletedId }] as T[] : [] as T[] };
+      }
+
       if (sql.includes('from vendor_product_link_rules')) {
         return { rows: linkRuleRows as T[] };
+      }
+
+      if (sql.includes('from customers') && sql.includes('left join agreements')) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Legal, LLP',
+              agreement_name: values?.[1] ? 'Mapped Legal Monthly Agreement' : null,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('filtered_rows')) {
+        return {
+          rows: [
+            {
+              row_id: 'exchange-standard-row',
+              customer_id: 'customer-1',
+              agreement_id: 'agreement-1',
+              external_account_id: 'mapped-m365-tenant',
+              product_key: 'O365_BUSINESS_PREMIUM',
+              product_code: 'O365-BUSINESS-PREMIUM',
+              product_name: 'O365_BUSINESS_PREMIUM',
+              row_label: 'O365_BUSINESS_PREMIUM',
+              quantity: '1',
+              observed_at: '2026-06-24T12:15:00.000Z',
+              details: {
+                userPrincipalName: 'licensed.user@example.test',
+                userId: 'm365-user-1',
+                Product: 'O365_BUSINESS_PREMIUM',
+              },
+            },
+            {
+              row_id: 'exchange-enterprise-row',
+              customer_id: 'customer-1',
+              agreement_id: 'agreement-1',
+              external_account_id: 'mapped-m365-tenant',
+              product_key: 'EXCHANGEENTERPRISE',
+              product_code: 'EXCHANGEENTERPRISE',
+              product_name: 'EXCHANGEENTERPRISE',
+              row_label: 'EXCHANGEENTERPRISE',
+              quantity: '1',
+              observed_at: '2026-06-24T12:15:00.000Z',
+              details: {
+                userPrincipalName: 'licensed.user@example.test',
+                userId: 'm365-user-1',
+                Product: 'EXCHANGEENTERPRISE',
+              },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes('mapped_snapshots.effective_customer_id')) {
+        return {
+          rows: [
+            {
+              row_id: `${values?.[1]}-row`,
+              customer_id: values?.[2],
+              agreement_id: values?.[3] ?? 'agreement-1',
+              external_account_id: 'mapped-m365-tenant',
+              product_key: values?.[1],
+              product_code: 'M365-SYNC',
+              product_name: String(values?.[1]),
+              row_label: String(values?.[1]),
+              quantity: values?.[1] === 'exchange-online-plan-1' ? '3' : '2',
+              observed_at: '2026-06-24T12:15:00.000Z',
+              details: {
+                'External account': 'mapped-m365-tenant',
+                Quantity: values?.[1] === 'exchange-online-plan-1' ? 3 : 2,
+              },
+            },
+          ] as T[],
+        };
       }
 
       return { rows: [] as T[] };
@@ -466,6 +557,43 @@ async function run() {
   const listedLinkRules = await listProductLinkRules(linkRuleDatabase, 'opentext-appriver');
   assert.equal(listedLinkRules[0]?.id, 'link-rule-1');
   assert.equal(listedLinkRules[0]?.sources[0]?.sourceType, 'vendor-product');
+
+  const linkRuleTest = await testProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    ruleId: linkedRule.id,
+    customerId: 'customer-1',
+  });
+  assert.equal(linkRuleTest.total, 5);
+  assert.equal(linkRuleTest.rows.length, 2);
+  assert.equal(linkRuleTest.sourceTotals.length, 2);
+  assert.equal(linkRuleTest.customerName, 'Mapped Legal, LLP');
+
+  const dedupedFilteredLinkedRule = await upsertProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    sourceVendorProductKey: 'Email Threat Protection|Monthly|Monthly',
+    ruleName: 'Email Threat Protection follows deduped Microsoft users',
+    reviewedBy: 'reviewer@example.com',
+    sources: [
+      {
+        sourceType: 'filtered-dataset',
+        vendorId: 'microsoft-365',
+        dataset: 'users',
+        aggregation: { type: 'row-count' },
+        filter: {
+          nodeType: 'condition',
+          field: 'ProductName',
+          operator: 'contains',
+          value: 'Exchange',
+        },
+      },
+    ],
+  });
+  const dedupedLinkRuleTest = await testProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
+    ruleId: dedupedFilteredLinkedRule.id,
+    customerId: 'customer-1',
+  });
+  assert.equal(dedupedLinkRuleTest.rows.length, 2);
+  assert.equal(dedupedLinkRuleTest.total, 1);
+  assert.equal(dedupedLinkRuleTest.sourceTotals[0]?.quantity, 1);
+  assert.equal(dedupedLinkRuleTest.sourceTotals[0]?.rowCount, 2);
 
   const filteredLinkedRule = await upsertProductLinkRule(linkRuleDatabase, 'opentext-appriver', {
     sourceVendorProductKey: 'Email Threat Protection|Monthly|Monthly',
@@ -543,6 +671,20 @@ async function run() {
     ),
     true,
   );
+
+  const reenabled = await setProductLinkRuleActive(linkRuleDatabase, 'opentext-appriver', linkedRule.id, true, {
+    reviewedBy: 'reviewer@example.com',
+  });
+  assert.equal(reenabled.active, true);
+  assert.equal(
+    linkRuleQueries.some(
+      (query) => query.sql.includes('set active = $3') && query.values?.[2] === true,
+    ),
+    true,
+  );
+
+  const deletedLinkRule = await deleteProductLinkRule(linkRuleDatabase, 'opentext-appriver', linkedRule.id);
+  assert.equal(deletedLinkRule.deleted, true);
 
   const productCandidateDatabase: Queryable = {
     async query<T = unknown>(sql: string) {
@@ -718,6 +860,59 @@ async function run() {
   assert.equal(catalogTargets[0]?.connectwiseProductCode, 'RENAMED-COVE-SERVER');
   assert.equal(catalogTargets[0]?.source, 'local');
   assert.match(catalogSearchQueries[0]?.sql ?? '', /from products/);
+
+  const microsoft365MappingQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const microsoft365MappingDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      microsoft365MappingQueries.push({ sql, values });
+      if (sql.includes('update vendor_account_mappings') && sql.includes('resolved_names')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from vendor_account_mappings') && sql.includes('inner join customers')) {
+        return {
+          rows: [
+            {
+              id: 'mapping-1',
+              vendor_id: 'microsoft-365',
+              external_account_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+              external_account_name: 'Contoso Ltd',
+              customer_id: 'customer-1',
+              customer_name: 'Contoso LLC',
+              agreement_id: 'agreement-1',
+              agreement_name: 'Managed Services',
+              mapping_status: 'approved',
+              confidence: 'manual',
+              match_score: 100,
+              mapping_source: 'manual',
+              active: true,
+              reviewed_by: 'reviewer',
+              reviewed_at: '2026-07-06T00:00:00.000Z',
+              last_seen_at: '2026-07-06T00:00:00.000Z',
+              match_evidence: [],
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+
+  await listMappingState(microsoft365MappingDatabase, 'microsoft-365');
+  const microsoft365AccountMappingSql =
+    microsoft365MappingQueries.find(
+      (query) => query.sql.includes('from vendor_account_mappings') && query.sql.includes('inner join customers'),
+    )?.sql ?? '';
+  assert.equal(microsoft365AccountMappingSql.includes("array['m365-users', 'license-snapshots']"), true);
+  assert.equal(microsoft365AccountMappingSql.includes('microsoft365_subscription_account_names'), true);
+  assert.equal(microsoft365AccountMappingSql.includes('latest_m365_license_sync_run'), true);
+  assert.equal(
+    microsoft365MappingQueries.some(
+      (query) => query.sql.includes('update vendor_account_mappings') && query.sql.includes('resolved_names'),
+    ),
+    true,
+  );
 
   console.log('mapping service tests passed');
 }
