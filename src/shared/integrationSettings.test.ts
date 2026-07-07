@@ -126,6 +126,31 @@ assert.deepEqual(connectedAppRiver.missingSecrets, []);
 assert.deepEqual(connectedAppRiver.missingNonSecrets, []);
 assert.equal(integrationHasCapability('opentext-appriver', 'invoice-import'), true);
 assert.equal(integrationHasCapability('opentext-appriver', 'mapping'), true);
+
+const wisePay = getIntegrationSettingsDefinition('wisepay');
+assert.ok(wisePay);
+assert.equal(wisePay.authMode, 'api-key');
+assert.equal(integrationHasCapability('wisepay', 'payment-link'), true);
+assert.equal(integrationHasCapability('wisepay', 'invoice-import'), false);
+assert.equal(integrationHasCapability('wisepay', 'live-api'), false);
+assert.deepEqual(
+  wisePay.requiredSecrets.map((secret) => secret.keyVaultSecretName),
+  ['mspharmony-wisepay-api-key'],
+);
+
+const connectedWisePay = validateIntegrationSettings(wisePay, {
+  integrationId: 'wisepay',
+  nonSecrets: {
+    endpoint: 'https://secure2.wise-sync.com',
+  },
+  availableKeyVaultSecrets: ['mspharmony-wisepay-api-key'],
+  lastTestResult: 'success',
+});
+
+assert.equal(connectedWisePay.configuredStatus, 'connected');
+assert.deepEqual(connectedWisePay.missingSecrets, []);
+assert.deepEqual(connectedWisePay.missingNonSecrets, []);
+
 assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
   'cove',
   'ncentral',

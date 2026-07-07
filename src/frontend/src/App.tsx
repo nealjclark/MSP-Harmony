@@ -61,9 +61,12 @@ import {
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
 
-type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'imports' | 'agreements' | 'audit' | 'settings';
+type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'audit' | 'settings';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
+type InvoiceWorkspaceTab = 'overdue' | 'monthly' | 'standard';
+type OverdueInvoiceSortKey = 'customerName' | 'pastDueStatus' | 'invoiceCount' | 'pastDueBalance' | 'agingBalance';
+type SortDirection = 'asc' | 'desc';
 type IssueStatus =
   | 'matched'
   | 'needs-review'
@@ -706,6 +709,217 @@ type InvoiceImportRefreshResponse = {
   productRowsUpdated: number;
 };
 
+type InvoiceNoticeType = 'reminder' | '30-day-notice' | '60-day-credit-hold' | '90-day-cancel-services';
+type OverdueInvoiceBucketId = '7-29-days' | '30-59-days' | '60-plus-days';
+
+type InvoiceNotificationAuditSummary = {
+  noticeType: InvoiceNoticeType;
+  actor: string;
+  occurredAt: string;
+  subject: string;
+  bodyPreview: string;
+};
+
+type OverdueInvoice = {
+  invoiceId: string;
+  invoiceNumber?: string;
+  invoiceType: string;
+  invoiceStatus: string;
+  invoiceStatusClosed: boolean;
+  company: {
+    id?: string;
+    identifier?: string;
+    name: string;
+  };
+  agreement?: {
+    id?: string;
+    name?: string;
+    type?: string;
+  };
+  applyToType?: string;
+  applyToId?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  daysPastDue: number;
+  total: number;
+  balance: number;
+  billingTerms?: string;
+  emailTemplateId?: number;
+  emailTemplateName?: string;
+  bucketId: OverdueInvoiceBucketId;
+  lastNotice?: InvoiceNotificationAuditSummary;
+};
+
+type OverdueInvoiceBucket = {
+  id: OverdueInvoiceBucketId;
+  label: string;
+  noticeType: InvoiceNoticeType;
+  invoices: OverdueInvoice[];
+  invoiceCount: number;
+  balanceTotal: number;
+};
+
+type OverdueInvoiceCustomerGroup = {
+  customerKey: string;
+  company: OverdueInvoice['company'];
+  invoices: OverdueInvoice[];
+  invoiceCount: number;
+  balanceTotal: number;
+  oldestDaysPastDue: number;
+  noticeType: InvoiceNoticeType;
+  bucketCounts: Record<OverdueInvoiceBucketId, number>;
+  lastNotice?: InvoiceNotificationAuditSummary;
+};
+
+type OverdueInvoicesResponse = {
+  generatedAt: string;
+  summary: {
+    reviewQueueCount: number;
+    reviewQueueBalance: number;
+    customerCount?: number;
+    totalOpenBalanceCount: number;
+    totalOpenBalanceAmount: number;
+  };
+  buckets: OverdueInvoiceBucket[];
+  customerGroups?: OverdueInvoiceCustomerGroup[];
+};
+
+type AgreementInvoiceReference = {
+  invoiceId: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  total: number;
+  balance: number;
+  emailTemplateId?: number;
+  invoiceType: string;
+};
+
+type MonthlyInvoiceCandidate = {
+  agreementId: string;
+  company: {
+    id?: string;
+    identifier?: string;
+    name: string;
+  };
+  agreementName: string;
+  agreementType?: string;
+  billAmount: number;
+  billingTerms?: string;
+  nextInvoiceDate?: string;
+  invoiceTemplateName?: string;
+  lastInvoice?: AgreementInvoiceReference;
+  missingFields: string[];
+};
+
+type MonthlyInvoiceCandidatesResponse = {
+  generatedAt: string;
+  agreementCount: number;
+  candidates: MonthlyInvoiceCandidate[];
+};
+
+type MonthlyInvoicePreview = {
+  generatedAt: string;
+  previewMode: 'stub';
+  candidate: MonthlyInvoiceCandidate;
+  payload: {
+    invoiceType: 'Agreement';
+    applyToType: 'Agreement';
+    applyToId: string;
+    companyName: string;
+    agreementName: string;
+    nextInvoiceDate?: string;
+    billingTerms?: string;
+    billAmount: number;
+    invoiceTemplateName?: string;
+  };
+  warnings: string[];
+};
+
+type StandardInvoiceCandidate = {
+  company: {
+    id?: string;
+    identifier?: string;
+    name: string;
+  };
+  latestInvoice?: AgreementInvoiceReference;
+  invoiceTypes: string[];
+  openInvoiceCount: number;
+  openBalanceAmount: number;
+  overdueInvoiceCount: number;
+};
+
+type StandardInvoiceCandidatesResponse = {
+  generatedAt: string;
+  candidateCount: number;
+  candidates: StandardInvoiceCandidate[];
+};
+
+type InvoiceWorkspaceCache = {
+  version: 1;
+  savedAt: string;
+  invoiceImports: Record<string, InvoiceImportsResponse>;
+  overdueInvoices?: OverdueInvoicesResponse;
+  monthlyInvoiceCandidates?: MonthlyInvoiceCandidatesResponse;
+  standardInvoiceCandidates?: StandardInvoiceCandidatesResponse;
+};
+
+type InvoiceWorkspaceLoadOptions = {
+  forceRefresh?: boolean;
+};
+
+type InvoiceNotificationPreview = {
+  invoiceId?: string;
+  invoiceNumber?: string;
+  invoiceIds: string[];
+  invoiceCount: number;
+  invoices: InvoiceNotificationPreviewInvoice[];
+  companyKey?: string;
+  companyName: string;
+  recipientName: string;
+  recipientEmail?: string;
+  billingContact?: InvoiceBillingContact;
+  agreementName?: string;
+  noticeType: InvoiceNoticeType;
+  daysPastDue: number;
+  dueDate?: string;
+  balance: number;
+  totalBalance: number;
+  emailTemplateId?: number;
+  emailTemplateName?: string;
+  emailTemplateNames: string[];
+  paymentLink?: string;
+  subject: string;
+  bodyPreview: string;
+};
+
+type InvoiceBillingContact = {
+  id: string;
+  name: string;
+  email?: string;
+};
+
+type InvoiceNotificationPreviewInvoice = {
+  invoiceId: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  daysPastDue: number;
+  balance: number;
+  total: number;
+  invoiceType: string;
+  invoiceStatus?: string;
+  agreementName?: string;
+  paymentLink?: string;
+};
+
+type InvoiceNotificationResponse = {
+  status: 'preview' | 'stubbed';
+  generatedAt: string;
+  preview: InvoiceNotificationPreview;
+  audit?: InvoiceNotificationAuditSummary;
+};
+
 type AgreementAddition = {
   id: string;
   connectWiseAdditionId: string;
@@ -1309,7 +1523,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'discrepancies', label: 'Discrepancies', icon: Link2 },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
-  { id: 'imports', label: 'Imports', icon: Upload },
+  { id: 'invoices', label: 'Invoices', icon: CircleDollarSign },
   { id: 'agreements', label: 'Agreements', icon: Building2 },
   { id: 'audit', label: 'Audit', icon: History },
 ];
@@ -1327,7 +1541,7 @@ const viewPaths: Record<View, string> = {
   integrations: '/integrations',
   mappings: '/mappings',
   reports: '/reports',
-  imports: '/imports',
+  invoices: '/invoices',
   agreements: '/agreements',
   audit: '/audit',
   settings: '/settings',
@@ -2450,6 +2664,9 @@ function viewFromLocation(location: Location): View {
 
 function viewFromPath(pathname: string): View | null {
   const normalizedPath = normalizePathname(pathname);
+  if (normalizedPath === '/imports') {
+    return 'invoices';
+  }
   if (mappingIntegrationIdFromPath(normalizedPath)) {
     return 'mappings';
   }
@@ -2895,6 +3112,79 @@ async function refreshInvoiceImportMappingsRequest(vendorId: IntegrationId, impo
   return body as unknown as InvoiceImportRefreshResponse;
 }
 
+async function fetchOverdueInvoices() {
+  const response = await fetch('/api/invoices/overdue');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Overdue invoice load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as OverdueInvoicesResponse;
+}
+
+async function postInvoiceNotification(input: {
+  invoiceId?: string;
+  invoiceIds?: string[];
+  companyKey?: string;
+  noticeType: InvoiceNoticeType;
+  confirm?: boolean;
+}) {
+  const response = await fetch('/api/invoices/notifications', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice notification failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvoiceNotificationResponse;
+}
+
+async function fetchMonthlyInvoiceCandidates() {
+  const response = await fetch('/api/invoices/monthly-agreements');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Monthly agreements load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as MonthlyInvoiceCandidatesResponse;
+}
+
+async function postMonthlyInvoicePreview(agreementId: string) {
+  const response = await fetch('/api/invoices/monthly-preview', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ agreementId }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Monthly invoice preview failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as MonthlyInvoicePreview;
+}
+
+async function fetchStandardInvoiceCandidates() {
+  const response = await fetch('/api/invoices/standard');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Standard invoices load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as StandardInvoiceCandidatesResponse;
+}
+
 async function fetchMappingState(integrationId: IntegrationId) {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}`);
   const body = await responseJson(response);
@@ -3280,6 +3570,174 @@ async function createReconciliationAdjustmentRequest(
 
 async function responseJson(response: Response) {
   return (await response.json().catch(() => ({}))) as Record<string, unknown>;
+}
+
+const invoiceWorkspaceCacheStorageKey = 'msp-harmony:invoice-workspace:v1';
+const invoiceWorkspaceCacheVersion = 1;
+const allInvoiceImportsCacheKey = 'all';
+
+function emptyInvoiceWorkspaceCache(): InvoiceWorkspaceCache {
+  return {
+    version: invoiceWorkspaceCacheVersion,
+    savedAt: '',
+    invoiceImports: {},
+  };
+}
+
+function invoiceImportCacheKey(vendorId: IntegrationId | '') {
+  return vendorId || allInvoiceImportsCacheKey;
+}
+
+function readInvoiceWorkspaceCache(): InvoiceWorkspaceCache {
+  if (typeof window === 'undefined') {
+    return emptyInvoiceWorkspaceCache();
+  }
+
+  try {
+    const rawCache = window.localStorage.getItem(invoiceWorkspaceCacheStorageKey);
+    if (!rawCache) {
+      return emptyInvoiceWorkspaceCache();
+    }
+
+    const parsed = JSON.parse(rawCache) as Partial<InvoiceWorkspaceCache>;
+    if (parsed.version !== invoiceWorkspaceCacheVersion) {
+      return emptyInvoiceWorkspaceCache();
+    }
+
+    return {
+      version: invoiceWorkspaceCacheVersion,
+      savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
+      invoiceImports:
+        parsed.invoiceImports && typeof parsed.invoiceImports === 'object' && !Array.isArray(parsed.invoiceImports)
+          ? parsed.invoiceImports
+          : {},
+      overdueInvoices: parsed.overdueInvoices,
+      monthlyInvoiceCandidates: parsed.monthlyInvoiceCandidates,
+      standardInvoiceCandidates: parsed.standardInvoiceCandidates,
+    };
+  } catch {
+    return emptyInvoiceWorkspaceCache();
+  }
+}
+
+function writeInvoiceWorkspaceCache(updater: (cache: InvoiceWorkspaceCache) => InvoiceWorkspaceCache) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const nextCache = {
+      ...updater(readInvoiceWorkspaceCache()),
+      version: invoiceWorkspaceCacheVersion,
+      savedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(invoiceWorkspaceCacheStorageKey, JSON.stringify(nextCache));
+  } catch {
+    try {
+      window.localStorage.removeItem(invoiceWorkspaceCacheStorageKey);
+    } catch {
+      // Ignore unavailable storage and quota failures.
+    }
+  }
+}
+
+function sortInvoiceImports(imports: InvoiceImportSummary[]) {
+  return [...imports].sort(
+    (left, right) =>
+      String(right.invoiceDate ?? '').localeCompare(String(left.invoiceDate ?? '')) ||
+      String(right.importedAt ?? '').localeCompare(String(left.importedAt ?? '')),
+  );
+}
+
+function readCachedInvoiceImports(vendorId: IntegrationId | '') {
+  return readInvoiceWorkspaceCache().invoiceImports[invoiceImportCacheKey(vendorId)] ?? null;
+}
+
+function cacheInvoiceImports(vendorId: IntegrationId | '', response: InvoiceImportsResponse) {
+  writeInvoiceWorkspaceCache((cache) => ({
+    ...cache,
+    invoiceImports: {
+      ...cache.invoiceImports,
+      [invoiceImportCacheKey(vendorId)]: {
+        imports: sortInvoiceImports(response.imports),
+      },
+    },
+  }));
+}
+
+function invalidateCachedInvoiceImports(vendorId?: IntegrationId | '') {
+  writeInvoiceWorkspaceCache((cache) => {
+    const nextImports = { ...cache.invoiceImports };
+    delete nextImports[allInvoiceImportsCacheKey];
+    if (vendorId) {
+      delete nextImports[invoiceImportCacheKey(vendorId)];
+    }
+
+    return {
+      ...cache,
+      invoiceImports: nextImports,
+    };
+  });
+}
+
+function updateCachedInvoiceImportSummary(invoiceImport: InvoiceImportSummary) {
+  writeInvoiceWorkspaceCache((cache) => {
+    const nextImports: Record<string, InvoiceImportsResponse> = {};
+
+    for (const [key, response] of Object.entries(cache.invoiceImports)) {
+      const hasImport = response.imports.some((item) => item.id === invoiceImport.id);
+      const shouldIncludeIfMissing = key === allInvoiceImportsCacheKey || key === invoiceImport.vendorId;
+      if (!hasImport && !shouldIncludeIfMissing) {
+        nextImports[key] = response;
+        continue;
+      }
+
+      const updatedImports = hasImport
+        ? response.imports.map((item) => (item.id === invoiceImport.id ? invoiceImport : item))
+        : [invoiceImport, ...response.imports];
+      nextImports[key] = {
+        imports: sortInvoiceImports(updatedImports),
+      };
+    }
+
+    return {
+      ...cache,
+      invoiceImports: nextImports,
+    };
+  });
+}
+
+function readCachedOverdueInvoices() {
+  return readInvoiceWorkspaceCache().overdueInvoices ?? null;
+}
+
+function cacheOverdueInvoices(response: OverdueInvoicesResponse) {
+  writeInvoiceWorkspaceCache((cache) => ({
+    ...cache,
+    overdueInvoices: response,
+  }));
+}
+
+function readCachedMonthlyInvoiceCandidates() {
+  return readInvoiceWorkspaceCache().monthlyInvoiceCandidates ?? null;
+}
+
+function cacheMonthlyInvoiceCandidates(response: MonthlyInvoiceCandidatesResponse) {
+  writeInvoiceWorkspaceCache((cache) => ({
+    ...cache,
+    monthlyInvoiceCandidates: response,
+  }));
+}
+
+function readCachedStandardInvoiceCandidates() {
+  return readInvoiceWorkspaceCache().standardInvoiceCandidates ?? null;
+}
+
+function cacheStandardInvoiceCandidates(response: StandardInvoiceCandidatesResponse) {
+  writeInvoiceWorkspaceCache((cache) => ({
+    ...cache,
+    standardInvoiceCandidates: response,
+  }));
 }
 
 function syncRequestBodyForIntegration(integrationId: IntegrationId, target?: IntegrationSyncTarget) {
@@ -3806,6 +4264,22 @@ function App() {
   const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload a vendor invoice CSV.');
   const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
   const [importingInvoice, setImportingInvoice] = useState(false);
+  const [invoiceWorkspaceTab, setInvoiceWorkspaceTab] = useState<InvoiceWorkspaceTab>('overdue');
+  const [showInvoiceImportPanel, setShowInvoiceImportPanel] = useState(false);
+  const [overdueInvoices, setOverdueInvoices] = useState<OverdueInvoicesResponse | null>(null);
+  const [overdueInvoiceLoadState, setOverdueInvoiceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [overdueInvoiceMessage, setOverdueInvoiceMessage] = useState('Loading overdue invoices from ConnectWise.');
+  const [invoiceNoticeResult, setInvoiceNoticeResult] = useState<InvoiceNotificationResponse | null>(null);
+  const [invoiceNoticeMessage, setInvoiceNoticeMessage] = useState('');
+  const [invoiceNoticeBusyKey, setInvoiceNoticeBusyKey] = useState<string | null>(null);
+  const [monthlyInvoiceCandidates, setMonthlyInvoiceCandidates] = useState<MonthlyInvoiceCandidatesResponse | null>(null);
+  const [monthlyInvoiceLoadState, setMonthlyInvoiceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [monthlyInvoiceMessage, setMonthlyInvoiceMessage] = useState('Loading monthly agreements from ConnectWise.');
+  const [monthlyInvoicePreview, setMonthlyInvoicePreview] = useState<MonthlyInvoicePreview | null>(null);
+  const [monthlyInvoicePreviewBusyId, setMonthlyInvoicePreviewBusyId] = useState<string | null>(null);
+  const [standardInvoiceCandidates, setStandardInvoiceCandidates] = useState<StandardInvoiceCandidatesResponse | null>(null);
+  const [standardInvoiceLoadState, setStandardInvoiceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [standardInvoiceMessage, setStandardInvoiceMessage] = useState('Loading standard invoices from ConnectWise.');
   const [invoiceExceptionReview, setInvoiceExceptionReview] = useState<InvoiceImportExceptionReview | null>(null);
   const [invoiceExceptionCustomerOptions, setInvoiceExceptionCustomerOptions] = useState<MappingCustomerOption[]>([]);
   const [invoiceExceptionLoadState, setInvoiceExceptionLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
@@ -4073,27 +4547,228 @@ function App() {
     }
   };
 
-  const loadInvoiceImports = async (vendorId: IntegrationId | '' = selectedInvoiceIntegrationId) => {
+  const loadInvoiceImports = async (
+    vendorId: IntegrationId | '' = selectedInvoiceIntegrationId,
+    options: InvoiceWorkspaceLoadOptions = {},
+  ) => {
+    const cached = options.forceRefresh ? null : readCachedInvoiceImports(vendorId);
+    if (cached) {
+      setInvoiceImports(cached.imports);
+      setInvoiceImportLoadState('ready');
+      setInvoiceImportMessage(
+        cached.imports.length > 0
+          ? `Loaded ${cached.imports.length.toLocaleString()} saved vendor invoice imports.`
+          : vendorId
+            ? `No saved ${integrationName(vendorId)} invoices were found.`
+            : 'No saved vendor invoice imports were found.',
+      );
+      return cached;
+    }
+
     setInvoiceImportLoadState('loading');
     setInvoiceImportMessage('Loading invoice imports...');
 
     try {
       const response = await fetchInvoiceImports(vendorId || undefined);
-      setInvoiceImports(response.imports);
+      const nextResponse = {
+        imports: sortInvoiceImports(response.imports),
+      };
+      setInvoiceImports(nextResponse.imports);
+      cacheInvoiceImports(vendorId, nextResponse);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
-        response.imports.length > 0
-          ? `Loaded ${response.imports.length.toLocaleString()} vendor invoice imports.`
+        nextResponse.imports.length > 0
+          ? `Loaded ${nextResponse.imports.length.toLocaleString()} vendor invoice imports.`
           : vendorId
             ? `No ${integrationName(vendorId)} invoices have been imported yet.`
             : 'No vendor invoices have been imported yet.',
       );
-      return response;
+      return nextResponse;
     } catch (error) {
       setInvoiceImports([]);
       setInvoiceImportLoadState('failed');
       setInvoiceImportMessage(error instanceof Error ? error.message : 'Unable to load invoice imports.');
       return null;
+    }
+  };
+
+  const loadOverdueInvoiceWorkspace = async (options: InvoiceWorkspaceLoadOptions = {}) => {
+    const cached = options.forceRefresh ? null : readCachedOverdueInvoices();
+    if (cached) {
+      setOverdueInvoices(cached);
+      setOverdueInvoiceLoadState('ready');
+      setOverdueInvoiceMessage(
+        cached.summary.reviewQueueCount > 0
+          ? `Loaded ${cached.summary.reviewQueueCount.toLocaleString()} saved invoices at least 7 days overdue.`
+          : 'No saved invoices are at least 7 days overdue.',
+      );
+      return cached;
+    }
+
+    setOverdueInvoiceLoadState('loading');
+    setOverdueInvoiceMessage('Loading overdue invoices from ConnectWise...');
+
+    try {
+      const response = await fetchOverdueInvoices();
+      setOverdueInvoices(response);
+      cacheOverdueInvoices(response);
+      setOverdueInvoiceLoadState('ready');
+      setOverdueInvoiceMessage(
+        response.summary.reviewQueueCount > 0
+          ? `Loaded ${response.summary.reviewQueueCount.toLocaleString()} invoices at least 7 days overdue.`
+          : 'No invoices are at least 7 days overdue.',
+      );
+      return response;
+    } catch (error) {
+      setOverdueInvoices(null);
+      setOverdueInvoiceLoadState('failed');
+      setOverdueInvoiceMessage(error instanceof Error ? error.message : 'Unable to load overdue invoices.');
+      return null;
+    }
+  };
+
+  const loadMonthlyInvoiceWorkspace = async (options: InvoiceWorkspaceLoadOptions = {}) => {
+    const cached = options.forceRefresh ? null : readCachedMonthlyInvoiceCandidates();
+    if (cached) {
+      setMonthlyInvoiceCandidates(cached);
+      setMonthlyInvoiceLoadState('ready');
+      setMonthlyInvoiceMessage(
+        cached.agreementCount > 0
+          ? `Loaded ${cached.agreementCount.toLocaleString()} saved active monthly agreements.`
+          : 'No saved active monthly agreements were found.',
+      );
+      return cached;
+    }
+
+    setMonthlyInvoiceLoadState('loading');
+    setMonthlyInvoiceMessage('Loading monthly agreements from ConnectWise...');
+
+    try {
+      const response = await fetchMonthlyInvoiceCandidates();
+      setMonthlyInvoiceCandidates(response);
+      cacheMonthlyInvoiceCandidates(response);
+      setMonthlyInvoiceLoadState('ready');
+      setMonthlyInvoiceMessage(
+        response.agreementCount > 0
+          ? `Loaded ${response.agreementCount.toLocaleString()} active monthly agreements.`
+          : 'No active monthly agreements were found.',
+      );
+      return response;
+    } catch (error) {
+      setMonthlyInvoiceCandidates(null);
+      setMonthlyInvoiceLoadState('failed');
+      setMonthlyInvoiceMessage(error instanceof Error ? error.message : 'Unable to load monthly agreements.');
+      return null;
+    }
+  };
+
+  const loadStandardInvoiceWorkspace = async (options: InvoiceWorkspaceLoadOptions = {}) => {
+    const cached = options.forceRefresh ? null : readCachedStandardInvoiceCandidates();
+    if (cached) {
+      setStandardInvoiceCandidates(cached);
+      setStandardInvoiceLoadState('ready');
+      setStandardInvoiceMessage(
+        cached.candidateCount > 0
+          ? `Loaded ${cached.candidateCount.toLocaleString()} saved standard invoice candidates.`
+          : 'No saved standard invoice candidates were found.',
+      );
+      return cached;
+    }
+
+    setStandardInvoiceLoadState('loading');
+    setStandardInvoiceMessage('Loading standard invoices from ConnectWise...');
+
+    try {
+      const response = await fetchStandardInvoiceCandidates();
+      setStandardInvoiceCandidates(response);
+      cacheStandardInvoiceCandidates(response);
+      setStandardInvoiceLoadState('ready');
+      setStandardInvoiceMessage(
+        response.candidateCount > 0
+          ? `Loaded ${response.candidateCount.toLocaleString()} standard invoice candidates.`
+          : 'No standard invoice candidates were found.',
+      );
+      return response;
+    } catch (error) {
+      setStandardInvoiceCandidates(null);
+      setStandardInvoiceLoadState('failed');
+      setStandardInvoiceMessage(error instanceof Error ? error.message : 'Unable to load standard invoices.');
+      return null;
+    }
+  };
+
+  const refreshInvoiceWorkspace = async () => {
+    await Promise.all([
+      loadInvoiceImports(selectedInvoiceIntegrationId, { forceRefresh: true }),
+      loadOverdueInvoiceWorkspace({ forceRefresh: true }),
+      loadMonthlyInvoiceWorkspace({ forceRefresh: true }),
+      loadStandardInvoiceWorkspace({ forceRefresh: true }),
+    ]);
+  };
+
+  const previewInvoiceNotice = async (customer: OverdueInvoiceCustomerGroup) => {
+    const actionKey = `${customer.customerKey}:preview`;
+    setInvoiceNoticeBusyKey(actionKey);
+    setInvoiceNoticeMessage(`Preparing overdue email for ${customer.company.name}...`);
+
+    try {
+      const response = await postInvoiceNotification({
+        companyKey: customer.customerKey,
+        invoiceIds: customer.invoices.map((invoice) => invoice.invoiceId),
+        noticeType: customer.noticeType,
+      });
+      setInvoiceNoticeResult(response);
+      setInvoiceNoticeMessage('Email preview ready.');
+      return response;
+    } catch (error) {
+      setInvoiceNoticeResult(null);
+      setInvoiceNoticeMessage(error instanceof Error ? error.message : 'Unable to preview overdue email.');
+      return null;
+    } finally {
+      setInvoiceNoticeBusyKey(null);
+    }
+  };
+
+  const confirmInvoiceNotice = async (preview: InvoiceNotificationPreview) => {
+    const actionKey = `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:confirm`;
+    setInvoiceNoticeBusyKey(actionKey);
+    setInvoiceNoticeMessage(`Saving overdue email event for ${preview.companyName}...`);
+
+    try {
+      const response = await postInvoiceNotification({
+        invoiceId: preview.invoiceId,
+        invoiceIds: preview.invoiceIds,
+        companyKey: preview.companyKey,
+        noticeType: preview.noticeType,
+        confirm: true,
+      });
+      setInvoiceNoticeResult(response);
+      setInvoiceNoticeMessage('Overdue email event saved to audit history.');
+      await loadOverdueInvoiceWorkspace({ forceRefresh: true });
+      return response;
+    } catch (error) {
+      setInvoiceNoticeMessage(error instanceof Error ? error.message : 'Unable to save overdue email event.');
+      return null;
+    } finally {
+      setInvoiceNoticeBusyKey(null);
+    }
+  };
+
+  const previewMonthlyInvoice = async (candidate: MonthlyInvoiceCandidate) => {
+    setMonthlyInvoicePreviewBusyId(candidate.agreementId);
+    setMonthlyInvoiceMessage(`Preparing preview for ${candidate.agreementName}...`);
+
+    try {
+      const response = await postMonthlyInvoicePreview(candidate.agreementId);
+      setMonthlyInvoicePreview(response);
+      setMonthlyInvoiceMessage('Monthly invoice preview ready.');
+      return response;
+    } catch (error) {
+      setMonthlyInvoicePreview(null);
+      setMonthlyInvoiceMessage(error instanceof Error ? error.message : 'Unable to preview monthly invoice.');
+      return null;
+    } finally {
+      setMonthlyInvoicePreviewBusyId(null);
     }
   };
 
@@ -4108,7 +4783,12 @@ function App() {
     try {
       const response = await importInvoiceFile(file, importMode);
       const importsResponse = await fetchInvoiceImports(selectedInvoiceIntegrationId || undefined);
-      setInvoiceImports(importsResponse.imports);
+      const nextImportsResponse = {
+        imports: sortInvoiceImports(importsResponse.imports),
+      };
+      invalidateCachedInvoiceImports(response.import.vendorId);
+      cacheInvoiceImports(selectedInvoiceIntegrationId, nextImportsResponse);
+      setInvoiceImports(nextImportsResponse.imports);
       setInvoiceImportLoadState('ready');
       const vendorName = response.detectedVendor?.vendorName ?? integrationName(response.import.vendorId);
       setInvoiceImportMessage(
@@ -4132,16 +4812,13 @@ function App() {
   };
 
   const updateInvoiceImportSummary = (invoiceImport: InvoiceImportSummary) => {
+    updateCachedInvoiceImportSummary(invoiceImport);
     setInvoiceImports((current) => {
       const exists = current.some((item) => item.id === invoiceImport.id);
       const nextImports = exists
         ? current.map((item) => (item.id === invoiceImport.id ? invoiceImport : item))
         : [invoiceImport, ...current];
-      return [...nextImports].sort(
-        (left, right) =>
-          String(right.invoiceDate ?? '').localeCompare(String(left.invoiceDate ?? '')) ||
-          String(right.importedAt ?? '').localeCompare(String(left.importedAt ?? '')),
-      );
+      return sortInvoiceImports(nextImports);
     });
   };
 
@@ -4598,7 +5275,23 @@ function App() {
   }, [selectedMappingIntegrationId, view]);
 
   useEffect(() => {
-    if (view !== 'imports' && view !== 'integrations') {
+    if (view !== 'invoices') {
+      return;
+    }
+
+    if (invoiceWorkspaceTab === 'overdue') {
+      void loadOverdueInvoiceWorkspace();
+    }
+    if (invoiceWorkspaceTab === 'monthly') {
+      void loadMonthlyInvoiceWorkspace();
+    }
+    if (invoiceWorkspaceTab === 'standard') {
+      void loadStandardInvoiceWorkspace();
+    }
+  }, [invoiceWorkspaceTab, view]);
+
+  useEffect(() => {
+    if (view !== 'invoices' && view !== 'integrations') {
       return;
     }
 
@@ -4939,7 +5632,12 @@ function App() {
       const response = await importInvoiceTableFile(integrationId, file, columnMap, sourceType, importMode);
       setSelectedInvoiceIntegrationId(integrationId);
       const importsResponse = await fetchInvoiceImports(integrationId);
-      setInvoiceImports(importsResponse.imports);
+      const nextImportsResponse = {
+        imports: sortInvoiceImports(importsResponse.imports),
+      };
+      invalidateCachedInvoiceImports(integrationId);
+      cacheInvoiceImports(integrationId, nextImportsResponse);
+      setInvoiceImports(nextImportsResponse.imports);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
         `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${integrationName(integrationId)} table rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
@@ -5709,12 +6407,19 @@ function App() {
                     : `Review & Apply (${queuedAgreementUpdateIssues.length.toLocaleString()})`}
                 </button>
               ) : null
-            ) : (
-              <button className="button secondary" onClick={() => navigateToView('imports')} type="button">
+            ) : view === 'invoices' ? (
+              <button
+                className="button secondary"
+                onClick={() => {
+                  setShowInvoiceImportPanel(true);
+                  void loadInvoiceImports(selectedInvoiceIntegrationId);
+                }}
+                type="button"
+              >
                 <Upload size={18} />
                 Import invoices
               </button>
-            )}
+            ) : null}
           </div>
         </header>
 
@@ -5955,35 +6660,75 @@ function App() {
               vendorOptions={customerLicenseVendorIds}
             />
           )}
-          {view === 'imports' && (
-            <ImportsView
-              busyReviewAction={busyInvoiceExceptionAction}
-              customerOptions={invoiceExceptionCustomerOptions}
-              importing={importingInvoice}
-              importMode={invoiceImportMode}
-              imports={invoiceImports}
-              integrations={invoiceImportIntegrations}
-              loadState={invoiceImportLoadState}
-              message={invoiceImportMessage}
-              onAccountMappingSave={saveInvoiceExceptionAccountMapping}
-              onCloseReview={closeInvoiceExceptionReview}
-              onProductCatalogSearch={(query) =>
-                searchProductCatalog(invoiceExceptionReview?.import.vendorId ?? 'opentext-appriver', query)
+          {view === 'invoices' && (
+            <InvoicesView
+              importUtility={
+                <ImportsView
+                  busyReviewAction={busyInvoiceExceptionAction}
+                  customerOptions={invoiceExceptionCustomerOptions}
+                  importing={importingInvoice}
+                  importMode={invoiceImportMode}
+                  imports={invoiceImports}
+                  integrations={invoiceImportIntegrations}
+                  loadState={invoiceImportLoadState}
+                  message={invoiceImportMessage}
+                  onAccountMappingSave={saveInvoiceExceptionAccountMapping}
+                  onCloseReview={closeInvoiceExceptionReview}
+                  onProductCatalogSearch={(query) =>
+                    searchProductCatalog(invoiceExceptionReview?.import.vendorId ?? 'opentext-appriver', query)
+                  }
+                  onProductMappingSave={saveInvoiceExceptionProductMapping}
+                  onRefreshReview={reloadInvoiceExceptionReview}
+                  onReviewImport={openInvoiceExceptionReview}
+                  onTableUpload={importMappedInvoiceTable}
+                  onUpload={importVendorInvoice}
+                  onVendorChange={(integrationId) => {
+                    setSelectedInvoiceIntegrationId(integrationId);
+                    closeInvoiceExceptionReview();
+                  }}
+                  review={invoiceExceptionReview}
+                  reviewLoadState={invoiceExceptionLoadState}
+                  reviewMessage={invoiceExceptionMessage}
+                  selectedVendorId={selectedInvoiceIntegrationId}
+                  setImportMode={setInvoiceImportMode}
+                />
               }
-              onProductMappingSave={saveInvoiceExceptionProductMapping}
-              onRefreshReview={reloadInvoiceExceptionReview}
-              onReviewImport={openInvoiceExceptionReview}
-              onTableUpload={importMappedInvoiceTable}
-              onUpload={importVendorInvoice}
-              onVendorChange={(integrationId) => {
-                setSelectedInvoiceIntegrationId(integrationId);
-                closeInvoiceExceptionReview();
+              monthlyCandidates={monthlyInvoiceCandidates}
+              monthlyLoadMessage={monthlyInvoiceMessage}
+              monthlyLoadState={monthlyInvoiceLoadState}
+              monthlyPreview={monthlyInvoicePreview}
+              monthlyPreviewBusyId={monthlyInvoicePreviewBusyId}
+              noticeBusyKey={invoiceNoticeBusyKey}
+              noticeMessage={invoiceNoticeMessage}
+              noticeResult={invoiceNoticeResult}
+              onCloseImportPanel={() => setShowInvoiceImportPanel(false)}
+              onCloseNoticePreview={() => {
+                setInvoiceNoticeResult(null);
+                setInvoiceNoticeMessage('');
               }}
-              review={invoiceExceptionReview}
-              reviewLoadState={invoiceExceptionLoadState}
-              reviewMessage={invoiceExceptionMessage}
-              selectedVendorId={selectedInvoiceIntegrationId}
-              setImportMode={setInvoiceImportMode}
+              onConfirmNotice={confirmInvoiceNotice}
+              onImportInvoices={() => {
+                setShowInvoiceImportPanel(true);
+                void loadInvoiceImports(selectedInvoiceIntegrationId);
+              }}
+              onMonthlyPreview={previewMonthlyInvoice}
+              onNoticePreview={previewInvoiceNotice}
+              onRefreshAll={refreshInvoiceWorkspace}
+              onTabChange={setInvoiceWorkspaceTab}
+              overdueInvoices={overdueInvoices}
+              overdueLoadMessage={overdueInvoiceMessage}
+              overdueLoadState={overdueInvoiceLoadState}
+              refreshing={
+                invoiceImportLoadState === 'loading' ||
+                overdueInvoiceLoadState === 'loading' ||
+                monthlyInvoiceLoadState === 'loading' ||
+                standardInvoiceLoadState === 'loading'
+              }
+              selectedTab={invoiceWorkspaceTab}
+              showImportPanel={showInvoiceImportPanel}
+              standardCandidates={standardInvoiceCandidates}
+              standardLoadMessage={standardInvoiceMessage}
+              standardLoadState={standardInvoiceLoadState}
             />
           )}
           {view === 'agreements' && (
@@ -6076,8 +6821,8 @@ function pageTitle(view: View) {
       return 'Mappings';
     case 'reports':
       return 'Reporting';
-    case 'imports':
-      return 'Invoice imports';
+    case 'invoices':
+      return 'Invoices';
     case 'agreements':
       return 'Agreement workspace';
     case 'audit':
@@ -8759,6 +9504,7 @@ function IntegrationStat(props: { label: string; value: string }) {
 function integrationCapabilityLabel(capability: IntegrationCapability) {
   if (capability === 'live-api') return 'API sync';
   if (capability === 'invoice-import') return 'Invoice import';
+  if (capability === 'payment-link') return 'Payment link';
   return 'Mapping';
 }
 
@@ -13095,6 +13841,823 @@ function ReportsView(props: {
       </section>
     </section>
   );
+}
+
+function InvoiceLoadingGraphic() {
+  return (
+    <div className="invoice-loading-graphic" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function InvoicesView(props: {
+  importUtility: ReactNode;
+  monthlyCandidates: MonthlyInvoiceCandidatesResponse | null;
+  monthlyLoadMessage: string;
+  monthlyLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  monthlyPreview: MonthlyInvoicePreview | null;
+  monthlyPreviewBusyId: string | null;
+  noticeBusyKey: string | null;
+  noticeMessage: string;
+  noticeResult: InvoiceNotificationResponse | null;
+  onCloseImportPanel: () => void;
+  onCloseNoticePreview: () => void;
+  onConfirmNotice: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  onImportInvoices: () => void;
+  onMonthlyPreview: (candidate: MonthlyInvoiceCandidate) => Promise<MonthlyInvoicePreview | null>;
+  onNoticePreview: (customer: OverdueInvoiceCustomerGroup) => Promise<InvoiceNotificationResponse | null>;
+  onRefreshAll: () => Promise<void>;
+  onTabChange: (tab: InvoiceWorkspaceTab) => void;
+  overdueInvoices: OverdueInvoicesResponse | null;
+  overdueLoadMessage: string;
+  overdueLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  refreshing: boolean;
+  selectedTab: InvoiceWorkspaceTab;
+  showImportPanel: boolean;
+  standardCandidates: StandardInvoiceCandidatesResponse | null;
+  standardLoadMessage: string;
+  standardLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+}) {
+  const {
+    importUtility,
+    monthlyCandidates,
+    monthlyLoadMessage,
+    monthlyLoadState,
+    monthlyPreview,
+    monthlyPreviewBusyId,
+    noticeBusyKey,
+    noticeMessage,
+    noticeResult,
+    onCloseImportPanel,
+    onCloseNoticePreview,
+    onConfirmNotice,
+    onImportInvoices,
+    onMonthlyPreview,
+    onNoticePreview,
+    onRefreshAll,
+    onTabChange,
+    overdueInvoices,
+    overdueLoadMessage,
+    overdueLoadState,
+    refreshing,
+    selectedTab,
+    showImportPanel,
+    standardCandidates,
+    standardLoadMessage,
+    standardLoadState,
+  } = props;
+  const tabs: Array<{ id: InvoiceWorkspaceTab; label: string }> = [
+    { id: 'overdue', label: 'Past-Due' },
+    { id: 'monthly', label: 'Monthly Invoicing' },
+    { id: 'standard', label: 'Standard Invoicing' },
+  ];
+  return (
+    <section className="invoices-workspace">
+      <section className="toolbar invoices-toolbar" aria-label="Invoice workspace controls">
+        <div className="segmented-control invoices-tab-control" role="tablist" aria-label="Invoice workspace tabs">
+          {tabs.map((tab) => (
+            <button
+              aria-selected={selectedTab === tab.id}
+              className={selectedTab === tab.id ? 'active' : ''}
+              key={tab.id}
+              onClick={() => onTabChange(tab.id)}
+              role="tab"
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div className="invoice-toolbar-actions">
+          <button className="button secondary compact" disabled={refreshing} onClick={() => void onRefreshAll()} type="button">
+            <RefreshCcw size={15} />
+            {refreshing ? 'Refreshing' : 'Refresh all'}
+          </button>
+          <button className="button primary compact" onClick={onImportInvoices} type="button">
+            <Upload size={15} />
+            Import invoices
+          </button>
+        </div>
+      </section>
+
+      {showImportPanel ? (
+        <section className="invoice-import-utility" aria-label="Import invoices">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">Utility</span>
+              <h2>Import invoices</h2>
+            </div>
+            <button className="icon-button" onClick={onCloseImportPanel} title="Close import utility" type="button">
+              <X size={18} />
+            </button>
+          </div>
+          <div className="invoice-import-utility-body">{importUtility}</div>
+        </section>
+      ) : null}
+
+      {selectedTab === 'overdue' ? (
+        <OverdueInvoicesTab
+          loadMessage={overdueLoadMessage}
+          loadState={overdueLoadState}
+          noticeBusyKey={noticeBusyKey}
+          noticeMessage={noticeMessage}
+          noticeResult={noticeResult}
+          onCloseNoticePreview={onCloseNoticePreview}
+          onConfirmNotice={onConfirmNotice}
+          onNoticePreview={onNoticePreview}
+          response={overdueInvoices}
+        />
+      ) : null}
+
+      {selectedTab === 'monthly' ? (
+        <MonthlyInvoicesTab
+          loadMessage={monthlyLoadMessage}
+          loadState={monthlyLoadState}
+          onPreview={onMonthlyPreview}
+          preview={monthlyPreview}
+          previewBusyId={monthlyPreviewBusyId}
+          response={monthlyCandidates}
+        />
+      ) : null}
+
+      {selectedTab === 'standard' ? (
+        <StandardInvoicesTab
+          loadMessage={standardLoadMessage}
+          loadState={standardLoadState}
+          response={standardCandidates}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function OverdueInvoicesTab(props: {
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  noticeBusyKey: string | null;
+  noticeMessage: string;
+  noticeResult: InvoiceNotificationResponse | null;
+  onCloseNoticePreview: () => void;
+  onConfirmNotice: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  onNoticePreview: (customer: OverdueInvoiceCustomerGroup) => Promise<InvoiceNotificationResponse | null>;
+  response: OverdueInvoicesResponse | null;
+}) {
+  const {
+    loadMessage,
+    loadState,
+    noticeBusyKey,
+    noticeMessage,
+    noticeResult,
+    onCloseNoticePreview,
+    onConfirmNotice,
+    onNoticePreview,
+    response,
+  } = props;
+  const buckets = response?.buckets ?? [];
+  const allReviewInvoices = buckets.flatMap((bucket) => bucket.invoices);
+  const customerGroups = response?.customerGroups?.length
+    ? response.customerGroups
+    : groupOverdueInvoicesByCustomer(allReviewInvoices);
+  const customerCount = response?.summary.customerCount ?? customerGroups.length;
+  const agingSummary = overdueAgingSummary(customerGroups);
+  const [sortState, setSortState] = useState<{ key: OverdueInvoiceSortKey; direction: SortDirection }>({
+    key: 'pastDueStatus',
+    direction: 'desc',
+  });
+  const sortedCustomerGroups = useMemo(
+    () => sortOverdueCustomerGroups(customerGroups, sortState.key, sortState.direction),
+    [customerGroups, sortState],
+  );
+  const toggleSort = (key: OverdueInvoiceSortKey) => {
+    setSortState((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc',
+    }));
+  };
+  const sortIndicator = (key: OverdueInvoiceSortKey) =>
+    sortState.key === key ? (sortState.direction === 'desc' ? '▼' : '▲') : '';
+
+  return (
+    <>
+      <section className="invoice-aging-summary" aria-label="Overdue invoice aging summary">
+        <div className="invoice-aging-total">
+          <span>Past due</span>
+          <strong>{formatMoneyValue(response?.summary.reviewQueueBalance ?? 0)}</strong>
+          <em>{formatCount(customerCount)} customers / {formatCount(response?.summary.reviewQueueCount ?? 0)} invoices</em>
+        </div>
+        <div className="invoice-aging-stat">
+          <span>30 Days</span>
+          <strong>{formatMoneyValue(agingSummary.balance30)}</strong>
+          <em>{formatCount(agingSummary.customers30)} customers / {formatCount(agingSummary.invoices30)} invoices</em>
+        </div>
+        <div className="invoice-aging-stat">
+          <span>60 Days</span>
+          <strong>{formatMoneyValue(agingSummary.balance60)}</strong>
+          <em>{formatCount(agingSummary.customers60)} customers / {formatCount(agingSummary.invoices60)} invoices</em>
+        </div>
+        <div className="invoice-aging-stat critical">
+          <span>90+ Days</span>
+          <strong>{formatMoneyValue(agingSummary.balance90)}</strong>
+          <em>{formatCount(agingSummary.customers90)} customers / {formatCount(agingSummary.invoices90)} invoices</em>
+        </div>
+      </section>
+
+      <section className="work-surface invoice-table-surface" aria-label="Customers with overdue invoices">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">ConnectWise overdue</span>
+            <h2>Customers with past-due invoices</h2>
+          </div>
+          <span className="invoice-action-message">{loadMessage}</span>
+        </div>
+
+        {loadState === 'loading' && !response ? (
+          <div className="empty-state">
+            <InvoiceLoadingGraphic />
+            <strong>Loading overdue customers.</strong>
+            <span>{loadMessage}</span>
+          </div>
+        ) : null}
+
+        {loadState === 'failed' ? (
+          <div className="empty-state">
+            <FileSpreadsheet size={22} />
+            <strong>Overdue invoices unavailable.</strong>
+            <span>{loadMessage}</span>
+          </div>
+        ) : null}
+
+        {loadState !== 'failed' && response && customerGroups.length === 0 ? (
+          <div className="empty-state">
+            <ClipboardCheck size={22} />
+            <strong>No overdue customers.</strong>
+            <span>{loadMessage}</span>
+          </div>
+        ) : null}
+
+        {sortedCustomerGroups.length > 0 ? (
+          <div className="invoice-overdue-table-scroll">
+            <table className="invoice-overdue-table">
+              <thead>
+                <tr>
+                  <th aria-sort={ariaSortValue(sortState, 'customerName')}>
+                    <button className="invoice-sort-button" onClick={() => toggleSort('customerName')} type="button">
+                      Customer Name
+                      <span>{sortIndicator('customerName')}</span>
+                    </button>
+                  </th>
+                  <th aria-sort={ariaSortValue(sortState, 'pastDueStatus')}>
+                    <button className="invoice-sort-button" onClick={() => toggleSort('pastDueStatus')} type="button">
+                      Past Due Status
+                      <span>{sortIndicator('pastDueStatus')}</span>
+                    </button>
+                  </th>
+                  <th aria-sort={ariaSortValue(sortState, 'invoiceCount')}>
+                    <button className="invoice-sort-button" onClick={() => toggleSort('invoiceCount')} type="button">
+                      Total Invoice Count
+                      <span>{sortIndicator('invoiceCount')}</span>
+                    </button>
+                  </th>
+                  <th aria-sort={ariaSortValue(sortState, 'agingBalance')}>
+                    <button className="invoice-sort-button" onClick={() => toggleSort('agingBalance')} type="button">
+                      Past Due Balance 30/60/90
+                      <span>{sortIndicator('agingBalance')}</span>
+                    </button>
+                  </th>
+                  <th>
+                    <span className="invoice-table-heading-label">Preview Email</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedCustomerGroups.map((customer) => {
+                  const previewKey = `${customer.customerKey}:preview`;
+                  const agingBalances = agingBalancesForCustomer(customer);
+                  return (
+                    <tr key={customer.customerKey}>
+                      <td>
+                        <strong>{customer.company.name}</strong>
+                      </td>
+                      <td>
+                        <span className={`status-pill ${invoiceNoticeStatusClass(customer.noticeType)}`}>
+                          {invoiceNoticeLabel(customer.noticeType)}
+                        </span>
+                        <span>{customer.oldestDaysPastDue} days oldest</span>
+                      </td>
+                      <td>
+                        <strong>{formatCount(customer.invoiceCount)}</strong>
+                      </td>
+                      <td>
+                        <strong>{formatMoneyValue(customer.balanceTotal)}</strong>
+                        <div className="invoice-aging-balance" aria-label={`${customer.company.name} aging balance`}>
+                          <span>{formatMoneyValue(agingBalances.balance30)}</span>
+                          <span>{formatMoneyValue(agingBalances.balance60)}</span>
+                          <span>{formatMoneyValue(agingBalances.balance90)}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <button
+                          className="button primary compact table-action-button invoice-preview-action"
+                          disabled={Boolean(noticeBusyKey)}
+                          onClick={() => void onNoticePreview(customer)}
+                          type="button"
+                        >
+                          <ExternalLink size={15} />
+                          {noticeBusyKey === previewKey ? 'Previewing' : 'Preview'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+
+      {noticeResult?.preview ? (
+        <InvoiceNotificationModal
+          busyKey={noticeBusyKey}
+          message={noticeMessage}
+          onClose={onCloseNoticePreview}
+          onConfirm={onConfirmNotice}
+          result={noticeResult}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function InvoiceNotificationModal(props: {
+  busyKey: string | null;
+  message: string;
+  onClose: () => void;
+  onConfirm: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  result: InvoiceNotificationResponse | null;
+}) {
+  const { busyKey, message, onClose, onConfirm, result } = props;
+  const preview = result?.preview;
+  const confirmKey = preview ? `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:confirm` : '';
+
+  if (!preview) {
+    return null;
+  }
+
+  const missingPaymentLinks = preview.invoices.filter((invoice) => !invoice.paymentLink).length;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="invoice-notice-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-notice-modal-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="invoice-notice-modal-title">
+              <CircleDollarSign size={18} />
+              Overdue Email Preview
+            </h2>
+            <p>
+              To: {preview.recipientName}
+              {preview.recipientEmail ? ` <${preview.recipientEmail}>` : ''} / {preview.companyName}
+            </p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="invoice-email-preview">
+          <div className="invoice-email-subject">
+            <span className="section-kicker">Subject</span>
+            <strong>{preview.subject}</strong>
+          </div>
+
+          <div className="invoice-email-body">
+            <p>Hello {preview.recipientName},</p>
+            <p>{overdueEmailIntro(preview.noticeType, preview.invoiceCount, preview.totalBalance)}</p>
+            <div className="invoice-email-invoice-list">
+              {preview.invoices.map((invoice) => (
+                <div className="invoice-email-invoice-row" key={invoice.invoiceId}>
+                  <div>
+                    <strong>{invoice.invoiceNumber ?? `Invoice ${invoice.invoiceId}`}</strong>
+                    <span>
+                      {formatDateOnly(invoice.dueDate) ?? 'No due date'} / {invoice.daysPastDue} days past due
+                    </span>
+                  </div>
+                  <strong>{formatMoneyValue(invoice.balance)}</strong>
+                  {invoice.paymentLink ? (
+                    <a className="invoice-payment-link" href={invoice.paymentLink} rel="noreferrer" target="_blank">
+                      Pay now
+                      <ExternalLink size={14} />
+                    </a>
+                  ) : (
+                    <span className="status-pill blocked">WisePay unavailable</span>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p>Thank you.</p>
+          </div>
+
+          <div className="invoice-preview-meta">
+            {preview.recipientEmail ? <span>{preview.recipientEmail}</span> : null}
+            <span>{preview.daysPastDue} days oldest</span>
+            <span>{formatMoneyValue(preview.totalBalance)} past due</span>
+            {preview.emailTemplateName ? <span>{preview.emailTemplateName}</span> : null}
+            {preview.emailTemplateNames.length > 1 ? <span>{formatCount(preview.emailTemplateNames.length)} templates</span> : null}
+            {missingPaymentLinks > 0 ? <span>{formatCount(missingPaymentLinks)} missing WisePay links</span> : <span>WisePay ready</span>}
+          </div>
+        </div>
+
+        <div className="modal-actions invoice-notice-actions">
+          {message ? <span className="invoice-action-message">{message}</span> : null}
+          {result.status === 'stubbed' ? (
+            <span className="status-pill approved">
+              Saved {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
+            </span>
+          ) : (
+            <button
+              className="button primary compact"
+              disabled={Boolean(busyKey)}
+              onClick={() => void onConfirm(preview)}
+              type="button"
+            >
+              <Check size={15} />
+              {busyKey === confirmKey ? 'Saving' : 'Trigger email'}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MonthlyInvoicesTab(props: {
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onPreview: (candidate: MonthlyInvoiceCandidate) => Promise<MonthlyInvoicePreview | null>;
+  preview: MonthlyInvoicePreview | null;
+  previewBusyId: string | null;
+  response: MonthlyInvoiceCandidatesResponse | null;
+}) {
+  const { loadMessage, loadState, onPreview, preview, previewBusyId, response } = props;
+  const candidates = response?.candidates ?? [];
+  const totalBillAmount = candidates.reduce((total, candidate) => total + candidate.billAmount, 0);
+  const missingCount = candidates.filter((candidate) => candidate.missingFields.length > 0).length;
+
+  return (
+    <>
+      <section className="metric-grid invoices-metric-grid" aria-label="Monthly invoicing summary">
+        <MetricCard icon={Building2} label="Agreements" tone="approved" value={formatCount(response?.agreementCount ?? 0)} />
+        <MetricCard icon={CircleDollarSign} label="Monthly amount" tone="money" value={formatMoneyValue(totalBillAmount)} />
+        <MetricCard icon={ListChecks} label="Ready" tone="ready" value={formatCount(candidates.length - missingCount)} />
+        <MetricCard icon={Activity} label="Needs data" tone="warn" value={formatCount(missingCount)} />
+      </section>
+
+      <section className="invoice-bucket-layout">
+        <div className="work-surface">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">ConnectWise agreements</span>
+              <h2>Monthly invoicing</h2>
+            </div>
+            <span className="invoice-action-message">{loadMessage}</span>
+          </div>
+          <div className="invoice-live-list">
+            {candidates.length === 0 ? (
+              <div className="empty-state">
+                {loadState === 'loading' ? <InvoiceLoadingGraphic /> : <FileSpreadsheet size={20} />}
+                <strong>{loadState === 'loading' ? 'Loading monthly agreements.' : 'No monthly agreements found.'}</strong>
+                <span>{loadMessage}</span>
+              </div>
+            ) : null}
+            {candidates.map((candidate) => (
+              <div className="invoice-live-row monthly-invoice-row" key={candidate.agreementId}>
+                <div>
+                  <strong>{candidate.company.name}</strong>
+                  <span>{candidate.agreementName}</span>
+                </div>
+                <span>{formatDateOnly(candidate.nextInvoiceDate) ?? 'No next date'}</span>
+                <strong>{formatMoneyValue(candidate.billAmount)}</strong>
+                <span>
+                  {candidate.lastInvoice
+                    ? `${candidate.lastInvoice.invoiceNumber ?? `Invoice ${candidate.lastInvoice.invoiceId}`} / ${formatDateOnly(candidate.lastInvoice.invoiceDate) ?? 'No date'}`
+                    : 'No prior invoice'}
+                </span>
+                <span className={candidate.missingFields.length > 0 ? 'status-pill needs-review' : 'status-pill approved'}>
+                  {candidate.missingFields.length > 0 ? 'Review' : 'Ready'}
+                </span>
+                <button
+                  className="button primary compact"
+                  disabled={Boolean(previewBusyId)}
+                  onClick={() => void onPreview(candidate)}
+                  type="button"
+                >
+                  {previewBusyId === candidate.agreementId ? 'Generating' : 'Generate invoice'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <aside className="work-surface invoice-side-panel" aria-label="Monthly invoice preview">
+          <div className="surface-header compact-header">
+            <div>
+              <span className="section-kicker">Preview only</span>
+              <h3>{preview?.candidate.agreementName ?? 'No invoice preview'}</h3>
+            </div>
+          </div>
+          {!preview ? (
+            <div className="empty-state">
+              <FileSpreadsheet size={20} />
+              <strong>Select a monthly agreement.</strong>
+            </div>
+          ) : (
+            <div className="invoice-preview-panel">
+              <div>
+                <span className="section-kicker">Payload</span>
+                <strong>{preview.payload.companyName}</strong>
+              </div>
+              <div className="invoice-preview-meta">
+                <span>{preview.payload.invoiceType}</span>
+                <span>{preview.payload.applyToType} #{preview.payload.applyToId}</span>
+                <span>{formatMoneyValue(preview.payload.billAmount)}</span>
+                {preview.payload.invoiceTemplateName ? <span>{preview.payload.invoiceTemplateName}</span> : null}
+              </div>
+              {preview.warnings.length > 0 ? (
+                <div className="invoice-warning-list">
+                  {preview.warnings.map((warning) => (
+                    <span key={warning}>{warning}</span>
+                  ))}
+                </div>
+              ) : (
+                <span className="status-pill approved">Preview ready</span>
+              )}
+            </div>
+          )}
+        </aside>
+      </section>
+    </>
+  );
+}
+
+function StandardInvoicesTab(props: {
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  response: StandardInvoiceCandidatesResponse | null;
+}) {
+  const { loadMessage, loadState, response } = props;
+  const candidates = response?.candidates ?? [];
+  const openInvoiceCount = candidates.reduce((total, candidate) => total + candidate.openInvoiceCount, 0);
+  const openBalanceAmount = candidates.reduce((total, candidate) => total + candidate.openBalanceAmount, 0);
+  const overdueInvoiceCount = candidates.reduce((total, candidate) => total + candidate.overdueInvoiceCount, 0);
+
+  return (
+    <>
+      <section className="metric-grid invoices-metric-grid" aria-label="Standard invoicing summary">
+        <MetricCard icon={Users} label="Candidates" tone="approved" value={formatCount(response?.candidateCount ?? 0)} />
+        <MetricCard icon={FileSpreadsheet} label="Open invoices" tone="ready" value={formatCount(openInvoiceCount)} />
+        <MetricCard icon={CircleDollarSign} label="Open balance" tone="money" value={formatMoneyValue(openBalanceAmount)} />
+        <MetricCard icon={Activity} label="Overdue" tone="warn" value={formatCount(overdueInvoiceCount)} />
+      </section>
+
+      <section className="work-surface">
+        <div className="surface-header">
+            <div>
+              <span className="section-kicker">ConnectWise invoices</span>
+              <h2>Standard invoicing</h2>
+            </div>
+          <span className="invoice-action-message">{loadMessage}</span>
+        </div>
+        <div className="invoice-live-list">
+          {candidates.length === 0 ? (
+            <div className="empty-state">
+              {loadState === 'loading' ? <InvoiceLoadingGraphic /> : <FileSpreadsheet size={20} />}
+              <strong>{loadState === 'loading' ? 'Loading standard invoices.' : 'No standard invoice candidates found.'}</strong>
+              <span>{loadMessage}</span>
+            </div>
+          ) : null}
+          {candidates.map((candidate) => (
+            <div className="invoice-live-row standard-invoice-row" key={`${candidate.company.id ?? candidate.company.name}`}>
+              <div>
+                <strong>{candidate.company.name}</strong>
+                <span>{candidate.invoiceTypes.length > 0 ? candidate.invoiceTypes.join(', ') : 'Standard'}</span>
+              </div>
+              <span>{candidate.latestInvoice?.invoiceNumber ?? 'No invoice number'}</span>
+              <strong>{formatCount(candidate.openInvoiceCount)} open</strong>
+              <strong>{formatMoneyValue(candidate.openBalanceAmount)}</strong>
+              <span className={candidate.overdueInvoiceCount > 0 ? 'status-pill needs-review' : 'status-pill approved'}>
+                {candidate.overdueInvoiceCount > 0 ? `${candidate.overdueInvoiceCount} overdue` : 'Current'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function invoiceNoticeLabel(noticeType: InvoiceNoticeType) {
+  if (noticeType === '90-day-cancel-services') return 'Cancel services';
+  if (noticeType === '60-day-credit-hold') return '60-day credit hold';
+  if (noticeType === '30-day-notice') return '30-day notice';
+  return 'Reminder';
+}
+
+function invoiceNoticeStatusClass(noticeType: InvoiceNoticeType) {
+  if (noticeType === '90-day-cancel-services' || noticeType === '60-day-credit-hold') return 'blocked';
+  if (noticeType === '30-day-notice') return 'needs-review';
+  return 'ready';
+}
+
+function ariaSortValue(
+  sortState: { key: OverdueInvoiceSortKey; direction: SortDirection },
+  key: OverdueInvoiceSortKey,
+): 'ascending' | 'descending' | 'none' {
+  if (sortState.key !== key) {
+    return 'none';
+  }
+  return sortState.direction === 'asc' ? 'ascending' : 'descending';
+}
+
+function sortOverdueCustomerGroups(
+  customers: OverdueInvoiceCustomerGroup[],
+  key: OverdueInvoiceSortKey,
+  direction: SortDirection,
+) {
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...customers].sort((left, right) => {
+    const compared = compareOverdueCustomerSortValue(left, right, key);
+    if (compared !== 0) {
+      return compared * multiplier;
+    }
+    return left.company.name.localeCompare(right.company.name, undefined, { sensitivity: 'base' });
+  });
+}
+
+function compareOverdueCustomerSortValue(
+  left: OverdueInvoiceCustomerGroup,
+  right: OverdueInvoiceCustomerGroup,
+  key: OverdueInvoiceSortKey,
+) {
+  if (key === 'customerName') {
+    return left.company.name.localeCompare(right.company.name, undefined, { sensitivity: 'base' });
+  }
+  if (key === 'pastDueStatus') {
+    return left.oldestDaysPastDue - right.oldestDaysPastDue;
+  }
+  if (key === 'invoiceCount') {
+    return left.invoiceCount - right.invoiceCount;
+  }
+  if (key === 'pastDueBalance' || key === 'agingBalance') {
+    return left.balanceTotal - right.balanceTotal;
+  }
+  return 0;
+}
+
+function agingBalancesForCustomer(customer: OverdueInvoiceCustomerGroup) {
+  return customer.invoices.reduce(
+    (totals, invoice) => {
+      if (invoice.daysPastDue >= 90) {
+        totals.balance90 += invoice.balance;
+      } else if (invoice.daysPastDue >= 60) {
+        totals.balance60 += invoice.balance;
+      } else {
+        totals.balance30 += invoice.balance;
+      }
+      return totals;
+    },
+    { balance30: 0, balance60: 0, balance90: 0 },
+  );
+}
+
+function overdueAgingSummary(customers: OverdueInvoiceCustomerGroup[]) {
+  return customers.reduce(
+    (summary, customer) => {
+      let has30 = false;
+      let has60 = false;
+      let has90 = false;
+
+      for (const invoice of customer.invoices) {
+        if (invoice.daysPastDue >= 90) {
+          summary.invoices90 += 1;
+          summary.balance90 += invoice.balance;
+          has90 = true;
+        } else if (invoice.daysPastDue >= 60) {
+          summary.invoices60 += 1;
+          summary.balance60 += invoice.balance;
+          has60 = true;
+        } else {
+          summary.invoices30 += 1;
+          summary.balance30 += invoice.balance;
+          has30 = true;
+        }
+      }
+
+      if (has30) summary.customers30 += 1;
+      if (has60) summary.customers60 += 1;
+      if (has90) summary.customers90 += 1;
+
+      return summary;
+    },
+    {
+      balance30: 0,
+      balance60: 0,
+      balance90: 0,
+      customers30: 0,
+      customers60: 0,
+      customers90: 0,
+      invoices30: 0,
+      invoices60: 0,
+      invoices90: 0,
+    },
+  );
+}
+
+function overdueEmailIntro(noticeType: InvoiceNoticeType, invoiceCount: number, totalBalance: number) {
+  const invoiceLabel = invoiceCount === 1 ? 'invoice is' : 'invoices are';
+  if (noticeType === '90-day-cancel-services') {
+    return `The overdue ${invoiceLabel} 90 or more days past due with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
+  }
+  if (noticeType === '60-day-credit-hold') {
+    return `The overdue ${invoiceLabel} listed below with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
+  }
+  if (noticeType === '30-day-notice') {
+    return `The overdue ${invoiceLabel} more than 30 days past due with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
+  }
+  return `The overdue ${invoiceLabel} listed below with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
+}
+
+function groupOverdueInvoicesByCustomer(invoices: OverdueInvoice[]): OverdueInvoiceCustomerGroup[] {
+  const groups = new Map<string, OverdueInvoiceCustomerGroup>();
+
+  for (const invoice of invoices) {
+    const customerKey = overdueInvoiceCustomerKey(invoice);
+    const existing =
+      groups.get(customerKey) ??
+      ({
+        customerKey,
+        company: invoice.company,
+        invoices: [],
+        invoiceCount: 0,
+        balanceTotal: 0,
+        oldestDaysPastDue: 0,
+        noticeType: 'reminder',
+        bucketCounts: {
+          '7-29-days': 0,
+          '30-59-days': 0,
+          '60-plus-days': 0,
+        },
+      } satisfies OverdueInvoiceCustomerGroup);
+
+    existing.invoices.push(invoice);
+    existing.invoiceCount += 1;
+    existing.balanceTotal += invoice.balance;
+    existing.oldestDaysPastDue = Math.max(existing.oldestDaysPastDue, invoice.daysPastDue);
+    existing.noticeType = invoiceNoticeTypeForDaysPastDue(existing.oldestDaysPastDue);
+    existing.bucketCounts[invoice.bucketId] += 1;
+    if (
+      invoice.lastNotice &&
+      (!existing.lastNotice || new Date(invoice.lastNotice.occurredAt).getTime() > new Date(existing.lastNotice.occurredAt).getTime())
+    ) {
+      existing.lastNotice = invoice.lastNotice;
+    }
+
+    groups.set(customerKey, existing);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      invoices: sortedOverdueInvoicesOldestFirst(group.invoices),
+      balanceTotal: Math.round(group.balanceTotal * 100) / 100,
+    }))
+    .sort(
+      (left, right) =>
+        right.balanceTotal - left.balanceTotal ||
+        right.oldestDaysPastDue - left.oldestDaysPastDue ||
+        left.company.name.localeCompare(right.company.name, undefined, { sensitivity: 'base' }),
+    );
+}
+
+function sortedOverdueInvoicesOldestFirst(invoices: OverdueInvoice[]) {
+  return [...invoices].sort(
+    (left, right) => right.daysPastDue - left.daysPastDue || String(left.dueDate ?? '').localeCompare(String(right.dueDate ?? '')),
+  );
+}
+
+function overdueInvoiceCustomerKey(invoice: OverdueInvoice) {
+  if (invoice.company.id) return `id:${invoice.company.id}`;
+  if (invoice.company.identifier) return `identifier:${invoice.company.identifier.trim().toLowerCase()}`;
+  return `name:${invoice.company.name.trim().toLowerCase()}`;
+}
+
+function invoiceNoticeTypeForDaysPastDue(daysPastDue: number): InvoiceNoticeType {
+  if (daysPastDue >= 90) return '90-day-cancel-services';
+  if (daysPastDue >= 60) return '60-day-credit-hold';
+  if (daysPastDue >= 30) return '30-day-notice';
+  return 'reminder';
 }
 
 function ImportsView(props: {

@@ -1,5 +1,6 @@
 export type IntegrationId =
   | 'connectwise'
+  | 'wisepay'
   | 'cove'
   | 'ncentral'
   | 'sentinelone'
@@ -13,7 +14,7 @@ export type IntegrationId =
   | 'custom-table';
 
 export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic' | 'none';
-export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import';
+export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import' | 'payment-link';
 export type IntegrationConfiguredStatus = 'connected' | 'degraded' | 'not-configured';
 export type IntegrationDataIngestionMethod = 'live-api' | 'csv' | 'excel';
 export type IntegrationDataSourceType =
@@ -110,6 +111,23 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     ],
     scopes: ['companies.read', 'agreements.read', 'agreements.write', 'products.read', 'tickets.write'],
     syncFrequency: 'hourly',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'wisepay',
+    displayName: 'WisePay',
+    category: 'Payments',
+    authMode: 'api-key',
+    capabilities: ['payment-link'],
+    dataSources: [],
+    description: 'API key used to generate WisePay payment links for ConnectWise invoice notifications.',
+    endpoint: 'https://secure2.wise-sync.com',
+    requiredSecrets: [secret('apiKey', 'API Key', 'mspharmony-wisepay-api-key', 'WISEPAY_API_KEY')],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Payment Link Endpoint', 'WISEPAY_ENDPOINT', 'https://secure2.wise-sync.com'),
+    ],
+    scopes: ['payment-link.generate'],
+    syncFrequency: 'manual',
     webhookSupported: false,
   },
   {

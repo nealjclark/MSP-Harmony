@@ -27,6 +27,31 @@ export type ConnectWiseCompany = {
   [key: string]: unknown;
 };
 
+export type ConnectWiseContact = {
+  id: number;
+  firstName?: string;
+  lastName?: string;
+  company?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  defaultFlag?: boolean;
+  defaultBillingFlag?: boolean;
+  inactiveFlag?: boolean;
+  communicationItems?: Array<{
+    id?: number;
+    type?: {
+      id?: number;
+      name?: string;
+    };
+    communicationType?: string;
+    value?: string;
+    defaultFlag?: boolean;
+  }>;
+  [key: string]: unknown;
+};
+
 export type ConnectWiseAgreement = {
   id: number;
   name: string;
@@ -35,13 +60,99 @@ export type ConnectWiseAgreement = {
     identifier?: string;
     name?: string;
   };
+  type?: {
+    id?: number;
+    name?: string;
+  };
   status?: string | {
     id?: number;
     name?: string;
   };
   agreementStatus?: string;
+  billingCycle?: {
+    id?: number;
+    name?: string;
+  };
+  billingTerms?: {
+    id?: number;
+    name?: string;
+  };
+  invoiceTemplate?: {
+    id?: number;
+    name?: string;
+  };
+  billAmount?: number;
+  nextInvoiceDate?: string;
   startDate?: string;
   endDate?: string;
+  [key: string]: unknown;
+};
+
+export type ConnectWiseInvoice = {
+  id: number;
+  invoiceNumber?: string;
+  type?: string;
+  status?: {
+    id?: number;
+    name?: string;
+    isClosed?: boolean;
+  };
+  company?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  billToCompany?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  agreement?: {
+    id?: number;
+    name?: string;
+    type?: string;
+  };
+  applyToType?: string;
+  applyToId?: number;
+  billingTerms?: {
+    id?: number;
+    name?: string;
+  };
+  invoiceTemplate?: {
+    id?: number;
+    name?: string;
+  };
+  emailTemplateId?: number;
+  date?: string;
+  dueDate?: string;
+  total?: number;
+  subtotal?: number;
+  balance?: number;
+  payments?: number;
+  credits?: number;
+  serviceTotal?: number;
+  productTotal?: number;
+  agreementAmount?: number;
+  _info?: {
+    lastUpdated?: string;
+    dateEntered?: string;
+    updatedBy?: string;
+    enteredBy?: string;
+  };
+  [key: string]: unknown;
+};
+
+export type ConnectWiseInvoiceEmailTemplate = {
+  id: number;
+  name: string;
+  subject?: string;
+  body?: string;
+  cc?: string;
+  bcc?: string;
+  _info?: {
+    lastUpdated?: string;
+    updatedBy?: string;
+  };
   [key: string]: unknown;
 };
 
@@ -140,13 +251,35 @@ export class ConnectWiseClient {
     return this.request<ConnectWiseCompany[]>(`/company/companies?${listParams(options).toString()}`);
   }
 
+  async listContacts(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseContact[]>(`/company/contacts?${listParams(options).toString()}`);
+  }
+
   async listAgreements(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseAgreement[]>(`/finance/agreements?${listParams(options).toString()}`);
+  }
+
+  async getAgreement(agreementId: number | string) {
+    return this.request<ConnectWiseAgreement>(`/finance/agreements/${encodeURIComponent(String(agreementId))}`);
   }
 
   async listAgreementAdditions(agreementId: number | string, options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseAgreementAddition[]>(
       `/finance/agreements/${encodeURIComponent(String(agreementId))}/additions?${listParams(options).toString()}`,
+    );
+  }
+
+  async listInvoices(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseInvoice[]>(`/finance/invoices?${listParams(options).toString()}`);
+  }
+
+  async getInvoice(invoiceId: number | string) {
+    return this.request<ConnectWiseInvoice>(`/finance/invoices/${encodeURIComponent(String(invoiceId))}`);
+  }
+
+  async getInvoiceEmailTemplate(templateId: number | string) {
+    return this.request<ConnectWiseInvoiceEmailTemplate>(
+      `/finance/invoiceEmailTemplates/${encodeURIComponent(String(templateId))}`,
     );
   }
 

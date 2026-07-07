@@ -24,6 +24,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Integration | Secret names |
 | --- | --- |
 | ConnectWise Manage | `mspharmony-connectwise-public-key`, `mspharmony-connectwise-private-key` |
+| WisePay | `mspharmony-wisepay-api-key` |
 | Cove Data Protection | `mspharmony-cove-username`, `mspharmony-cove-password` |
 | SentinelOne | `mspharmony-sentinelone-api-token` |
 | Proofpoint Essentials | `mspharmony-proofpoint-username`, `mspharmony-proofpoint-password` |
@@ -39,6 +40,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Integration | Required settings |
 | --- | --- |
 | ConnectWise Manage | `endpoint`, `companyId`, `clientId` |
+| WisePay | `endpoint` |
 | Cove Data Protection | `endpoint`, `partnerName` |
 | SentinelOne | `endpoint` |
 | Proofpoint Essentials | `endpoint` |
@@ -143,6 +145,17 @@ Requirements:
 - ConnectWise writes are disabled until a dry-run plan is approved.
 - Sync defaults to daily except ConnectWise and SentinelOne, which default to hourly.
 - Webhooks are documented for integrations that support them, but scheduled/manual sync is the MVP path.
+
+## WisePay Payment Links
+
+WisePay is not synchronized as a data integration. MSP Harmony only stores a WisePay API key so overdue ConnectWise invoice notification previews can include a payment link.
+
+- Key Vault secret: `mspharmony-wisepay-api-key`
+- Local development env var: `WISEPAY_API_KEY`
+- Default endpoint: `https://secure2.wise-sync.com`
+- Link template: `https://secure2.wise-sync.com/PaymentProxy/PayNow/Email?apiKey=<apikey>&invoiceNo=[invnumber]&amount=[invamount]&companyCode=[companyid]`
+
+`[invnumber]` comes from the ConnectWise invoice number, `[invamount]` uses the outstanding invoice balance, and `[companyid]` uses the ConnectWise company identifier with company ID as a fallback. The key is saved through the Integrations settings flow and should live in Azure Key Vault for deployed environments.
 
 ## Microsoft 365 Graph Application Notes
 

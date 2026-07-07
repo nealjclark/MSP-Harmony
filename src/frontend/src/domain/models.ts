@@ -1,4 +1,4 @@
-export type View = 'reconcile' | 'integrations' | 'imports' | 'agreements' | 'audit' | 'objects';
+export type View = 'reconcile' | 'integrations' | 'invoices' | 'agreements' | 'audit' | 'objects';
 
 export type IssueStatus = 'needs-review' | 'ready' | 'approved' | 'blocked';
 export type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
