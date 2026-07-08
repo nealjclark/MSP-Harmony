@@ -6,6 +6,7 @@ import {
   getInvoiceImportExceptionReview,
   importMappedInvoiceTableCsv,
   type InvoiceImportMode,
+  type ManualImportSyncMode,
   type InvoiceTableColumnMap,
   importAppRiverInvoiceCsv,
   listInvoiceImports,
@@ -21,8 +22,10 @@ type InvoiceImportBody = {
   fileName?: string;
   content?: string;
   importMode?: string;
+  linkedIntegrationId?: string;
   columnMap?: InvoiceTableColumnMap;
   sourceType?: string;
+  syncMode?: string;
 };
 
 export async function importDetectedInvoiceHttp(
@@ -150,10 +153,12 @@ export async function importMappedInvoiceTableHttp(
   const importMode = parseInvoiceImportMode(body.importMode);
   const columnMap = body.columnMap && typeof body.columnMap === 'object' ? body.columnMap : undefined;
   const sourceType = parseInvoiceImportSourceType(body.sourceType);
+  const syncMode = parseManualImportSyncMode(body.syncMode);
+  const linkedIntegrationId = parseIntegrationId(body.linkedIntegrationId);
 
   if (!fileName || !content || !columnMap) {
     return jsonResponse(400, {
-      error: 'Invoice table import requires fileName, CSV content, and columnMap.',
+      error: 'Invoice table import requires fileName, file content, and columnMap.',
     });
   }
 
@@ -175,10 +180,12 @@ export async function importMappedInvoiceTableHttp(
       },
       import: await importMappedInvoiceTableCsv(repositoryContext.pool, {
         vendorId,
+        linkedIntegrationId,
         fileName,
         content,
         columnMap,
         sourceType,
+        syncMode,
         importMode,
       }),
       importMode,
@@ -351,11 +358,18 @@ function parseInvoiceImportMode(value: string | undefined): InvoiceImportMode {
   return value === 'overwrite' ? 'overwrite' : 'merge';
 }
 
+function parseManualImportSyncMode(value: string | undefined): ManualImportSyncMode {
+  return value === 'info-only' ? 'info-only' : 'full-vendor-sync';
+}
+
 function parseInvoiceImportSourceType(value: string | undefined): IntegrationDataSourceType | undefined {
   if (
     value === 'user-license-detail' ||
     value === 'customer-product-breakdown' ||
-    value === 'reseller-product-total'
+    value === 'reseller-product-total' ||
+    value === 'device-count' ||
+    value === 'invoice' ||
+    value === 'license-count'
   ) {
     return value;
   }

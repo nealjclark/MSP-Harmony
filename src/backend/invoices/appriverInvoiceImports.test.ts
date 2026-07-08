@@ -617,6 +617,124 @@ async function run() {
     true,
   );
 
+  const customImports: Array<{ sql: string; values?: unknown[] }> = [];
+  const customLines: Array<{ sql: string; values?: unknown[] }> = [];
+  const customSyncQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const customDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from vendor_account_mappings')) {
+        return {
+          rows: [
+            {
+              external_account_id: 'client-42',
+              external_account_name: 'Mapped Client',
+              customer_id: customerId,
+              agreement_id: agreementId,
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_product_mappings')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('insert into invoice_imports')) {
+        customImports.push({ sql, values });
+        return { rows: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }] as T[] };
+      }
+
+      if (sql.includes('insert into invoice_line_items')) {
+        customLines.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return { rows: [{ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }] as T[] };
+      }
+
+      if (
+        sql.includes('delete from vendor_usage_snapshots') ||
+        sql.includes('insert into vendor_usage_snapshots') ||
+        sql.includes('update sync_runs')
+      ) {
+        customSyncQueries.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
+        const importValues = customImports[0]?.values ?? [];
+        return {
+          rows: [
+            {
+              id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+              vendor_id: importValues[0],
+              file_name: importValues[1],
+              invoice_number: importValues[2],
+              imported_at: '2026-07-03T12:00:00Z',
+              invoice_date: importValues[3],
+              billing_period_start: importValues[4],
+              billing_period_end: importValues[5],
+              row_count: importValues[6],
+              matched_rows: importValues[7],
+              exception_rows: importValues[8],
+              status: importValues[9],
+            },
+          ] as T[],
+        };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+
+  const customDeviceImport = await importMappedInvoiceTableCsv(customDatabase, {
+    vendorId: 'custom-table',
+    linkedIntegrationId: 'ncentral',
+    fileName: 'devices.json',
+    content: JSON.stringify([
+      {
+        Client: 'client-42',
+        DeviceType: 'Server',
+        DeviceClass: 'Virtual',
+        Count: 3,
+      },
+    ]),
+    columnMap: {
+      externalAccountId: 'Client',
+      deviceType: 'DeviceType',
+      deviceClass: 'DeviceClass',
+      quantity: 'Count',
+    },
+    sourceType: 'device-count',
+    syncMode: 'info-only',
+  });
+
+  assert.equal(customDeviceImport.vendorId, 'ncentral');
+  assert.equal(customDeviceImport.status, 'ready');
+  assert.equal(customDeviceImport.matchedRows, 1);
+  assert.equal(customDeviceImport.exceptionRows, 0);
+  const customSummary = JSON.parse(String(customImports[0]?.values?.[10]));
+  assert.equal(customSummary.importVendorId, 'custom-table');
+  assert.equal(customSummary.mappingVendorId, 'ncentral');
+  assert.equal(customSummary.linkedIntegrationId, 'ncentral');
+  assert.equal(customSummary.sourceType, 'device-count');
+  assert.equal(customSummary.syncMode, 'info-only');
+  assert.equal(customLines[0]?.values?.[1], 'ncentral');
+  assert.equal(customLines[0]?.values?.[2], customerId);
+  assert.equal(customLines[0]?.values?.[6], 'device:virtual-server');
+  assert.equal(customLines[0]?.values?.[8], 'device:virtual-server');
+  assert.equal(customLines[0]?.values?.[9], 'Device Count - Virtual Server');
+  assert.equal(customLines[0]?.values?.[10], null);
+  const customPayload = JSON.parse(String(customLines[0]?.values?.[30]));
+  assert.equal(customPayload.importVendorId, 'custom-table');
+  assert.equal(customPayload.mappingVendorId, 'ncentral');
+  assert.equal(customPayload.deviceType, 'Server');
+  assert.equal(customPayload.deviceClass, 'Virtual');
+  assert.equal(customPayload.deviceCategory, 'device:virtual-server');
+  assert.equal(customSyncQueries.some((query) => query.sql.includes("'detailOnlySync'")), true);
+  assert.equal(customSyncQueries.some((query) => query.sql.includes("'manual-info-only'")), true);
+
   console.log('AppRiver invoice import tests passed');
 }
 

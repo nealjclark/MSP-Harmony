@@ -337,6 +337,35 @@ async function run() {
         };
       }
 
+      if (sql.includes('vendor_usage_snapshots.vendor_id = $2')) {
+        assert.deepEqual(values, ['sentinel-sync-1', 'sentinelone']);
+        return {
+          rows: [
+            {
+              customer_id: 'customer-1',
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: 'site-1',
+              vendor_product_key: 'device:virtual-server',
+              product_code: 'device:virtual-server',
+              product_name: 'Device Count - Virtual Server',
+              quantity: '3',
+              observed_at: new Date('2026-07-03T12:00:00Z'),
+              dimensions: {
+                sourceType: 'device-count',
+                syncMode: 'info-only',
+                externalAccountName: 'Mapped Client',
+                deviceType: 'Server',
+                deviceClass: 'Virtual',
+                deviceCategoryLabel: 'Device Count - Virtual Server',
+                invoiceFileName: 'devices.json',
+              },
+              raw_payload: { DeviceType: 'Server', DeviceClass: 'Virtual' },
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('from vendor_usage_snapshots')) {
         return {
           rows: [
@@ -492,8 +521,12 @@ async function run() {
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');
   assert.equal(genericDetails?.syncRun.id, 'sentinel-sync-1');
-  assert.deepEqual(genericDetails?.columns, []);
-  assert.equal(genericDetails?.summary.rowCount, 0);
+  assert.equal(genericDetails?.columns.includes('SourceType'), true);
+  assert.equal(genericDetails?.summary.rowCount, 1);
+  assert.equal(genericDetails?.summary.productCount, 1);
+  assert.equal(genericDetails?.rows[0]?.SourceType, 'device-count');
+  assert.equal(genericDetails?.rows[0]?.DeviceCategory, 'Device Count - Virtual Server');
+  assert.equal(genericDetails?.rows[0]?.Quantity, 3);
 
   console.log('raw sync report tests passed');
 }

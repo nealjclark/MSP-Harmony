@@ -24,6 +24,8 @@ import {
   syncMicrosoft365UserLicenseSnapshots,
   testMicrosoft365Connection,
 } from '../vendor/microsoft365/operations';
+import { SentinelOneApiError } from '../vendor/sentinelone/client';
+import { syncSentinelOneUsageSnapshots, testSentinelOneConnection } from '../vendor/sentinelone/operations';
 import { requireRole } from './auth';
 
 loadDotEnv({ override: false });
@@ -41,7 +43,7 @@ type SyncBody = {
 
 type SyncableIntegrationId = Extract<
   IntegrationId,
-  'connectwise' | 'cove' | 'ncentral' | 'datto' | 'opentext-appriver' | 'microsoft-365'
+  'connectwise' | 'cove' | 'ncentral' | 'datto' | 'opentext-appriver' | 'microsoft-365' | 'sentinelone'
 >;
 
 type IntegrationSyncQueueMessage = SyncBody & {
@@ -111,7 +113,8 @@ export async function testIntegrationHttp(
     integrationId !== 'ncentral' &&
     integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
-    integrationId !== 'microsoft-365'
+    integrationId !== 'microsoft-365' &&
+    integrationId !== 'sentinelone'
   ) {
     return jsonResponse(501, {
       error: `Live test is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
@@ -210,6 +213,20 @@ export async function testIntegrationHttp(
       });
     }
 
+    if (integrationId === 'sentinelone') {
+      const result = await testSentinelOneConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        accountCount: result.accountCount,
+        siteCount: result.siteCount,
+        sampleSites: result.sampleSites,
+      });
+    }
+
     const result = await testMicrosoft365Connection({ provider, pool: repositoryContext.pool });
 
     await saveTestResult('success');
@@ -243,7 +260,8 @@ export async function syncIntegrationHttp(
     integrationId !== 'ncentral' &&
     integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
-    integrationId !== 'microsoft-365'
+    integrationId !== 'microsoft-365' &&
+    integrationId !== 'sentinelone'
   ) {
     return jsonResponse(501, {
       error: `Live sync is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
@@ -370,6 +388,17 @@ export async function processIntegrationSyncQueueMessage(
         });
       }
       context.log(`AppRiver queued sync ${result.syncRunId} ${result.status}.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'sentinelone') {
+      const result = await syncSentinelOneUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        pageSize: parsed.pageSize,
+        maxPages: parsed.maxPages,
+      });
+      context.log(`SentinelOne queued sync ${result.syncRunId} completed.`);
       return;
     }
 
@@ -511,6 +540,13 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof SentinelOneApiError) {
+    return jsonResponse(error.status ? 502 : 400, {
+      error: error.message || fallback,
+      status: error.status,
+    });
+  }
+
   return jsonResponse(400, {
     error: error instanceof Error ? error.message : fallback,
   });
@@ -522,6 +558,7 @@ function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'datto') return 'Datto Backup';
   if (integrationId === 'opentext-appriver') return 'AppRiver - OpenText';
   if (integrationId === 'microsoft-365') return 'Microsoft 365';
+  if (integrationId === 'sentinelone') return 'SentinelOne';
   return 'ConnectWise';
 }
 
@@ -594,6 +631,16 @@ function buildIntegrationSyncQueueMessage(
     };
   }
 
+  if (integrationId === 'sentinelone') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 1000),
+      maxPages: safePositiveInteger(body.maxPages, 100),
+    };
+  }
+
   return {
     integrationId,
     requestedBy,
@@ -631,7 +678,8 @@ function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage |
     parsed.integrationId !== 'ncentral' &&
     parsed.integrationId !== 'datto' &&
     parsed.integrationId !== 'opentext-appriver' &&
-    parsed.integrationId !== 'microsoft-365'
+    parsed.integrationId !== 'microsoft-365' &&
+    parsed.integrationId !== 'sentinelone'
   ) {
     throw new Error('Integration sync queue message has an unsupported integrationId.');
   }

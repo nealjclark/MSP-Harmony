@@ -21,6 +21,7 @@ import { loadDattoRuleSet } from '../vendor/datto/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
+import { loadSentinelOneRuleSet } from '../vendor/sentinelone/operations';
 import {
   listProductBundles,
   listProductLinkRules,
@@ -382,6 +383,10 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
     return loadAppRiverRuleSet(database);
   }
 
+  if (vendorId === 'sentinelone') {
+    return loadSentinelOneRuleSet(database);
+  }
+
   const ruleSet = getVendorRuleSet(vendorId);
   if (!ruleSet) {
     return loadMappedInvoiceRuleSet(database, vendorId);
@@ -436,6 +441,7 @@ async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
      from sync_runs
      where integration_id = $1
        and status = 'complete'
+       and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
      order by completed_at desc nulls last, started_at desc
      limit 1`,
     [vendorId],
@@ -867,6 +873,7 @@ async function loadVendorProductLinkedSourceTotals(
        where integration_id = $1
          and status = 'complete'
          and coalesce(metadata->>'source', '') <> 'invoice-table'
+         and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
        order by completed_at desc nulls last, started_at desc
        limit 1
      ),

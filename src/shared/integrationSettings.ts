@@ -16,11 +16,14 @@ export type IntegrationId =
 export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic' | 'none';
 export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import' | 'payment-link';
 export type IntegrationConfiguredStatus = 'connected' | 'degraded' | 'not-configured';
-export type IntegrationDataIngestionMethod = 'live-api' | 'csv' | 'excel';
+export type IntegrationDataIngestionMethod = 'live-api' | 'csv' | 'excel' | 'json';
 export type IntegrationDataSourceType =
   | 'user-license-detail'
   | 'customer-product-breakdown'
-  | 'reseller-product-total';
+  | 'reseller-product-total'
+  | 'device-count'
+  | 'invoice'
+  | 'license-count';
 export type IntegrationNonSecretInputType = 'text' | 'checkbox';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
@@ -195,13 +198,13 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'SentinelOne',
     category: 'Security',
     authMode: 'token',
-    capabilities: ['mapping', 'invoice-import'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
     dataSources: [
       dataSource(
         'sentinelone-sites',
         'Site agent counts',
         'customer-product-breakdown',
-        ['csv', 'excel'],
+        ['live-api', 'csv', 'excel'],
         true,
         false,
         'Customer or site-level endpoint agent counts from invoice tables or exports.',
@@ -449,23 +452,40 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
   },
   {
     integrationId: 'custom-table',
-    displayName: 'Custom Table Import',
+    displayName: 'Custom Manual Import',
     category: 'Custom',
     authMode: 'none',
     capabilities: ['mapping', 'invoice-import'],
     dataSources: [
       dataSource(
-        'custom-customer-products',
-        'Customer products',
-        'customer-product-breakdown',
-        ['csv', 'excel'],
+        'custom-device-counts',
+        'Device counts',
+        'device-count',
+        ['csv', 'excel', 'json'],
         true,
-        true,
-        'User-mapped invoice table with customer/account, product, quantity, and optional amount fields.',
+        false,
+        'Manual device count rows with customer/account, quantity, and DeviceType or DeviceClass category fields.',
       ),
-      resellerInvoiceTotals(),
+      dataSource(
+        'custom-invoices',
+        'Invoices',
+        'invoice',
+        ['csv', 'excel', 'json'],
+        true,
+        true,
+        'Manual invoice rows with customer/account, product, quantity, and optional amount fields.',
+      ),
+      dataSource(
+        'custom-license-counts',
+        'License counts',
+        'license-count',
+        ['csv', 'excel', 'json'],
+        true,
+        false,
+        'Manual license or seat count rows with customer/account, license product, and quantity fields.',
+      ),
     ],
-    description: 'User-defined invoice table imports for vendors that do not have a live API connection.',
+    description: 'User-defined manual imports for vendors that do not have a live API connection.',
     endpoint: '',
     requiredSecrets: [],
     requiredNonSecrets: [],

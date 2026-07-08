@@ -147,6 +147,20 @@ type DattoSnapshotRow = {
   raw_payload: unknown;
 };
 
+type GenericSnapshotRow = {
+  customer_id: string | null;
+  customer_name: string | null;
+  agreement_name: string | null;
+  external_account_id: string | null;
+  vendor_product_key: string | null;
+  product_code: string | null;
+  product_name: string | null;
+  quantity: string | number;
+  observed_at: Date | string;
+  dimensions: unknown;
+  raw_payload: unknown;
+};
+
 export const coveRawSyncColumns = [
   'Customer',
   'Agreement',
@@ -300,6 +314,33 @@ export const dattoRawSyncColumns = [
   'ProductName',
   'Quantity',
   'QuantitySource',
+  'ExternalAccountId',
+  'Mapped',
+  'ObservedAt',
+  'RawPayload',
+] as const;
+
+export const genericRawSyncColumns = [
+  'Customer',
+  'Agreement',
+  'SourceType',
+  'SyncMode',
+  'ExternalAccountName',
+  'ProductKey',
+  'ProductCode',
+  'ProductName',
+  'Quantity',
+  'DeviceId',
+  'DeviceName',
+  'DeviceType',
+  'DeviceClass',
+  'DeviceCategory',
+  'LicenseId',
+  'LicenseName',
+  'UserPrincipalName',
+  'Email',
+  'InvoiceFileName',
+  'InvoiceNumber',
   'ExternalAccountId',
   'Mapped',
   'ObservedAt',
@@ -1033,17 +1074,98 @@ async function getGenericRawSyncDetails(
     return undefined;
   }
 
+  const detailResult = await database.query<GenericSnapshotRow>(
+    `with mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.sync_run_id = $1
+         and vendor_usage_snapshots.vendor_id = $2
+     )
+     select
+       mapped_snapshots.effective_customer_id as customer_id,
+       customers.name as customer_name,
+       agreements.name as agreement_name,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.vendor_product_key,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       mapped_snapshots.dimensions,
+       mapped_snapshots.raw_payload
+     from mapped_snapshots
+     left join customers
+       on customers.id = mapped_snapshots.effective_customer_id
+     left join agreements
+       on agreements.id = mapped_snapshots.effective_agreement_id
+     order by customers.name nulls last,
+              agreements.name nulls last,
+              mapped_snapshots.external_account_id,
+              mapped_snapshots.product_name`,
+    [syncRunId, integrationId],
+  );
+  const rows = detailResult.rows.map(mapGenericSnapshotRow);
+
   return {
     integrationId,
     syncRun: mapSyncRun(syncRunRow),
-    columns: [],
-    rows: [],
+    columns: genericRawSyncColumns,
+    rows,
     summary: {
-      rowCount: 0,
-      companyCount: 0,
-      agreementCount: 0,
-      productCount: 0,
+      rowCount: rows.length,
+      companyCount: uniqueCount(rows, 'Customer'),
+      agreementCount: uniqueCount(rows, 'Agreement'),
+      productCount: uniqueCount(rows, 'ProductKey'),
     },
+  };
+}
+
+function mapGenericSnapshotRow(row: GenericSnapshotRow): RawSyncDetail {
+  const dimensions = recordFromJson(row.dimensions);
+  const rawPayload = recordFromJson(row.raw_payload);
+  const rawString = (key: string) => stringValue(rawPayload[key]);
+  const dimensionString = (key: string) => stringValue(dimensions[key]) ?? rawString(key);
+
+  return {
+    CustomerId: row.customer_id,
+    Customer: row.customer_name,
+    Agreement: row.agreement_name,
+    SourceType: dimensionString('sourceType'),
+    SyncMode: dimensionString('syncMode'),
+    ExternalAccountName: dimensionString('externalAccountName'),
+    ProductKey: row.vendor_product_key,
+    ProductCode: row.product_code,
+    ProductName: row.product_name,
+    Quantity: numberValue(row.quantity) ?? 0,
+    DeviceId: dimensionString('deviceId'),
+    DeviceName: dimensionString('deviceName'),
+    DeviceType: dimensionString('deviceType'),
+    DeviceClass: dimensionString('deviceClass'),
+    DeviceCategory: dimensionString('deviceCategoryLabel') ?? dimensionString('deviceCategory'),
+    LicenseId: dimensionString('licenseId'),
+    LicenseName: dimensionString('licenseName'),
+    UserPrincipalName: dimensionString('userPrincipalName'),
+    Email: dimensionString('email'),
+    InvoiceFileName: dimensionString('invoiceFileName'),
+    InvoiceNumber: dimensionString('invoiceNumber'),
+    ExternalAccountId: row.external_account_id,
+    Mapped: Boolean(row.customer_name && row.agreement_name),
+    ObservedAt: isoDate(row.observed_at) ?? null,
+    RawPayload: compactJson(row.raw_payload),
   };
 }
 

@@ -36,12 +36,21 @@ export type InvoiceQuantity = {
 };
 
 export type InvoiceImportMode = 'merge' | 'overwrite';
+export type ManualImportSyncMode = 'info-only' | 'full-vendor-sync';
 
 export type InvoiceTableColumnMap = {
   externalAccountId?: string;
   externalAccountName?: string;
   productCode?: string;
   productName?: string;
+  licenseId?: string;
+  licenseName?: string;
+  userPrincipalName?: string;
+  email?: string;
+  deviceId?: string;
+  deviceName?: string;
+  deviceType?: string;
+  deviceClass?: string;
   quantity?: string;
   invoiceNumber?: string;
   invoiceDate?: string;
@@ -186,6 +195,7 @@ type InvoiceExceptionLineRow = {
   primary_domain: string | null;
   customer_id: string | null;
   agreement_id: string | null;
+  import_sync_mode?: string | null;
 };
 
 type InvoiceAccountExistingMappingRow = {
@@ -257,8 +267,12 @@ type ParsedCsv = {
 
 type NormalizedInvoiceLine = {
   vendorId: IntegrationId;
+  importVendorId: IntegrationId;
+  mappingVendorId: IntegrationId;
   sourceType: InvoiceImportSourceType;
+  syncMode: ManualImportSyncMode;
   requiresCustomerMapping: boolean;
+  requiresProductMapping: boolean;
   rawRowNumber: number;
   raw: Record<string, string>;
   externalAccountId: string;
@@ -288,6 +302,16 @@ type NormalizedInvoiceLine = {
   billingFrequency?: string;
   primaryDomain?: string;
   aliasDomains?: string;
+  userPrincipalName?: string;
+  email?: string;
+  licenseId?: string;
+  licenseName?: string;
+  deviceId?: string;
+  deviceName?: string;
+  deviceType?: string;
+  deviceClass?: string;
+  deviceCategory?: string;
+  deviceCategoryLabel?: string;
 };
 
 type ProductMappingIndex = {
@@ -457,31 +481,48 @@ export async function importMappedInvoiceTableCsv(
   database: Queryable,
   input: {
     vendorId: IntegrationId;
+    linkedIntegrationId?: IntegrationId;
     fileName: string;
     content: string;
     columnMap: InvoiceTableColumnMap;
     sourceType?: InvoiceImportSourceType;
+    syncMode?: ManualImportSyncMode;
     importMode?: InvoiceImportMode;
   },
 ): Promise<InvoiceImportSummary> {
   assertInvoiceImportCapable(input.vendorId);
+  const importVendorId = input.vendorId;
+  const mappingVendorId = linkedMappingVendorId(input.vendorId, input.linkedIntegrationId);
+  const storageVendorId = mappingVendorId;
+  assertInvoiceImportCapable(storageVendorId);
   const importMode = input.importMode ?? 'merge';
-  const sourceType = supportedInvoiceImportSourceType(input.vendorId, input.sourceType);
-  const parsed = parseCsv(input.content);
+  const syncMode = input.syncMode ?? 'full-vendor-sync';
+  const sourceType = supportedInvoiceImportSourceType(importVendorId, input.sourceType);
+  const parsed = parseTabularContent({ fileName: input.fileName, content: input.content });
   if (parsed.rows.length === 0) {
-    throw new Error('Invoice table CSV did not contain any data rows.');
+    throw new Error('Invoice table import did not contain any data rows.');
   }
 
   const columnMap = normalizedInvoiceTableColumnMap(input.columnMap, parsed.headers);
   assertRequiredTableColumns(columnMap, sourceType);
 
   const [accountIndex, productMappings] = await Promise.all([
-    loadGenericAccountIndex(database, input.vendorId),
-    loadGenericProductMappings(database, input.vendorId),
+    loadGenericAccountIndex(database, mappingVendorId),
+    loadGenericProductMappings(database, mappingVendorId),
   ]);
   const productIndex = buildProductMappingIndex(productMappings);
   const lines = parsed.rows.map((row) =>
-    normalizeMappedInvoiceLine(row, input.vendorId, sourceType, columnMap, accountIndex, productIndex),
+    normalizeMappedInvoiceLine(
+      row,
+      storageVendorId,
+      importVendorId,
+      mappingVendorId,
+      sourceType,
+      syncMode,
+      columnMap,
+      accountIndex,
+      productIndex,
+    ),
   );
   const invoiceNumber = mostCommonString(lines.map((line) => stringValue(line.raw[columnMap.invoiceNumber ?? ''])));
   const invoiceDate = mostCommonString(lines.map((line) => line.invoiceDate));
@@ -508,7 +549,7 @@ export async function importMappedInvoiceTableCsv(
      values ($1, $2, $3, $4::date, $5::date, $6::date, $7, $8, $9, $10, $11::jsonb)
      returning id`,
     [
-      input.vendorId,
+      storageVendorId,
       input.fileName,
       invoiceNumber ?? null,
       invoiceDate ?? null,
@@ -521,6 +562,10 @@ export async function importMappedInvoiceTableCsv(
       JSON.stringify({
         ...rawSummary(input.fileName, parsed.headers, lines),
         importType: 'mapped-table',
+        importVendorId,
+        mappingVendorId,
+        linkedIntegrationId: input.linkedIntegrationId ?? undefined,
+        syncMode,
         sourceType,
         columnMap,
       }),
@@ -542,11 +587,11 @@ export async function importMappedInvoiceTableCsv(
       fileName: input.fileName,
       invoiceDate,
       invoiceNumber,
-      vendorId: input.vendorId,
+      vendorId: storageVendorId,
     });
   }
 
-  await syncInvoiceImportUsageSnapshots(database, input.vendorId, importId);
+  await syncInvoiceImportUsageSnapshots(database, storageVendorId, importId);
 
   const imported = await loadInvoiceImport(database, importId);
   if (!imported) {
@@ -613,14 +658,18 @@ export async function getInvoiceImportExceptionReview(
             invoice_date,
             primary_domain,
             customer_id,
-            agreement_id
+            agreement_id,
+            coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') as import_sync_mode
        from invoice_line_items
       inner join invoice_imports
          on invoice_imports.id = invoice_line_items.invoice_import_id
       where invoice_line_items.invoice_import_id = $1::uuid
         and invoice_line_items.vendor_id = $2
         and (
-          invoice_line_items.connectwise_product_code is null
+          (
+            invoice_line_items.connectwise_product_code is null
+            and coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
+          )
           or (
             coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
             and (invoice_line_items.customer_id is null or invoice_line_items.agreement_id is null)
@@ -831,8 +880,10 @@ export async function loadLatestInvoiceImportSummary(
             matched_rows,
             exception_rows,
             status
-       from invoice_imports
+     from invoice_imports
       where vendor_id = $1
+        and coalesce(raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
+        and coalesce(raw_summary->>'sourceType', 'customer-product-breakdown') not in ('device-count', 'license-count')
       order by invoice_date desc nulls last, imported_at desc
       limit 1`,
     [vendorId],
@@ -914,8 +965,12 @@ function normalizeInvoiceLine(
 
   return {
     vendorId: appRiverInvoiceVendorId,
+    importVendorId: appRiverInvoiceVendorId,
+    mappingVendorId: appRiverInvoiceVendorId,
     sourceType: 'customer-product-breakdown',
+    syncMode: 'full-vendor-sync',
     requiresCustomerMapping: true,
+    requiresProductMapping: true,
     rawRowNumber: row.recordNumber,
     raw: values,
     externalAccountId,
@@ -951,7 +1006,10 @@ function normalizeInvoiceLine(
 function normalizeMappedInvoiceLine(
   row: ParsedCsv['rows'][number],
   vendorId: IntegrationId,
+  importVendorId: IntegrationId,
+  mappingVendorId: IntegrationId,
   sourceType: InvoiceImportSourceType,
+  syncMode: ManualImportSyncMode,
   columnMap: Required<Pick<InvoiceTableColumnMap, 'externalAccountId' | 'productName' | 'quantity'>> &
     InvoiceTableColumnMap,
   accountIndex: AccountMappingIndex,
@@ -960,13 +1018,32 @@ function normalizeMappedInvoiceLine(
   const values = row.values;
   const externalAccountId = mappedString(values, columnMap.externalAccountId) ?? '';
   const externalAccountName = mappedString(values, columnMap.externalAccountName) ?? externalAccountId;
-  const productName = mappedString(values, columnMap.productName) ?? '';
-  const productCode = mappedString(values, columnMap.productCode) ?? productName;
+  const deviceType = mappedString(values, columnMap.deviceType);
+  const deviceClass = mappedString(values, columnMap.deviceClass);
+  const deviceCategory = sourceType === 'device-count' ? deviceCategoryForValues(deviceType, deviceClass) : undefined;
+  const licenseName = mappedString(values, columnMap.licenseName);
+  const licenseId = mappedString(values, columnMap.licenseId);
+  const productName =
+    mappedString(values, columnMap.productName) ??
+    (sourceType === 'license-count' ? licenseName : undefined) ??
+    deviceCategory?.label ??
+    '';
+  const productCode =
+    mappedString(values, columnMap.productCode) ??
+    (sourceType === 'license-count' ? licenseId : undefined) ??
+    deviceCategory?.key ??
+    productName;
   const term = mappedString(values, columnMap.term);
   const billingFrequency = mappedString(values, columnMap.billingFrequency);
-  const vendorProductKeyCandidates = productKeyCandidates(productCode, productName, term, billingFrequency);
+  const vendorProductKeyCandidates = manualProductKeyCandidates(sourceType, productCode, productName, term, billingFrequency, {
+    deviceCategoryKey: deviceCategory?.key,
+    deviceCategoryLabel: deviceCategory?.label,
+    licenseId,
+    licenseName,
+  });
   const productMapping = findProductMapping(productIndex, vendorProductKeyCandidates, productCode, productName);
   const requiresCustomerMapping = integrationDataSourceRequiresCustomerMapping(sourceType);
+  const requiresProductMapping = importRequiresProductMapping(sourceType, syncMode);
   const accountMapping = requiresCustomerMapping
     ? findAccountMapping(accountIndex, {
         'Customer Account Number': externalAccountId,
@@ -979,8 +1056,12 @@ function normalizeMappedInvoiceLine(
 
   return {
     vendorId,
+    importVendorId,
+    mappingVendorId,
     sourceType,
+    syncMode,
     requiresCustomerMapping,
+    requiresProductMapping,
     rawRowNumber: row.recordNumber,
     raw: values,
     externalAccountId,
@@ -1002,11 +1083,118 @@ function normalizeMappedInvoiceLine(
     term,
     billingFrequency,
     primaryDomain: mappedString(values, columnMap.primaryDomain),
+    userPrincipalName: mappedString(values, columnMap.userPrincipalName),
+    email: mappedString(values, columnMap.email),
+    licenseId,
+    licenseName,
+    deviceId: mappedString(values, columnMap.deviceId),
+    deviceName: mappedString(values, columnMap.deviceName),
+    deviceType,
+    deviceClass,
+    deviceCategory: deviceCategory?.key,
+    deviceCategoryLabel: deviceCategory?.label,
   };
 }
 
 function mappedString(values: Record<string, string>, columnName: string | undefined) {
   return columnName ? stringValue(values[columnName]) : undefined;
+}
+
+function linkedMappingVendorId(vendorId: IntegrationId, linkedIntegrationId: IntegrationId | undefined) {
+  if (vendorId !== 'custom-table') {
+    return vendorId;
+  }
+
+  return linkedIntegrationId && getIntegrationSettingsDefinition(linkedIntegrationId) ? linkedIntegrationId : vendorId;
+}
+
+function importRequiresProductMapping(sourceType: InvoiceImportSourceType, syncMode: ManualImportSyncMode) {
+  if (syncMode === 'info-only') {
+    return false;
+  }
+
+  return true;
+}
+
+function sourceProductRequirementLabel(sourceType: InvoiceImportSourceType) {
+  if (sourceType === 'device-count') {
+    return 'Product, DeviceType, or DeviceClass column';
+  }
+  if (sourceType === 'license-count') {
+    return 'Product or license column';
+  }
+
+  return 'Product name or code column';
+}
+
+function manualProductKeyCandidates(
+  sourceType: InvoiceImportSourceType,
+  productCode: string,
+  productName: string,
+  term: string | undefined,
+  billingFrequency: string | undefined,
+  options: {
+    deviceCategoryKey?: string;
+    deviceCategoryLabel?: string;
+    licenseId?: string;
+    licenseName?: string;
+  },
+) {
+  const candidates = productKeyCandidates(productCode, productName, term, billingFrequency);
+  if (sourceType === 'device-count' && options.deviceCategoryKey) {
+    candidates.unshift(options.deviceCategoryKey);
+    if (options.deviceCategoryLabel) {
+      candidates.push(options.deviceCategoryLabel);
+    }
+  }
+  if (sourceType === 'license-count') {
+    candidates.push(
+      ...productKeyCandidates(options.licenseId ?? '', options.licenseName ?? '', term, billingFrequency),
+    );
+  }
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function deviceCategoryForValues(deviceType: string | undefined, deviceClass: string | undefined) {
+  const combined = normalizeDeviceCategoryInput([deviceType, deviceClass].filter(Boolean).join(' '));
+  if (!combined) {
+    return undefined;
+  }
+
+  const hasServer = /\b(server|srv|domain controller|hypervisor|host)\b/.test(combined);
+  const hasVirtual = /\b(virtual|vm|hyper v|hyper-v|vmware|vcenter|esxi)\b/.test(combined);
+  const hasPhysical = /\b(physical|bare metal|baremetal)\b/.test(combined);
+
+  if (hasServer && hasVirtual) {
+    return { key: 'device:virtual-server', label: 'Device Count - Virtual Server' };
+  }
+  if (hasServer && hasPhysical) {
+    return { key: 'device:physical-server', label: 'Device Count - Physical Server' };
+  }
+  if (hasServer) {
+    return { key: 'device:server', label: 'Device Count - Server' };
+  }
+  if (/\b(workstation|desktop|laptop|notebook|pc|client|mac|windows workstation)\b/.test(combined)) {
+    return { key: 'device:workstation', label: 'Device Count - Workstation' };
+  }
+  if (/\b(firewall|router|switch|access point|ap|network|printer|nas|san|appliance)\b/.test(combined)) {
+    return { key: 'device:network-device', label: 'Device Count - Network Device' };
+  }
+  if (/\b(phone|tablet|mobile|ios|android)\b/.test(combined)) {
+    return { key: 'device:mobile-device', label: 'Device Count - Mobile Device' };
+  }
+
+  return { key: 'device:other-device', label: 'Device Count - Other Device' };
+}
+
+function normalizeDeviceCategoryInput(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[_/]+/g, ' ')
+    .replace(/[^a-z0-9.+ -]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function normalizedInvoiceTableColumnMap(
@@ -1035,9 +1223,18 @@ function assertRequiredTableColumns(
   sourceType: InvoiceImportSourceType,
 ) {
   const requiresCustomerMapping = integrationDataSourceRequiresCustomerMapping(sourceType);
+  const hasProductColumn = Boolean(columnMap.productName || columnMap.productCode);
+  const hasLicenseColumn = Boolean(columnMap.licenseName || columnMap.licenseId);
+  const hasDeviceCategoryColumn = Boolean(columnMap.deviceType || columnMap.deviceClass);
+  const hasSourceProduct =
+    sourceType === 'device-count'
+      ? hasProductColumn || hasDeviceCategoryColumn
+      : sourceType === 'license-count'
+        ? hasProductColumn || hasLicenseColumn
+        : hasProductColumn;
   const missing = [
     requiresCustomerMapping && !columnMap.externalAccountId ? 'Customer/account column' : undefined,
-    columnMap.productName ? undefined : 'Product name column',
+    hasSourceProduct ? undefined : sourceProductRequirementLabel(sourceType),
     columnMap.quantity ? undefined : 'Quantity column',
   ].filter((value): value is string => Boolean(value));
 
@@ -1145,9 +1342,29 @@ async function insertInvoiceLine(database: Queryable, invoiceImportId: string, l
       line.primaryDomain ?? null,
       line.aliasDomains ?? null,
       line.rawRowNumber,
-      JSON.stringify(line.raw),
+      JSON.stringify(rawPayloadForLine(line)),
     ],
   );
+}
+
+function rawPayloadForLine(line: NormalizedInvoiceLine) {
+  return {
+    ...line.raw,
+    importVendorId: line.importVendorId,
+    mappingVendorId: line.mappingVendorId,
+    sourceType: line.sourceType,
+    syncMode: line.syncMode,
+    userPrincipalName: line.userPrincipalName,
+    email: line.email,
+    licenseId: line.licenseId,
+    licenseName: line.licenseName,
+    deviceId: line.deviceId,
+    deviceName: line.deviceName,
+    deviceType: line.deviceType,
+    deviceClass: line.deviceClass,
+    deviceCategory: line.deviceCategory,
+    deviceCategoryLabel: line.deviceCategoryLabel,
+  };
 }
 
 async function loadInvoiceImport(database: Queryable, importId: string) {
@@ -1206,22 +1423,29 @@ async function recountInvoiceImport(
 ) {
   const result = await database.query<InvoiceImportRow>(
     `with import_scope as (
-       select coalesce(raw_summary->>'sourceType', 'customer-product-breakdown') as source_type
+       select coalesce(raw_summary->>'sourceType', 'customer-product-breakdown') as source_type,
+              coalesce(raw_summary->>'syncMode', 'full-vendor-sync') as sync_mode
        from invoice_imports
        where id = $1::uuid
          and vendor_id = $2
      ),
      counts as (
        select count(*)::int as row_count,
-              count(*) filter (
-                where connectwise_product_code is not null
-                  and (
-                    (select source_type from import_scope) = 'reseller-product-total'
-                    or (customer_id is not null and agreement_id is not null)
+               count(*) filter (
+                 where (
+                     connectwise_product_code is not null
+                     or (select sync_mode from import_scope) = 'info-only'
+                   )
+                   and (
+                     (select source_type from import_scope) = 'reseller-product-total'
+                     or (customer_id is not null and agreement_id is not null)
                   )
               )::int as matched_rows,
-              count(*) filter (
-                where connectwise_product_code is null
+               count(*) filter (
+                 where (
+                     connectwise_product_code is null
+                     and (select sync_mode from import_scope) <> 'info-only'
+                   )
                    or (
                      (select source_type from import_scope) <> 'reseller-product-total'
                      and (customer_id is null or agreement_id is null)
@@ -1445,7 +1669,7 @@ function mapInvoiceExceptionLineRow(row: InvoiceExceptionLineRow): InvoiceExcept
     primaryDomain: row.primary_domain ?? undefined,
     missingCustomer: !row.customer_id,
     missingAgreement: !row.agreement_id,
-    missingProduct: !row.connectwise_product_code,
+    missingProduct: row.import_sync_mode !== 'info-only' && !row.connectwise_product_code,
   };
 }
 
@@ -1612,7 +1836,10 @@ async function loadGenericProductMappings(
 }
 
 function isMappedInvoiceLine(line: NormalizedInvoiceLine) {
-  return Boolean((!line.requiresCustomerMapping || (line.customerId && line.agreementId)) && line.connectWiseProductCode);
+  return Boolean(
+    (!line.requiresCustomerMapping || (line.customerId && line.agreementId)) &&
+      (!line.requiresProductMapping || line.connectWiseProductCode),
+  );
 }
 
 async function loadAppRiverProductAliases(
@@ -1838,7 +2065,10 @@ function supportedInvoiceImportSourceType(
 ): InvoiceImportSourceType {
   const sourceType = requestedSourceType ?? 'customer-product-breakdown';
   const dataSource = getIntegrationDataSource(vendorId, sourceType);
-  if (!dataSource || !dataSource.ingestionMethods.some((method) => method === 'csv' || method === 'excel')) {
+  if (
+    !dataSource ||
+    !dataSource.ingestionMethods.some((method) => method === 'csv' || method === 'excel' || method === 'json')
+  ) {
     throw new Error(`Invoice table import source type "${sourceType}" is not available for integration "${vendorId}".`);
   }
 
@@ -1880,12 +2110,29 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
          'invoiceDate', invoice_imports.invoice_date,
          'invoiceFileName', invoice_imports.file_name,
          'invoiceTableImport', true,
+         'manualImport', true,
+         'sourceType', coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown'),
+         'syncMode', coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync'),
+         'detailOnlySync', coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') = 'info-only',
+         'importVendorId', invoice_imports.raw_summary->>'importVendorId',
+         'mappingVendorId', invoice_imports.raw_summary->>'mappingVendorId',
+         'linkedIntegrationId', invoice_imports.raw_summary->>'linkedIntegrationId',
          'externalAccountName', invoice_line_items.external_account_name,
          'productName', invoice_line_items.product_name,
          'productCode', invoice_line_items.product_code,
          'chargeType', invoice_line_items.charge_type,
          'billingFrequency', invoice_line_items.billing_frequency,
-         'term', invoice_line_items.term
+         'term', invoice_line_items.term,
+         'userPrincipalName', invoice_line_items.raw_payload->>'userPrincipalName',
+         'email', invoice_line_items.raw_payload->>'email',
+         'licenseId', invoice_line_items.raw_payload->>'licenseId',
+         'licenseName', invoice_line_items.raw_payload->>'licenseName',
+         'deviceId', invoice_line_items.raw_payload->>'deviceId',
+         'deviceName', invoice_line_items.raw_payload->>'deviceName',
+         'deviceType', invoice_line_items.raw_payload->>'deviceType',
+         'deviceClass', invoice_line_items.raw_payload->>'deviceClass',
+         'deviceCategory', invoice_line_items.raw_payload->>'deviceCategory',
+         'deviceCategoryLabel', invoice_line_items.raw_payload->>'deviceCategoryLabel'
        ) || invoice_line_items.raw_payload,
        invoice_line_items.raw_payload
      from invoice_line_items
@@ -1910,8 +2157,27 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
                 and coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
             ),
             metadata = sync_runs.metadata || jsonb_build_object(
-              'source', 'invoice-table',
+              'source',
+                coalesce(
+                  sync_runs.metadata->>'source',
+                  case
+                    when coalesce(invoice_imports.raw_summary->>'syncMode', '') = 'info-only' then 'manual-info-only'
+                    when nullif(invoice_imports.raw_summary->>'syncMode', '') is not null then 'manual-full-sync'
+                    else 'invoice-table'
+                  end
+                ),
+              'entity',
+                coalesce(
+                  sync_runs.metadata->>'entity',
+                  case coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown')
+                    when 'device-count' then 'manual-device-counts'
+                    when 'license-count' then 'manual-license-counts'
+                    when 'invoice' then 'manual-invoice-lines'
+                    else 'invoice-lines'
+                  end
+                ),
               'sourceType', coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown'),
+              'syncMode', coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync'),
               'invoiceImportId', invoice_imports.id,
               'invoiceNumber', invoice_imports.invoice_number,
               'fileName', invoice_imports.file_name
@@ -1928,7 +2194,6 @@ async function ensureInvoiceImportSyncRun(database: Queryable, vendorId: Integra
     `select id
        from sync_runs
       where integration_id = $1
-        and metadata->>'source' = 'invoice-table'
         and metadata->>'invoiceImportId' = $2
       order by started_at desc
       limit 1`,
@@ -1953,7 +2218,6 @@ async function ensureInvoiceImportSyncRun(database: Queryable, vendorId: Integra
     [
       vendorId,
       JSON.stringify({
-        source: 'invoice-table',
         invoiceImportId: importId,
       }),
     ],
@@ -1964,6 +2228,91 @@ async function ensureInvoiceImportSyncRun(database: Queryable, vendorId: Integra
   }
 
   return createdId;
+}
+
+function parseTabularContent(input: { fileName: string; content: string }): ParsedCsv {
+  if (looksLikeJsonTable(input.fileName, input.content)) {
+    return parseJsonTable(input.content);
+  }
+
+  return parseCsv(input.content);
+}
+
+function looksLikeJsonTable(fileName: string, content: string) {
+  const trimmed = content.trimStart();
+  return fileName.toLowerCase().endsWith('.json') || trimmed.startsWith('[') || trimmed.startsWith('{');
+}
+
+function parseJsonTable(content: string): ParsedCsv {
+  const parsed = parseJson(content);
+  const rows = jsonRows(parsed);
+  if (rows.length === 0) {
+    return { headers: [], rows: [] };
+  }
+
+  if (Array.isArray(rows[0])) {
+    const arrayRows = rows.filter(Array.isArray) as unknown[][];
+    const headerRow = arrayRows[0].map((value) => stringFromJsonCell(value).trim()).filter(Boolean);
+    return {
+      headers: headerRow,
+      rows: arrayRows.slice(1).map((values, index) => ({
+        recordNumber: index + 2,
+        values: Object.fromEntries(headerRow.map((header, headerIndex) => [header, stringFromJsonCell(values[headerIndex])])),
+      })),
+    };
+  }
+
+  const objectRows = rows.filter(isJsonRecord);
+  const headers = [
+    ...new Set(
+      objectRows.flatMap((row) =>
+        Object.keys(row).filter((key) => typeof row[key] !== 'undefined' && row[key] !== null),
+      ),
+    ),
+  ];
+
+  return {
+    headers,
+    rows: objectRows.map((row, index) => ({
+      recordNumber: index + 2,
+      values: Object.fromEntries(headers.map((header) => [header, stringFromJsonCell(row[header])])),
+    })),
+  };
+}
+
+function jsonRows(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (isJsonRecord(value)) {
+    for (const key of ['rows', 'data', 'items', 'records', 'results']) {
+      const candidate = value[key];
+      if (Array.isArray(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return [];
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringFromJsonCell(value: unknown) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (value === null || typeof value === 'undefined') {
+    return '';
+  }
+
+  return JSON.stringify(value);
 }
 
 function parseCsv(content: string): ParsedCsv {

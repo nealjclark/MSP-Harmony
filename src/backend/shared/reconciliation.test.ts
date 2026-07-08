@@ -48,7 +48,12 @@ const ncentralSourceOnly = reconcileVendorUsage({
   snapshots: [ncentralSnapshot('ncentral-workstation-1')],
   agreementAdditions: [],
 });
-assert.equal(ncentralSourceOnly.lines.length, 0);
+assert.equal(ncentralSourceOnly.lines.length, 1);
+const ncentralOnlyLine = ncentralSourceOnly.lines[0];
+assert.equal(ncentralOnlyLine?.status, 'needs-review');
+assert.equal(ncentralOnlyLine?.writeAction, 'create-addition');
+assert.equal(ncentralOnlyLine?.sourceQuantity, 1);
+assert.equal(ncentralOnlyLine?.agreementQuantity, 0);
 
 const ncentralExistingProduct = reconcileVendorUsage({
   vendorId: 'ncentral',

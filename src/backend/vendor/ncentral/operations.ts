@@ -288,9 +288,10 @@ export async function loadNcentralProductMappings(database: Queryable): Promise<
 }
 
 export async function loadNcentralRuleSet(database: Queryable) {
-  const [productMappings, filterMappings] = await Promise.all([
+  const [productMappings, filterMappings, snapshotProducts] = await Promise.all([
     loadNcentralProductMappings(database),
     listNcentralFilterMappings(database),
+    loadDistinctNcentralSnapshotProducts(database),
   ]);
   const dynamicMappings = Object.fromEntries(
     filterMappings
@@ -300,11 +301,51 @@ export async function loadNcentralRuleSet(database: Queryable) {
         productMappings[mapping.vendorProductKey as string] ?? defaultProductMapping(mapping),
       ]),
   );
-
-  return buildNcentralRuleSet({
+  const resolvedMappings = {
     ...productMappings,
     ...dynamicMappings,
-  });
+  };
+
+  for (const snapshotProduct of snapshotProducts) {
+    if (!snapshotProduct.vendor_product_key || resolvedMappings[snapshotProduct.vendor_product_key]) {
+      continue;
+    }
+
+    resolvedMappings[snapshotProduct.vendor_product_key] = {
+      vendorProductKey: snapshotProduct.vendor_product_key,
+      productCode: snapshotProduct.product_code,
+      productName: snapshotProduct.product_name,
+    };
+  }
+
+  return buildNcentralRuleSet(resolvedMappings);
+}
+
+async function loadDistinctNcentralSnapshotProducts(database: Queryable) {
+  const result = await database.query<{
+    vendor_product_key: string;
+    product_code: string;
+    product_name: string;
+  }>(
+    `select distinct on (vendor_product_key)
+       vendor_product_key,
+       product_code,
+       product_name
+     from vendor_usage_snapshots
+     where vendor_id = 'ncentral'
+       and vendor_product_key is not null
+       and sync_run_id = (
+         select id
+         from sync_runs
+         where integration_id = 'ncentral'
+           and status = 'complete'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       )
+     order by vendor_product_key, observed_at desc`,
+  );
+
+  return result.rows;
 }
 
 function resolveFilterMappings(mappings: NcentralFilterMapping[], filters: NcentralDeviceFilter[]) {

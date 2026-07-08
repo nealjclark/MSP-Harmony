@@ -5,6 +5,7 @@ import { dattoRuleSet } from '../vendor/datto/rules';
 import { microsoft365RuleSet } from '../vendor/microsoft365/rules';
 import { ncentralRuleSet } from '../vendor/ncentral/rules';
 import { appRiverRuleSet } from '../vendor/appriver/rules';
+import { sentinelOneRuleSet } from '../vendor/sentinelone/rules';
 
 const vendorRuleSets: Record<string, VendorRuleSet> = {
   [coveRuleSet.vendorId]: coveRuleSet,
@@ -12,6 +13,7 @@ const vendorRuleSets: Record<string, VendorRuleSet> = {
   [ncentralRuleSet.vendorId]: ncentralRuleSet,
   [microsoft365RuleSet.vendorId]: microsoft365RuleSet,
   [appRiverRuleSet.vendorId]: appRiverRuleSet,
+  [sentinelOneRuleSet.vendorId]: sentinelOneRuleSet,
 };
 
 export function listVendorRuleSets() {

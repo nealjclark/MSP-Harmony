@@ -201,5 +201,9 @@ assert.equal(customTable.authMode, 'none');
 assert.equal(validateIntegrationSettings(customTable).configuredStatus, 'connected');
 assert.equal(integrationHasCapability('custom-table', 'invoice-import'), true);
 assert.equal(integrationHasCapability('custom-table', 'mapping'), true);
+assert.equal(customTable.displayName, 'Custom Manual Import');
+assert.equal(getIntegrationDataSource('custom-table', 'device-count')?.ingestionMethods.includes('json'), true);
+assert.equal(getIntegrationDataSource('custom-table', 'invoice')?.providesCosts, true);
+assert.equal(getIntegrationDataSource('custom-table', 'license-count')?.requiresCustomerMapping, true);
 
 console.log('integration settings tests passed');

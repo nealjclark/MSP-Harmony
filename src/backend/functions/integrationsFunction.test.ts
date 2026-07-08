@@ -31,6 +31,8 @@ const envKeys = [
   'OPENTEXT_APPRIVER_CLIENT_SECRET',
   'OPENTEXT_APPRIVER_REFRESH_TOKEN',
   'OPENTEXT_APPRIVER_REFRESH_TOKEN_CACHE_PATH',
+  'SENTINELONE_ENDPOINT',
+  'SENTINELONE_API_TOKEN',
 ] as const;
 
 async function run() {
@@ -49,13 +51,46 @@ async function run() {
   try {
     const unsupportedTestResponse = await testIntegrationHttp(
       {
-        params: { integrationId: 'sentinelone' },
+        params: { integrationId: 'proofpoint' },
         headers: adminHeaders,
       } as never,
       { log() {} } as never,
     );
 
     assert.equal(unsupportedTestResponse.status, 501);
+
+    const sentinelOneTestResponse = await testIntegrationHttp(
+      {
+        params: { integrationId: 'sentinelone' },
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.notEqual(sentinelOneTestResponse.status, 501);
+    assert.match(
+      String((sentinelOneTestResponse.jsonBody as { error?: string }).error),
+      /SentinelOne settings|SentinelOne test failed|SentinelOne request failed|SentinelOne endpoint is not configured/i,
+    );
+    assert.doesNotMatch(
+      String((sentinelOneTestResponse.jsonBody as { error?: string }).error),
+      /not implemented/i,
+    );
+
+    process.env.SENTINELONE_ENDPOINT = 'https://usea1.sentinelone.net';
+    process.env.SENTINELONE_API_TOKEN = jwtWithPayload({ exp: 1758220801 });
+    const expiredSentinelOneTestResponse = await testIntegrationHttp(
+      {
+        params: { integrationId: 'sentinelone' },
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(expiredSentinelOneTestResponse.status, 400);
+    assert.match(
+      String((expiredSentinelOneTestResponse.jsonBody as { error?: string }).error),
+      /SentinelOne API token expired on 2025-09-18T18:40:01.000Z/,
+    );
+    process.env.SENTINELONE_API_TOKEN = '';
 
     const coveTestResponse = await testIntegrationHttp(
       {
@@ -194,6 +229,14 @@ async function run() {
   }
 
   console.log('integrations function tests passed');
+}
+
+function jwtWithPayload(payload: Record<string, unknown>) {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'),
+    Buffer.from(JSON.stringify(payload)).toString('base64url'),
+    'signature',
+  ].join('.');
 }
 
 run().catch((error: unknown) => {

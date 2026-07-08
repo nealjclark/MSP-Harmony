@@ -484,6 +484,7 @@ function sqlLatestVendorUsageSyncRunCte() {
        where integration_id = $1
          and status = 'complete'
          and coalesce(metadata->>'source', '') <> 'invoice-table'
+         and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
          and (
            $1::text <> 'microsoft-365'
            or coalesce(metadata->>'entity', 'license-snapshots') = any(array['m365-users', 'license-snapshots']::text[])
@@ -1006,6 +1007,7 @@ export async function listProductMappingCustomers(
        select id
        from invoice_imports
        where vendor_id = $1
+         and coalesce(raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
        order by invoice_date desc nulls last, imported_at desc
        limit 1
      ),
@@ -1628,6 +1630,7 @@ async function loadVendorProductLinkRuleTestRows(
        where integration_id = $1
          and status = 'complete'
          and coalesce(metadata->>'source', '') <> 'invoice-table'
+         and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
        order by completed_at desc nulls last, started_at desc
        limit 1
      ),
@@ -2882,6 +2885,7 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
          select id
          from invoice_imports
          where vendor_id = $1
+           and coalesce(raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
          order by invoice_date desc nulls last, imported_at desc
          limit 1
        ),
@@ -2909,6 +2913,7 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
          where invoice_line_items.vendor_id = $1
            and invoice_line_items.vendor_product_key is not null
            and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
+           and coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
        )
        select vendor_id,
               vendor_product_key,
@@ -3127,6 +3132,7 @@ async function loadVendorProductSources(
        where invoice_line_items.vendor_id = $1
          and invoice_line_items.vendor_product_key is not null
          and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
+         and coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
      )
      select
        vendor_product_key,
@@ -3307,6 +3313,8 @@ async function countUnmappedSnapshots(database: Queryable, vendorId: Integration
          on sync_runs.id = vendor_usage_snapshots.sync_run_id
        where vendor_id = $1
          and coalesce(sync_runs.metadata->>'source', '') <> 'invoice-table'
+         and sync_runs.metadata->>'invoiceImportId' is null
+         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
          and (customer_id is null or agreement_id is null)
      ) + (
        select count(*)
@@ -3318,7 +3326,10 @@ async function countUnmappedSnapshots(database: Queryable, vendorId: Integration
          and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
          and (invoice_line_items.customer_id is null
            or invoice_line_items.agreement_id is null
-           or invoice_line_items.connectwise_product_code is null)
+           or (
+             coalesce(invoice_imports.raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
+             and invoice_line_items.connectwise_product_code is null
+           ))
      ) as count`,
     [vendorId],
   );
