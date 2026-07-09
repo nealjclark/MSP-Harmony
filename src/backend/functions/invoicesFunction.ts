@@ -20,6 +20,9 @@ type InvoiceNotificationBody = {
   companyKey?: string;
   noticeType?: string;
   confirm?: boolean;
+  testMode?: boolean;
+  testRecipientEmail?: string;
+  notes?: string;
 };
 
 type MonthlyPreviewBody = {
@@ -66,17 +69,27 @@ export async function stubInvoiceNotificationHttp(
   if ((!invoiceId && invoiceIds.length === 0) || !noticeType) {
     return jsonResponse(400, {
       error: 'Invoice notification preview requires invoiceId or invoiceIds and a valid noticeType.',
-      noticeTypes: ['reminder', '30-day-notice', '60-day-credit-hold', '90-day-cancel-services'],
+      noticeTypes: ['past-due-reminder', 'credit-hold', 'service-suspension'],
     });
   }
 
   const runtime = await createInvoiceRuntime();
+  const testMode = Boolean(body.testMode);
+  const testRecipientEmail = stringValue(body.testRecipientEmail);
+  const notes = stringValue(body.notes);
 
   if (body.confirm && !runtime.repositoryContext.pool) {
     await runtime.repositoryContext.close();
     return jsonResponse(400, {
       error: 'Invoice notification confirmation needs PostgreSQL settings before audit history can be saved.',
       missingDatabaseSettings: runtime.repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  if (testMode && body.confirm && !testRecipientEmail) {
+    await runtime.repositoryContext.close();
+    return jsonResponse(400, {
+      error: 'Test email requires testRecipientEmail.',
     });
   }
 
@@ -91,6 +104,9 @@ export async function stubInvoiceNotificationHttp(
         companyKey,
         noticeType,
         confirm: Boolean(body.confirm),
+        testMode,
+        testRecipientEmail,
+        notes,
         provider: runtime.provider,
       }),
     );
@@ -235,12 +251,7 @@ function invoiceErrorResponse(error: unknown, fallback: string) {
 }
 
 function parseInvoiceNoticeType(value: string | undefined): InvoiceNoticeType | undefined {
-  if (
-    value === 'reminder' ||
-    value === '30-day-notice' ||
-    value === '60-day-credit-hold' ||
-    value === '90-day-cancel-services'
-  ) {
+  if (value === 'past-due-reminder' || value === 'credit-hold' || value === 'service-suspension') {
     return value;
   }
 

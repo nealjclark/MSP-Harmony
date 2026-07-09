@@ -20,6 +20,17 @@ export type ConnectWiseCompany = {
     id?: number;
     name?: string;
   }>;
+  invoiceToEmailAddress?: string;
+  invoiceCCEmailAddress?: string;
+  billingContact?: {
+    id?: number;
+    name?: string;
+  };
+  billToCompany?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
   deletedFlag?: boolean;
   _info?: {
     lastUpdated?: string;
@@ -249,6 +260,10 @@ export class ConnectWiseClient {
 
   async listCompanies(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseCompany[]>(`/company/companies?${listParams(options).toString()}`);
+  }
+
+  async getCompany(companyId: number | string) {
+    return this.request<ConnectWiseCompany>(`/company/companies/${encodeURIComponent(String(companyId))}`);
   }
 
   async listContacts(options: ConnectWiseListOptions = {}) {

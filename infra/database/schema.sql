@@ -694,3 +694,33 @@ CREATE TABLE IF NOT EXISTS vendor_product_addition_pins (
 CREATE INDEX IF NOT EXISTS idx_vendor_product_addition_pins_scope
   ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key)
   WHERE active;
+
+CREATE TABLE IF NOT EXISTS communication_settings (
+  id text PRIMARY KEY DEFAULT 'default',
+  invoice_bcc_emails text NOT NULL DEFAULT '',
+  invoice_notice_templates jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by text
+);
+
+INSERT INTO communication_settings (id, invoice_bcc_emails, invoice_notice_templates, updated_by)
+VALUES (
+  'default',
+  '',
+  '{
+    "past-due-reminder": {
+      "subject": "Past due reminder for {company}",
+      "body": "Hello {recipientName},\n\nThis is a friendly reminder that {company} has past-due invoices totaling {totalBalance}.\nPlease review the invoices below and submit payment at your earliest convenience."
+    },
+    "credit-hold": {
+      "subject": "Credit hold notice for {company}",
+      "body": "Hello {recipientName},\n\nThis is a credit hold notice for {company}. The past-due balance is {totalBalance}.\nIf payment is not received promptly, the account may be placed on credit hold.\nPlease review the invoices below and contact billing if you have questions."
+    },
+    "service-suspension": {
+      "subject": "Service suspension notice for {company}",
+      "body": "Hello {recipientName},\n\nThis is a service suspension notice for {company}. The past-due balance is {totalBalance}.\nIf payment is not received promptly, services may be suspended.\nPlease review the invoices below and contact billing immediately to avoid interruption."
+    }
+  }'::jsonb,
+  'system'
+)
+ON CONFLICT (id) DO NOTHING;

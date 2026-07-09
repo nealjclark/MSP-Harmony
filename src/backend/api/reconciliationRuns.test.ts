@@ -180,9 +180,10 @@ async function run() {
   const linkedStandardLine = appRiverLinkedResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
   assert.equal(linkedStandardLine?.sourceQuantity, 0);
   assert.equal(linkedStandardLine?.linkedCount?.quantity, 12);
-  assert.equal(linkedStandardLine?.proposedQuantity, 12);
+  // Linked is a selectable reference; proposed stays on the vendor/API baseline.
+  assert.equal(linkedStandardLine?.proposedQuantity, 0);
   assert.equal(linkedStandardLine?.agreementQuantity, 10);
-  assert.equal(linkedStandardLine?.delta, 2);
+  assert.equal(linkedStandardLine?.delta, -10);
   assert.equal(linkedStandardLine?.status, 'needs-review');
   assert.equal(linkedStandardLine?.writeAction, 'update-addition');
   assert.equal(linkedStandardLine?.linkedCount?.sources.length, 2);
@@ -212,19 +213,44 @@ async function run() {
     ),
     true,
   );
-  assert.equal(linkedThreatLine?.proposedQuantity, 2);
+  assert.equal(linkedThreatLine?.proposedQuantity, 0);
   assert.equal(linkedThreatLine?.agreementQuantity, 1);
-  assert.equal(linkedThreatLine?.delta, 1);
+  assert.equal(linkedThreatLine?.delta, -1);
   assert.equal(appRiverFilteredLinkedResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
 
   const huntressLinkedResult = await reconcileVendorFromDatabase(huntressLinkedConnectWiseDatabase, 'huntress', { syncRunId });
   const huntressLine = huntressLinkedResult.lines.find((line) => line.productCode === 'HUNTRESS');
   assert.equal(huntressLine?.sourceQuantity, 0);
   assert.equal(huntressLine?.linkedCount?.quantity, 9);
-  assert.equal(huntressLine?.proposedQuantity, 9);
+  assert.equal(huntressLine?.proposedQuantity, 0);
   assert.equal(huntressLine?.agreementQuantity, 8);
-  assert.equal(huntressLine?.delta, 1);
+  assert.equal(huntressLine?.delta, -8);
   assert.equal(huntressLine?.linkedCount?.sources[0]?.sourceType, 'connectwise-addition');
+
+  const sentinelOneLinkedSeparateResult = await reconcileVendorFromDatabase(
+    sentinelOneLinkedSeparateDatabase,
+    'sentinelone',
+    { syncRunId },
+  );
+  const linkedWorkstationLine = sentinelOneLinkedSeparateResult.lines.find(
+    (line) => line.vendorProductKey === 'device:workstation' && line.connectWiseAdditionId === '2594',
+  );
+  const linkedServerLine = sentinelOneLinkedSeparateResult.lines.find(
+    (line) => line.vendorProductKey === 'device:server' && line.connectWiseAdditionId === '2595',
+  );
+  assert.equal(linkedWorkstationLine?.sourceQuantity, 5);
+  assert.equal(linkedWorkstationLine?.linkedCount?.ruleName, 'N-Able-PC');
+  assert.equal(linkedWorkstationLine?.linkedCount?.quantity, 5);
+  assert.equal(linkedWorkstationLine?.linkedCount?.sourceVendorProductKey, 'device:workstation');
+  assert.equal(linkedServerLine?.sourceQuantity, 1);
+  assert.equal(linkedServerLine?.linkedCount?.ruleName, 'N-Able SRV');
+  assert.equal(linkedServerLine?.linkedCount?.quantity, 1);
+  assert.equal(linkedServerLine?.linkedCount?.sourceVendorProductKey, 'device:server');
+  assert.notEqual(
+    linkedServerLine?.linkedCount?.ruleName,
+    'N-Able-PC',
+    'server line must keep N-Able SRV linked count, not the shared-CW-code workstation rule',
+  );
 
   console.log('database reconciliation tests passed');
 }
@@ -1080,6 +1106,316 @@ const huntressLinkedConnectWiseDatabase: Queryable = {
           },
         ] as T[],
       };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const sentinelOneLinkedSeparateDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_product_link_rules')) {
+      return {
+        rows: [
+          {
+            id: 'link-rule-s1-server',
+            vendor_id: 'sentinelone',
+            source_vendor_product_key: 'device:server',
+            rule_name: 'N-Able SRV',
+            sources: [
+              {
+                sourceType: 'vendor-product',
+                vendorId: 'ncentral',
+                vendorProductKey: 'ncentral-physical-server',
+                vendorProductName: 'N-central Managed Physical Server',
+              },
+              {
+                sourceType: 'vendor-product',
+                vendorId: 'ncentral',
+                vendorProductKey: 'ncentral-virtual-server',
+                vendorProductName: 'N-central Managed Virtual Server',
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-01T12:00:00Z',
+            created_at: '2026-07-01T12:00:00Z',
+            updated_at: '2026-07-01T12:00:00Z',
+          },
+          {
+            id: 'link-rule-s1-workstation',
+            vendor_id: 'sentinelone',
+            source_vendor_product_key: 'device:workstation',
+            rule_name: 'N-Able-PC',
+            sources: [
+              {
+                sourceType: 'vendor-product',
+                vendorId: 'ncentral',
+                vendorProductKey: 'ncentral-workstation',
+                vendorProductName: 'N-central Managed Workstation',
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-01T12:00:00Z',
+            created_at: '2026-07-01T12:00:00Z',
+            updated_at: '2026-07-01T12:00:00Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from deduped_rows') && sql.includes('vendor_usage_snapshots.vendor_id = $1') && values?.[0] === 'ncentral') {
+      const vendorProductKey = String(values?.[1] ?? '');
+      const quantity =
+        vendorProductKey === 'ncentral-physical-server'
+          ? '1'
+          : vendorProductKey === 'ncentral-workstation'
+            ? '5'
+            : '0';
+      if (quantity === '0') {
+        return { rows: [] as T[] };
+      }
+      return {
+        rows: [
+          {
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            quantity,
+            row_count: quantity,
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'sentinelone') {
+      return {
+        rows: [
+          {
+            id: 's1-server-1',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:server',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'ao-fs' },
+          },
+          {
+            id: 's1-pc-1',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'ao' },
+          },
+          {
+            id: 's1-pc-2',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'ao-dt-2ua3061q5k' },
+          },
+          {
+            id: 's1-pc-3',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'ao-dt-2ua32408dn' },
+          },
+          {
+            id: 's1-pc-4',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'ao-dt-mxl5010hr8' },
+          },
+          {
+            id: 's1-pc-5',
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            observed_at: new Date('2026-07-01T12:00:00Z'),
+            dimensions: { hostname: 'desktop-real5pf' },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_mappings') && values?.[0] === 'sentinelone') {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'device:server',
+            target_index: 0,
+            connectwise_product_code: 'Managed Endpoint Protection',
+            connectwise_product_name: 'Managed Endpoint Protection',
+            unit_price: null,
+          },
+          {
+            vendor_product_key: 'device:workstation',
+            target_index: 0,
+            connectwise_product_code: 'Managed Endpoint Protection',
+            connectwise_product_name: 'Managed Endpoint Protection',
+            unit_price: null,
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('select distinct') && sql.includes('vendor_product_key') && sql.includes('vendor_usage_snapshots')) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'device:server',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+          },
+          {
+            vendor_product_key: 'device:workstation',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_bundles') || sql.includes('from vendor_usage_overrides')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from integration_settings')) {
+      return {
+        rows: [
+          {
+            non_secret_settings: {
+              psaAgreementReconcileMode: 'separate-multiple-products',
+            },
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_addition_pins')) {
+      return {
+        rows: [
+          {
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:workstation',
+            connectwise_addition_id: '2594',
+            connectwise_product_code: 'Managed Endpoint Protection',
+            connectwise_product_name: 'Managed Endpoint Protection',
+            mapping_source: 'auto-reconcile',
+          },
+          {
+            vendor_id: 'sentinelone',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            vendor_product_key: 'device:server',
+            connectwise_addition_id: '2595',
+            connectwise_product_code: 'Managed Endpoint Protection',
+            connectwise_product_name: 'Managed Endpoint Protection',
+            mapping_source: 'auto-reconcile',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('select distinct') && sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreement_additions')) {
+      return {
+        rows: [
+          {
+            id: 'addition-2594',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            connectwise_addition_id: '2594',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '7',
+            unit_price: '14.95',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-01T12:00:00Z'),
+            raw_payload: {},
+          },
+          {
+            id: 'addition-2595',
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            connectwise_addition_id: '2595',
+            product_code: 'Managed Endpoint Protection',
+            product_name: 'Managed Endpoint Protection',
+            quantity: '1',
+            unit_price: '19.95',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-01T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements') && sql.includes('inner join customers')) {
+      return {
+        rows: [
+          {
+            customer_id: '32b037f2-e63b-41e4-827e-34e1b4601411',
+            customer_name: 'Advanced Opinions',
+            connectwise_company_id: '24132',
+            agreement_id: 'bfb433c2-e583-4d3d-bfae-da2de67abc12',
+            agreement_name: 'Advanced Opinions Monthly Services',
+            connectwise_agreement_id: '707',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from invoice_imports') || sql.includes('from invoice_line_items')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('insert into vendor_product_addition_pins')) {
+      return { rows: [] as T[] };
     }
 
     return { rows: [] as T[] };

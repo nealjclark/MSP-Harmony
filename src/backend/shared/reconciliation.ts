@@ -13,6 +13,7 @@ import {
   matchesDimensions,
   matchesRuleProduct,
   normalizeProductCode,
+  ruleVendorProductKey,
   sumAdditions,
   targetProductCodes,
 } from './reconciliationProductMatching';
@@ -170,6 +171,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
         agreementId,
         productCode: rule.productCode,
         productName: rule.productName,
+        vendorProductKey: ruleVendorProductKey(rule),
         lineType: 'base-count',
         ruleId: rule.id,
         sourceQuantity: proposedBaseQuantity,

@@ -86,9 +86,29 @@ import {
   suggestInvoiceTableColumnMap,
 } from '../../shared/invoiceTableMapping';
 import { readWorkbookObjectRows } from './importWorkbook';
+import {
+  preferredReconciliationCountSource,
+  type ReconciliationCountSource,
+} from './preferredReconciliationCountSource';
+import {
+  defaultCommunicationSettings,
+  defaultInvoiceNoticeTemplates,
+  invoiceNoticeTypeLabels,
+  invoiceNoticeTypePillLabels,
+  invoiceNoticeTypeRanges,
+  invoiceNoticeTypes,
+  isValidEmail,
+  normalizeInvoiceNoticeType,
+  noticeTypeForDaysPastDue,
+  validateEmailList,
+  type CommunicationSettings,
+  type InvoiceNoticeTemplate,
+  type InvoiceNoticeTemplates,
+  type InvoiceNoticeType,
+} from '../../shared/communicationSettings';
 
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'settings';
-type SettingsSection = 'user-management' | 'integrations' | 'audit-logs';
+type SettingsSection = 'user-management' | 'integrations' | 'email-communication' | 'audit-logs';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
 type InvoiceWorkspaceTab = 'overdue' | 'monthly' | 'standard';
@@ -109,8 +129,6 @@ type IntegrationTab = 'api' | 'invoice';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 type MappingSectionId = 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
-type ReconciliationCountSource = 'api' | 'invoice' | 'linked' | 'manual';
-
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -727,7 +745,6 @@ type InvoiceImportRefreshResponse = {
   productRowsUpdated: number;
 };
 
-type InvoiceNoticeType = 'reminder' | '30-day-notice' | '60-day-credit-hold' | '90-day-cancel-services';
 type OverdueInvoiceBucketId = '7-29-days' | '30-59-days' | '60-plus-days';
 
 type InvoiceNotificationAuditSummary = {
@@ -896,6 +913,9 @@ type InvoiceNotificationPreview = {
   companyName: string;
   recipientName: string;
   recipientEmail?: string;
+  ccEmails: string[];
+  bccEmails: string[];
+  notes?: string;
   billingContact?: InvoiceBillingContact;
   agreementName?: string;
   noticeType: InvoiceNoticeType;
@@ -909,6 +929,7 @@ type InvoiceNotificationPreview = {
   paymentLink?: string;
   subject: string;
   bodyPreview: string;
+  templateBody?: string;
 };
 
 type InvoiceBillingContact = {
@@ -932,10 +953,14 @@ type InvoiceNotificationPreviewInvoice = {
 };
 
 type InvoiceNotificationResponse = {
-  status: 'preview' | 'stubbed';
+  status: 'preview' | 'stubbed' | 'test-stubbed';
   generatedAt: string;
   preview: InvoiceNotificationPreview;
   audit?: InvoiceNotificationAuditSummary;
+};
+
+type CommunicationSettingsResponse = {
+  settings: CommunicationSettings;
 };
 
 type AuditSyncRun = {
@@ -1641,6 +1666,11 @@ const settingsSections: Array<{ id: SettingsSection; label: string; description:
     description: 'Integration credentials and configuration',
   },
   {
+    id: 'email-communication',
+    label: 'Email Communication',
+    description: 'Invoice past-due email wording and billing BCC recipients',
+  },
+  {
     id: 'audit-logs',
     label: 'Audit Logs',
     description: 'Sync runs, approvals, and application activity history',
@@ -1650,6 +1680,7 @@ const settingsSections: Array<{ id: SettingsSection; label: string; description:
 const settingsSectionPaths: Record<SettingsSection, string> = {
   'user-management': '/settings/user-management',
   integrations: '/settings/integrations',
+  'email-communication': '/settings/email-communication',
   'audit-logs': '/settings/audit-logs',
 };
 
@@ -1858,15 +1889,6 @@ function validManualOverrideTotal(issue: Pick<ReconcileIssue, 'manualOverrideTot
     Number.isFinite(issue.manualOverrideTotal)
     ? issue.manualOverrideTotal
     : undefined;
-}
-
-function preferredReconciliationCountSource(
-  apiCount: number,
-  invoiceCount: number | undefined,
-  linkedCount?: number,
-): ReconciliationCountSource {
-  if (typeof linkedCount === 'number') return 'linked';
-  return typeof invoiceCount === 'number' && invoiceCount > apiCount ? 'invoice' : 'api';
 }
 
 function reconciliationCountSource(issue: ReconcileIssue): ReconciliationCountSource {
@@ -3131,6 +3153,37 @@ async function fetchManagedUsers() {
   return body as unknown as ManagedUsersResponse;
 }
 
+async function fetchCommunicationSettings() {
+  const response = await fetch('/api/settings/communication');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Communication settings load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CommunicationSettingsResponse;
+}
+
+async function saveCommunicationSettingsRequest(payload: {
+  invoiceBccEmails: string;
+  invoiceNoticeTemplates: InvoiceNoticeTemplates;
+}) {
+  const response = await fetch('/api/settings/communication', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Communication settings save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CommunicationSettingsResponse;
+}
+
 async function createManagedUserRequest(payload: {
   email: string;
   displayName: string;
@@ -3505,6 +3558,9 @@ async function postInvoiceNotification(input: {
   companyKey?: string;
   noticeType: InvoiceNoticeType;
   confirm?: boolean;
+  testMode?: boolean;
+  testRecipientEmail?: string;
+  notes?: string;
 }) {
   const response = await fetch('/api/invoices/notifications', {
     method: 'POST',
@@ -4111,14 +4167,54 @@ function updateCachedInvoiceImportSummary(invoiceImport: InvoiceImportSummary) {
 }
 
 function readCachedOverdueInvoices() {
-  return readInvoiceWorkspaceCache().overdueInvoices ?? null;
+  const cached = readInvoiceWorkspaceCache().overdueInvoices ?? null;
+  return cached ? normalizeOverdueInvoicesResponse(cached) : null;
 }
 
 function cacheOverdueInvoices(response: OverdueInvoicesResponse) {
   writeInvoiceWorkspaceCache((cache) => ({
     ...cache,
-    overdueInvoices: response,
+    overdueInvoices: normalizeOverdueInvoicesResponse(response),
   }));
+}
+
+function normalizeOverdueInvoicesResponse(response: OverdueInvoicesResponse): OverdueInvoicesResponse {
+  const buckets = (response.buckets ?? []).map((bucket) => ({
+    ...bucket,
+    noticeType: normalizeInvoiceNoticeType(bucket.noticeType),
+    invoices: (bucket.invoices ?? []).map((invoice) => ({
+      ...invoice,
+      lastNotice: invoice.lastNotice
+        ? {
+            ...invoice.lastNotice,
+            noticeType: normalizeInvoiceNoticeType(invoice.lastNotice.noticeType, invoice.daysPastDue),
+          }
+        : undefined,
+    })),
+  }));
+  const customerGroups = (response.customerGroups ?? []).map((customer) => {
+    const oldestDaysPastDue = Math.max(
+      customer.oldestDaysPastDue ?? 0,
+      ...customer.invoices.map((invoice) => invoice.daysPastDue),
+    );
+    return {
+      ...customer,
+      oldestDaysPastDue,
+      noticeType: normalizeInvoiceNoticeType(customer.noticeType, oldestDaysPastDue),
+      lastNotice: customer.lastNotice
+        ? {
+            ...customer.lastNotice,
+            noticeType: normalizeInvoiceNoticeType(customer.lastNotice.noticeType, oldestDaysPastDue),
+          }
+        : undefined,
+    };
+  });
+
+  return {
+    ...response,
+    buckets,
+    customerGroups,
+  };
 }
 
 function readCachedMonthlyInvoiceCandidates() {
@@ -4682,6 +4778,10 @@ function App() {
   const [invoiceNoticeResult, setInvoiceNoticeResult] = useState<InvoiceNotificationResponse | null>(null);
   const [invoiceNoticeMessage, setInvoiceNoticeMessage] = useState('');
   const [invoiceNoticeBusyKey, setInvoiceNoticeBusyKey] = useState<string | null>(null);
+  const [selectedOverdueCustomerKeys, setSelectedOverdueCustomerKeys] = useState<string[]>([]);
+  const [bulkNoticeCustomers, setBulkNoticeCustomers] = useState<OverdueInvoiceCustomerGroup[] | null>(null);
+  const [bulkNoticeMessage, setBulkNoticeMessage] = useState('');
+  const [bulkNoticeBusy, setBulkNoticeBusy] = useState(false);
   const [monthlyInvoiceCandidates, setMonthlyInvoiceCandidates] = useState<MonthlyInvoiceCandidatesResponse | null>(null);
   const [monthlyInvoiceLoadState, setMonthlyInvoiceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [monthlyInvoiceMessage, setMonthlyInvoiceMessage] = useState('Loading monthly agreements from ConnectWise.');
@@ -5133,7 +5233,7 @@ function App() {
     setOverdueInvoiceMessage('Loading overdue invoices from ConnectWise...');
 
     try {
-      const response = await fetchOverdueInvoices();
+      const response = normalizeOverdueInvoicesResponse(await fetchOverdueInvoices());
       setOverdueInvoices(response);
       cacheOverdueInvoices(response);
       setOverdueInvoiceLoadState('ready');
@@ -5232,6 +5332,7 @@ function App() {
 
   const previewInvoiceNotice = async (customer: OverdueInvoiceCustomerGroup) => {
     const actionKey = `${customer.customerKey}:preview`;
+    const noticeType = normalizeInvoiceNoticeType(customer.noticeType, customer.oldestDaysPastDue);
     setInvoiceNoticeBusyKey(actionKey);
     setInvoiceNoticeMessage(`Preparing overdue email for ${customer.company.name}...`);
 
@@ -5239,7 +5340,7 @@ function App() {
       const response = await postInvoiceNotification({
         companyKey: customer.customerKey,
         invoiceIds: customer.invoices.map((invoice) => invoice.invoiceId),
-        noticeType: customer.noticeType,
+        noticeType,
       });
       setInvoiceNoticeResult(response);
       setInvoiceNoticeMessage('Email preview ready.');
@@ -5253,7 +5354,7 @@ function App() {
     }
   };
 
-  const confirmInvoiceNotice = async (preview: InvoiceNotificationPreview) => {
+  const confirmInvoiceNotice = async (preview: InvoiceNotificationPreview, notes?: string) => {
     const actionKey = `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:confirm`;
     setInvoiceNoticeBusyKey(actionKey);
     setInvoiceNoticeMessage(`Saving overdue email event for ${preview.companyName}...`);
@@ -5265,6 +5366,7 @@ function App() {
         companyKey: preview.companyKey,
         noticeType: preview.noticeType,
         confirm: true,
+        notes,
       });
       setInvoiceNoticeResult(response);
       setInvoiceNoticeMessage('Overdue email event saved to audit history.');
@@ -5275,6 +5377,103 @@ function App() {
       return null;
     } finally {
       setInvoiceNoticeBusyKey(null);
+    }
+  };
+
+  const testInvoiceNotice = async (preview: InvoiceNotificationPreview, testRecipientEmail: string, notes?: string) => {
+    const actionKey = `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:test`;
+    setInvoiceNoticeBusyKey(actionKey);
+    setInvoiceNoticeMessage(`Sending test email for ${preview.companyName} to ${testRecipientEmail}...`);
+
+    try {
+      const response = await postInvoiceNotification({
+        invoiceId: preview.invoiceId,
+        invoiceIds: preview.invoiceIds,
+        companyKey: preview.companyKey,
+        noticeType: preview.noticeType,
+        confirm: true,
+        testMode: true,
+        testRecipientEmail,
+        notes,
+      });
+      setInvoiceNoticeResult(response);
+      setInvoiceNoticeMessage(`Test email stubbed to ${testRecipientEmail}.`);
+      return response;
+    } catch (error) {
+      setInvoiceNoticeMessage(error instanceof Error ? error.message : 'Unable to stub test email.');
+      return null;
+    } finally {
+      setInvoiceNoticeBusyKey(null);
+    }
+  };
+
+  const openBulkNoticeConfirm = (customers: OverdueInvoiceCustomerGroup[]) => {
+    if (customers.length === 0) {
+      setBulkNoticeMessage('Select at least one customer before sending.');
+      return;
+    }
+    setBulkNoticeCustomers(customers);
+    setBulkNoticeMessage(`Review ${customers.length} selected customer email${customers.length === 1 ? '' : 's'} before sending.`);
+  };
+
+  const confirmBulkInvoiceNotices = async (customers: OverdueInvoiceCustomerGroup[], notes?: string) => {
+    setBulkNoticeBusy(true);
+    setBulkNoticeMessage(`Sending ${customers.length} overdue email${customers.length === 1 ? '' : 's'}...`);
+
+    try {
+      let successCount = 0;
+      for (const customer of customers) {
+        await postInvoiceNotification({
+          companyKey: customer.customerKey,
+          invoiceIds: customer.invoices.map((invoice) => invoice.invoiceId),
+          noticeType: normalizeInvoiceNoticeType(customer.noticeType, customer.oldestDaysPastDue),
+          confirm: true,
+          notes,
+        });
+        successCount += 1;
+        setBulkNoticeMessage(`Sent ${successCount} of ${customers.length}...`);
+      }
+      setBulkNoticeCustomers(null);
+      setSelectedOverdueCustomerKeys([]);
+      setBulkNoticeMessage(`Saved ${successCount} overdue email event${successCount === 1 ? '' : 's'} to audit history.`);
+      setInvoiceNoticeMessage(`Saved ${successCount} overdue email event${successCount === 1 ? '' : 's'} to audit history.`);
+      await loadOverdueInvoiceWorkspace({ forceRefresh: true });
+    } catch (error) {
+      setBulkNoticeMessage(error instanceof Error ? error.message : 'Unable to send selected overdue emails.');
+    } finally {
+      setBulkNoticeBusy(false);
+    }
+  };
+
+  const testBulkInvoiceNotices = async (
+    customers: OverdueInvoiceCustomerGroup[],
+    testRecipientEmail: string,
+    notes?: string,
+  ) => {
+    setBulkNoticeBusy(true);
+    setBulkNoticeMessage(`Sending ${customers.length} test email${customers.length === 1 ? '' : 's'} to ${testRecipientEmail}...`);
+
+    try {
+      let successCount = 0;
+      for (const customer of customers) {
+        await postInvoiceNotification({
+          companyKey: customer.customerKey,
+          invoiceIds: customer.invoices.map((invoice) => invoice.invoiceId),
+          noticeType: normalizeInvoiceNoticeType(customer.noticeType, customer.oldestDaysPastDue),
+          confirm: true,
+          testMode: true,
+          testRecipientEmail,
+          notes,
+        });
+        successCount += 1;
+        setBulkNoticeMessage(`Tested ${successCount} of ${customers.length}...`);
+      }
+      setBulkNoticeMessage(`Stubbed ${successCount} test email${successCount === 1 ? '' : 's'} to ${testRecipientEmail}.`);
+      setInvoiceNoticeMessage(`Stubbed ${successCount} test email${successCount === 1 ? '' : 's'} to ${testRecipientEmail}.`);
+    } catch (error) {
+      setBulkNoticeMessage(error instanceof Error ? error.message : 'Unable to stub test batch emails.');
+    } finally {
+      setBulkNoticeBusy(false);
     }
   };
 
@@ -7395,12 +7594,25 @@ function App() {
                 setInvoiceNoticeMessage('');
               }}
               onConfirmNotice={confirmInvoiceNotice}
+              onTestNotice={testInvoiceNotice}
               onImportInvoices={() => {
                 setShowInvoiceImportPanel(true);
                 void loadInvoiceImports(selectedInvoiceIntegrationId);
               }}
               onMonthlyPreview={previewMonthlyInvoice}
               onNoticePreview={previewInvoiceNotice}
+              onOpenBulkNoticeConfirm={openBulkNoticeConfirm}
+              onCloseBulkNoticeConfirm={() => {
+                setBulkNoticeCustomers(null);
+                setBulkNoticeMessage('');
+              }}
+              onConfirmBulkNotices={confirmBulkInvoiceNotices}
+              onTestBulkNotices={testBulkInvoiceNotices}
+              bulkNoticeBusy={bulkNoticeBusy}
+              bulkNoticeCustomers={bulkNoticeCustomers}
+              bulkNoticeMessage={bulkNoticeMessage}
+              selectedOverdueCustomerKeys={selectedOverdueCustomerKeys}
+              onSelectedOverdueCustomerKeysChange={setSelectedOverdueCustomerKeys}
               onRefreshAll={refreshInvoiceWorkspace}
               onTabChange={setInvoiceWorkspaceTab}
               overdueInvoices={overdueInvoices}
@@ -7540,6 +7752,9 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
       }
       if (settingsSection === 'integrations') {
         return 'Integrations settings';
+      }
+      if (settingsSection === 'email-communication') {
+        return 'Email communication';
       }
       return 'User management';
     default:
@@ -7959,6 +8174,7 @@ function SettingsPageView(props: {
 
       {section === 'user-management' ? <SettingsView /> : null}
       {section === 'integrations' ? <SettingsIntegrationsStub onOpenIntegrations={onNavigateToIntegrations} /> : null}
+      {section === 'email-communication' ? <SettingsEmailCommunicationView /> : null}
       {section === 'audit-logs' ? <AuditView /> : null}
     </section>
   );
@@ -7982,6 +8198,179 @@ function SettingsIntegrationsStub(props: { onOpenIntegrations: () => void }) {
           Open Integrations
         </button>
       </div>
+    </section>
+  );
+}
+
+function SettingsEmailCommunicationView() {
+  const [settings, setSettings] = useState<CommunicationSettings>(defaultCommunicationSettings);
+  const [invoiceBccEmails, setInvoiceBccEmails] = useState('');
+  const [templates, setTemplates] = useState<InvoiceNoticeTemplates>(defaultInvoiceNoticeTemplates);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [message, setMessage] = useState('Loading email communication settings...');
+  const [saving, setSaving] = useState(false);
+
+  const applySettings = (next: CommunicationSettings) => {
+    setSettings(next);
+    setInvoiceBccEmails(next.invoiceBccEmails);
+    setTemplates(next.invoiceNoticeTemplates);
+  };
+
+  const refreshSettings = async () => {
+    setLoadState('loading');
+    setMessage('Refreshing email communication settings...');
+
+    try {
+      const response = await fetchCommunicationSettings();
+      applySettings(response.settings);
+      setLoadState('ready');
+      setMessage('Email communication settings loaded.');
+    } catch (error) {
+      setLoadState('failed');
+      setMessage(error instanceof Error ? error.message : 'Unable to load communication settings.');
+    }
+  };
+
+  useEffect(() => {
+    void refreshSettings();
+  }, []);
+
+  const updateTemplate = (noticeType: InvoiceNoticeType, field: keyof InvoiceNoticeTemplate, value: string) => {
+    setTemplates((current) => ({
+      ...current,
+      [noticeType]: {
+        ...current[noticeType],
+        [field]: value,
+      },
+    }));
+  };
+
+  const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const validation = validateEmailList(invoiceBccEmails);
+    if (validation.invalid.length > 0) {
+      setMessage(`Invalid BCC email address(es): ${validation.invalid.join(', ')}`);
+      return;
+    }
+
+    setSaving(true);
+    setMessage('Saving email communication settings...');
+
+    try {
+      const response = await saveCommunicationSettingsRequest({
+        invoiceBccEmails,
+        invoiceNoticeTemplates: templates,
+      });
+      applySettings(response.settings);
+      setLoadState('ready');
+      setMessage('Email communication settings saved.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to save communication settings.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="settings-email-communication" aria-label="Email communication settings">
+      <section className="settings-panel settings-email-panel">
+        <div className="settings-panel-header">
+          <div>
+            <span className="section-kicker">Billing email</span>
+            <h2>Invoice communication</h2>
+            <p>Configure past-due invoice wording and shared BCC recipients for billing emails.</p>
+          </div>
+          <button
+            className="button secondary compact"
+            disabled={saving || loadState === 'loading'}
+            onClick={() => void refreshSettings()}
+            type="button"
+          >
+            <RefreshCcw size={15} />
+            Refresh
+          </button>
+        </div>
+        <div className="settings-email-panel-body settings-email-status-row">
+          <p className="settings-email-status">{message}</p>
+        </div>
+      </section>
+
+      <form className="settings-email-form" onSubmit={(event) => void saveSettings(event)}>
+        <section className="settings-panel settings-email-panel" aria-label="Invoice BCC settings">
+          <div className="settings-panel-header">
+            <div>
+              <span className="section-kicker">Recipients</span>
+              <h2>BCC all billing emails</h2>
+              <p>Separate multiple addresses with commas or semicolons. Applied to all past-due invoice emails.</p>
+            </div>
+          </div>
+          <div className="settings-email-panel-body">
+            <label className="settings-email-field">
+              <span>BCC addresses</span>
+              <input
+                onChange={(event) => setInvoiceBccEmails(event.target.value)}
+                placeholder="billing@example.com, ar@example.com"
+                type="text"
+                value={invoiceBccEmails}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-panel settings-email-panel" aria-label="Invoice past-due wording">
+          <div className="settings-panel-header">
+            <div>
+              <span className="section-kicker">Invoice</span>
+              <h2>Past-due email wording</h2>
+              <p>
+                Templates follow the oldest invoice for each customer. Placeholders: {'{company}'}, {'{recipientName}'},{' '}
+                {'{invoiceCount}'}, {'{totalBalance}'}, {'{invoiceNumber}'}.
+              </p>
+            </div>
+          </div>
+          <div className="settings-email-panel-body">
+            <div className="settings-email-template-grid">
+              {invoiceNoticeTypes.map((noticeType) => (
+                <article className="settings-email-template-card" key={noticeType}>
+                  <header>
+                    <strong>{invoiceNoticeTypeLabels[noticeType]}</strong>
+                    <span>{invoiceNoticeTypeRanges[noticeType]}</span>
+                  </header>
+                  <label className="settings-email-field">
+                    <span>Subject</span>
+                    <input
+                      onChange={(event) => updateTemplate(noticeType, 'subject', event.target.value)}
+                      type="text"
+                      value={templates[noticeType].subject}
+                    />
+                  </label>
+                  <label className="settings-email-field">
+                    <span>Body</span>
+                    <textarea
+                      onChange={(event) => updateTemplate(noticeType, 'body', event.target.value)}
+                      rows={8}
+                      value={templates[noticeType].body}
+                    />
+                  </label>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <div className="settings-email-actions">
+          <button className="button primary compact" disabled={saving || loadState === 'loading'} type="submit">
+            <Check size={15} />
+            {saving ? 'Saving' : 'Save email settings'}
+          </button>
+          {settings.updatedAt ? (
+            <span className="invoice-action-message">
+              Last updated {formatDateTime(settings.updatedAt)}
+              {settings.updatedBy ? ` by ${settings.updatedBy}` : ''}
+            </span>
+          ) : null}
+        </div>
+      </form>
     </section>
   );
 }
@@ -9808,197 +10197,199 @@ function ManualOverrideModal(props: {
           <IntegrationStat label="Impact" value={formatCurrency(reconciliationIssueImpact(issue))} />
         </div>
 
-        {issue.vendorProductKey ? (
-          <section className="manual-section" aria-label="Agreement addition pin">
+        <div className="manual-override-body">
+          {issue.vendorProductKey ? (
+            <section className="manual-section" aria-label="Agreement addition pin">
+              <div className="manual-section-header">
+                <span className="section-kicker">Pin to agreement addition</span>
+                <strong>{issue.unit || issue.vendorProductKey}</strong>
+              </div>
+              <div className="cw-addition-context">
+                <span>
+                  Choose which ConnectWise addition this vendor product should reconcile against for {issue.customer}.
+                </span>
+              </div>
+              <div className="manual-pin-form">
+                <label>
+                  <span>Agreement addition</span>
+                  <select
+                    disabled={saving || loadingPinAdditions || pinAdditions.length === 0}
+                    onChange={(event) => setPinAdditionId(event.target.value)}
+                    value={pinAdditionId}
+                  >
+                    <option value="">
+                      {loadingPinAdditions ? 'Loading additions...' : 'Select CW addition'}
+                    </option>
+                    {pinAdditions.map((addition) => (
+                      <option key={addition.connectWiseAdditionId} value={addition.connectWiseAdditionId}>
+                        {`CW ${addition.connectWiseAdditionId} · ${addition.productName} · qty ${addition.quantity.toLocaleString()}${
+                          addition.unitPrice ? ` · ${formatCurrency(addition.unitPrice.amount)}` : ''
+                        }`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="button primary compact"
+                  disabled={!canSavePin}
+                  onClick={() => {
+                    if (selectedPinAddition) {
+                      void onAdditionPinSave(issue, selectedPinAddition);
+                    }
+                  }}
+                  type="button"
+                >
+                  <Check size={16} />
+                  Save Pin
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          <section className="manual-section" aria-label="Manual total update">
             <div className="manual-section-header">
-              <span className="section-kicker">Pin to agreement addition</span>
-              <strong>{issue.unit || issue.vendorProductKey}</strong>
+              <span className="section-kicker">Manual Override Total</span>
+              <strong>{reconciliationSelectedCount(issue).toLocaleString()} selected</strong>
             </div>
             <div className="cw-addition-context">
-              <span>
-                Choose which ConnectWise addition this vendor product should reconcile against for {issue.customer}.
-              </span>
+              {selectedAddition ? (
+                <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
+              ) : (
+                <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
+              )}
             </div>
             <div className="manual-count-form">
               <label>
-                <span>Agreement addition</span>
-                <select
-                  disabled={saving || loadingPinAdditions || pinAdditions.length === 0}
-                  onChange={(event) => setPinAdditionId(event.target.value)}
-                  value={pinAdditionId}
-                >
-                  <option value="">
-                    {loadingPinAdditions ? 'Loading additions...' : 'Select CW addition'}
-                  </option>
-                  {pinAdditions.map((addition) => (
-                    <option key={addition.connectWiseAdditionId} value={addition.connectWiseAdditionId}>
-                      {`CW ${addition.connectWiseAdditionId} · ${addition.productName} · qty ${addition.quantity.toLocaleString()}${
-                        addition.unitPrice ? ` · ${formatCurrency(addition.unitPrice.amount)}` : ''
-                      }`}
-                    </option>
-                  ))}
-                </select>
+                <span>Total Count</span>
+                <input
+                  min="0"
+                  onChange={(event) => setManualTotal(event.target.value)}
+                  step="1"
+                  type="number"
+                  value={manualTotal}
+                />
               </label>
               <button
                 className="button primary compact"
-                disabled={!canSavePin}
-                onClick={() => {
-                  if (selectedPinAddition) {
-                    void onAdditionPinSave(issue, selectedPinAddition);
-                  }
-                }}
+                disabled={!canSaveManualTotal}
+                onClick={() => void onManualTotalSave(issue, manualTotalValue)}
                 type="button"
               >
                 <Check size={16} />
-                Save Pin
+                Queue Total
               </button>
             </div>
-          </section>
-        ) : null}
-
-        <section className="manual-section" aria-label="Manual total update">
-          <div className="manual-section-header">
-            <span className="section-kicker">Manual Override Total</span>
-            <strong>{reconciliationSelectedCount(issue).toLocaleString()} selected</strong>
-          </div>
-          <div className="cw-addition-context">
-            {selectedAddition ? (
-              <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
-            ) : (
-              <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
-            )}
-          </div>
-          <div className="manual-count-form">
-            <label>
-              <span>Total Count</span>
-              <input
-                min="0"
-                onChange={(event) => setManualTotal(event.target.value)}
-                step="1"
-                type="number"
-                value={manualTotal}
-              />
-            </label>
-            <button
-              className="button primary compact"
-              disabled={!canSaveManualTotal}
-              onClick={() => void onManualTotalSave(issue, manualTotalValue)}
-              type="button"
-            >
-              <Check size={16} />
-              Queue Total
-            </button>
-          </div>
-          {issue.manualOverrideTotalTouched && typeof issue.manualOverrideTotal === 'number' ? (
-            <div className="adjustment-chip-list" aria-label="Queued manual total update">
-              <span>
-                Queued total {issue.manualOverrideTotal.toLocaleString()}
-                {' '}
-                ({deltaLabel(issue.manualOverrideTotal - issue.invoiceCount)})
-              </span>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="manual-section" aria-label="Less Included Qty update">
-          <div className="manual-section-header">
-            <span className="section-kicker">Less Included Qty</span>
-            <strong>{currentLessIncluded(issue).toLocaleString()} current</strong>
-          </div>
-          <div className="cw-addition-context">
-            {selectedAddition ? (
-              <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
-            ) : (
-              <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
-            )}
-          </div>
-          <div className="less-count-form">
-            <label>
-              <span>Less Qty</span>
-              <input
-                min="0"
-                onChange={(event) => setLessCount(event.target.value)}
-                step="1"
-                type="number"
-                value={lessCount}
-              />
-            </label>
-            <button
-              className="button primary compact"
-              disabled={!canSaveLessCount}
-              onClick={() => void onLessCountSave(issue, lessCountValue)}
-              type="button"
-            >
-              <Check size={16} />
-              Queue Less Qty
-            </button>
-          </div>
-          {issue.lessIncludedTouched ? (
-            <div className="adjustment-chip-list" aria-label="Queued less-included update">
-              <span>
-                Queued less {proposedLessIncluded(issue).toLocaleString()}
-                {' '}
-                ({deltaLabel(proposedLessIncluded(issue) - currentLessIncluded(issue))})
-              </span>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="manual-section" aria-label="Source device remapping">
-          <div className="manual-section-header">
-            <span className="section-kicker">Source devices</span>
-            <strong>
-              {issue.devices.length.toLocaleString()} rows
-              {hasRemapChanges ? ` / ${pendingRemaps.length.toLocaleString()} remapped` : ''}
-            </strong>
-          </div>
-          <div className="manual-device-list">
-            {issue.devices.length === 0 ? (
-              <div className="empty-state">
-                <Database size={20} />
-                <strong>No source devices were attached to this count.</strong>
+            {issue.manualOverrideTotalTouched && typeof issue.manualOverrideTotal === 'number' ? (
+              <div className="adjustment-chip-list" aria-label="Queued manual total update">
+                <span>
+                  Queued total {issue.manualOverrideTotal.toLocaleString()}
+                  {' '}
+                  ({deltaLabel(issue.manualOverrideTotal - issue.invoiceCount)})
+                </span>
               </div>
             ) : null}
+          </section>
 
-            {issue.devices.map((device) => {
-              const targetOptions = productOptions.filter((option) => option.vendorProductKey !== device.vendorProductKey);
-              const selectedTarget = remapTargets[device.id] ?? '';
-              return (
-                <article className="manual-device-row" key={device.id}>
-                  <div>
-                    <strong>{deviceDisplayName(device)}</strong>
-                    <span>{device.productName}</span>
-                  </div>
-                  <div>
-                    <strong>{device.quantity.toLocaleString()}</strong>
-                    <span>{formatDateTime(device.observedAt) ?? 'Unknown date'}</span>
-                  </div>
-                  <div>
-                    <strong>{deviceDetailSummary(device)}</strong>
-                    <span>{usageOverrideFilterLabel(deviceIdentityFilter(device))}</span>
-                  </div>
-                  <div className="manual-device-actions">
-                    <select
-                      aria-label={`Remap ${deviceDisplayName(device)}`}
-                      disabled={saving || targetOptions.length === 0}
-                      onChange={(event) => updateRemapTarget(device.id, event.target.value)}
-                      value={selectedTarget}
-                    >
-                      <option value="">Keep current product</option>
-                      {targetOptions.map((option) => (
-                        <option key={option.vendorProductKey} value={option.vendorProductKey}>
-                          {option.productName}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
+          <section className="manual-section" aria-label="Less Included Qty update">
+            <div className="manual-section-header">
+              <span className="section-kicker">Less Included Qty</span>
+              <strong>{currentLessIncluded(issue).toLocaleString()} current</strong>
+            </div>
+            <div className="cw-addition-context">
+              {selectedAddition ? (
+                <span>{formatMatchedAgreementAdditionContext(selectedAddition)}</span>
+              ) : (
+                <span>{blockReason ?? 'Select an active CW addition before applying.'}</span>
+              )}
+            </div>
+            <div className="less-count-form">
+              <label>
+                <span>Less Qty</span>
+                <input
+                  min="0"
+                  onChange={(event) => setLessCount(event.target.value)}
+                  step="1"
+                  type="number"
+                  value={lessCount}
+                />
+              </label>
+              <button
+                className="button primary compact"
+                disabled={!canSaveLessCount}
+                onClick={() => void onLessCountSave(issue, lessCountValue)}
+                type="button"
+              >
+                <Check size={16} />
+                Queue Less Qty
+              </button>
+            </div>
+            {issue.lessIncludedTouched ? (
+              <div className="adjustment-chip-list" aria-label="Queued less-included update">
+                <span>
+                  Queued less {proposedLessIncluded(issue).toLocaleString()}
+                  {' '}
+                  ({deltaLabel(proposedLessIncluded(issue) - currentLessIncluded(issue))})
+                </span>
+              </div>
+            ) : null}
+          </section>
 
-        {message ? <p className="config-note manual-message">{message}</p> : null}
+          <section className="manual-section" aria-label="Source device remapping">
+            <div className="manual-section-header">
+              <span className="section-kicker">Source devices</span>
+              <strong>
+                {issue.devices.length.toLocaleString()} rows
+                {hasRemapChanges ? ` / ${pendingRemaps.length.toLocaleString()} remapped` : ''}
+              </strong>
+            </div>
+            <div className="manual-device-list">
+              {issue.devices.length === 0 ? (
+                <div className="empty-state">
+                  <Database size={20} />
+                  <strong>No source devices were attached to this count.</strong>
+                </div>
+              ) : null}
+
+              {issue.devices.map((device) => {
+                const targetOptions = productOptions.filter((option) => option.vendorProductKey !== device.vendorProductKey);
+                const selectedTarget = remapTargets[device.id] ?? '';
+                return (
+                  <article className="manual-device-row" key={device.id}>
+                    <div>
+                      <strong>{deviceDisplayName(device)}</strong>
+                      <span>{device.productName}</span>
+                    </div>
+                    <div>
+                      <strong>{device.quantity.toLocaleString()}</strong>
+                      <span>{formatDateTime(device.observedAt) ?? 'Unknown date'}</span>
+                    </div>
+                    <div>
+                      <strong>{deviceDetailSummary(device)}</strong>
+                      <span>{usageOverrideFilterLabel(deviceIdentityFilter(device))}</span>
+                    </div>
+                    <div className="manual-device-actions">
+                      <select
+                        aria-label={`Remap ${deviceDisplayName(device)}`}
+                        disabled={saving || targetOptions.length === 0}
+                        onChange={(event) => updateRemapTarget(device.id, event.target.value)}
+                        value={selectedTarget}
+                      >
+                        <option value="">Keep current product</option>
+                        {targetOptions.map((option) => (
+                          <option key={option.vendorProductKey} value={option.vendorProductKey}>
+                            {option.productName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
+          {message ? <p className="config-note manual-message">{message}</p> : null}
+        </div>
 
         <div className="manual-override-actions">
           <button className="button secondary" disabled={saving} onClick={onClose} type="button">
@@ -15980,6 +16371,9 @@ function InvoiceLoadingGraphic() {
 }
 
 function InvoicesView(props: {
+  bulkNoticeBusy: boolean;
+  bulkNoticeCustomers: OverdueInvoiceCustomerGroup[] | null;
+  bulkNoticeMessage: string;
   importUtility: ReactNode;
   monthlyCandidates: MonthlyInvoiceCandidatesResponse | null;
   monthlyLoadMessage: string;
@@ -15989,18 +16383,33 @@ function InvoicesView(props: {
   noticeBusyKey: string | null;
   noticeMessage: string;
   noticeResult: InvoiceNotificationResponse | null;
+  onCloseBulkNoticeConfirm: () => void;
   onCloseImportPanel: () => void;
   onCloseNoticePreview: () => void;
-  onConfirmNotice: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  onConfirmBulkNotices: (customers: OverdueInvoiceCustomerGroup[], notes?: string) => Promise<void>;
+  onConfirmNotice: (preview: InvoiceNotificationPreview, notes?: string) => Promise<InvoiceNotificationResponse | null>;
   onImportInvoices: () => void;
   onMonthlyPreview: (candidate: MonthlyInvoiceCandidate) => Promise<MonthlyInvoicePreview | null>;
   onNoticePreview: (customer: OverdueInvoiceCustomerGroup) => Promise<InvoiceNotificationResponse | null>;
+  onOpenBulkNoticeConfirm: (customers: OverdueInvoiceCustomerGroup[]) => void;
   onRefreshAll: () => Promise<void>;
+  onSelectedOverdueCustomerKeysChange: (keys: string[]) => void;
   onTabChange: (tab: InvoiceWorkspaceTab) => void;
+  onTestBulkNotices: (
+    customers: OverdueInvoiceCustomerGroup[],
+    testRecipientEmail: string,
+    notes?: string,
+  ) => Promise<void>;
+  onTestNotice: (
+    preview: InvoiceNotificationPreview,
+    testRecipientEmail: string,
+    notes?: string,
+  ) => Promise<InvoiceNotificationResponse | null>;
   overdueInvoices: OverdueInvoicesResponse | null;
   overdueLoadMessage: string;
   overdueLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   refreshing: boolean;
+  selectedOverdueCustomerKeys: string[];
   selectedTab: InvoiceWorkspaceTab;
   showImportPanel: boolean;
   standardCandidates: StandardInvoiceCandidatesResponse | null;
@@ -16008,6 +16417,9 @@ function InvoicesView(props: {
   standardLoadState: 'idle' | 'loading' | 'ready' | 'failed';
 }) {
   const {
+    bulkNoticeBusy,
+    bulkNoticeCustomers,
+    bulkNoticeMessage,
     importUtility,
     monthlyCandidates,
     monthlyLoadMessage,
@@ -16017,18 +16429,25 @@ function InvoicesView(props: {
     noticeBusyKey,
     noticeMessage,
     noticeResult,
+    onCloseBulkNoticeConfirm,
     onCloseImportPanel,
     onCloseNoticePreview,
+    onConfirmBulkNotices,
     onConfirmNotice,
     onImportInvoices,
     onMonthlyPreview,
     onNoticePreview,
+    onOpenBulkNoticeConfirm,
     onRefreshAll,
+    onSelectedOverdueCustomerKeysChange,
     onTabChange,
+    onTestBulkNotices,
+    onTestNotice,
     overdueInvoices,
     overdueLoadMessage,
     overdueLoadState,
     refreshing,
+    selectedOverdueCustomerKeys,
     selectedTab,
     showImportPanel,
     standardCandidates,
@@ -16086,15 +16505,25 @@ function InvoicesView(props: {
 
       {selectedTab === 'overdue' ? (
         <OverdueInvoicesTab
+          bulkNoticeBusy={bulkNoticeBusy}
+          bulkNoticeCustomers={bulkNoticeCustomers}
+          bulkNoticeMessage={bulkNoticeMessage}
           loadMessage={overdueLoadMessage}
           loadState={overdueLoadState}
           noticeBusyKey={noticeBusyKey}
           noticeMessage={noticeMessage}
           noticeResult={noticeResult}
+          onCloseBulkNoticeConfirm={onCloseBulkNoticeConfirm}
           onCloseNoticePreview={onCloseNoticePreview}
+          onConfirmBulkNotices={onConfirmBulkNotices}
           onConfirmNotice={onConfirmNotice}
           onNoticePreview={onNoticePreview}
+          onOpenBulkNoticeConfirm={onOpenBulkNoticeConfirm}
+          onSelectedOverdueCustomerKeysChange={onSelectedOverdueCustomerKeysChange}
+          onTestBulkNotices={onTestBulkNotices}
+          onTestNotice={onTestNotice}
           response={overdueInvoices}
+          selectedOverdueCustomerKeys={selectedOverdueCustomerKeys}
         />
       ) : null}
 
@@ -16121,26 +16550,54 @@ function InvoicesView(props: {
 }
 
 function OverdueInvoicesTab(props: {
+  bulkNoticeBusy: boolean;
+  bulkNoticeCustomers: OverdueInvoiceCustomerGroup[] | null;
+  bulkNoticeMessage: string;
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   noticeBusyKey: string | null;
   noticeMessage: string;
   noticeResult: InvoiceNotificationResponse | null;
+  onCloseBulkNoticeConfirm: () => void;
   onCloseNoticePreview: () => void;
-  onConfirmNotice: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  onConfirmBulkNotices: (customers: OverdueInvoiceCustomerGroup[], notes?: string) => Promise<void>;
+  onConfirmNotice: (preview: InvoiceNotificationPreview, notes?: string) => Promise<InvoiceNotificationResponse | null>;
   onNoticePreview: (customer: OverdueInvoiceCustomerGroup) => Promise<InvoiceNotificationResponse | null>;
+  onOpenBulkNoticeConfirm: (customers: OverdueInvoiceCustomerGroup[]) => void;
+  onSelectedOverdueCustomerKeysChange: (keys: string[]) => void;
+  onTestBulkNotices: (
+    customers: OverdueInvoiceCustomerGroup[],
+    testRecipientEmail: string,
+    notes?: string,
+  ) => Promise<void>;
+  onTestNotice: (
+    preview: InvoiceNotificationPreview,
+    testRecipientEmail: string,
+    notes?: string,
+  ) => Promise<InvoiceNotificationResponse | null>;
   response: OverdueInvoicesResponse | null;
+  selectedOverdueCustomerKeys: string[];
 }) {
   const {
+    bulkNoticeBusy,
+    bulkNoticeCustomers,
+    bulkNoticeMessage,
     loadMessage,
     loadState,
     noticeBusyKey,
     noticeMessage,
     noticeResult,
+    onCloseBulkNoticeConfirm,
     onCloseNoticePreview,
+    onConfirmBulkNotices,
     onConfirmNotice,
     onNoticePreview,
+    onOpenBulkNoticeConfirm,
+    onSelectedOverdueCustomerKeysChange,
+    onTestBulkNotices,
+    onTestNotice,
     response,
+    selectedOverdueCustomerKeys,
   } = props;
   const buckets = response?.buckets ?? [];
   const allReviewInvoices = buckets.flatMap((bucket) => bucket.invoices);
@@ -16157,6 +16614,12 @@ function OverdueInvoicesTab(props: {
     () => sortOverdueCustomerGroups(customerGroups, sortState.key, sortState.direction),
     [customerGroups, sortState],
   );
+  const selectedCustomers = sortedCustomerGroups.filter((customer) =>
+    selectedOverdueCustomerKeys.includes(customer.customerKey),
+  );
+  const allVisibleSelected =
+    sortedCustomerGroups.length > 0 &&
+    sortedCustomerGroups.every((customer) => selectedOverdueCustomerKeys.includes(customer.customerKey));
   const toggleSort = (key: OverdueInvoiceSortKey) => {
     setSortState((current) => ({
       key,
@@ -16165,6 +16628,20 @@ function OverdueInvoicesTab(props: {
   };
   const sortIndicator = (key: OverdueInvoiceSortKey) =>
     sortState.key === key ? (sortState.direction === 'desc' ? '▼' : '▲') : '';
+  const toggleCustomer = (customerKey: string) => {
+    if (selectedOverdueCustomerKeys.includes(customerKey)) {
+      onSelectedOverdueCustomerKeysChange(selectedOverdueCustomerKeys.filter((key) => key !== customerKey));
+      return;
+    }
+    onSelectedOverdueCustomerKeysChange([...selectedOverdueCustomerKeys, customerKey]);
+  };
+  const toggleAllVisible = () => {
+    if (allVisibleSelected) {
+      onSelectedOverdueCustomerKeysChange([]);
+      return;
+    }
+    onSelectedOverdueCustomerKeysChange(sortedCustomerGroups.map((customer) => customer.customerKey));
+  };
 
   return (
     <>
@@ -16174,20 +16651,29 @@ function OverdueInvoicesTab(props: {
           <strong>{formatMoneyValue(response?.summary.reviewQueueBalance ?? 0)}</strong>
           <em>{formatCount(customerCount)} customers / {formatCount(response?.summary.reviewQueueCount ?? 0)} invoices</em>
         </div>
-        <div className="invoice-aging-stat">
-          <span>30 Days</span>
-          <strong>{formatMoneyValue(agingSummary.balance30)}</strong>
-          <em>{formatCount(agingSummary.customers30)} customers / {formatCount(agingSummary.invoices30)} invoices</em>
+        <div className="invoice-aging-stat notice-reminder">
+          <span>Past Due Reminder</span>
+          <strong>{formatMoneyValue(agingSummary.balanceReminder)}</strong>
+          <em>
+            {formatCount(agingSummary.customersReminder)} customers / {formatCount(agingSummary.invoicesReminder)}{' '}
+            invoices
+          </em>
         </div>
-        <div className="invoice-aging-stat">
-          <span>60 Days</span>
-          <strong>{formatMoneyValue(agingSummary.balance60)}</strong>
-          <em>{formatCount(agingSummary.customers60)} customers / {formatCount(agingSummary.invoices60)} invoices</em>
+        <div className="invoice-aging-stat notice-credit-hold">
+          <span>Credit Hold</span>
+          <strong>{formatMoneyValue(agingSummary.balanceCreditHold)}</strong>
+          <em>
+            {formatCount(agingSummary.customersCreditHold)} customers / {formatCount(agingSummary.invoicesCreditHold)}{' '}
+            invoices
+          </em>
         </div>
-        <div className="invoice-aging-stat critical">
-          <span>90+ Days</span>
-          <strong>{formatMoneyValue(agingSummary.balance90)}</strong>
-          <em>{formatCount(agingSummary.customers90)} customers / {formatCount(agingSummary.invoices90)} invoices</em>
+        <div className="invoice-aging-stat notice-suspension critical">
+          <span>Service Suspension</span>
+          <strong>{formatMoneyValue(agingSummary.balanceSuspension)}</strong>
+          <em>
+            {formatCount(agingSummary.customersSuspension)} customers / {formatCount(agingSummary.invoicesSuspension)}{' '}
+            invoices
+          </em>
         </div>
       </section>
 
@@ -16197,7 +16683,18 @@ function OverdueInvoicesTab(props: {
             <span className="section-kicker">ConnectWise overdue</span>
             <h2>Customers with past-due invoices</h2>
           </div>
-          <span className="invoice-action-message">{loadMessage}</span>
+          <div className="surface-header-actions">
+            <span className="invoice-action-message">{loadMessage || noticeMessage || bulkNoticeMessage}</span>
+            <button
+              className="button secondary compact"
+              disabled={selectedCustomers.length === 0 || bulkNoticeBusy || Boolean(noticeBusyKey)}
+              onClick={() => onOpenBulkNoticeConfirm(selectedCustomers)}
+              type="button"
+            >
+              <Upload size={15} />
+              Send selected ({formatCount(selectedCustomers.length)})
+            </button>
+          </div>
         </div>
 
         {loadState === 'loading' && !response ? (
@@ -16229,6 +16726,16 @@ function OverdueInvoicesTab(props: {
             <table className="invoice-overdue-table">
               <thead>
                 <tr>
+                  <th className="invoice-select-column">
+                    <label className="invoice-select-control">
+                      <input
+                        aria-label="Select all overdue customers"
+                        checked={allVisibleSelected}
+                        onChange={toggleAllVisible}
+                        type="checkbox"
+                      />
+                    </label>
+                  </th>
                   <th aria-sort={ariaSortValue(sortState, 'customerName')}>
                     <button className="invoice-sort-button" onClick={() => toggleSort('customerName')} type="button">
                       Customer Name
@@ -16249,7 +16756,7 @@ function OverdueInvoicesTab(props: {
                   </th>
                   <th aria-sort={ariaSortValue(sortState, 'agingBalance')}>
                     <button className="invoice-sort-button" onClick={() => toggleSort('agingBalance')} type="button">
-                      Past Due Balance 30/60/90
+                      Past Due Balance Reminder/Hold/Suspension
                       <span>{sortIndicator('agingBalance')}</span>
                     </button>
                   </th>
@@ -16262,14 +16769,27 @@ function OverdueInvoicesTab(props: {
                 {sortedCustomerGroups.map((customer) => {
                   const previewKey = `${customer.customerKey}:preview`;
                   const agingBalances = agingBalancesForCustomer(customer);
+                  const isSelected = selectedOverdueCustomerKeys.includes(customer.customerKey);
                   return (
                     <tr key={customer.customerKey}>
+                      <td className="invoice-select-column">
+                        <label className="invoice-select-control">
+                          <input
+                            aria-label={`Select ${customer.company.name}`}
+                            checked={isSelected}
+                            onChange={() => toggleCustomer(customer.customerKey)}
+                            type="checkbox"
+                          />
+                        </label>
+                      </td>
                       <td>
                         <strong>{customer.company.name}</strong>
                       </td>
                       <td>
-                        <span className={`status-pill ${invoiceNoticeStatusClass(customer.noticeType)}`}>
-                          {invoiceNoticeLabel(customer.noticeType)}
+                        <span
+                          className={`status-pill ${invoiceNoticeStatusClass(customer.noticeType, customer.oldestDaysPastDue)}`}
+                        >
+                          {invoiceNoticeLabel(customer.noticeType, customer.oldestDaysPastDue)}
                         </span>
                         <span>{customer.oldestDaysPastDue} days oldest</span>
                       </td>
@@ -16279,9 +16799,9 @@ function OverdueInvoicesTab(props: {
                       <td>
                         <strong>{formatMoneyValue(customer.balanceTotal)}</strong>
                         <div className="invoice-aging-balance" aria-label={`${customer.company.name} aging balance`}>
-                          <span>{formatMoneyValue(agingBalances.balance30)}</span>
-                          <span>{formatMoneyValue(agingBalances.balance60)}</span>
-                          <span>{formatMoneyValue(agingBalances.balance90)}</span>
+                          <span>{formatMoneyValue(agingBalances.balanceReminder)}</span>
+                          <span>{formatMoneyValue(agingBalances.balanceCreditHold)}</span>
+                          <span>{formatMoneyValue(agingBalances.balanceSuspension)}</span>
                         </div>
                       </td>
                       <td>
@@ -16310,7 +16830,19 @@ function OverdueInvoicesTab(props: {
           message={noticeMessage}
           onClose={onCloseNoticePreview}
           onConfirm={onConfirmNotice}
+          onTest={onTestNotice}
           result={noticeResult}
+        />
+      ) : null}
+
+      {bulkNoticeCustomers ? (
+        <BulkInvoiceNoticeModal
+          busy={bulkNoticeBusy}
+          customers={bulkNoticeCustomers}
+          message={bulkNoticeMessage}
+          onClose={onCloseBulkNoticeConfirm}
+          onConfirm={onConfirmBulkNotices}
+          onTest={onTestBulkNotices}
         />
       ) : null}
     </>
@@ -16321,18 +16853,33 @@ function InvoiceNotificationModal(props: {
   busyKey: string | null;
   message: string;
   onClose: () => void;
-  onConfirm: (preview: InvoiceNotificationPreview) => Promise<InvoiceNotificationResponse | null>;
+  onConfirm: (preview: InvoiceNotificationPreview, notes?: string) => Promise<InvoiceNotificationResponse | null>;
+  onTest: (
+    preview: InvoiceNotificationPreview,
+    testRecipientEmail: string,
+    notes?: string,
+  ) => Promise<InvoiceNotificationResponse | null>;
   result: InvoiceNotificationResponse | null;
 }) {
-  const { busyKey, message, onClose, onConfirm, result } = props;
+  const { busyKey, message, onClose, onConfirm, onTest, result } = props;
   const preview = result?.preview;
   const confirmKey = preview ? `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:confirm` : '';
+  const testKey = preview ? `${preview.companyKey ?? preview.invoiceId ?? preview.invoiceIds.join('-')}:test` : '';
+  const [notes, setNotes] = useState(preview?.notes ?? '');
+  const [testEmailPrompt, setTestEmailPrompt] = useState(false);
+  const [testEmail, setTestEmail] = useState('');
 
   if (!preview) {
     return null;
   }
 
   const missingPaymentLinks = preview.invoices.filter((invoice) => !invoice.paymentLink).length;
+  const templateParagraphs = (preview.templateBody ?? preview.bodyPreview.split(/\n\nNOTE:/)[0] ?? '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const noteText = notes.trim();
+  const completed = result.status === 'stubbed' || result.status === 'test-stubbed';
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -16347,72 +16894,249 @@ function InvoiceNotificationModal(props: {
               To: {preview.recipientName}
               {preview.recipientEmail ? ` <${preview.recipientEmail}>` : ''} / {preview.companyName}
             </p>
+            {(preview.ccEmails?.length ?? 0) > 0 ? <p>CC: {preview.ccEmails.join(', ')}</p> : null}
+            {(preview.bccEmails?.length ?? 0) > 0 ? <p>BCC: {preview.bccEmails.join(', ')}</p> : null}
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={20} />
           </button>
         </div>
 
-        <div className="invoice-email-preview">
-          <div className="invoice-email-subject">
-            <span className="section-kicker">Subject</span>
-            <strong>{preview.subject}</strong>
-          </div>
-
-          <div className="invoice-email-body">
-            <p>Hello {preview.recipientName},</p>
-            <p>{overdueEmailIntro(preview.noticeType, preview.invoiceCount, preview.totalBalance)}</p>
-            <div className="invoice-email-invoice-list">
-              {preview.invoices.map((invoice) => (
-                <div className="invoice-email-invoice-row" key={invoice.invoiceId}>
-                  <div>
-                    <strong>{invoice.invoiceNumber ?? `Invoice ${invoice.invoiceId}`}</strong>
-                    <span>
-                      {formatDateOnly(invoice.dueDate) ?? 'No due date'} / {invoice.daysPastDue} days past due
-                    </span>
-                  </div>
-                  <strong>{formatMoneyValue(invoice.balance)}</strong>
-                  {invoice.paymentLink ? (
-                    <a className="invoice-payment-link" href={invoice.paymentLink} rel="noreferrer" target="_blank">
-                      Pay now
-                      <ExternalLink size={14} />
-                    </a>
-                  ) : (
-                    <span className="status-pill blocked">WisePay unavailable</span>
-                  )}
-                </div>
-              ))}
+        <div className="invoice-notice-modal-body">
+          <div className="invoice-email-preview">
+            <div className="invoice-email-subject">
+              <span className="section-kicker">Subject</span>
+              <strong>{preview.subject}</strong>
             </div>
-            <p>Thank you.</p>
+
+            <div className="invoice-email-body">
+              {templateParagraphs.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+              {noteText ? (
+                <div className="invoice-email-note">
+                  <strong>NOTE:</strong>
+                  <p>{noteText}</p>
+                </div>
+              ) : null}
+              <div className="invoice-email-invoice-list">
+                {preview.invoices.map((invoice) => (
+                  <div className="invoice-email-invoice-row" key={invoice.invoiceId}>
+                    <div>
+                      <strong>{invoice.invoiceNumber ?? `Invoice ${invoice.invoiceId}`}</strong>
+                      <span>
+                        {formatDateOnly(invoice.dueDate) ?? 'No due date'} / {invoice.daysPastDue} days past due
+                      </span>
+                    </div>
+                    <strong>{formatMoneyValue(invoice.balance)}</strong>
+                    {invoice.paymentLink ? (
+                      <a className="invoice-payment-link" href={invoice.paymentLink} rel="noreferrer" target="_blank">
+                        Pay now
+                        <ExternalLink size={14} />
+                      </a>
+                    ) : (
+                      <span className="status-pill blocked">WisePay unavailable</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="invoice-preview-meta">
+              <span>{invoiceNoticeLabel(preview.noticeType)}</span>
+              {preview.recipientEmail ? <span>{preview.recipientEmail}</span> : null}
+              <span>{preview.daysPastDue} days oldest</span>
+              <span>{formatMoneyValue(preview.totalBalance)} past due</span>
+              {preview.emailTemplateName ? <span>{preview.emailTemplateName}</span> : null}
+              {preview.emailTemplateNames.length > 1 ? (
+                <span>{formatCount(preview.emailTemplateNames.length)} templates</span>
+              ) : null}
+              {missingPaymentLinks > 0 ? (
+                <span>{formatCount(missingPaymentLinks)} missing WisePay links</span>
+              ) : (
+                <span>WisePay ready</span>
+              )}
+            </div>
           </div>
 
-          <div className="invoice-preview-meta">
-            {preview.recipientEmail ? <span>{preview.recipientEmail}</span> : null}
-            <span>{preview.daysPastDue} days oldest</span>
-            <span>{formatMoneyValue(preview.totalBalance)} past due</span>
-            {preview.emailTemplateName ? <span>{preview.emailTemplateName}</span> : null}
-            {preview.emailTemplateNames.length > 1 ? <span>{formatCount(preview.emailTemplateNames.length)} templates</span> : null}
-            {missingPaymentLinks > 0 ? <span>{formatCount(missingPaymentLinks)} missing WisePay links</span> : <span>WisePay ready</span>}
-          </div>
+          {!completed ? (
+            <label className="invoice-notice-field invoice-notice-notes">
+              <span>Notes</span>
+              <textarea
+                onChange={(event) => setNotes(event.target.value)}
+                placeholder="Optional note shown above the invoice table"
+                rows={3}
+                value={notes}
+              />
+            </label>
+          ) : null}
+
+          {testEmailPrompt ? (
+            <div className="invoice-test-email-prompt">
+              <label className="invoice-notice-field">
+                <span>Test email address</span>
+                <input
+                  onChange={(event) => setTestEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  type="email"
+                  value={testEmail}
+                />
+              </label>
+              <div className="invoice-test-email-actions">
+                <button className="button secondary compact" onClick={() => setTestEmailPrompt(false)} type="button">
+                  Cancel
+                </button>
+                <button
+                  className="button primary compact"
+                  disabled={Boolean(busyKey) || !isValidEmail(testEmail)}
+                  onClick={() => void onTest(preview, testEmail.trim(), noteText || undefined)}
+                  type="button"
+                >
+                  {busyKey === testKey ? 'Sending test' : 'Send test email'}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="modal-actions invoice-notice-actions">
           {message ? <span className="invoice-action-message">{message}</span> : null}
-          {result.status === 'stubbed' ? (
+          {completed ? (
             <span className="status-pill approved">
-              Saved {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
+              {result.status === 'test-stubbed' ? 'Test stubbed' : 'Saved'}{' '}
+              {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
             </span>
           ) : (
-            <button
-              className="button primary compact"
-              disabled={Boolean(busyKey)}
-              onClick={() => void onConfirm(preview)}
-              type="button"
-            >
-              <Check size={15} />
-              {busyKey === confirmKey ? 'Saving' : 'Trigger email'}
-            </button>
+            <>
+              <button
+                className="button secondary compact"
+                disabled={Boolean(busyKey)}
+                onClick={() => setTestEmailPrompt(true)}
+                type="button"
+              >
+                Test email
+              </button>
+              <button
+                className="button primary compact"
+                disabled={Boolean(busyKey)}
+                onClick={() => void onConfirm(preview, noteText || undefined)}
+                type="button"
+              >
+                <Check size={15} />
+                {busyKey === confirmKey ? 'Saving' : 'Trigger email'}
+              </button>
+            </>
           )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BulkInvoiceNoticeModal(props: {
+  busy: boolean;
+  customers: OverdueInvoiceCustomerGroup[];
+  message: string;
+  onClose: () => void;
+  onConfirm: (customers: OverdueInvoiceCustomerGroup[], notes?: string) => Promise<void>;
+  onTest: (customers: OverdueInvoiceCustomerGroup[], testRecipientEmail: string, notes?: string) => Promise<void>;
+}) {
+  const { busy, customers, message, onClose, onConfirm, onTest } = props;
+  const [notes, setNotes] = useState('');
+  const [testEmailPrompt, setTestEmailPrompt] = useState(false);
+  const [testEmail, setTestEmail] = useState('');
+  const noteText = notes.trim();
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="invoice-notice-modal bulk-invoice-notice-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-invoice-notice-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="bulk-invoice-notice-title">
+              <CircleDollarSign size={18} />
+              Send selected overdue emails
+            </h2>
+            <p>Confirm {formatCount(customers.length)} customer email{customers.length === 1 ? '' : 's'} before sending.</p>
+          </div>
+          <button className="modal-close" disabled={busy} onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="invoice-notice-modal-body">
+          <div className="bulk-invoice-notice-list">
+            {customers.map((customer) => (
+              <div className="bulk-invoice-notice-row" key={customer.customerKey}>
+                <div>
+                  <strong>{customer.company.name}</strong>
+                  <span>
+                    {invoiceNoticeLabel(customer.noticeType, customer.oldestDaysPastDue)} ·{' '}
+                    {formatCount(customer.invoiceCount)} invoices · {customer.oldestDaysPastDue} days oldest
+                  </span>
+                </div>
+                <strong>{formatMoneyValue(customer.balanceTotal)}</strong>
+              </div>
+            ))}
+          </div>
+
+          <label className="invoice-notice-field invoice-notice-notes">
+            <span>Notes</span>
+            <textarea
+              onChange={(event) => setNotes(event.target.value)}
+              placeholder="Optional note applied to every selected email"
+              rows={3}
+              value={notes}
+            />
+          </label>
+
+          {testEmailPrompt ? (
+            <div className="invoice-test-email-prompt">
+              <label className="invoice-notice-field">
+                <span>Test batch email address</span>
+                <input
+                  onChange={(event) => setTestEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  type="email"
+                  value={testEmail}
+                />
+                <em>Ignores ConnectWise To/CC and stubs each selected email to this address only.</em>
+              </label>
+              <div className="invoice-test-email-actions">
+                <button
+                  className="button secondary compact"
+                  disabled={busy}
+                  onClick={() => setTestEmailPrompt(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="button primary compact"
+                  disabled={busy || !isValidEmail(testEmail)}
+                  onClick={() => void onTest(customers, testEmail.trim(), noteText || undefined)}
+                  type="button"
+                >
+                  {busy ? 'Sending test batch' : 'Send test batch'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="modal-actions invoice-notice-actions">
+          {message ? <span className="invoice-action-message">{message}</span> : null}
+          <button className="button secondary compact" disabled={busy} onClick={() => setTestEmailPrompt(true)} type="button">
+            Test batch
+          </button>
+          <button
+            className="button primary compact"
+            disabled={busy}
+            onClick={() => void onConfirm(customers, noteText || undefined)}
+            type="button"
+          >
+            <Check size={15} />
+            {busy ? 'Sending' : `Send ${formatCount(customers.length)}`}
+          </button>
         </div>
       </section>
     </div>
@@ -16584,17 +17308,16 @@ function StandardInvoicesTab(props: {
   );
 }
 
-function invoiceNoticeLabel(noticeType: InvoiceNoticeType) {
-  if (noticeType === '90-day-cancel-services') return 'Cancel services';
-  if (noticeType === '60-day-credit-hold') return '60-day credit hold';
-  if (noticeType === '30-day-notice') return '30-day notice';
-  return 'Reminder';
+function invoiceNoticeLabel(noticeType: unknown, daysPastDue?: number) {
+  const normalized = normalizeInvoiceNoticeType(noticeType, daysPastDue);
+  return invoiceNoticeTypePillLabels[normalized];
 }
 
-function invoiceNoticeStatusClass(noticeType: InvoiceNoticeType) {
-  if (noticeType === '90-day-cancel-services' || noticeType === '60-day-credit-hold') return 'blocked';
-  if (noticeType === '30-day-notice') return 'needs-review';
-  return 'ready';
+function invoiceNoticeStatusClass(noticeType: unknown, daysPastDue?: number) {
+  const normalized = normalizeInvoiceNoticeType(noticeType, daysPastDue);
+  if (normalized === 'service-suspension') return 'notice-suspension';
+  if (normalized === 'credit-hold') return 'notice-credit-hold';
+  return 'notice-reminder';
 }
 
 function ariaSortValue(
@@ -16645,74 +17368,62 @@ function compareOverdueCustomerSortValue(
 function agingBalancesForCustomer(customer: OverdueInvoiceCustomerGroup) {
   return customer.invoices.reduce(
     (totals, invoice) => {
-      if (invoice.daysPastDue >= 90) {
-        totals.balance90 += invoice.balance;
-      } else if (invoice.daysPastDue >= 60) {
-        totals.balance60 += invoice.balance;
+      const noticeType = invoiceNoticeTypeForDaysPastDue(invoice.daysPastDue);
+      if (noticeType === 'service-suspension') {
+        totals.balanceSuspension += invoice.balance;
+      } else if (noticeType === 'credit-hold') {
+        totals.balanceCreditHold += invoice.balance;
       } else {
-        totals.balance30 += invoice.balance;
+        totals.balanceReminder += invoice.balance;
       }
       return totals;
     },
-    { balance30: 0, balance60: 0, balance90: 0 },
+    { balanceReminder: 0, balanceCreditHold: 0, balanceSuspension: 0 },
   );
 }
 
 function overdueAgingSummary(customers: OverdueInvoiceCustomerGroup[]) {
   return customers.reduce(
     (summary, customer) => {
-      let has30 = false;
-      let has60 = false;
-      let has90 = false;
+      let hasReminder = false;
+      let hasCreditHold = false;
+      let hasSuspension = false;
 
       for (const invoice of customer.invoices) {
-        if (invoice.daysPastDue >= 90) {
-          summary.invoices90 += 1;
-          summary.balance90 += invoice.balance;
-          has90 = true;
-        } else if (invoice.daysPastDue >= 60) {
-          summary.invoices60 += 1;
-          summary.balance60 += invoice.balance;
-          has60 = true;
+        const noticeType = invoiceNoticeTypeForDaysPastDue(invoice.daysPastDue);
+        if (noticeType === 'service-suspension') {
+          summary.invoicesSuspension += 1;
+          summary.balanceSuspension += invoice.balance;
+          hasSuspension = true;
+        } else if (noticeType === 'credit-hold') {
+          summary.invoicesCreditHold += 1;
+          summary.balanceCreditHold += invoice.balance;
+          hasCreditHold = true;
         } else {
-          summary.invoices30 += 1;
-          summary.balance30 += invoice.balance;
-          has30 = true;
+          summary.invoicesReminder += 1;
+          summary.balanceReminder += invoice.balance;
+          hasReminder = true;
         }
       }
 
-      if (has30) summary.customers30 += 1;
-      if (has60) summary.customers60 += 1;
-      if (has90) summary.customers90 += 1;
+      if (hasReminder) summary.customersReminder += 1;
+      if (hasCreditHold) summary.customersCreditHold += 1;
+      if (hasSuspension) summary.customersSuspension += 1;
 
       return summary;
     },
     {
-      balance30: 0,
-      balance60: 0,
-      balance90: 0,
-      customers30: 0,
-      customers60: 0,
-      customers90: 0,
-      invoices30: 0,
-      invoices60: 0,
-      invoices90: 0,
+      balanceReminder: 0,
+      balanceCreditHold: 0,
+      balanceSuspension: 0,
+      customersReminder: 0,
+      customersCreditHold: 0,
+      customersSuspension: 0,
+      invoicesReminder: 0,
+      invoicesCreditHold: 0,
+      invoicesSuspension: 0,
     },
   );
-}
-
-function overdueEmailIntro(noticeType: InvoiceNoticeType, invoiceCount: number, totalBalance: number) {
-  const invoiceLabel = invoiceCount === 1 ? 'invoice is' : 'invoices are';
-  if (noticeType === '90-day-cancel-services') {
-    return `The overdue ${invoiceLabel} 90 or more days past due with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
-  }
-  if (noticeType === '60-day-credit-hold') {
-    return `The overdue ${invoiceLabel} listed below with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
-  }
-  if (noticeType === '30-day-notice') {
-    return `The overdue ${invoiceLabel} more than 30 days past due with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
-  }
-  return `The overdue ${invoiceLabel} listed below with a total past-due balance of ${formatMoneyValue(totalBalance)}.`;
 }
 
 function groupOverdueInvoicesByCustomer(invoices: OverdueInvoice[]): OverdueInvoiceCustomerGroup[] {
@@ -16729,7 +17440,7 @@ function groupOverdueInvoicesByCustomer(invoices: OverdueInvoice[]): OverdueInvo
         invoiceCount: 0,
         balanceTotal: 0,
         oldestDaysPastDue: 0,
-        noticeType: 'reminder',
+        noticeType: 'past-due-reminder',
         bucketCounts: {
           '7-29-days': 0,
           '30-59-days': 0,
@@ -16780,10 +17491,7 @@ function overdueInvoiceCustomerKey(invoice: OverdueInvoice) {
 }
 
 function invoiceNoticeTypeForDaysPastDue(daysPastDue: number): InvoiceNoticeType {
-  if (daysPastDue >= 90) return '90-day-cancel-services';
-  if (daysPastDue >= 60) return '60-day-credit-hold';
-  if (daysPastDue >= 30) return '30-day-notice';
-  return 'reminder';
+  return noticeTypeForDaysPastDue(daysPastDue);
 }
 
 function ImportsView(props: {

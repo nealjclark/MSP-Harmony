@@ -9,7 +9,6 @@ import type {
   ReconciliationLinkedCountSource,
   ReconciliationLine,
   ReconciliationResult,
-  ReconciliationWriteAction,
   UsageSnapshot,
   VendorRuleSet,
 } from '../shared/types';
@@ -826,7 +825,10 @@ async function loadLinkedCountContext(
 
     for (const total of totalsByScope.values()) {
       const sources = [...total.sourcesByKey.values()].sort((left, right) => left.label.localeCompare(right.label));
-      const lineKey = linkedLineKey(total.customerId, total.agreementId, targetRule.productCode);
+      // Key by parent vendor product key so separate device classes that share a CW
+      // catalog code (e.g. device:server + device:workstation → Managed Endpoint Protection)
+      // keep their own linked counts.
+      const lineKey = linkedLineKey(total.customerId, total.agreementId, sourceVendorProductKey);
       countsByLineKey.set(lineKey, {
         ruleId: rule.id,
         ruleName: rule.ruleName,
@@ -835,7 +837,7 @@ async function loadLinkedCountContext(
         sources,
       });
       anchorSnapshots.push({
-        id: `linked:${rule.id}:${total.customerId}:${total.agreementId}:${targetRule.productCode}`,
+        id: `linked:${rule.id}:${total.customerId}:${total.agreementId}:${sourceVendorProductKey}`,
         vendorId,
         clientId: total.customerId,
         agreementId: total.agreementId,
@@ -1390,34 +1392,17 @@ function applyLinkedCountsToLines(
       return line;
     }
 
-    const linkedCount = countsByLineKey.get(linkedLineKey(line.clientId, line.agreementId, line.productCode));
+    const linkedCount = linkedCountForLine(line, countsByLineKey);
     if (!linkedCount) {
       return line;
     }
 
-    const delta = linkedCount.quantity - line.agreementQuantity;
-    const financialImpact = line.unitPrice
-      ? {
-          amount: delta * line.unitPrice.amount,
-          currency: line.unitPrice.currency,
-        }
-      : {
-          amount: 0,
-          currency: 'USD' as const,
-        };
-
+    // Linked counts are a selectable reference (e.g. N-able). Keep the vendor API
+    // proposed quantity as the billing baseline; the UI picks the highest among
+    // API / linked / invoice when present.
     return {
       ...line,
-      proposedQuantity: linkedCount.quantity,
-      delta,
-      financialImpact,
       linkedCount,
-      status: delta === 0 ? 'matched' : 'needs-review',
-      writeAction: linkedWriteAction(delta, line),
-      reason:
-        delta === 0
-          ? `${line.productName} linked count matches the agreement addition.`
-          : `${line.productName} linked count differs from the agreement addition.`,
       evidence: [
         ...line.evidence,
         { label: 'Linked count rule', value: linkedCount.ruleName },
@@ -1431,25 +1416,20 @@ function applyLinkedCountsToLines(
   });
 }
 
-function linkedWriteAction(delta: number, line: ReconciliationLine): ReconciliationWriteAction | undefined {
-  if (delta === 0) {
+function linkedCountForLine(
+  line: ReconciliationLine,
+  countsByLineKey: Map<string, ReconciliationLinkedCount>,
+) {
+  const vendorProductKey = line.vendorProductKey?.trim();
+  if (!vendorProductKey) {
     return undefined;
   }
 
-  const matchedAdditionCount = matchedAdditionCountFromEvidence(line);
-  if (matchedAdditionCount === 0) return 'create-addition';
-  if (matchedAdditionCount === 1) return 'update-addition';
-
-  return 'review-required';
+  return countsByLineKey.get(linkedLineKey(line.clientId, line.agreementId, vendorProductKey));
 }
 
-function matchedAdditionCountFromEvidence(line: ReconciliationLine) {
-  const evidence = line.evidence.find((item) => item.label === 'Matched agreement additions');
-  return typeof evidence?.value === 'number' ? evidence.value : Number(evidence?.value ?? 0);
-}
-
-function linkedLineKey(customerId: string, agreementId: string, productCode: string) {
-  return `${customerId}|${agreementId}|${productCode.trim().toLowerCase()}`;
+function linkedLineKey(customerId: string, agreementId: string, vendorProductKey: string) {
+  return `${customerId}|${agreementId}|${canonicalVendorProductKey(vendorProductKey).trim().toLowerCase()}`;
 }
 
 function canonicalVendorProductKey(value: string) {
@@ -1565,13 +1545,21 @@ function invoiceDetailsForLine(quantities: Map<string, InvoiceQuantity>, line: R
 
 function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ruleSet: VendorRuleSet) {
   const rule = ruleSet.rules.find((candidate) => candidate.id === line.ruleId);
+  const lineVendorProductKeys = new Set(
+    [
+      line.vendorProductKey,
+      ...(rule ? ruleVendorProductKeys(rule) : []),
+    ].filter((key): key is string => Boolean(key)),
+  );
 
   return snapshots
     .filter(
       (snapshot) =>
         snapshot.clientId === line.clientId &&
         snapshot.agreementId === line.agreementId &&
-        (!line.vendorProductKey || snapshot.vendorProductKey === line.vendorProductKey) &&
+        (lineVendorProductKeys.size === 0 ||
+          !snapshot.vendorProductKey ||
+          lineVendorProductKeys.has(snapshot.vendorProductKey)) &&
         (line.lineType === 'unmapped-vendor'
           ? snapshotMatchesUnmappedLine(snapshot, line)
           : !rule || snapshotMatchesRule(snapshot, rule)),

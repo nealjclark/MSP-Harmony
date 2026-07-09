@@ -3,14 +3,30 @@ import {
   type IntegrationSettingsProvider,
 } from '../config/settingsProvider';
 import {
+  getCommunicationSettings,
+  type Queryable as CommunicationQueryable,
+} from '../config/communicationSettingsService';
+import {
   ConnectWiseClient,
   connectWiseCredentialsFromSettings,
   type ConnectWiseAgreement,
+  type ConnectWiseCompany,
   type ConnectWiseContact,
   type ConnectWiseInvoice,
   type ConnectWiseInvoiceEmailTemplate,
   type ConnectWiseListOptions,
 } from '../connectwise/client';
+import {
+  defaultCommunicationSettings,
+  isInvoiceNoticeType,
+  noticeTypeForDaysPastDue as sharedNoticeTypeForDaysPastDue,
+  parseEmailList,
+  renderTemplate,
+  type CommunicationSettings,
+  type InvoiceNoticeType,
+} from '../../shared/communicationSettings';
+
+export type { InvoiceNoticeType } from '../../shared/communicationSettings';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -20,7 +36,6 @@ export type Queryable = {
   query: <T = unknown>(sql: string, values?: unknown[]) => Promise<QueryResult<T>>;
 };
 
-export type InvoiceNoticeType = 'reminder' | '30-day-notice' | '60-day-credit-hold' | '90-day-cancel-services';
 export type OverdueInvoiceBucketId = '7-29-days' | '30-59-days' | '60-plus-days';
 
 export type OverdueInvoice = {
@@ -168,6 +183,9 @@ export type InvoiceNotificationPreview = {
   companyName: string;
   recipientName: string;
   recipientEmail?: string;
+  ccEmails: string[];
+  bccEmails: string[];
+  notes?: string;
   billingContact?: InvoiceBillingContact;
   agreementName?: string;
   noticeType: InvoiceNoticeType;
@@ -181,6 +199,7 @@ export type InvoiceNotificationPreview = {
   paymentLink?: string;
   subject: string;
   bodyPreview: string;
+  templateBody: string;
 };
 
 export type InvoiceBillingContact = {
@@ -217,7 +236,7 @@ export type InvoiceNotificationAuditSummary = {
 };
 
 export type InvoiceNotificationAuditResult = {
-  status: 'preview' | 'stubbed';
+  status: 'preview' | 'stubbed' | 'test-stubbed';
   generatedAt: string;
   preview: InvoiceNotificationPreview;
   audit?: InvoiceNotificationAuditSummary;
@@ -226,6 +245,7 @@ export type InvoiceNotificationAuditResult = {
 export type ConnectWiseInvoiceReader = {
   listAgreements: (options?: ConnectWiseListOptions) => Promise<ConnectWiseAgreement[]>;
   getAgreement: (agreementId: string | number) => Promise<ConnectWiseAgreement>;
+  getCompany?: (companyId: string | number) => Promise<ConnectWiseCompany>;
   listContacts: (options?: ConnectWiseListOptions) => Promise<ConnectWiseContact[]>;
   listInvoices: (options?: ConnectWiseListOptions) => Promise<ConnectWiseInvoice[]>;
   getInvoice: (invoiceId: string | number) => Promise<ConnectWiseInvoice>;
@@ -289,6 +309,9 @@ export async function previewOrStubInvoiceNotice(input: {
   companyKey?: string;
   noticeType: InvoiceNoticeType;
   confirm?: boolean;
+  testMode?: boolean;
+  testRecipientEmail?: string;
+  notes?: string;
   provider?: IntegrationSettingsProvider;
   today?: string;
 }): Promise<InvoiceNotificationAuditResult> {
@@ -333,9 +356,9 @@ export async function loadConnectWiseOverdueInvoices(
 
   const bucketOrder: OverdueInvoiceBucketId[] = ['7-29-days', '30-59-days', '60-plus-days'];
   const bucketNoticeType: Record<OverdueInvoiceBucketId, InvoiceNoticeType> = {
-    '7-29-days': 'reminder',
-    '30-59-days': '30-day-notice',
-    '60-plus-days': '60-day-credit-hold',
+    '7-29-days': 'past-due-reminder',
+    '30-59-days': 'credit-hold',
+    '60-plus-days': 'service-suspension',
   };
 
   const buckets = bucketOrder.map((bucketId) => {
@@ -497,8 +520,12 @@ export async function previewOrStubConnectWiseInvoiceNotice(
     companyKey?: string;
     noticeType: InvoiceNoticeType;
     confirm?: boolean;
+    testMode?: boolean;
+    testRecipientEmail?: string;
+    notes?: string;
     today?: string;
     paymentLinkConfig?: WisePayPaymentLinkConfig;
+    communicationSettings?: CommunicationSettings;
   },
 ): Promise<InvoiceNotificationAuditResult> {
   const today = input.today ?? currentDateKey();
@@ -511,14 +538,43 @@ export async function previewOrStubConnectWiseInvoiceNotice(
   assertSingleNotificationCustomer(invoices, input.companyKey);
   const templateNames = await resolveInvoiceTemplateNames(client, invoices.map((invoice) => invoice.emailTemplateId));
   const billingContact = await resolveDefaultBillingContact(client, invoices);
-  const preview = buildInvoiceNotificationPreview(
+  const ccEmails = await resolveBillToCcEmails(client, invoices);
+  const communicationSettings =
+    input.communicationSettings ??
+    (input.database
+      ? await getCommunicationSettings(input.database as CommunicationQueryable)
+      : defaultCommunicationSettings);
+  const bccEmails = parseEmailList(communicationSettings.invoiceBccEmails);
+  const notes = textValue(input.notes);
+  const testMode = Boolean(input.testMode);
+  const testRecipientEmail = textValue(input.testRecipientEmail);
+
+  if (testMode && input.confirm && !testRecipientEmail) {
+    throw new Error('Test email requires a recipient address.');
+  }
+
+  let preview = buildInvoiceNotificationPreview(
     invoices,
     input.noticeType,
     templateNames,
     today,
     input.paymentLinkConfig,
     billingContact,
+    ccEmails,
+    bccEmails,
+    communicationSettings,
+    notes,
   );
+
+  if (testMode) {
+    preview = {
+      ...preview,
+      recipientName: testRecipientEmail ?? preview.recipientName,
+      recipientEmail: testRecipientEmail,
+      ccEmails: [],
+      bccEmails: [],
+    };
+  }
 
   if (!input.confirm) {
     return {
@@ -533,13 +589,15 @@ export async function previewOrStubConnectWiseInvoiceNotice(
   }
 
   const occurredAt = new Date().toISOString();
+  const eventType = testMode ? 'connectwise.invoice.notice.test-stubbed' : 'connectwise.invoice.notice.stubbed';
   for (const invoice of invoices) {
     const previewInvoice = preview.invoices.find((item) => item.invoiceId === String(invoice.id));
     await input.database.query(
       `insert into audit_events (actor, event_type, entity_type, entity_id, occurred_at, payload)
-       values ($1, 'connectwise.invoice.notice.stubbed', 'connectwise_invoice', $2, $3::timestamptz, $4::jsonb)`,
+       values ($1, $2, 'connectwise_invoice', $3, $4::timestamptz, $5::jsonb)`,
       [
         input.actor,
+        eventType,
         String(invoice.id),
         occurredAt,
         JSON.stringify({
@@ -553,6 +611,10 @@ export async function previewOrStubConnectWiseInvoiceNotice(
           companyName: preview.companyName,
           recipientName: preview.recipientName,
           recipientEmail: preview.recipientEmail,
+          ccEmails: preview.ccEmails,
+          bccEmails: preview.bccEmails,
+          notes: preview.notes,
+          testMode,
           billingContact: preview.billingContact,
           agreementName: previewInvoice?.agreementName,
           dueDate: previewInvoice?.dueDate,
@@ -566,7 +628,7 @@ export async function previewOrStubConnectWiseInvoiceNotice(
   }
 
   return {
-    status: 'stubbed',
+    status: testMode ? 'test-stubbed' : 'stubbed',
     generatedAt: occurredAt,
     preview,
     audit: {
@@ -698,7 +760,7 @@ function groupOverdueInvoicesByCustomer(invoices: OverdueInvoice[]): OverdueInvo
         invoiceCount: 0,
         balanceTotal: 0,
         oldestDaysPastDue: 0,
-        noticeType: 'reminder',
+        noticeType: 'past-due-reminder',
         bucketCounts: {
           '7-29-days': 0,
           '30-59-days': 0,
@@ -796,6 +858,10 @@ function buildInvoiceNotificationPreview(
   today: string,
   paymentLinkConfig?: WisePayPaymentLinkConfig,
   billingContact?: InvoiceBillingContact,
+  ccEmails: string[] = [],
+  bccEmails: string[] = [],
+  communicationSettings: CommunicationSettings = defaultCommunicationSettings,
+  notes?: string,
 ): InvoiceNotificationPreview {
   const [firstInvoice] = invoices;
   if (!firstInvoice) {
@@ -841,9 +907,18 @@ function buildInvoiceNotificationPreview(
       }),
     ),
   ];
-  const subject = notificationSubject(noticeType, company, previewInvoices);
   const recipientName = billingContact?.name ?? company;
-  const bodyPreview = notificationBodyPreview(noticeType, company, recipientName, previewInvoices, totalBalance);
+  const templateValues = {
+    company,
+    recipientName,
+    invoiceCount,
+    totalBalance: formatUsd(totalBalance),
+    invoiceNumber: singleInvoice?.invoiceNumber ?? singleInvoice?.invoiceId,
+  };
+  const noticeTemplate = communicationSettings.invoiceNoticeTemplates[noticeType];
+  const subject = renderTemplate(noticeTemplate.subject, templateValues);
+  const templateBody = renderTemplate(noticeTemplate.body, templateValues);
+  const bodyPreview = buildNotificationBodyPreview(templateBody, notes, previewInvoices);
 
   return {
     invoiceId: singleInvoice?.invoiceId,
@@ -855,6 +930,9 @@ function buildInvoiceNotificationPreview(
     companyName: company,
     recipientName,
     recipientEmail: billingContact?.email,
+    ccEmails,
+    bccEmails,
+    notes,
     billingContact,
     agreementName: singleInvoice?.agreementName,
     noticeType,
@@ -868,67 +946,48 @@ function buildInvoiceNotificationPreview(
     paymentLink: singleInvoice?.paymentLink,
     subject,
     bodyPreview,
+    templateBody,
   };
 }
 
-function notificationSubject(
-  noticeType: InvoiceNoticeType,
-  company: string,
+function buildNotificationBodyPreview(
+  templateBody: string,
+  notes: string | undefined,
   invoices: InvoiceNotificationPreviewInvoice[],
 ) {
-  const singleInvoice = invoices.length === 1 ? invoices[0] : undefined;
-  const invoiceNumber = singleInvoice ? singleInvoice.invoiceNumber ?? singleInvoice.invoiceId : undefined;
-
-  if (noticeType === '60-day-credit-hold') {
-    return singleInvoice
-      ? `Credit hold notice for invoice #${invoiceNumber}`
-      : `Credit hold notice for ${company} - ${invoices.length} overdue invoices`;
+  const sections = [templateBody.trim()];
+  const trimmedNotes = notes?.trim();
+  if (trimmedNotes) {
+    sections.push(`NOTE:\n${trimmedNotes}`);
   }
 
-  if (noticeType === '90-day-cancel-services') {
-    return singleInvoice
-      ? `Cancel services notice for invoice #${invoiceNumber}`
-      : `Cancel services notice for ${company} - ${invoices.length} overdue invoices`;
-  }
-
-  if (noticeType === '30-day-notice') {
-    return singleInvoice
-      ? `30-day past due notice for invoice #${invoiceNumber}`
-      : `30-day past due notice for ${company} - ${invoices.length} overdue invoices`;
-  }
-
-  return singleInvoice
-    ? `Payment reminder for invoice #${invoiceNumber}`
-    : `Payment reminder for ${company} - ${invoices.length} overdue invoices`;
-}
-
-function notificationBodyPreview(
-  noticeType: InvoiceNoticeType,
-  company: string,
-  recipientName: string,
-  invoices: InvoiceNotificationPreviewInvoice[],
-  totalBalance: number,
-) {
-  const lead =
-    noticeType === '90-day-cancel-services'
-      ? `This is a cancel services notice for ${company}.`
-      : noticeType === '60-day-credit-hold'
-      ? `This is a credit hold notice for ${company}.`
-      : noticeType === '30-day-notice'
-        ? `This is a 30-day past due notice for ${company}.`
-        : `This is a payment reminder for ${company}.`;
-  const summary =
-    invoices.length === 1
-      ? `The invoice below is past due with a remaining balance of ${formatUsd(totalBalance)}.`
-      : `The invoices below are past due with a combined remaining balance of ${formatUsd(totalBalance)}.`;
   const invoiceLines = invoices.map((invoice) => {
     const invoiceNumber = invoice.invoiceNumber ?? invoice.invoiceId;
     const dueDate = invoice.dueDate ? `due ${invoice.dueDate}` : 'no due date';
     const paymentLink = invoice.paymentLink ? ` Pay: ${invoice.paymentLink}` : '';
     return `Invoice #${invoiceNumber}: ${dueDate}, ${invoice.daysPastDue} days past due, ${formatUsd(invoice.balance)}.${paymentLink}`;
   });
+  sections.push(invoiceLines.join('\n'));
 
-  return [`Hello ${recipientName},`, lead, summary, ...invoiceLines].join('\n');
+  return sections.filter(Boolean).join('\n\n');
+}
+
+async function resolveBillToCcEmails(
+  client: ConnectWiseInvoiceReader,
+  invoices: ConnectWiseInvoice[],
+): Promise<string[]> {
+  const [invoice] = invoices;
+  const companyId = invoice?.billToCompany?.id ?? invoice?.company?.id;
+  if (!companyId || !client.getCompany) {
+    return [];
+  }
+
+  try {
+    const company = await client.getCompany(companyId);
+    return parseEmailList(textValue(company.invoiceCCEmailAddress));
+  } catch {
+    return [];
+  }
 }
 
 async function resolveDefaultBillingContact(
@@ -1073,16 +1132,7 @@ function assertSingleNotificationCustomer(invoices: ConnectWiseInvoice[], expect
 }
 
 function noticeTypeForDaysPastDue(daysPastDue: number): InvoiceNoticeType {
-  if (daysPastDue >= 90) {
-    return '90-day-cancel-services';
-  }
-  if (daysPastDue >= 60) {
-    return '60-day-credit-hold';
-  }
-  if (daysPastDue >= 30) {
-    return '30-day-notice';
-  }
-  return 'reminder';
+  return sharedNoticeTypeForDaysPastDue(daysPastDue);
 }
 
 async function resolveInvoiceTemplateNames(
@@ -1269,15 +1319,6 @@ function formatUsd(value: number) {
 
 function isoDate(value: Date | string) {
   return value instanceof Date ? value.toISOString() : value;
-}
-
-function isInvoiceNoticeType(value: unknown): value is InvoiceNoticeType {
-  return (
-    value === 'reminder' ||
-    value === '30-day-notice' ||
-    value === '60-day-credit-hold' ||
-    value === '90-day-cancel-services'
-  );
 }
 
 function uniqueStrings(values: Array<string | number | undefined>) {

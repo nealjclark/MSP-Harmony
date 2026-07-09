@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import type {
   ConnectWiseAgreement,
+  ConnectWiseCompany,
   ConnectWiseContact,
   ConnectWiseInvoice,
   ConnectWiseInvoiceEmailTemplate,
@@ -15,10 +16,12 @@ import {
   type ConnectWiseInvoiceReader,
   type Queryable,
 } from './connectwiseInvoices';
+import { defaultCommunicationSettings } from '../../shared/communicationSettings';
 
 type FakeClientInput = {
   agreements?: ConnectWiseAgreement[];
   contacts?: ConnectWiseContact[];
+  companies?: ConnectWiseCompany[];
   invoices?: ConnectWiseInvoice[];
   templates?: ConnectWiseInvoiceEmailTemplate[];
 };
@@ -96,11 +99,11 @@ async function testOverdueCustomerGrouping() {
   assert.equal(acme?.invoiceCount, 2);
   assert.equal(acme?.balanceTotal, 350);
   assert.equal(acme?.oldestDaysPastDue, 97);
-  assert.equal(acme?.noticeType, '90-day-cancel-services');
+  assert.equal(acme?.noticeType, 'service-suspension');
   assert.deepEqual(acme?.invoices.map((item) => item.invoiceId), ['601', '602']);
   assert.equal(acme?.bucketCounts['60-plus-days'], 1);
   assert.equal(acme?.bucketCounts['30-59-days'], 1);
-  assert.equal(bravo?.noticeType, 'reminder');
+  assert.equal(bravo?.noticeType, 'past-due-reminder');
 }
 
 async function testMonthlyAgreementInvoiceMatching() {
@@ -225,7 +228,8 @@ async function testInvoiceNotificationStubAudit() {
   const preview = await previewOrStubConnectWiseInvoiceNotice(client, {
     actor: 'analyst@example.com',
     invoiceId: '501',
-    noticeType: '30-day-notice',
+    noticeType: 'credit-hold',
+    communicationSettings: defaultCommunicationSettings,
     paymentLinkConfig: {
       apiKey: 'wise-key',
     },
@@ -246,8 +250,9 @@ async function testInvoiceNotificationStubAudit() {
     actor: 'analyst@example.com',
     database,
     invoiceId: '501',
-    noticeType: '30-day-notice',
+    noticeType: 'credit-hold',
     confirm: true,
+    communicationSettings: defaultCommunicationSettings,
     paymentLinkConfig: {
       apiKey: 'wise-key',
     },
@@ -257,8 +262,9 @@ async function testInvoiceNotificationStubAudit() {
   assert.equal(queries.length, 1);
   assert.match(queries[0]?.sql ?? '', /insert into audit_events/);
   assert.equal(queries[0]?.values?.[0], 'analyst@example.com');
-  assert.equal(queries[0]?.values?.[1], '501');
-  const auditPayload = JSON.parse(String(queries[0]?.values?.[3] ?? '{}')) as { paymentLink?: string };
+  assert.equal(queries[0]?.values?.[1], 'connectwise.invoice.notice.stubbed');
+  assert.equal(queries[0]?.values?.[2], '501');
+  const auditPayload = JSON.parse(String(queries[0]?.values?.[4] ?? '{}')) as { paymentLink?: string };
   assert.equal(auditPayload.paymentLink, preview.preview.paymentLink);
 }
 
@@ -305,7 +311,8 @@ async function testCustomerInvoiceNoticePreview() {
     actor: 'analyst@example.com',
     invoiceIds: ['702', '701'],
     companyKey: 'id:42',
-    noticeType: '60-day-credit-hold',
+    noticeType: 'credit-hold',
+    communicationSettings: defaultCommunicationSettings,
     paymentLinkConfig: {
       apiKey: 'wise-key',
     },
@@ -320,7 +327,7 @@ async function testCustomerInvoiceNoticePreview() {
   assert.equal(preview.preview.totalBalance, 400);
   assert.deepEqual(preview.preview.invoiceIds, ['701', '702']);
   assert.deepEqual(preview.preview.invoices.map((item) => item.invoiceNumber), ['INV-701', 'INV-702']);
-  assert.match(preview.preview.subject, /Acme - 2 overdue invoices/);
+  assert.match(preview.preview.subject, /Credit hold notice for Acme/);
   assert.match(preview.preview.bodyPreview, /^Hello Morgan Ledger,/);
   assert.match(preview.preview.bodyPreview, /INV-701/);
   assert.match(preview.preview.bodyPreview, /INV-702/);
@@ -338,8 +345,10 @@ async function testCustomerInvoiceNoticePreview() {
     database,
     invoiceIds: ['702', '701'],
     companyKey: 'id:42',
-    noticeType: '60-day-credit-hold',
+    noticeType: 'credit-hold',
     confirm: true,
+    notes: 'Please call AP today.',
+    communicationSettings: defaultCommunicationSettings,
     paymentLinkConfig: {
       apiKey: 'wise-key',
     },
@@ -347,16 +356,23 @@ async function testCustomerInvoiceNoticePreview() {
   });
 
   assert.equal(confirmed.status, 'stubbed');
+  assert.match(confirmed.preview.bodyPreview, /NOTE:\nPlease call AP today\./);
   assert.equal(queries.length, 2);
-  assert.deepEqual(queries.map((query) => query.values?.[1]), ['702', '701']);
-  const auditPayload = JSON.parse(String(queries[0]?.values?.[3] ?? '{}')) as { invoiceIds?: string[]; totalBalance?: number };
+  assert.deepEqual(queries.map((query) => query.values?.[2]), ['702', '701']);
+  const auditPayload = JSON.parse(String(queries[0]?.values?.[4] ?? '{}')) as {
+    invoiceIds?: string[];
+    totalBalance?: number;
+    notes?: string;
+  };
   assert.deepEqual(auditPayload.invoiceIds, ['701', '702']);
   assert.equal(auditPayload.totalBalance, 400);
+  assert.equal(auditPayload.notes, 'Please call AP today.');
 }
 
 function fakeClient(input: FakeClientInput): FakeClient {
   const agreements = input.agreements ?? [];
   const contacts = input.contacts ?? [];
+  const companies = input.companies ?? [];
   const invoices = input.invoices ?? [];
   const templates = input.templates ?? [];
   const calls: FakeClient['calls'] = {
@@ -374,6 +390,16 @@ function fakeClient(input: FakeClientInput): FakeClient {
     async getAgreement(agreementId: string | number) {
       const found = agreements.find((item) => String(item.id) === String(agreementId));
       if (!found) throw new Error(`Agreement ${agreementId} not found.`);
+      return found;
+    },
+    async getCompany(companyId: string | number) {
+      const found = companies.find((item) => String(item.id) === String(companyId));
+      if (!found) {
+        return {
+          id: Number(companyId),
+          name: `Company ${companyId}`,
+        };
+      }
       return found;
     },
     async listContacts(options: ConnectWiseListOptions = {}) {
