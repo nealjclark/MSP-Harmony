@@ -1286,10 +1286,34 @@ h2 {
 .invoice-notice-modal-body {
   display: grid;
   align-content: start;
-  gap: 14px;
   min-height: 0;
-  padding: 8px 22px 4px;
+  padding: 8px 22px 0;
+  overflow: hidden;
+}
+
+.invoice-notice-modal-body > .invoice-email-preview {
+  min-height: 0;
   overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+.invoice-notice-modal-footer {
+  display: grid;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 12px 22px 0;
+  border-top: 1px solid var(--line);
+  background: #fbfcfa;
+}
+
+.invoice-notice-modal-footer .invoice-notice-notes,
+.invoice-notice-modal-footer .invoice-test-email-prompt {
+  margin: 0;
+}
+
+.invoice-notice-modal-footer .modal-actions.invoice-notice-actions {
+  margin: 0 -22px 0;
+  border-top: 1px solid var(--line);
 }
 
 .invoice-notice-field {
@@ -5870,22 +5894,35 @@ h2 {
   padding: 0;
 }
 
-.invoice-email-subject,
 .invoice-email-body {
   display: grid;
   gap: 8px;
 }
 
 .invoice-email-subject {
-  padding: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfa;
 }
 
+.invoice-email-subject > span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .invoice-email-subject strong {
+  min-width: 0;
   color: var(--ink);
   font-size: 1rem;
+  overflow-wrap: anywhere;
 }
 
 .invoice-email-body {

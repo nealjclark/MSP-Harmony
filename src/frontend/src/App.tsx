@@ -16873,7 +16873,6 @@ function InvoiceNotificationModal(props: {
     return null;
   }
 
-  const missingPaymentLinks = preview.invoices.filter((invoice) => !invoice.paymentLink).length;
   const templateParagraphs = (preview.templateBody ?? preview.bodyPreview.split(/\n\nNOTE:/)[0] ?? '')
     .split(/\n+/)
     .map((line) => line.trim())
@@ -16905,7 +16904,7 @@ function InvoiceNotificationModal(props: {
         <div className="invoice-notice-modal-body">
           <div className="invoice-email-preview">
             <div className="invoice-email-subject">
-              <span className="section-kicker">Subject</span>
+              <span>Subject:</span>
               <strong>{preview.subject}</strong>
             </div>
 
@@ -16941,24 +16940,10 @@ function InvoiceNotificationModal(props: {
                 ))}
               </div>
             </div>
-
-            <div className="invoice-preview-meta">
-              <span>{invoiceNoticeLabel(preview.noticeType)}</span>
-              {preview.recipientEmail ? <span>{preview.recipientEmail}</span> : null}
-              <span>{preview.daysPastDue} days oldest</span>
-              <span>{formatMoneyValue(preview.totalBalance)} past due</span>
-              {preview.emailTemplateName ? <span>{preview.emailTemplateName}</span> : null}
-              {preview.emailTemplateNames.length > 1 ? (
-                <span>{formatCount(preview.emailTemplateNames.length)} templates</span>
-              ) : null}
-              {missingPaymentLinks > 0 ? (
-                <span>{formatCount(missingPaymentLinks)} missing WisePay links</span>
-              ) : (
-                <span>WisePay ready</span>
-              )}
-            </div>
           </div>
+        </div>
 
+        <div className="invoice-notice-modal-footer">
           {!completed ? (
             <label className="invoice-notice-field invoice-notice-notes">
               <span>Notes</span>
@@ -16997,36 +16982,36 @@ function InvoiceNotificationModal(props: {
               </div>
             </div>
           ) : null}
-        </div>
 
-        <div className="modal-actions invoice-notice-actions">
-          {message ? <span className="invoice-action-message">{message}</span> : null}
-          {completed ? (
-            <span className="status-pill approved">
-              {result.status === 'test-stubbed' ? 'Test stubbed' : 'Saved'}{' '}
-              {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
-            </span>
-          ) : (
-            <>
-              <button
-                className="button secondary compact"
-                disabled={Boolean(busyKey)}
-                onClick={() => setTestEmailPrompt(true)}
-                type="button"
-              >
-                Test email
-              </button>
-              <button
-                className="button primary compact"
-                disabled={Boolean(busyKey)}
-                onClick={() => void onConfirm(preview, noteText || undefined)}
-                type="button"
-              >
-                <Check size={15} />
-                {busyKey === confirmKey ? 'Saving' : 'Trigger email'}
-              </button>
-            </>
-          )}
+          <div className="modal-actions invoice-notice-actions">
+            {message ? <span className="invoice-action-message">{message}</span> : null}
+            {completed ? (
+              <span className="status-pill approved">
+                {result.status === 'test-stubbed' ? 'Test stubbed' : 'Saved'}{' '}
+                {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
+              </span>
+            ) : (
+              <>
+                <button
+                  className="button secondary compact"
+                  disabled={Boolean(busyKey)}
+                  onClick={() => setTestEmailPrompt(true)}
+                  type="button"
+                >
+                  Test
+                </button>
+                <button
+                  className="button primary compact"
+                  disabled={Boolean(busyKey)}
+                  onClick={() => void onConfirm(preview, noteText || undefined)}
+                  type="button"
+                >
+                  <Check size={15} />
+                  {busyKey === confirmKey ? 'Sending' : 'Send'}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </section>
     </div>
