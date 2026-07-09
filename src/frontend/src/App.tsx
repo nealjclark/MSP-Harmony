@@ -23,10 +23,12 @@ import {
   Package,
   Pencil,
   Plug,
+  Plus,
   RefreshCcw,
   Search,
   Settings,
   SlidersHorizontal,
+  Trash2,
   Upload,
   UserPlus,
   Users,
@@ -61,8 +63,32 @@ import {
   type IntegrationSettingsState,
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
+import {
+  isVendorDatapointId,
+  type CreateVendorDatapointInput,
+  type InvoiceTableColumnMap as SharedInvoiceTableColumnMap,
+  type ManualImportSyncMode,
+  type UpdateVendorDatapointInput,
+  type VendorDatapointRecord,
+  type VendorKey,
+} from '../../shared/vendorDatapoints';
+import {
+  columnMapSatisfiesSourceType,
+  columnMappingHeaderOptions,
+  importRequiresQuantityColumn,
+  invoiceTableFieldDefinitions,
+  invoiceTableFieldGroups,
+  matchVendorDatapointByHeaders,
+  mergeInvoiceTableColumnMap,
+  mappedColumnHeaders,
+  mergeKnownHeaders,
+  quantityColumnSelectOptions,
+  suggestInvoiceTableColumnMap,
+} from '../../shared/invoiceTableMapping';
+import { readWorkbookObjectRows } from './importWorkbook';
 
-type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'audit' | 'settings';
+type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'settings';
+type SettingsSection = 'user-management' | 'integrations' | 'audit-logs';
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
 type ManagedUserStatus = 'active' | 'disabled';
 type InvoiceWorkspaceTab = 'overdue' | 'monthly' | 'standard';
@@ -110,9 +136,14 @@ type ReconciliationMatchedAgreementAddition = {
   updatedAt?: string;
 };
 
+type ReconciliationVendorOption = {
+  id: VendorKey;
+  name: string;
+};
+
 type ReconcileIssue = {
   id: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   clientId: string;
   agreementId: string;
   accountId?: string;
@@ -152,6 +183,8 @@ type ReconcileIssue = {
   devices: ReconciliationDevice[];
   adjustments: ReconciliationAdjustment[];
   matchedAgreementAdditions: ReconciliationMatchedAgreementAddition[];
+  connectWiseAdditionId?: string;
+  vendorProductKey?: string;
   writeAction?: 'update-addition' | 'create-addition' | 'review-required';
   proposedLessIncluded?: number;
   lessIncludedTouched?: boolean;
@@ -573,7 +606,7 @@ type ReconciliationRunMeta = {
 
 type InvoiceImportSummary = {
   id: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   fileName: string;
   invoiceNumber?: string;
   importedAt: string;
@@ -587,32 +620,7 @@ type InvoiceImportSummary = {
 };
 
 type InvoiceImportMode = 'overwrite' | 'merge';
-type ManualImportSyncMode = 'info-only' | 'full-vendor-sync';
-
-type InvoiceTableColumnMap = {
-  externalAccountId?: string;
-  externalAccountName?: string;
-  productCode?: string;
-  productName?: string;
-  licenseId?: string;
-  licenseName?: string;
-  userPrincipalName?: string;
-  email?: string;
-  deviceId?: string;
-  deviceName?: string;
-  deviceType?: string;
-  deviceClass?: string;
-  quantity?: string;
-  invoiceNumber?: string;
-  invoiceDate?: string;
-  chargeType?: string;
-  billedAmount?: string;
-  term?: string;
-  billingFrequency?: string;
-  billingPeriodStart?: string;
-  billingPeriodEnd?: string;
-  primaryDomain?: string;
-};
+type InvoiceTableColumnMap = SharedInvoiceTableColumnMap;
 
 type InvoiceImportsResponse = {
   imports: InvoiceImportSummary[];
@@ -1104,13 +1112,15 @@ type ReconciliationLineResponse = {
     value: string | number;
   }>;
   matchedAgreementAdditions?: ReconciliationMatchedAgreementAddition[];
+  connectWiseAdditionId?: string;
+  vendorProductKey?: string;
   devices?: ReconciliationDevice[];
   adjustments?: ReconciliationAdjustment[];
 };
 
 type AgreementAdditionUpdatePayload = {
   sourceLineId: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   customerId: string;
   customerName: string;
   agreementId: string;
@@ -1598,8 +1608,6 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
   { id: 'invoices', label: 'Invoices', icon: CircleDollarSign },
-  { id: 'agreements', label: 'Agreements', icon: Building2 },
-  { id: 'audit', label: 'Audit', icon: History },
 ];
 
 const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
@@ -1609,7 +1617,7 @@ const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }
 const defaultView: View = 'reconcile';
 const defaultMappingIntegrationId: IntegrationId = 'cove';
 
-const viewPaths: Record<View, string> = {
+const viewPaths: Record<Exclude<View, 'settings'>, string> = {
   reconcile: '/reconcile',
   discrepancies: '/discrepancies',
   integrations: '/integrations',
@@ -1617,8 +1625,32 @@ const viewPaths: Record<View, string> = {
   reports: '/reports',
   invoices: '/invoices',
   agreements: '/agreements',
-  audit: '/audit',
-  settings: '/settings',
+};
+
+const defaultSettingsSection: SettingsSection = 'user-management';
+
+const settingsSections: Array<{ id: SettingsSection; label: string; description: string }> = [
+  {
+    id: 'user-management',
+    label: 'User Management',
+    description: 'Manage application users, roles, and access status',
+  },
+  {
+    id: 'integrations',
+    label: 'Integrations',
+    description: 'Integration credentials and configuration',
+  },
+  {
+    id: 'audit-logs',
+    label: 'Audit Logs',
+    description: 'Sync runs, approvals, and application activity history',
+  },
+];
+
+const settingsSectionPaths: Record<SettingsSection, string> = {
+  'user-management': '/settings/user-management',
+  integrations: '/settings/integrations',
+  'audit-logs': '/settings/audit-logs',
 };
 
 const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean; description: string }> = [
@@ -1687,6 +1719,10 @@ function isActiveApiIntegration(integration: Integration) {
 
 function hasAvailableRawSyncReport(integration: Integration) {
   return hasRawSyncReportDataSignal(integration) || (hasLiveIntegrationActions(integration.id) && integration.enabled);
+}
+
+function isEnabledReconciliationDatapoint(datapoint: VendorDatapointRecord) {
+  return datapoint.active && Boolean(datapoint.lastImportedAt) && !datapoint.linkedIntegrationId;
 }
 
 function isEnabledReconciliationIntegration(integration: Integration) {
@@ -1883,6 +1919,14 @@ function proposedLessIncluded(issue: ReconcileIssue) {
 }
 
 function selectedAgreementAddition(issue: ReconcileIssue) {
+  if (issue.connectWiseAdditionId) {
+    return (
+      issue.matchedAgreementAdditions.find(
+        (addition) => addition.connectWiseAdditionId === issue.connectWiseAdditionId,
+      ) ?? issue.matchedAgreementAdditions[0]
+    );
+  }
+
   return issue.matchedAgreementAdditions.length === 1 ? issue.matchedAgreementAdditions[0] : undefined;
 }
 
@@ -1995,6 +2039,35 @@ function formatAuthMode(value: string) {
 
 function integrationName(integrationId: IntegrationId) {
   return integrationSettingsRegistry.find((integration) => integration.integrationId === integrationId)?.displayName ?? integrationId;
+}
+
+function vendorDisplayName(vendorId: VendorKey, datapoints: VendorDatapointRecord[] = []) {
+  const datapoint = datapoints.find((item) => item.vendorId === vendorId);
+  if (datapoint) {
+    return datapoint.displayName;
+  }
+
+  if (isVendorDatapointId(vendorId)) {
+    return vendorId;
+  }
+
+  return integrationName(vendorId);
+}
+
+function datapointMappingVendorId(datapoint: VendorDatapointRecord): VendorKey {
+  return datapoint.linkedIntegrationId ?? datapoint.vendorId;
+}
+
+function hasMappingWorkspaceForVendor(vendorId: VendorKey) {
+  if (isVendorDatapointId(vendorId)) {
+    return true;
+  }
+
+  return hasMappingWorkspace(vendorId);
+}
+
+function isRegistryIntegrationId(vendorId: VendorKey): vendorId is IntegrationId {
+  return !isVendorDatapointId(vendorId);
 }
 
 function customerLicenseVendorName(vendorId: CustomerLicenseReportVendorId) {
@@ -2729,12 +2802,12 @@ function isReviewViewIssue(issue: ReconcileIssue) {
   return isReviewableIssue(issue) || issue.status === 'approved' || issue.status === 'updated';
 }
 
-function isProcessedReconciliationIssue(issue: ReconcileIssue) {
-  if (issue.vendorId === 'ncentral') {
-    return true;
-  }
+function isZeroZeroReconciliationIssue(issue: ReconcileIssue) {
+  return issue.sourceCount === 0 && issue.invoiceCount === 0;
+}
 
-  return issue.lineType !== 'unmapped-vendor' && issue.status !== 'unmapped';
+function isProcessedReconciliationIssue(issue: ReconcileIssue) {
+  return !isZeroZeroReconciliationIssue(issue);
 }
 
 function issueMatchesSearchAndVendor(issue: ReconcileIssue, query: string, vendorFilter: string) {
@@ -2754,12 +2827,28 @@ function initialView(): View {
   return viewFromLocation(window.location);
 }
 
-function initialMappingIntegrationId(): IntegrationId {
+function initialSettingsSection(): SettingsSection {
+  const queryView = new URLSearchParams(window.location.search).get('view');
+  if (queryView === 'audit') {
+    return 'audit-logs';
+  }
+
+  return settingsSectionFromPath(window.location.pathname) ?? defaultSettingsSection;
+}
+
+function isVendorKey(value: string | null): value is VendorKey {
+  return Boolean(value && (isIntegrationId(value) || isVendorDatapointId(value)));
+}
+
+function initialMappingIntegrationId(): VendorKey {
   return mappingIntegrationIdFromLocation(window.location) ?? defaultMappingIntegrationId;
 }
 
 function viewFromLocation(location: Location): View {
   const queryView = new URLSearchParams(location.search).get('view');
+  if (queryView === 'audit') {
+    return 'settings';
+  }
   if (isView(queryView)) return queryView;
 
   const pathView = viewFromPath(location.pathname);
@@ -2774,9 +2863,29 @@ function viewFromPath(pathname: string): View | null {
   if (mappingIntegrationIdFromPath(normalizedPath)) {
     return 'mappings';
   }
+  if (settingsSectionFromPath(normalizedPath) || normalizedPath === '/settings' || normalizedPath === '/audit') {
+    return 'settings';
+  }
 
   const matchedEntry = Object.entries(viewPaths).find(([, path]) => path === normalizedPath);
   return matchedEntry ? (matchedEntry[0] as View) : normalizedPath === '/' ? defaultView : null;
+}
+
+function settingsSectionFromPath(pathname: string): SettingsSection | null {
+  const normalizedPath = normalizePathname(pathname);
+  if (normalizedPath === '/audit') {
+    return 'audit-logs';
+  }
+  if (normalizedPath === '/settings') {
+    return defaultSettingsSection;
+  }
+
+  const segments = normalizedPath.split('/').filter(Boolean);
+  if (segments.length === 2 && segments[0] === 'settings' && isSettingsSection(segments[1])) {
+    return segments[1];
+  }
+
+  return null;
 }
 
 function normalizePathname(pathname: string) {
@@ -2784,7 +2893,11 @@ function normalizePathname(pathname: string) {
 }
 
 function isView(value: string | null): value is View {
-  return Boolean(value && Object.prototype.hasOwnProperty.call(viewPaths, value));
+  return Boolean(value && (value === 'settings' || Object.prototype.hasOwnProperty.call(viewPaths, value)));
+}
+
+function isSettingsSection(value: string): value is SettingsSection {
+  return Object.prototype.hasOwnProperty.call(settingsSectionPaths, value);
 }
 
 function isIntegrationId(value: string | null): value is IntegrationId {
@@ -2808,38 +2921,57 @@ function mappingIntegrationIdFromPath(pathname: string) {
 
   try {
     const integrationId = decodeURIComponent(segments[0]);
-    return isIntegrationId(integrationId) ? integrationId : null;
+    return isVendorKey(integrationId) ? integrationId : null;
   } catch {
     return null;
   }
 }
 
-function urlForView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
+function urlForSettingsSection(section: SettingsSection = defaultSettingsSection) {
+  return settingsSectionPaths[section];
+}
+
+function urlForView(
+  view: View,
+  mappingIntegrationId: VendorKey = defaultMappingIntegrationId,
+  settingsSection: SettingsSection = defaultSettingsSection,
+) {
   if (view === 'mappings') {
     return `/${encodeURIComponent(mappingIntegrationId)}/mappings`;
+  }
+  if (view === 'settings') {
+    return urlForSettingsSection(settingsSection);
   }
 
   return viewPaths[view];
 }
 
-function currentRouteMatchesView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
+function currentRouteMatchesView(
+  view: View,
+  mappingIntegrationId: VendorKey = defaultMappingIntegrationId,
+  settingsSection: SettingsSection = defaultSettingsSection,
+) {
   const currentView = viewFromPath(window.location.pathname);
   const queryView = new URLSearchParams(window.location.search).get('view');
-  const expectedPath = normalizePathname(urlForView(view, mappingIntegrationId));
+  const expectedPath = normalizePathname(urlForView(view, mappingIntegrationId, settingsSection));
   return (
     currentView === view &&
     normalizePathname(window.location.pathname) === expectedPath &&
-    (!queryView || queryView === view)
+    (!queryView || queryView === view || (queryView === 'audit' && view === 'settings' && settingsSection === 'audit-logs'))
   );
 }
 
-function updateRouteForView(view: View, mappingIntegrationId: IntegrationId = defaultMappingIntegrationId) {
-  if (currentRouteMatchesView(view, mappingIntegrationId)) {
+function updateRouteForView(
+  view: View,
+  mappingIntegrationId: VendorKey = defaultMappingIntegrationId,
+  settingsSection: SettingsSection = defaultSettingsSection,
+) {
+  if (currentRouteMatchesView(view, mappingIntegrationId, settingsSection)) {
     return;
   }
 
   const nextUrl = new URL(window.location.href);
-  nextUrl.pathname = urlForView(view, mappingIntegrationId);
+  nextUrl.pathname = urlForView(view, mappingIntegrationId, settingsSection);
   nextUrl.searchParams.delete('view');
   nextUrl.searchParams.delete('vendor');
   window.history.pushState({ view }, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
@@ -2901,6 +3033,76 @@ function groupIssuesByVendor(issues: ReconcileIssue[]) {
     groups.set(issue.vendor, [...existing, issue]);
   });
   return Array.from(groups.entries());
+}
+
+async function fetchVendorDatapoints() {
+  const response = await fetch('/api/vendor-datapoints');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Vendor datapoint load failed with HTTP ${response.status}.`));
+  }
+
+  return (body as { datapoints: VendorDatapointRecord[] }).datapoints ?? [];
+}
+
+async function createVendorDatapointRequest(payload: CreateVendorDatapointInput) {
+  const response = await fetch('/api/vendor-datapoints', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Vendor datapoint create failed with HTTP ${response.status}.`));
+  }
+
+  return (body as { datapoint: VendorDatapointRecord }).datapoint;
+}
+
+async function updateVendorDatapointRequest(datapointId: string, payload: UpdateVendorDatapointInput) {
+  const response = await fetch(`/api/vendor-datapoints/${encodeURIComponent(datapointId)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Vendor datapoint update failed with HTTP ${response.status}.`));
+  }
+
+  return (body as { datapoint: VendorDatapointRecord }).datapoint;
+}
+
+async function importVendorDatapointRequest(
+  datapointId: string,
+  payload: {
+    fileName: string;
+    content: string;
+    columnMap?: InvoiceTableColumnMap;
+    persistColumnMap?: boolean;
+  },
+) {
+  const response = await fetch(`/api/vendor-datapoints/${encodeURIComponent(datapointId)}/import`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Vendor datapoint import failed with HTTP ${response.status}.`));
+  }
+
+  return body as { datapoint: VendorDatapointRecord; import: InvoiceImportSummary };
 }
 
 async function fetchRuntimeIntegrations() {
@@ -3000,7 +3202,7 @@ async function fetchRawSyncRuns(integrationId: IntegrationId, dataset?: RawSyncD
 }
 
 async function fetchRawSyncDetails(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   syncRunId: string,
   dataset?: RawSyncDataset,
   options: { customerId?: string } = {},
@@ -3116,10 +3318,13 @@ async function fetchAgreementAdditions(agreementId: string) {
   return body as unknown as AgreementAdditionsResponse;
 }
 
-async function fetchInvoiceImports(vendorId?: IntegrationId) {
+async function fetchInvoiceImports(vendorId?: VendorKey, datapointId?: string) {
   const params = new URLSearchParams();
   if (vendorId) {
     params.set('vendorId', vendorId);
+  }
+  if (datapointId) {
+    params.set('datapointId', datapointId);
   }
   const response = await fetch(`/api/invoice-imports${params.toString() ? `?${params.toString()}` : ''}`);
   const body = await responseJson(response);
@@ -3154,7 +3359,7 @@ async function importInvoiceFile(file: File, importMode: InvoiceImportMode) {
 }
 
 async function importInvoiceTableFile(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   file: File,
   columnMap: InvoiceTableColumnMap,
   sourceType: IntegrationDataSourceType,
@@ -3187,7 +3392,23 @@ async function importInvoiceTableFile(
   return body as unknown as InvoiceImportResponse;
 }
 
-async function fetchInvoiceImportExceptions(vendorId: IntegrationId, importId: string) {
+async function deleteInvoiceImportRequest(vendorId: VendorKey, importId: string) {
+  const response = await fetch(
+    `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Invoice import delete failed with HTTP ${response.status}.`));
+  }
+
+  return (body as { import: InvoiceImportSummary }).import;
+}
+
+async function fetchInvoiceImportExceptions(vendorId: VendorKey, importId: string) {
   const response = await fetch(
     `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}/exceptions`,
   );
@@ -3200,7 +3421,7 @@ async function fetchInvoiceImportExceptions(vendorId: IntegrationId, importId: s
   return body as unknown as InvoiceImportExceptionReview;
 }
 
-async function refreshInvoiceImportMappingsRequest(vendorId: IntegrationId, importId: string) {
+async function refreshInvoiceImportMappingsRequest(vendorId: VendorKey, importId: string) {
   const response = await fetch(
     `/api/invoice-imports/${encodeURIComponent(vendorId)}/${encodeURIComponent(importId)}/refresh-mappings`,
     {
@@ -3340,7 +3561,7 @@ async function fetchStandardInvoiceCandidates() {
   return body as unknown as StandardInvoiceCandidatesResponse;
 }
 
-async function fetchMappingState(integrationId: IntegrationId) {
+async function fetchMappingState(integrationId: VendorKey) {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}`);
   const body = await responseJson(response);
 
@@ -3351,7 +3572,7 @@ async function fetchMappingState(integrationId: IntegrationId) {
   return body as unknown as MappingStateResponse;
 }
 
-async function fetchProductMappingCustomers(integrationId: IntegrationId, vendorProductKey: string) {
+async function fetchProductMappingCustomers(integrationId: VendorKey, vendorProductKey: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/products/${encodeURIComponent(vendorProductKey)}/customers`,
   );
@@ -3364,8 +3585,8 @@ async function fetchProductMappingCustomers(integrationId: IntegrationId, vendor
   return body as unknown as ProductMappingCustomerReview;
 }
 
-async function fetchReconciliationRun(integrationId: IntegrationId) {
-  const response = await fetch(`/api/reconciliation/${encodeURIComponent(integrationId)}/run`, {
+async function fetchReconciliationRun(vendorId: VendorKey) {
+  const response = await fetch(`/api/reconciliation/${encodeURIComponent(vendorId)}/run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3404,7 +3625,7 @@ async function applyAgreementAdditionUpdatesRequest(
   return body as unknown as AgreementAdditionUpdateResponse;
 }
 
-async function postMappingAction(integrationId: IntegrationId, action: 'automap' | 'apply' | 'approve-suggested') {
+async function postMappingAction(integrationId: VendorKey, action: 'automap' | 'apply' | 'approve-suggested') {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/${action}`, {
     method: 'POST',
     headers: {
@@ -3422,7 +3643,7 @@ async function postMappingAction(integrationId: IntegrationId, action: 'automap'
 }
 
 async function saveAccountMapping(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   externalAccountId: string,
   payload: {
     status: MappingStatus;
@@ -3449,7 +3670,7 @@ async function saveAccountMapping(
 }
 
 async function saveProductMapping(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   vendorProductKey: string,
   payload: {
     status: MappingStatus;
@@ -3474,7 +3695,7 @@ async function saveProductMapping(
 }
 
 async function saveProductBundleRequest(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   payload: {
     bundleKey?: string;
     bundleName: string;
@@ -3499,7 +3720,7 @@ async function saveProductBundleRequest(
   return body as unknown as { vendorId: IntegrationId; bundle: ProductBundle };
 }
 
-async function deactivateProductBundleRequest(integrationId: IntegrationId, bundleKey: string) {
+async function deactivateProductBundleRequest(integrationId: VendorKey, bundleKey: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/bundles/${encodeURIComponent(bundleKey)}/deactivate`,
     {
@@ -3518,7 +3739,7 @@ async function deactivateProductBundleRequest(integrationId: IntegrationId, bund
 }
 
 async function saveProductLinkRuleRequest(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   payload: {
     id?: string;
     sourceVendorProductKey: string;
@@ -3543,7 +3764,7 @@ async function saveProductLinkRuleRequest(
   return body as unknown as { vendorId: IntegrationId; rule: ProductLinkRule };
 }
 
-async function setProductLinkRuleActiveRequest(integrationId: IntegrationId, ruleId: string, active: boolean) {
+async function setProductLinkRuleActiveRequest(integrationId: VendorKey, ruleId: string, active: boolean) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}/${active ? 'activate' : 'deactivate'}`,
     {
@@ -3561,7 +3782,7 @@ async function setProductLinkRuleActiveRequest(integrationId: IntegrationId, rul
   }
 }
 
-async function deleteProductLinkRuleRequest(integrationId: IntegrationId, ruleId: string) {
+async function deleteProductLinkRuleRequest(integrationId: VendorKey, ruleId: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/linked-products/${encodeURIComponent(ruleId)}`,
     {
@@ -3579,7 +3800,7 @@ async function deleteProductLinkRuleRequest(integrationId: IntegrationId, ruleId
 }
 
 async function testProductLinkRuleRequest(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   ruleId: string,
   payload: { customerId: string; agreementId?: string },
 ) {
@@ -3602,7 +3823,7 @@ async function testProductLinkRuleRequest(
   return body as unknown as ProductLinkRuleTestResult;
 }
 
-async function searchProductCatalog(integrationId: IntegrationId, query: string) {
+async function searchProductCatalog(integrationId: VendorKey, query: string) {
   const params = new URLSearchParams();
   params.set('query', query);
   params.set('limit', '25');
@@ -3618,7 +3839,7 @@ async function searchProductCatalog(integrationId: IntegrationId, query: string)
   return body as unknown as ProductCatalogSearchResponse;
 }
 
-async function fetchUsageOverrides(integrationId: IntegrationId) {
+async function fetchUsageOverrides(integrationId: VendorKey) {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/overrides`);
   const body = await responseJson(response);
 
@@ -3629,7 +3850,7 @@ async function fetchUsageOverrides(integrationId: IntegrationId) {
   return body as unknown as UsageOverridesResponse;
 }
 
-async function createUsageOverrideRequest(integrationId: IntegrationId, payload: CreateUsageOverridePayload) {
+async function createUsageOverrideRequest(integrationId: VendorKey, payload: CreateUsageOverridePayload) {
   const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/overrides`, {
     method: 'POST',
     headers: {
@@ -3646,7 +3867,7 @@ async function createUsageOverrideRequest(integrationId: IntegrationId, payload:
   return body as unknown as { vendorId: IntegrationId; override: UsageOverride };
 }
 
-async function deactivateUsageOverrideRequest(integrationId: IntegrationId, overrideId: string) {
+async function deactivateUsageOverrideRequest(integrationId: VendorKey, overrideId: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/overrides/${encodeURIComponent(overrideId)}/deactivate`,
     {
@@ -3704,7 +3925,7 @@ async function saveNcentralFilterMappingRequest(payload: Partial<NcentralFilterM
 }
 
 async function createReconciliationAdjustmentRequest(
-  integrationId: IntegrationId,
+  integrationId: VendorKey,
   payload: CreateReconciliationAdjustmentPayload,
 ) {
   const response = await fetch(`/api/reconciliation/${encodeURIComponent(integrationId)}/adjustments`, {
@@ -3739,7 +3960,7 @@ function emptyInvoiceWorkspaceCache(): InvoiceWorkspaceCache {
   };
 }
 
-function invoiceImportCacheKey(vendorId: IntegrationId | '') {
+function invoiceImportCacheKey(vendorId: VendorKey | '') {
   return vendorId || allInvoiceImportsCacheKey;
 }
 
@@ -3804,11 +4025,11 @@ function sortInvoiceImports(imports: InvoiceImportSummary[]) {
   );
 }
 
-function readCachedInvoiceImports(vendorId: IntegrationId | '') {
+function readCachedInvoiceImports(vendorId: VendorKey | '') {
   return readInvoiceWorkspaceCache().invoiceImports[invoiceImportCacheKey(vendorId)] ?? null;
 }
 
-function cacheInvoiceImports(vendorId: IntegrationId | '', response: InvoiceImportsResponse) {
+function cacheInvoiceImports(vendorId: VendorKey | '', response: InvoiceImportsResponse) {
   writeInvoiceWorkspaceCache((cache) => ({
     ...cache,
     invoiceImports: {
@@ -3820,7 +4041,7 @@ function cacheInvoiceImports(vendorId: IntegrationId | '', response: InvoiceImpo
   }));
 }
 
-function invalidateCachedInvoiceImports(vendorId?: IntegrationId | '') {
+function invalidateCachedInvoiceImports(vendorId?: VendorKey | '') {
   writeInvoiceWorkspaceCache((cache) => {
     const nextImports = { ...cache.invoiceImports };
     delete nextImports[allInvoiceImportsCacheKey];
@@ -4194,6 +4415,8 @@ function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[
       devices: line.devices ?? [],
       adjustments: line.adjustments ?? [],
       matchedAgreementAdditions: line.matchedAgreementAdditions ?? [],
+      connectWiseAdditionId: line.connectWiseAdditionId,
+      vendorProductKey: line.vendorProductKey,
       writeAction: line.writeAction,
       proposedLessIncluded: undefined,
       lessIncludedTouched: false,
@@ -4344,11 +4567,12 @@ function shortId(value: string) {
 
 function App() {
   const [view, setView] = useState<View>(() => initialView());
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(() => initialSettingsSection());
   const [issues, setIssues] = useState<ReconcileIssue[]>([]);
   const [expandedClientNames, setExpandedClientNames] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [vendorFilter, setVendorFilter] = useState('All');
-  const [selectedReconciliationIntegrationIds, setSelectedReconciliationIntegrationIds] = useState<IntegrationId[]>([]);
+  const [selectedReconciliationIntegrationIds, setSelectedReconciliationIntegrationIds] = useState<VendorKey[]>([]);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
   const [productFilter, setProductFilter] = useState('All products');
   const [autoPost, setAutoPost] = useState(false);
@@ -4360,16 +4584,14 @@ function App() {
   const [integrationSaveMessage, setIntegrationSaveMessage] = useState<string | null>(null);
   const [savingIntegrationId, setSavingIntegrationId] = useState<IntegrationId | null>(null);
   const [runtimeIntegrations, setRuntimeIntegrations] = useState<RuntimeIntegrationSummary[] | null>(null);
-  const [integrationRuntimeMeta, setIntegrationRuntimeMeta] = useState<{
-    nonSecretStorage: RuntimeIntegrationsResponse['nonSecretStorage'];
-    missingDatabaseSettings: string[];
-    lastLoadedAt?: string;
-  }>({
-    nonSecretStorage: 'not-configured',
-    missingDatabaseSettings: [],
-  });
   const [integrationLoadState, setIntegrationLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [integrationLoadMessage, setIntegrationLoadMessage] = useState<string>('Loading live integration status...');
+  const [vendorDatapoints, setVendorDatapoints] = useState<VendorDatapointRecord[]>([]);
+  const [vendorDatapointLoadState, setVendorDatapointLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [vendorDatapointMessage, setVendorDatapointMessage] = useState('Saved vendor datapoints with reusable column maps.');
+  const [showCreateVendorDatapoint, setShowCreateVendorDatapoint] = useState(false);
+  const [editingVendorDatapointId, setEditingVendorDatapointId] = useState<string | null>(null);
+  const [selectedVendorDatapointId, setSelectedVendorDatapointId] = useState<string | null>(null);
   const [integrationActionMessages, setIntegrationActionMessages] = useState<Partial<Record<IntegrationId, string>>>({});
   const [busyIntegrationAction, setBusyIntegrationAction] = useState<IntegrationActionKey | null>(null);
   const [reportSection, setReportSection] = useState<ReportSection>('raw-sync');
@@ -4404,7 +4626,7 @@ function App() {
   const [customerLicenseReport, setCustomerLicenseReport] = useState<CustomerLicenseReportResponse | null>(null);
   const [customerLicenseLoadState, setCustomerLicenseLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [customerLicenseMessage, setCustomerLicenseMessage] = useState('Load customers, then generate a customer license report.');
-  const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<IntegrationId>(() => initialMappingIntegrationId());
+  const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<VendorKey>(() => initialMappingIntegrationId());
   const [mappingState, setMappingState] = useState<MappingStateResponse | null>(null);
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
   const [ncentralFilters, setNcentralFilters] = useState<NcentralFilter[]>([]);
@@ -4415,12 +4637,12 @@ function App() {
   const [reconciliationLoadState, setReconciliationLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [reconciliationMessage, setReconciliationMessage] = useState('Choose a vendor.');
   const [reconciliationRunMetaByVendor, setReconciliationRunMetaByVendor] =
-    useState<Partial<Record<IntegrationId, ReconciliationRunMeta>>>({});
+    useState<Partial<Record<VendorKey, ReconciliationRunMeta>>>({});
   const [reconciliationProductOptionsByVendor, setReconciliationProductOptionsByVendor] =
-    useState<Partial<Record<IntegrationId, ReconciliationProductOption[]>>>({});
+    useState<Partial<Record<VendorKey, ReconciliationProductOption[]>>>({});
   const [reconciliationComparisonRequested, setReconciliationComparisonRequested] = useState(false);
   const [invoiceImports, setInvoiceImports] = useState<InvoiceImportSummary[]>([]);
-  const [selectedInvoiceIntegrationId, setSelectedInvoiceIntegrationId] = useState<IntegrationId | ''>('');
+  const [selectedInvoiceIntegrationId, setSelectedInvoiceIntegrationId] = useState<VendorKey | ''>('');
   const [invoiceImportLoadState, setInvoiceImportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [invoiceImportMessage, setInvoiceImportMessage] = useState('Upload a vendor invoice CSV.');
   const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
@@ -4467,12 +4689,28 @@ function App() {
     ? reconciliationRunMetaByVendor[selectedReconciliationIntegrationId] ?? null
     : null;
 
-  const navigateToView = (nextView: View, mappingIntegrationId: IntegrationId = selectedMappingIntegrationId) => {
+  const navigateToView = (nextView: View, mappingIntegrationId: VendorKey = selectedMappingIntegrationId) => {
+    const nextSettingsSection =
+      nextView === 'settings'
+        ? view === 'settings'
+          ? settingsSection
+          : defaultSettingsSection
+        : defaultSettingsSection;
+
     setView(nextView);
-    updateRouteForView(nextView, mappingIntegrationId);
+    if (nextView === 'settings') {
+      setSettingsSection(nextSettingsSection);
+    }
+    updateRouteForView(nextView, mappingIntegrationId, nextSettingsSection);
   };
 
-  const selectMappingIntegration = (integrationId: IntegrationId) => {
+  const navigateToSettingsSection = (section: SettingsSection) => {
+    setSettingsSection(section);
+    setView('settings');
+    updateRouteForView('settings', selectedMappingIntegrationId, section);
+  };
+
+  const selectMappingIntegration = (integrationId: VendorKey) => {
     setSelectedMappingIntegrationId(integrationId);
     setMappingState(null);
     setUsageOverrides([]);
@@ -4482,28 +4720,126 @@ function App() {
   const refreshRuntimeIntegrations = async () => {
     setIntegrationLoadState('loading');
     setIntegrationLoadMessage('Refreshing live integration status...');
+    setVendorDatapointLoadState('loading');
+    setVendorDatapointMessage('Loading saved vendor datapoints...');
 
     try {
       const response = await fetchRuntimeIntegrations();
       setRuntimeIntegrations(response.integrations);
-      setIntegrationRuntimeMeta({
-        nonSecretStorage: response.nonSecretStorage,
-        missingDatabaseSettings: response.missingDatabaseSettings,
-        lastLoadedAt: new Date().toISOString(),
-      });
       setIntegrationLoadState('ready');
       setIntegrationLoadMessage('Live integration status loaded.');
+
+      try {
+        const datapoints = await fetchVendorDatapoints();
+        setVendorDatapoints(datapoints);
+        setVendorDatapointLoadState('ready');
+        setVendorDatapointMessage(
+          datapoints.length > 0
+            ? `${datapoints.length.toLocaleString()} saved vendor datapoint${datapoints.length === 1 ? '' : 's'} ready to import.`
+            : 'Create a vendor datapoint to save column maps for repeat file imports.',
+        );
+      } catch (datapointError) {
+        setVendorDatapoints([]);
+        setVendorDatapointLoadState('failed');
+        const datapointMessage =
+          datapointError instanceof Error ? datapointError.message : 'Unable to load vendor datapoints.';
+        setVendorDatapointMessage(datapointMessage);
+        if (datapointMessage.includes('HTTP 404')) {
+          setIntegrationLoadMessage(
+            'Live integration status loaded. Restart the Functions host after `npm run backend:build` to enable vendor datapoints.',
+          );
+        }
+      }
+
       return response;
     } catch (error) {
       setRuntimeIntegrations(null);
-      setIntegrationRuntimeMeta({
-        nonSecretStorage: 'not-configured',
-        missingDatabaseSettings: [],
-      });
+      setVendorDatapoints([]);
       setIntegrationLoadState('failed');
       setIntegrationLoadMessage(error instanceof Error ? error.message : 'Unable to load live integration status.');
+      setVendorDatapointLoadState('failed');
+      setVendorDatapointMessage(error instanceof Error ? error.message : 'Unable to load vendor datapoints.');
       return null;
     }
+  };
+
+  const createVendorDatapoint = async (payload: CreateVendorDatapointInput) => {
+    const datapoint = await createVendorDatapointRequest(payload);
+    setVendorDatapoints((current) => [...current, datapoint].sort((left, right) => left.displayName.localeCompare(right.displayName)));
+    setSelectedVendorDatapointId(datapoint.id);
+    setShowCreateVendorDatapoint(false);
+    setVendorDatapointMessage(`Created ${datapoint.displayName}. Upload a file to save its column map.`);
+    return datapoint;
+  };
+
+  const importVendorDatapoint = async (
+    datapoint: VendorDatapointRecord,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    persistColumnMap: boolean,
+  ) => {
+    const table = await readImportTableFile(file);
+    const response = await importVendorDatapointRequest(datapoint.id, {
+      fileName: file.name,
+      content: table.content,
+      columnMap,
+      persistColumnMap,
+    });
+    setVendorDatapoints((current) =>
+      current.map((item) => (item.id === response.datapoint.id ? response.datapoint : item)),
+    );
+    const mappingVendorId = datapointMappingVendorId(response.datapoint);
+    setSelectedInvoiceIntegrationId(mappingVendorId);
+    const importsResponse = await fetchInvoiceImports(mappingVendorId);
+    const nextImportsResponse = {
+      imports: sortInvoiceImports(importsResponse.imports),
+    };
+    invalidateCachedInvoiceImports(mappingVendorId);
+    cacheInvoiceImports(mappingVendorId, nextImportsResponse);
+    setInvoiceImports(nextImportsResponse.imports);
+    setInvoiceImportLoadState('ready');
+    setInvoiceImportMessage(
+      `Imported ${response.import.rowCount.toLocaleString()} rows for ${response.datapoint.displayName} with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+    );
+    return response;
+  };
+
+  const saveVendorDatapointMapping = async (
+    datapoint: VendorDatapointRecord,
+    columnMap: InvoiceTableColumnMap,
+    knownHeaders?: string[],
+  ) => {
+    const updated = await updateVendorDatapointRequest(datapoint.id, {
+      columnMap,
+      knownHeaders: knownHeaders ?? mergeKnownHeaders(datapoint.knownHeaders, mappedColumnHeaders(columnMap)),
+    });
+    setVendorDatapoints((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)).sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    );
+    setVendorDatapointMessage(`Saved column map for ${updated.displayName}.`);
+    return updated;
+  };
+
+  const updateVendorDatapoint = async (datapointId: string, payload: UpdateVendorDatapointInput) => {
+    const updated = await updateVendorDatapointRequest(datapointId, payload);
+    setVendorDatapoints((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)).sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    );
+    setEditingVendorDatapointId(null);
+    setVendorDatapointMessage(`Updated ${updated.displayName}.`);
+    return updated;
+  };
+
+  const deleteDatapointImport = async (datapoint: VendorDatapointRecord, invoiceImport: InvoiceImportSummary) => {
+    const mappingVendorId = datapointMappingVendorId(datapoint);
+    await deleteInvoiceImportRequest(invoiceImport.vendorId, invoiceImport.id);
+    invalidateCachedInvoiceImports(mappingVendorId);
+    const importsResponse = await fetchInvoiceImports(mappingVendorId, datapoint.id);
+    cacheInvoiceImports(mappingVendorId, { imports: sortInvoiceImports(importsResponse.imports) });
+    if (selectedInvoiceIntegrationId === mappingVendorId) {
+      setInvoiceImports(importsResponse.imports);
+    }
+    setVendorDatapointMessage(`Deleted import ${invoiceImport.fileName} for ${datapoint.displayName}.`);
   };
 
   const loadRawSyncRuns = async (integrationId: IntegrationId, dataset: RawSyncDataset = 'users') => {
@@ -4709,7 +5045,7 @@ function App() {
   };
 
   const loadInvoiceImports = async (
-    vendorId: IntegrationId | '' = selectedInvoiceIntegrationId,
+    vendorId: VendorKey | '' = selectedInvoiceIntegrationId,
     options: InvoiceWorkspaceLoadOptions = {},
   ) => {
     const cached = options.forceRefresh ? null : readCachedInvoiceImports(vendorId);
@@ -4720,7 +5056,7 @@ function App() {
         cached.imports.length > 0
           ? `Loaded ${cached.imports.length.toLocaleString()} saved vendor invoice imports.`
           : vendorId
-            ? `No saved ${integrationName(vendorId)} invoices were found.`
+            ? `No ${vendorDisplayName(vendorId, vendorDatapoints)} invoices were found.`
             : 'No saved vendor invoice imports were found.',
       );
       return cached;
@@ -4741,7 +5077,7 @@ function App() {
         nextResponse.imports.length > 0
           ? `Loaded ${nextResponse.imports.length.toLocaleString()} vendor invoice imports.`
           : vendorId
-            ? `No ${integrationName(vendorId)} invoices have been imported yet.`
+            ? `No ${vendorDisplayName(vendorId, vendorDatapoints)} invoices have been imported yet.`
             : 'No vendor invoices have been imported yet.',
       );
       return nextResponse;
@@ -4951,12 +5287,13 @@ function App() {
       cacheInvoiceImports(selectedInvoiceIntegrationId, nextImportsResponse);
       setInvoiceImports(nextImportsResponse.imports);
       setInvoiceImportLoadState('ready');
-      const vendorName = response.detectedVendor?.vendorName ?? integrationName(response.import.vendorId);
+      const vendorName = response.detectedVendor?.vendorName ?? vendorDisplayName(response.import.vendorId, vendorDatapoints);
       setInvoiceImportMessage(
         `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${vendorName} invoice rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(response.import.vendorId) &&
         selectedReconciliationIntegrationSet.has(response.import.vendorId) &&
         reconciliationVendorIds.includes(response.import.vendorId)
       ) {
@@ -4995,7 +5332,7 @@ function App() {
     try {
       const [review, mappingResponse] = await Promise.all([
         fetchInvoiceImportExceptions(invoiceImport.vendorId, invoiceImport.id),
-        hasMappingWorkspace(invoiceImport.vendorId)
+        hasMappingWorkspaceForVendor(invoiceImport.vendorId)
           ? fetchMappingState(invoiceImport.vendorId)
           : Promise.resolve({ customerOptions: [] } as unknown as MappingStateResponse),
       ]);
@@ -5154,7 +5491,7 @@ function App() {
     };
   };
 
-  const loadMappings = async (integrationId: IntegrationId) => {
+  const loadMappings = async (integrationId: VendorKey) => {
     setMappingLoadState('loading');
     setMappingMessage('Loading mapping state...');
 
@@ -5174,7 +5511,7 @@ function App() {
     }
   };
 
-  const loadUsageOverrides = async (integrationId: IntegrationId) => {
+  const loadUsageOverrides = async (integrationId: VendorKey) => {
     try {
       const response = await fetchUsageOverrides(integrationId);
       setUsageOverrides(response.overrides);
@@ -5203,7 +5540,7 @@ function App() {
     }
   };
 
-  const refreshMappingWorkspace = async (integrationId: IntegrationId) => {
+  const refreshMappingWorkspace = async (integrationId: VendorKey) => {
     const state = await loadMappings(integrationId);
     await loadUsageOverrides(integrationId);
     if (integrationId === 'ncentral') {
@@ -5215,24 +5552,24 @@ function App() {
     return state;
   };
 
-  const loadVendorReconciliation = async (integrationId: IntegrationId) => {
-    const sourceName = integrationName(integrationId);
+  const loadVendorReconciliation = async (vendorId: VendorKey) => {
+    const sourceName = vendorDisplayName(vendorId, vendorDatapoints);
     setReconciliationLoadState('loading');
     setReconciliationMessage(`Comparing latest ${sourceName} sync against ConnectWise additions...`);
 
     try {
-      const run = await fetchReconciliationRun(integrationId);
+      const run = await fetchReconciliationRun(vendorId);
       const nextIssues = reconcileIssuesFromRun(run);
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
         [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
       setIssues((currentIssues) => [
-        ...currentIssues.filter((issue) => issue.vendorId !== integrationId),
+        ...currentIssues.filter((issue) => issue.vendorId !== vendorId),
         ...nextIssues,
       ]);
       setReconciliationRunMetaByVendor((current) => ({
         ...current,
-        [integrationId]: {
+        [vendorId]: {
         syncRunId: run.syncRunId,
         generatedAt: run.generatedAt,
         snapshotCount: run.snapshotCount,
@@ -5243,28 +5580,30 @@ function App() {
       }));
       setReconciliationProductOptionsByVendor((current) => ({
         ...current,
-        [integrationId]: run.productOptions ?? [],
+        [vendorId]: run.productOptions ?? [],
       }));
       setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
       setReconciliationLoadState('ready');
       setReconciliationMessage(
         nextReviewIssues.length > 0
           ? `${nextReviewIssues.length.toLocaleString()} discrepancies ready for review.`
-          : run.syncRunId
-            ? `No ${sourceName} discrepancies found in the latest sync.`
-            : `No completed ${sourceName} sync is available yet.`,
+          : run.syncRunId && run.snapshotCount === 0
+            ? `Latest ${sourceName} sync has no customer-mapped snapshots. Approve account mappings on ${sourceName}, refresh the device import, then compare again.`
+            : run.syncRunId
+              ? `No ${sourceName} discrepancies found in the latest sync.`
+              : `No completed ${sourceName} sync is available yet.`,
       );
       return run;
     } catch (error) {
-      setIssues((currentIssues) => currentIssues.filter((issue) => issue.vendorId !== integrationId));
+      setIssues((currentIssues) => currentIssues.filter((issue) => issue.vendorId !== vendorId));
       setReconciliationRunMetaByVendor((current) => {
         const next = { ...current };
-        delete next[integrationId];
+        delete next[vendorId];
         return next;
       });
       setReconciliationProductOptionsByVendor((current) => {
         const next = { ...current };
-        delete next[integrationId];
+        delete next[vendorId];
         return next;
       });
       setExpandedClientNames([]);
@@ -5274,9 +5613,9 @@ function App() {
     }
   };
 
-  const loadSelectedVendorReconciliations = async (integrationIds: IntegrationId[]) => {
-    const uniqueIntegrationIds = [...new Set(integrationIds)];
-    if (uniqueIntegrationIds.length === 0) {
+  const loadSelectedVendorReconciliations = async (vendorIds: VendorKey[]) => {
+    const uniqueVendorIds = [...new Set(vendorIds)];
+    if (uniqueVendorIds.length === 0) {
       setIssues([]);
       setReconciliationRunMetaByVendor({});
       setReconciliationProductOptionsByVendor({});
@@ -5290,11 +5629,11 @@ function App() {
     setReconciliationComparisonRequested(true);
     setReconciliationLoadState('loading');
     setReconciliationMessage(
-      `Comparing ${uniqueIntegrationIds.map(integrationName).join(', ')} against ConnectWise additions...`,
+      `Comparing ${uniqueVendorIds.map((vendorId) => vendorDisplayName(vendorId, vendorDatapoints)).join(', ')} against ConnectWise additions...`,
     );
 
     try {
-      const runs = await Promise.all(uniqueIntegrationIds.map((integrationId) => fetchReconciliationRun(integrationId)));
+      const runs = await Promise.all(uniqueVendorIds.map((vendorId) => fetchReconciliationRun(vendorId)));
       const nextIssues = runs.flatMap(reconcileIssuesFromRun);
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
@@ -5313,11 +5652,11 @@ function App() {
               productCheckCount: run.lines.length,
             },
           ]),
-        ) as Partial<Record<IntegrationId, ReconciliationRunMeta>>,
+        ) as Partial<Record<VendorKey, ReconciliationRunMeta>>,
       );
       setReconciliationProductOptionsByVendor(
         Object.fromEntries(runs.map((run) => [run.vendorId, run.productOptions ?? []])) as Partial<
-          Record<IntegrationId, ReconciliationProductOption[]>
+          Record<VendorKey, ReconciliationProductOption[]>
         >,
       );
       setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
@@ -5325,7 +5664,11 @@ function App() {
       setReconciliationMessage(
         nextReviewIssues.length > 0
           ? `${nextReviewIssues.length.toLocaleString()} discrepancies ready for review.`
-          : 'No selected vendor discrepancies found in the latest syncs.',
+          : runs.some((run) => run.syncRunId && run.snapshotCount === 0)
+            ? 'Latest sync has no customer-mapped snapshots. Approve account mappings, refresh the device import, then compare again.'
+            : runs.some((run) => run.syncRunId)
+              ? 'No selected vendor discrepancies found in the latest syncs.'
+              : 'No completed sync is available for the selected vendors yet.',
       );
       return runs;
     } catch (error) {
@@ -5359,6 +5702,7 @@ function App() {
       const nextMappingIntegrationId = mappingIntegrationIdFromLocation(window.location);
 
       setView(nextView);
+      setSettingsSection(settingsSectionFromPath(window.location.pathname) ?? defaultSettingsSection);
       if (nextMappingIntegrationId) {
         setSelectedMappingIntegrationId(nextMappingIntegrationId);
         setMappingState(null);
@@ -5477,6 +5821,22 @@ function App() {
     () => sortIntegrationsForDisplay(integrations.filter(isEnabledReconciliationIntegration)),
     [integrations],
   );
+  const enabledReconciliationVendors = useMemo(
+    (): ReconciliationVendorOption[] =>
+      [
+        ...enabledReconciliationIntegrations.map((integration) => ({
+          id: integration.id,
+          name: integration.name,
+        })),
+        ...vendorDatapoints
+          .filter(isEnabledReconciliationDatapoint)
+          .map((datapoint) => ({
+            id: datapoint.vendorId,
+            name: datapoint.displayName,
+          })),
+      ].sort((left, right) => left.name.localeCompare(right.name)),
+    [enabledReconciliationIntegrations, vendorDatapoints],
+  );
   const invoiceImportIntegrations = useMemo(
     () =>
       sortIntegrationsForDisplay(
@@ -5503,7 +5863,9 @@ function App() {
   const selectedReconciliationIntegration = integrations.find((integration) => integration.id === selectedReconciliationIntegrationId);
   const connectWiseIntegration = integrations.find((integration) => integration.id === 'connectwise');
   const vendorDataSummary = formatSyncSummary(
-    selectedReconciliationIntegration?.lastSync,
+    reconciliationRunMeta?.generatedAt
+      ? formatDateTime(reconciliationRunMeta.generatedAt)
+      : selectedReconciliationIntegration?.lastSync,
     reconciliationRunMeta?.snapshotCount,
     'snapshots',
   );
@@ -5535,8 +5897,13 @@ function App() {
   }, [clientGroups]);
 
   useEffect(() => {
-    const enabledReconciliationIds = new Set(enabledReconciliationIntegrations.map((integration) => integration.id));
-    const enabledVendorNames = new Set(['All', ...enabledReconciliationIntegrations.map((integration) => integration.name)]);
+    const enabledReconciliationIds = new Set(enabledReconciliationVendors.map((vendor) => vendor.id));
+    const selectedVendorNames = new Set([
+      'All',
+      ...enabledReconciliationVendors
+        .filter((vendor) => selectedReconciliationIntegrationIds.includes(vendor.id))
+        .map((vendor) => vendor.name),
+    ]);
 
     const nextSelectedIds = selectedReconciliationIntegrationIds.filter((integrationId) =>
       enabledReconciliationIds.has(integrationId),
@@ -5551,7 +5918,7 @@ function App() {
       setExpandedClientNames([]);
       setReconciliationLoadState('idle');
       setReconciliationMessage(
-        enabledReconciliationIntegrations.length > 0
+        enabledReconciliationVendors.length > 0
           ? nextSelectedIds.length > 0
             ? 'Click Compare to load selected vendors.'
             : 'Choose one or more enabled vendors.'
@@ -5559,11 +5926,11 @@ function App() {
       );
     }
 
-    if (!enabledVendorNames.has(vendorFilter)) {
+    if (!selectedVendorNames.has(vendorFilter)) {
       setVendorFilter('All');
     }
   }, [
-    enabledReconciliationIntegrations,
+    enabledReconciliationVendors,
     selectedReconciliationIntegrationIds,
     vendorFilter,
   ]);
@@ -5666,8 +6033,8 @@ function App() {
     try {
       const sourceName =
         selectedReconciliationIntegrationIds.length === 1
-          ? integrationName(selectedReconciliationIntegrationIds[0])
-          : selectedReconciliationIntegrationIds.map(integrationName).join(' + ');
+          ? vendorDisplayName(selectedReconciliationIntegrationIds[0], vendorDatapoints)
+          : selectedReconciliationIntegrationIds.map((vendorId) => vendorDisplayName(vendorId, vendorDatapoints)).join(' + ');
       const agreementIds = [...new Set(issues.map((issue) => issue.agreementId))];
       const nextCache: Record<string, AgreementAddition[]> = {};
       const additionEntries = await Promise.all(
@@ -5776,7 +6143,7 @@ function App() {
   };
 
   const importMappedInvoiceTable = async (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     file: File,
     columnMap: InvoiceTableColumnMap,
     sourceType: IntegrationDataSourceType,
@@ -5788,7 +6155,7 @@ function App() {
     setImportingInvoice(true);
     setInvoiceImportLoadState('loading');
     setInvoiceImportMessage(
-      `${importMode === 'overwrite' ? 'Overwriting' : 'Importing'} ${file.name} for ${integrationName(storageIntegrationId)}...`,
+      `${importMode === 'overwrite' ? 'Overwriting' : 'Importing'} ${file.name} for ${vendorDisplayName(storageIntegrationId, vendorDatapoints)}...`,
     );
     setInvoiceExceptionReview(null);
     setInvoiceExceptionLoadState('idle');
@@ -5814,10 +6181,11 @@ function App() {
       setInvoiceImports(nextImportsResponse.imports);
       setInvoiceImportLoadState('ready');
       setInvoiceImportMessage(
-        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${integrationName(storageIntegrationId)} table rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
+        `${importMode === 'overwrite' ? 'Overwrote' : 'Imported'} ${response.import.rowCount.toLocaleString()} ${vendorDisplayName(storageIntegrationId, vendorDatapoints)} table rows with ${response.import.exceptionRows.toLocaleString()} exceptions.`,
       );
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(storageIntegrationId) &&
         selectedReconciliationIntegrationSet.has(storageIntegrationId) &&
         reconciliationVendorIds.includes(storageIntegrationId)
       ) {
@@ -5947,6 +6315,7 @@ function App() {
       if (
         !queuedSync &&
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6056,7 +6425,7 @@ function App() {
   };
 
   const saveProductTargets = async (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     vendorProductKey: string,
     targetProducts: ProductMappingTarget[],
   ) => {
@@ -6075,6 +6444,7 @@ function App() {
       setMappingMessage(`Saved ${targetProducts.length} product target${targetProducts.length === 1 ? '' : 's'} for ${vendorProductKey}.`);
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6089,7 +6459,7 @@ function App() {
   };
 
   const saveProductBundle = async (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     payload: {
       bundleKey?: string;
       bundleName: string;
@@ -6107,6 +6477,7 @@ function App() {
       setMappingMessage(`Saved bundle mapping for ${payload.bundleName}.`);
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6122,7 +6493,7 @@ function App() {
     }
   };
 
-  const deactivateProductBundle = async (integrationId: IntegrationId, bundleKey: string) => {
+  const deactivateProductBundle = async (integrationId: VendorKey, bundleKey: string) => {
     const actionKey = `bundle:${bundleKey}`;
     setBusyMappingAction(actionKey);
     try {
@@ -6131,6 +6502,7 @@ function App() {
       setMappingMessage('Product bundle disabled.');
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6145,7 +6517,7 @@ function App() {
   };
 
   const saveProductLinkRule = async (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     payload: {
       id?: string;
       sourceVendorProductKey: string;
@@ -6163,6 +6535,7 @@ function App() {
       setMappingMessage(`Saved linked count rule for ${payload.sourceVendorProductKey}.`);
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6178,7 +6551,7 @@ function App() {
     }
   };
 
-  const setProductLinkRuleActive = async (integrationId: IntegrationId, ruleId: string, active: boolean) => {
+  const setProductLinkRuleActive = async (integrationId: VendorKey, ruleId: string, active: boolean) => {
     const actionKey = `link:${ruleId}`;
     setBusyMappingAction(actionKey);
     try {
@@ -6187,6 +6560,7 @@ function App() {
       setMappingMessage(active ? 'Linked count rule re-enabled.' : 'Linked count rule disabled.');
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6200,7 +6574,7 @@ function App() {
     }
   };
 
-  const deleteProductLinkRule = async (integrationId: IntegrationId, ruleId: string) => {
+  const deleteProductLinkRule = async (integrationId: VendorKey, ruleId: string) => {
     const actionKey = `link-delete:${ruleId}`;
     setBusyMappingAction(actionKey);
     try {
@@ -6209,6 +6583,7 @@ function App() {
       setMappingMessage('Linked count rule deleted.');
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6239,7 +6614,7 @@ function App() {
     }
   };
 
-  const saveUsageOverride = async (integrationId: IntegrationId, payload: CreateUsageOverridePayload) => {
+  const saveUsageOverride = async (integrationId: VendorKey, payload: CreateUsageOverridePayload) => {
     setBusyMappingAction('override:create');
     try {
       await createUsageOverrideRequest(integrationId, payload);
@@ -6247,6 +6622,7 @@ function App() {
       setMappingMessage('Saved usage override.');
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6262,7 +6638,7 @@ function App() {
     }
   };
 
-  const deactivateUsageOverride = async (integrationId: IntegrationId, overrideId: string) => {
+  const deactivateUsageOverride = async (integrationId: VendorKey, overrideId: string) => {
     const actionKey = `override:${overrideId}`;
     setBusyMappingAction(actionKey);
     try {
@@ -6271,6 +6647,7 @@ function App() {
       setMappingMessage('Usage override removed.');
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
         selectedReconciliationIntegrationSet.has(integrationId) &&
         reconciliationVendorIds.includes(integrationId)
       ) {
@@ -6446,37 +6823,55 @@ function App() {
     }
   };
 
-  const remapReconciliationDevice = async (
+  const remapReconciliationDevices = async (
     issue: ReconcileIssue,
-    device: ReconciliationDevice,
-    targetVendorProductKey: string,
+    remaps: Array<{ device: ReconciliationDevice; targetVendorProductKey: string }>,
   ) => {
-    const sourceVendorProductKey = device.vendorProductKey;
-    if (!sourceVendorProductKey) {
-      setManualOverrideMessage('This device does not have a source product key to remap.');
-      return false;
-    }
-
-    const dimensionFilters = deviceIdentityFilter(device);
-    if (Object.keys(dimensionFilters).length === 0) {
-      setManualOverrideMessage('This device needs a hostname, account ID, or other stable identifier before it can be remapped.');
+    const pending = remaps.filter((entry) => entry.targetVendorProductKey.trim().length > 0);
+    if (pending.length === 0) {
+      setManualOverrideMessage('Select a new product for at least one device before saving.');
       return false;
     }
 
     setSavingManualOverride(true);
-    setManualOverrideMessage('Saving device remap...');
+    setManualOverrideMessage(
+      pending.length === 1 ? 'Saving device remap...' : `Saving ${pending.length.toLocaleString()} device remaps...`,
+    );
 
     try {
-      await createUsageOverrideRequest(issue.vendorId, {
-        customerId: issue.clientId,
-        agreementId: issue.agreementId,
-        sourceVendorProductKey,
-        targetVendorProductKey,
-        dimensionFilters,
-        reason: `Remapped from ${device.productName} in reconciliation review.`,
-      });
-      setManualOverrideMessage('Device remap saved.');
-      await loadVendorReconciliation(issue.vendorId);
+      const applied: Array<{ device: ReconciliationDevice; targetVendorProductKey: string }> = [];
+      const productOptions = reconciliationProductOptionsByVendor[issue.vendorId] ?? [];
+
+      for (const { device, targetVendorProductKey } of pending) {
+        const sourceVendorProductKey = device.vendorProductKey;
+        if (!sourceVendorProductKey) {
+          throw new Error(`${deviceDisplayName(device)} does not have a source product key to remap.`);
+        }
+
+        const dimensionFilters = deviceIdentityFilter(device);
+        if (Object.keys(dimensionFilters).length === 0) {
+          throw new Error(
+            `${deviceDisplayName(device)} needs a hostname, account ID, or other stable identifier before it can be remapped.`,
+          );
+        }
+
+        await createUsageOverrideRequest(issue.vendorId, {
+          customerId: issue.clientId,
+          agreementId: issue.agreementId,
+          sourceVendorProductKey,
+          targetVendorProductKey,
+          dimensionFilters,
+          reason: `Remapped from ${device.productName} in reconciliation review.`,
+        });
+        applied.push({ device, targetVendorProductKey });
+      }
+
+      setManualOverrideMessage(
+        applied.length === 1
+          ? 'Device remap saved.'
+          : `${applied.length.toLocaleString()} device remaps saved.`,
+      );
+      setIssues((currentIssues) => applyDeviceRemapsToIssues(currentIssues, issue, applied, productOptions));
       setManualOverrideIssue(null);
       return true;
     } catch (error) {
@@ -6508,7 +6903,7 @@ function App() {
                 <a
                   aria-current={view === item.id ? 'page' : undefined}
                   className={view === item.id ? 'nav-item active' : 'nav-item'}
-                  href={urlForView(item.id)}
+                  href={urlForView(item.id, selectedMappingIntegrationId, settingsSection)}
                   onClick={(event) => {
                     event.preventDefault();
                     navigateToView(item.id);
@@ -6545,7 +6940,7 @@ function App() {
               <a
                 aria-current={view === item.id ? 'page' : undefined}
                 className={view === item.id ? 'nav-item active' : 'nav-item'}
-                href={urlForView(item.id)}
+                href={urlForView(item.id, selectedMappingIntegrationId, settingsSection)}
                 key={item.id}
                 onClick={(event) => {
                   event.preventDefault();
@@ -6564,7 +6959,7 @@ function App() {
         <header className="topbar">
           <div className="title-block">
             <span className="section-kicker">Vendor API, invoice tables, and ConnectWise additions</span>
-            <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view)}</h1>
+            <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view, settingsSection)}</h1>
           </div>
           <div className="top-actions">
             {view === 'reconcile' ? (
@@ -6641,7 +7036,7 @@ function App() {
               pendingCount={pendingCount}
               query={query}
               reconciliationLoadState={reconciliationLoadState}
-              reconciliationIntegrations={enabledReconciliationIntegrations}
+              reconciliationIntegrations={enabledReconciliationVendors}
               reconciliationMessage={reconciliationMessage}
               selectedReconciliationIntegrationIds={selectedReconciliationIntegrationIds}
               setExpandedClientNames={setExpandedClientNames}
@@ -6691,7 +7086,6 @@ function App() {
               invoiceReviewMessage={invoiceExceptionMessage}
               loadMessage={integrationLoadMessage}
               loadState={integrationLoadState}
-              runtimeMeta={integrationRuntimeMeta}
               integrations={integrations}
               onConfigure={openIntegrationModal}
               onInvoiceAccountMappingSave={saveInvoiceExceptionAccountMapping}
@@ -6718,8 +7112,34 @@ function App() {
               setInvoiceImportMode={setInvoiceImportMode}
               onSync={syncIntegration}
               onTest={testIntegration}
+              vendorDatapoints={vendorDatapoints}
+              vendorDatapointLoadState={vendorDatapointLoadState}
+              vendorDatapointMessage={vendorDatapointMessage}
+              selectedVendorDatapointId={selectedVendorDatapointId}
+              onCreateVendorDatapoint={() => setShowCreateVendorDatapoint(true)}
+              onEditVendorDatapoint={setEditingVendorDatapointId}
+              onSelectVendorDatapoint={setSelectedVendorDatapointId}
+              onImportVendorDatapoint={importVendorDatapoint}
+              onSaveVendorDatapointMapping={saveVendorDatapointMapping}
+              onDeleteDatapointImport={deleteDatapointImport}
+              onUpdateVendorDatapoint={updateVendorDatapoint}
             />
           )}
+          {showCreateVendorDatapoint ? (
+            <CreateVendorDatapointModal
+              integrations={integrations}
+              onClose={() => setShowCreateVendorDatapoint(false)}
+              onCreate={createVendorDatapoint}
+            />
+          ) : null}
+          {editingVendorDatapointId ? (
+            <EditVendorDatapointModal
+              datapoint={vendorDatapoints.find((item) => item.id === editingVendorDatapointId)}
+              integrations={integrations}
+              onClose={() => setEditingVendorDatapointId(null)}
+              onUpdate={updateVendorDatapoint}
+            />
+          ) : null}
           {view === 'mappings' && (
             <MappingsView
               busyAction={busyMappingAction}
@@ -6749,6 +7169,7 @@ function App() {
               onUsageOverrideDeactivate={deactivateUsageOverride}
               selectedIntegrationId={selectedMappingIntegrationId}
               usageOverrides={usageOverrides}
+              vendorDatapoints={vendorDatapoints}
             />
           )}
           {view === 'reports' && reportSection === 'raw-sync' && (
@@ -6865,6 +7286,7 @@ function App() {
                   reviewMessage={invoiceExceptionMessage}
                   selectedVendorId={selectedInvoiceIntegrationId}
                   setImportMode={setInvoiceImportMode}
+                  vendorDatapoints={vendorDatapoints}
                 />
               }
               monthlyCandidates={monthlyInvoiceCandidates}
@@ -6914,8 +7336,13 @@ function App() {
               visibleRules={visibleRules}
             />
           )}
-          {view === 'audit' && <AuditView />}
-          {view === 'settings' && <SettingsView />}
+          {view === 'settings' && (
+            <SettingsPageView
+              onNavigateToIntegrations={() => navigateToView('integrations')}
+              onSectionChange={navigateToSettingsSection}
+              section={settingsSection}
+            />
+          )}
         </main>
       </div>
 
@@ -6970,7 +7397,7 @@ function App() {
           }}
           onLessCountSave={queueLessIncludedUpdate}
           onManualTotalSave={queueManualTotalUpdate}
-          onDeviceRemap={remapReconciliationDevice}
+          onDeviceRemapsSave={remapReconciliationDevices}
           productOptions={reconciliationProductOptionsByVendor[manualOverrideIssue.vendorId] ?? []}
           saving={savingManualOverride}
         />
@@ -6985,7 +7412,7 @@ function App() {
   );
 }
 
-function pageTitle(view: View) {
+function pageTitle(view: View, settingsSection: SettingsSection = defaultSettingsSection) {
   switch (view) {
     case 'discrepancies':
       return 'Discrepancy dashboard';
@@ -6999,10 +7426,14 @@ function pageTitle(view: View) {
       return 'Invoices';
     case 'agreements':
       return 'Agreement workspace';
-    case 'audit':
-      return 'Audit history';
     case 'settings':
-      return 'Settings';
+      if (settingsSection === 'audit-logs') {
+        return 'Audit logs';
+      }
+      if (settingsSection === 'integrations') {
+        return 'Integrations settings';
+      }
+      return 'User management';
     default:
       return 'Reconciliation command center';
   }
@@ -7393,6 +7824,60 @@ type ManagedUserDraft = {
   status: ManagedUserStatus;
 };
 
+function SettingsPageView(props: {
+  section: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
+  onNavigateToIntegrations: () => void;
+}) {
+  const { section, onSectionChange, onNavigateToIntegrations } = props;
+
+  return (
+    <section className="settings-workspace" aria-label="Application settings">
+      <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+        {settingsSections.map((item) => (
+          <button
+            aria-selected={section === item.id}
+            className={section === item.id ? 'active' : ''}
+            key={item.id}
+            onClick={() => onSectionChange(item.id)}
+            role="tab"
+            title={item.description}
+            type="button"
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {section === 'user-management' ? <SettingsView /> : null}
+      {section === 'integrations' ? <SettingsIntegrationsStub onOpenIntegrations={onNavigateToIntegrations} /> : null}
+      {section === 'audit-logs' ? <AuditView /> : null}
+    </section>
+  );
+}
+
+function SettingsIntegrationsStub(props: { onOpenIntegrations: () => void }) {
+  const { onOpenIntegrations } = props;
+
+  return (
+    <section className="settings-integrations-stub" aria-label="Integrations settings placeholder">
+      <div className="settings-integrations-notice">
+        <Plug size={18} />
+        <div>
+          <strong>Integrations settings</strong>
+          <p>
+            Integration configuration will move here soon. Continue managing integrations from the Integrations page for
+            now.
+          </p>
+        </div>
+        <button className="button secondary compact" onClick={onOpenIntegrations} type="button">
+          Open Integrations
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function SettingsView() {
   const [users, setUsers] = useState<ManagedAppUser[]>([]);
   const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Analyst']);
@@ -7743,13 +8228,13 @@ function ReconcileView(props: {
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
   onCompareReconciliation: () => Promise<ReconciliationRunResponse[] | null>;
-  onReconciliationSourceToggle: (integrationId: IntegrationId) => void;
+  onReconciliationSourceToggle: (vendorId: VendorKey) => void;
   pendingCount: number;
   query: string;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
-  reconciliationIntegrations: Integration[];
+  reconciliationIntegrations: ReconciliationVendorOption[];
   reconciliationMessage: string;
-  selectedReconciliationIntegrationIds: IntegrationId[];
+  selectedReconciliationIntegrationIds: VendorKey[];
   setExpandedClientNames: (value: string[] | ((currentNames: string[]) => string[])) => void;
   setNeedsReviewOnly: (value: boolean) => void;
   setQuery: (value: string) => void;
@@ -7803,12 +8288,15 @@ function ReconcileView(props: {
     selectedReconciliationIntegrationIds.length === 0
       ? 'Choose vendors'
       : selectedReconciliationIntegrationIds.length === 1
-        ? integrationName(selectedReconciliationIntegrationIds[0])
+        ? (reconciliationIntegrations.find((vendor) => vendor.id === selectedReconciliationIntegrationIds[0])?.name ??
+          selectedReconciliationIntegrationIds[0])
         : `${selectedReconciliationIntegrationIds.length} vendors`;
-  const reconciliationVendors = useMemo(
-    () => ['All', ...reconciliationIntegrations.map((integration) => integration.name)],
-    [reconciliationIntegrations],
-  );
+  const reconciliationVendors = useMemo(() => {
+    const selectedVendors = reconciliationIntegrations.filter((vendor) =>
+      selectedReconciliationIntegrationIds.includes(vendor.id),
+    );
+    return ['All', ...selectedVendors.map((vendor) => vendor.name)];
+  }, [reconciliationIntegrations, selectedReconciliationIntegrationIds]);
   const workflowSteps = workflow.map((step) => {
     if (step.label === 'Vendor API Data') return { ...step, value: vendorDataSummary };
     if (step.label === 'Vendor Invoice') return { ...step, value: vendorInvoiceSummary };
@@ -7870,16 +8358,16 @@ function ReconcileView(props: {
             aria-label="Reconciliation source"
           >
             {reconciliationIntegrations.length > 0 ? (
-              reconciliationIntegrations.map((integration) => (
+              reconciliationIntegrations.map((vendor) => (
                 <button
-                  className={selectedReconciliationIntegrationIds.includes(integration.id) ? 'active' : ''}
-                  aria-pressed={selectedReconciliationIntegrationIds.includes(integration.id)}
+                  className={selectedReconciliationIntegrationIds.includes(vendor.id) ? 'active' : ''}
+                  aria-pressed={selectedReconciliationIntegrationIds.includes(vendor.id)}
                   disabled={reconciliationLoadState === 'loading'}
-                  key={integration.id}
-                  onClick={() => onReconciliationSourceToggle(integration.id)}
+                  key={vendor.id}
+                  onClick={() => onReconciliationSourceToggle(vendor.id)}
                   type="button"
                 >
-                  {integration.name}
+                  {vendor.name}
                 </button>
               ))
             ) : (
@@ -8099,9 +8587,9 @@ function ReconcileView(props: {
                               <div className="vendor-license-header-meta">
                                 <button
                                   className="vendor-data-link"
-                                  disabled={!vendorId}
+                                  disabled={!vendorId || !isRegistryIntegrationId(vendorId)}
                                   onClick={() => {
-                                    if (vendorId) {
+                                    if (vendorId && isRegistryIntegrationId(vendorId)) {
                                       void openVendorData(client, vendorId, vendor);
                                     }
                                   }}
@@ -8163,7 +8651,12 @@ function ReconcileView(props: {
                                   >
                                     <span className="license-product">
                                       <strong>{issue.product}</strong>
-                                      <em>{issue.serviceCode} / {issue.family}</em>
+                                      <em>
+                                        {issue.serviceCode}
+                                        {issue.vendorProductKey ? ` / ${issue.unit}` : ''}
+                                        {' / '}
+                                        {issue.family}
+                                      </em>
                                     </span>
                                     {showLinkedCountColumn ? (
                                       <span className="count-cell">
@@ -9081,17 +9574,16 @@ function ManualOverrideModal(props: {
   issue: ReconcileIssue;
   message: string;
   onClose: () => void;
-  onDeviceRemap: (
+  onDeviceRemapsSave: (
     issue: ReconcileIssue,
-    device: ReconciliationDevice,
-    targetVendorProductKey: string,
+    remaps: Array<{ device: ReconciliationDevice; targetVendorProductKey: string }>,
   ) => Promise<boolean>;
   onLessCountSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
   onManualTotalSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
   productOptions: ReconciliationProductOption[];
   saving: boolean;
 }) {
-  const { issue, message, onClose, onDeviceRemap, onLessCountSave, onManualTotalSave, productOptions, saving } = props;
+  const { issue, message, onClose, onDeviceRemapsSave, onLessCountSave, onManualTotalSave, productOptions, saving } = props;
   const [manualTotal, setManualTotal] = useState(
     String(validManualOverrideTotal(issue) ?? reconciliationSelectedCount(issue)),
   );
@@ -9103,6 +9595,26 @@ function ManualOverrideModal(props: {
   const blockReason = applyBlockReason(issue);
   const canSaveManualTotal = Number.isFinite(manualTotalValue) && manualTotalValue >= 0 && !saving && !blockReason;
   const canSaveLessCount = Number.isFinite(lessCountValue) && lessCountValue >= 0 && !saving && !blockReason;
+  const pendingRemaps = issue.devices.flatMap((device) => {
+    const targetVendorProductKey = remapTargets[device.id]?.trim() ?? '';
+    if (!targetVendorProductKey || targetVendorProductKey === device.vendorProductKey) {
+      return [];
+    }
+    return [{ device, targetVendorProductKey }];
+  });
+  const hasRemapChanges = pendingRemaps.length > 0;
+
+  const updateRemapTarget = (deviceId: string, value: string) => {
+    setRemapTargets((current) => {
+      const next = { ...current };
+      if (value) {
+        next[deviceId] = value;
+      } else {
+        delete next[deviceId];
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -9219,7 +9731,10 @@ function ManualOverrideModal(props: {
         <section className="manual-section" aria-label="Source device remapping">
           <div className="manual-section-header">
             <span className="section-kicker">Source devices</span>
-            <strong>{issue.devices.length.toLocaleString()} rows</strong>
+            <strong>
+              {issue.devices.length.toLocaleString()} rows
+              {hasRemapChanges ? ` / ${pendingRemaps.length.toLocaleString()} remapped` : ''}
+            </strong>
           </div>
           <div className="manual-device-list">
             {issue.devices.length === 0 ? (
@@ -9248,29 +9763,18 @@ function ManualOverrideModal(props: {
                   </div>
                   <div className="manual-device-actions">
                     <select
-                      onChange={(event) =>
-                        setRemapTargets((current) => ({
-                          ...current,
-                          [device.id]: event.target.value,
-                        }))
-                      }
+                      aria-label={`Remap ${deviceDisplayName(device)}`}
+                      disabled={saving || targetOptions.length === 0}
+                      onChange={(event) => updateRemapTarget(device.id, event.target.value)}
                       value={selectedTarget}
                     >
-                      <option value="">Select product</option>
+                      <option value="">Keep current product</option>
                       {targetOptions.map((option) => (
                         <option key={option.vendorProductKey} value={option.vendorProductKey}>
                           {option.productName}
                         </option>
                       ))}
                     </select>
-                    <button
-                      className="button secondary compact"
-                      disabled={!selectedTarget || saving}
-                      onClick={() => void onDeviceRemap(issue, device, selectedTarget)}
-                      type="button"
-                    >
-                      Remap
-                    </button>
                   </div>
                 </article>
               );
@@ -9279,6 +9783,23 @@ function ManualOverrideModal(props: {
         </section>
 
         {message ? <p className="config-note manual-message">{message}</p> : null}
+
+        <div className="manual-override-actions">
+          <button className="button secondary" disabled={saving} onClick={onClose} type="button">
+            Close
+          </button>
+          {hasRemapChanges ? (
+            <button
+              className="button primary"
+              disabled={saving}
+              onClick={() => void onDeviceRemapsSave(issue, pendingRemaps)}
+              type="button"
+            >
+              <Check size={16} />
+              {saving ? 'Saving...' : `Save (${pendingRemaps.length})`}
+            </button>
+          ) : null}
+        </div>
       </section>
     </div>
   );
@@ -9300,22 +9821,17 @@ function IntegrationsView(props: {
   invoiceReviewMessage: string;
   loadMessage: string;
   loadState: 'loading' | 'ready' | 'failed';
-  runtimeMeta: {
-    nonSecretStorage: RuntimeIntegrationsResponse['nonSecretStorage'];
-    missingDatabaseSettings: string[];
-    lastLoadedAt?: string;
-  };
   integrations: Integration[];
   onConfigure: (integration: Integration) => void;
   onInvoiceAccountMappingSave: (account: InvoiceAccountException, customerId: string, agreementId: string) => Promise<boolean>;
   onInvoiceCloseReview: () => void;
-  onInvoiceIntegrationChange: (integrationId: IntegrationId | '') => void;
+  onInvoiceIntegrationChange: (vendorId: VendorKey | '') => void;
   onInvoiceProductCatalogSearch: (query: string) => Promise<ProductCatalogSearchResponse>;
   onInvoiceProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
   onInvoiceRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
   onInvoiceReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
   onInvoiceTableUpload: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     file: File,
     columnMap: InvoiceTableColumnMap,
     sourceType: IntegrationDataSourceType,
@@ -9324,12 +9840,32 @@ function IntegrationsView(props: {
     linkedIntegrationId?: IntegrationId,
   ) => Promise<InvoiceImportSummary | null>;
   onInvoiceUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
-  onOpenMappings: (integrationId: IntegrationId) => void;
+  onOpenMappings: (integrationId: VendorKey) => void;
   onRefresh: () => Promise<RuntimeIntegrationsResponse | null>;
-  selectedInvoiceIntegrationId: IntegrationId | '';
+  selectedInvoiceIntegrationId: VendorKey | '';
   setInvoiceImportMode: (value: InvoiceImportMode) => void;
   onSync: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
   onTest: (integrationId: IntegrationId) => void;
+  vendorDatapoints: VendorDatapointRecord[];
+  vendorDatapointLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  vendorDatapointMessage: string;
+  selectedVendorDatapointId: string | null;
+  onCreateVendorDatapoint: () => void;
+  onEditVendorDatapoint: (datapointId: string) => void;
+  onSelectVendorDatapoint: (datapointId: string | null) => void;
+  onImportVendorDatapoint: (
+    datapoint: VendorDatapointRecord,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    persistColumnMap: boolean,
+  ) => Promise<{ datapoint: VendorDatapointRecord; import: InvoiceImportSummary }>;
+  onSaveVendorDatapointMapping: (
+    datapoint: VendorDatapointRecord,
+    columnMap: InvoiceTableColumnMap,
+    knownHeaders?: string[],
+  ) => Promise<VendorDatapointRecord>;
+  onDeleteDatapointImport: (datapoint: VendorDatapointRecord, invoiceImport: InvoiceImportSummary) => Promise<void>;
+  onUpdateVendorDatapoint: (datapointId: string, payload: UpdateVendorDatapointInput) => Promise<VendorDatapointRecord>;
 }) {
   const {
     actionMessages,
@@ -9362,11 +9898,21 @@ function IntegrationsView(props: {
     onRefresh,
     onSync,
     onTest,
-    runtimeMeta,
     selectedInvoiceIntegrationId,
     setInvoiceImportMode,
+    vendorDatapoints,
+    vendorDatapointLoadState,
+    vendorDatapointMessage,
+    selectedVendorDatapointId,
+    onCreateVendorDatapoint,
+    onEditVendorDatapoint,
+    onSelectVendorDatapoint,
+    onImportVendorDatapoint,
+    onSaveVendorDatapointMapping,
+    onDeleteDatapointImport,
+    onUpdateVendorDatapoint,
   } = props;
-  const [managementTab, setManagementTab] = useState<'api' | 'invoice'>('api');
+  const [managementTab, setManagementTab] = useState<'api' | 'invoice' | 'datapoints'>('api');
   const connectedCount = integrations.filter((integration) => integration.status === 'connected').length;
   const degradedCount = integrations.filter((integration) => integration.status === 'degraded').length;
   const activeIntegrations = sortIntegrationsForDisplay(
@@ -9378,6 +9924,9 @@ function IntegrationsView(props: {
   const comingSoonIntegrations = sortIntegrationsForDisplay(
     integrations.filter((integration) => !isImplementedIntegration(integration.id)),
   );
+  const selectedVendorDatapoint = selectedVendorDatapointId
+    ? vendorDatapoints.find((datapoint) => datapoint.id === selectedVendorDatapointId)
+    : undefined;
 
   return (
     <section className="integrations-page" aria-label="Vendor API integrations">
@@ -9390,8 +9939,6 @@ function IntegrationsView(props: {
         <div className="integrations-live-meta">
           <span>{connectedCount} connected</span>
           <span>{degradedCount} degraded</span>
-          <span>Settings: {runtimeMeta.nonSecretStorage === 'database' ? 'PostgreSQL' : 'Not persisted'}</span>
-          <span>Last loaded {formatDateTime(runtimeMeta.lastLoadedAt) ?? 'never'}</span>
           <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
             <RefreshCcw size={16} />
             Refresh
@@ -9403,6 +9950,7 @@ function IntegrationsView(props: {
         <div className="segmented-control" role="tablist" aria-label="Integration management mode">
           {([
             { id: 'api' as const, label: 'API' },
+            { id: 'datapoints' as const, label: 'Vendor datapoints' },
             { id: 'invoice' as const, label: 'Invoice' },
           ]).map((tab) => (
             <button
@@ -9479,6 +10027,21 @@ function IntegrationsView(props: {
             </details>
           ) : null}
         </>
+      ) : managementTab === 'datapoints' ? (
+        <VendorDatapointsView
+          datapoints={vendorDatapoints}
+          integrations={integrations}
+          loadState={vendorDatapointLoadState}
+          message={vendorDatapointMessage}
+          onCreate={onCreateVendorDatapoint}
+          onEdit={onEditVendorDatapoint}
+          onImport={onImportVendorDatapoint}
+          onOpenMappings={(vendorId) => onOpenMappings(vendorId)}
+          onSaveMapping={onSaveVendorDatapointMapping}
+          onDeleteImport={onDeleteDatapointImport}
+          onSelect={onSelectVendorDatapoint}
+          selectedDatapoint={selectedVendorDatapoint}
+        />
       ) : (
         <ImportsView
           busyReviewAction={busyInvoiceReviewAction}
@@ -9503,8 +10066,996 @@ function IntegrationsView(props: {
           reviewMessage={invoiceReviewMessage}
           selectedVendorId={selectedInvoiceIntegrationId}
           setImportMode={setInvoiceImportMode}
+          vendorDatapoints={vendorDatapoints}
         />
       )}
+    </section>
+  );
+}
+
+function vendorDatapointSourceLabel(sourceType: string) {
+  if (sourceType === 'device-count') return 'Device counts';
+  if (sourceType === 'license-count') return 'License counts';
+  if (sourceType === 'invoice') return 'Invoices';
+  if (sourceType === 'user-license-detail') return 'User detail';
+  if (sourceType === 'reseller-product-total') return 'Product totals';
+  return 'Customer products';
+}
+
+function updateInvoiceTableColumnMap(
+  current: InvoiceTableColumnMap,
+  key: keyof InvoiceTableColumnMap,
+  value: string,
+) {
+  const next = { ...current };
+  if (value) {
+    next[key] = value;
+  } else {
+    delete next[key];
+  }
+  return next;
+}
+
+function InvoiceColumnMapGrid(props: {
+  columnMap: InvoiceTableColumnMap;
+  disabled?: boolean;
+  headerOptions: string[];
+  onChange: (key: keyof InvoiceTableColumnMap, value: string) => void;
+  sourceType: IntegrationDataSourceType | string;
+  requiresCustomerMapping?: boolean;
+}) {
+  const { columnMap, disabled = false, headerOptions, onChange, sourceType, requiresCustomerMapping = true } = props;
+  const mappingDisabled = disabled || headerOptions.length === 0;
+
+  return (
+    <div className="invoice-column-map-groups">
+      {invoiceTableFieldGroups.map((group) => (
+        <section className="invoice-column-map-group" key={group.id}>
+          <h3>{group.label}</h3>
+          <div className="invoice-column-map-grid">
+            {group.keys.map((fieldKey) => {
+              const field = invoiceTableFieldDefinitions.find((item) => item.key === fieldKey);
+              if (!field) {
+                return null;
+              }
+
+              const required =
+                (field.key === 'externalAccountId' && requiresCustomerMapping) ||
+                (field.key === 'quantity' && importRequiresQuantityColumn(sourceType)) ||
+                isRequiredSourceColumn(sourceType as IntegrationDataSourceType, field.key, columnMap);
+              const selectOptions =
+                field.key === 'quantity'
+                  ? quantityColumnSelectOptions(sourceType, headerOptions)
+                  : [
+                      { value: '', label: 'Ignore' },
+                      ...headerOptions.map((header) => ({ value: header, label: header })),
+                    ];
+
+              return (
+                <label className="config-field" key={field.key}>
+                  <span>{required ? `${field.label} *` : field.label}</span>
+                  <select
+                    disabled={mappingDisabled}
+                    onChange={(event) => onChange(field.key, event.target.value)}
+                    value={columnMap[field.key] ?? ''}
+                  >
+                    {selectOptions.map((option) => (
+                      <option key={`${field.key}:${option.value || 'blank'}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function CreateVendorDatapointModal(props: {
+  integrations: Integration[];
+  onClose: () => void;
+  onCreate: (payload: CreateVendorDatapointInput) => Promise<VendorDatapointRecord>;
+}) {
+  const { integrations, onClose, onCreate } = props;
+  const [displayName, setDisplayName] = useState('');
+  const [description, setDescription] = useState('');
+  const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>('');
+  const [sourceType, setSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
+  const [syncMode, setSyncMode] = useState<ManualImportSyncMode>('full-vendor-sync');
+  const [message, setMessage] = useState('Name this vendor datapoint and choose what the file contains.');
+  const [saving, setSaving] = useState(false);
+  const linkableIntegrations = integrations.filter(
+    (integration) => integrationHasCapability(integration.id, 'mapping') && integration.id !== 'custom-table',
+  );
+
+  useEffect(() => {
+    if (sourceType === 'device-count' || sourceType === 'license-count') {
+      setSyncMode('full-vendor-sync');
+    }
+  }, [sourceType]);
+
+  const submit = async () => {
+    if (!displayName.trim()) {
+      setMessage('Enter a display name for this vendor datapoint.');
+      return;
+    }
+
+    setSaving(true);
+    setMessage('Creating vendor datapoint...');
+    try {
+      await onCreate({
+        displayName: displayName.trim(),
+        description: description.trim() || undefined,
+        linkedIntegrationId: linkedIntegrationId || undefined,
+        sourceType,
+        syncMode,
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to create vendor datapoint.');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-labelledby="create-vendor-datapoint-title" className="modal-card integration-modal" role="dialog">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">Vendor datapoint</span>
+            <h2 id="create-vendor-datapoint-title">Create vendor datapoint</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Close" type="button">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="integration-modal-body">
+          <label className="config-field">
+            <span>Display name *</span>
+            <input onChange={(event) => setDisplayName(event.target.value)} value={displayName} />
+          </label>
+          <label className="config-field">
+            <span>Description</span>
+            <input onChange={(event) => setDescription(event.target.value)} value={description} />
+          </label>
+          <label className="config-field">
+            <span>Linked integration</span>
+            <select onChange={(event) => setLinkedIntegrationId(event.target.value as IntegrationId | '')} value={linkedIntegrationId}>
+              <option value="">Standalone vendor datapoint</option>
+              {linkableIntegrations.map((integration) => (
+                <option key={integration.id} value={integration.id}>
+                  {integration.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="config-field">
+            <span>Source type *</span>
+            <select onChange={(event) => setSourceType(event.target.value as IntegrationDataSourceType)} value={sourceType}>
+              <option value="customer-product-breakdown">Customer products</option>
+              <option value="device-count">Device counts</option>
+              <option value="license-count">License counts</option>
+              <option value="invoice">Invoices</option>
+              <option value="user-license-detail">User license detail</option>
+              <option value="reseller-product-total">Reseller product totals</option>
+            </select>
+          </label>
+          <div className="segmented-control invoice-source-toggle" role="group" aria-label="Vendor datapoint sync mode">
+            <button className={syncMode === 'full-vendor-sync' ? 'active' : ''} onClick={() => setSyncMode('full-vendor-sync')} type="button">
+              Full sync
+            </button>
+            <button className={syncMode === 'info-only' ? 'active' : ''} onClick={() => setSyncMode('info-only')} type="button">
+              Info only
+            </button>
+          </div>
+          {(sourceType === 'device-count' || sourceType === 'license-count') && (
+            <p className="config-note">
+              Use Full sync when you want this import included in reconciliation after product mappings are approved.
+            </p>
+          )}
+          <p className="config-note">{message}</p>
+        </div>
+        <div className="integration-modal-actions">
+          <button className="button secondary" disabled={saving} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="button primary" disabled={saving} onClick={() => void submit()} type="button">
+            {saving ? 'Creating' : 'Create datapoint'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditVendorDatapointModal(props: {
+  datapoint?: VendorDatapointRecord;
+  integrations: Integration[];
+  onClose: () => void;
+  onUpdate: (datapointId: string, payload: UpdateVendorDatapointInput) => Promise<VendorDatapointRecord>;
+}) {
+  const { datapoint, integrations, onClose, onUpdate } = props;
+  const [displayName, setDisplayName] = useState(datapoint?.displayName ?? '');
+  const [description, setDescription] = useState(datapoint?.description ?? '');
+  const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>(datapoint?.linkedIntegrationId ?? '');
+  const [sourceType, setSourceType] = useState<IntegrationDataSourceType>(
+    (datapoint?.sourceType as IntegrationDataSourceType) ?? 'customer-product-breakdown',
+  );
+  const [syncMode, setSyncMode] = useState<ManualImportSyncMode>(datapoint?.syncMode ?? 'full-vendor-sync');
+  const [columnMap, setColumnMap] = useState<InvoiceTableColumnMap>(datapoint?.columnMap ?? {});
+  const [knownHeaders, setKnownHeaders] = useState<string[]>(datapoint?.knownHeaders ?? []);
+  const [fileHeaders, setFileHeaders] = useState<string[]>([]);
+  const [message, setMessage] = useState('Update datapoint settings and column mappings.');
+  const [saving, setSaving] = useState(false);
+  const linkableIntegrations = integrations.filter(
+    (integration) => integrationHasCapability(integration.id, 'mapping') && integration.id !== 'custom-table',
+  );
+  const headerOptions = columnMappingHeaderOptions(columnMap, fileHeaders, knownHeaders);
+  const mappingReady = columnMapSatisfiesSourceType(sourceType, columnMap);
+
+  useEffect(() => {
+    if (!datapoint) {
+      return;
+    }
+
+    setDisplayName(datapoint.displayName);
+    setDescription(datapoint.description ?? '');
+    setLinkedIntegrationId(datapoint.linkedIntegrationId ?? '');
+    setSourceType(datapoint.sourceType as IntegrationDataSourceType);
+    setSyncMode(datapoint.syncMode);
+    setColumnMap(datapoint.columnMap);
+    setKnownHeaders(datapoint.knownHeaders);
+    setFileHeaders([]);
+    setMessage('Update datapoint settings and column mappings.');
+  }, [datapoint?.id]);
+
+  const handleSampleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = '';
+    if (!nextFile) {
+      return;
+    }
+
+    try {
+      const table = await readImportTableFile(nextFile);
+      const nextKnownHeaders = mergeKnownHeaders(knownHeaders, table.headers);
+      const nextMap = mergeInvoiceTableColumnMap(columnMap, table.headers, sourceType);
+      setKnownHeaders(nextKnownHeaders);
+      setFileHeaders(table.headers);
+      setColumnMap(Object.keys(nextMap).length > 0 ? nextMap : suggestInvoiceTableColumnMap(table.headers, sourceType));
+      setMessage(`Loaded ${table.headers.length.toLocaleString()} headers from ${nextFile.name}. Review the column map.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to read sample file headers.');
+    }
+  };
+
+  const updateColumn = (key: keyof InvoiceTableColumnMap, value: string) => {
+    setColumnMap((current) => updateInvoiceTableColumnMap(current, key, value));
+  };
+
+  const submit = async () => {
+    if (!datapoint) {
+      return;
+    }
+
+    if (!displayName.trim()) {
+      setMessage('Enter a display name for this vendor datapoint.');
+      return;
+    }
+
+    if (!mappingReady) {
+      setMessage('Map the required columns for this source type before saving.');
+      return;
+    }
+
+    setSaving(true);
+    setMessage('Saving vendor datapoint...');
+    try {
+      await onUpdate(datapoint.id, {
+        displayName: displayName.trim(),
+        description: description.trim() || undefined,
+        linkedIntegrationId: linkedIntegrationId || null,
+        sourceType,
+        syncMode,
+        columnMap,
+        knownHeaders: mergeKnownHeaders(knownHeaders, fileHeaders, mappedColumnHeaders(columnMap)),
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update vendor datapoint.');
+      setSaving(false);
+    }
+  };
+
+  if (!datapoint) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-labelledby="edit-vendor-datapoint-title" className="modal-card integration-modal vendor-datapoint-edit-modal" role="dialog">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">Vendor datapoint</span>
+            <h2 id="edit-vendor-datapoint-title">Edit {datapoint.displayName}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Close" type="button">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="integration-modal-body">
+          <label className="config-field">
+            <span>Display name *</span>
+            <input disabled={saving} onChange={(event) => setDisplayName(event.target.value)} value={displayName} />
+          </label>
+          <label className="config-field">
+            <span>Description</span>
+            <input disabled={saving} onChange={(event) => setDescription(event.target.value)} value={description} />
+          </label>
+          <label className="config-field">
+            <span>Linked integration</span>
+            <select
+              disabled={saving}
+              onChange={(event) => setLinkedIntegrationId(event.target.value as IntegrationId | '')}
+              value={linkedIntegrationId}
+            >
+              <option value="">Standalone vendor datapoint</option>
+              {linkableIntegrations.map((integration) => (
+                <option key={integration.id} value={integration.id}>
+                  {integration.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="config-field">
+            <span>Source type *</span>
+            <select
+              disabled={saving}
+              onChange={(event) => setSourceType(event.target.value as IntegrationDataSourceType)}
+              value={sourceType}
+            >
+              <option value="customer-product-breakdown">Customer products</option>
+              <option value="device-count">Device counts</option>
+              <option value="license-count">License counts</option>
+              <option value="invoice">Invoices</option>
+              <option value="user-license-detail">User license detail</option>
+              <option value="reseller-product-total">Reseller product totals</option>
+            </select>
+          </label>
+          <div className="segmented-control invoice-source-toggle" role="group" aria-label="Vendor datapoint sync mode">
+            <button
+              className={syncMode === 'full-vendor-sync' ? 'active' : ''}
+              disabled={saving}
+              onClick={() => setSyncMode('full-vendor-sync')}
+              type="button"
+            >
+              Full sync
+            </button>
+            <button
+              className={syncMode === 'info-only' ? 'active' : ''}
+              disabled={saving}
+              onClick={() => setSyncMode('info-only')}
+              type="button"
+            >
+              Info only
+            </button>
+          </div>
+          {(sourceType === 'device-count' || sourceType === 'license-count') && (
+            <p className="config-note">
+              Full sync includes imported counts in reconciliation once account and product mappings are approved.
+            </p>
+          )}
+
+          <div className="vendor-datapoint-edit-mapping-header">
+            <div>
+              <strong>Column mappings</strong>
+              <span>Update saved headers or load a sample file to refresh the available columns.</span>
+            </div>
+            <label className={saving ? 'button secondary compact file-upload-button disabled' : 'button secondary compact file-upload-button'}>
+              <FileSpreadsheet size={16} />
+              Load sample file
+              <input
+                accept=".csv,.json,.xls,.xlsx,text/csv,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                disabled={saving}
+                onChange={(event) => void handleSampleFileChange(event)}
+                type="file"
+              />
+            </label>
+          </div>
+
+          {headerOptions.length === 0 ? (
+            <p className="config-note">Load a sample export to choose column headers, or save mappings after the first import.</p>
+          ) : (
+            <>
+              <p className="config-note">
+                {headerOptions.length.toLocaleString()} saved column{headerOptions.length === 1 ? '' : 's'} available for mapping.
+              </p>
+              <InvoiceColumnMapGrid
+              columnMap={columnMap}
+              disabled={saving}
+              headerOptions={headerOptions}
+              onChange={updateColumn}
+              sourceType={sourceType}
+            />
+            </>
+          )}
+
+          <p className="config-note">{message}</p>
+        </div>
+        <div className="integration-modal-actions">
+          <button className="button secondary" disabled={saving} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="button primary" disabled={saving || !mappingReady} onClick={() => void submit()} type="button">
+            {saving ? 'Saving' : 'Save changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VendorDatapointsView(props: {
+  datapoints: VendorDatapointRecord[];
+  integrations: Integration[];
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onCreate: () => void;
+  onEdit: (datapointId: string) => void;
+  onImport: (
+    datapoint: VendorDatapointRecord,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    persistColumnMap: boolean,
+  ) => Promise<{ datapoint: VendorDatapointRecord; import: InvoiceImportSummary }>;
+  onOpenMappings: (vendorId: VendorKey) => void;
+  onSaveMapping: (
+    datapoint: VendorDatapointRecord,
+    columnMap: InvoiceTableColumnMap,
+    knownHeaders?: string[],
+  ) => Promise<VendorDatapointRecord>;
+  onDeleteImport: (datapoint: VendorDatapointRecord, invoiceImport: InvoiceImportSummary) => Promise<void>;
+  onSelect: (datapointId: string | null) => void;
+  selectedDatapoint?: VendorDatapointRecord;
+}) {
+  const {
+    datapoints,
+    loadState,
+    message,
+    onCreate,
+    onEdit,
+    onImport,
+    onOpenMappings,
+    onSaveMapping,
+    onDeleteImport,
+    onSelect,
+    selectedDatapoint,
+  } = props;
+  const [importing, setImporting] = useState(false);
+  const [savingMapping, setSavingMapping] = useState(false);
+  const [deletingImportId, setDeletingImportId] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [columnMap, setColumnMap] = useState<InvoiceTableColumnMap>({});
+  const [showMappingEditor, setShowMappingEditor] = useState(false);
+  const [pendingSourceType, setPendingSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
+  const [pendingDatapointId, setPendingDatapointId] = useState<string>('');
+  const [showImportTypePrompt, setShowImportTypePrompt] = useState(false);
+  const [importHistory, setImportHistory] = useState<InvoiceImportSummary[]>([]);
+  const [importHistoryState, setImportHistoryState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [panelMessage, setPanelMessage] = useState('Select a datapoint or drop a file to auto-detect the saved import setup.');
+
+  const hasSavedMap = Boolean(selectedDatapoint && Object.keys(selectedDatapoint.columnMap).length > 0);
+  const mappingReady = Boolean(
+    selectedDatapoint && columnMapSatisfiesSourceType(selectedDatapoint.sourceType, columnMap),
+  );
+  const quickImportReady = Boolean(hasSavedMap && file && mappingReady && !showMappingEditor);
+
+  useEffect(() => {
+    if (!selectedDatapoint) {
+      setFile(null);
+      setHeaders([]);
+      setColumnMap({});
+      setShowMappingEditor(false);
+      setShowImportTypePrompt(false);
+      setImportHistory([]);
+      setImportHistoryState('idle');
+      setPanelMessage('Select a datapoint or drop a file to auto-detect the saved import setup.');
+      return;
+    }
+
+    setColumnMap(selectedDatapoint.columnMap);
+    setShowMappingEditor(Object.keys(selectedDatapoint.columnMap).length === 0);
+    setPanelMessage(
+      Object.keys(selectedDatapoint.columnMap).length > 0
+        ? 'Saved column map loaded. Upload the next export for a one-click import.'
+        : 'Upload the first file, map columns, save the mapping, then import.',
+    );
+
+    let cancelled = false;
+    setImportHistoryState('loading');
+    void fetchInvoiceImports(datapointMappingVendorId(selectedDatapoint), selectedDatapoint.id)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setImportHistory(response.imports);
+        setImportHistoryState('ready');
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setImportHistory([]);
+        setImportHistoryState('failed');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDatapoint?.id]);
+
+  const applyDetectedFile = async (
+    nextFile: File,
+    datapoint: VendorDatapointRecord,
+    nextHeaders: string[],
+    nextMap: InvoiceTableColumnMap,
+    quickImport: boolean,
+  ) => {
+    setFile(nextFile);
+    setHeaders(nextHeaders);
+    setColumnMap(nextMap);
+
+    if (quickImport && columnMapSatisfiesSourceType(datapoint.sourceType, nextMap)) {
+      setImporting(true);
+      setPanelMessage(`Quick importing ${nextFile.name} for ${datapoint.displayName}...`);
+      try {
+        await onImport(datapoint, nextFile, nextMap, false);
+        setPanelMessage(`Imported ${nextFile.name} for ${datapoint.displayName}.`);
+        const history = await fetchInvoiceImports(datapointMappingVendorId(datapoint), datapoint.id);
+        setImportHistory(history.imports);
+        setImportHistoryState('ready');
+      } catch (error) {
+        setShowMappingEditor(true);
+        setPanelMessage(error instanceof Error ? error.message : 'Unable to quick import this file.');
+      } finally {
+        setImporting(false);
+      }
+      return;
+    }
+
+    setShowMappingEditor(true);
+    setPanelMessage(`${nextHeaders.length.toLocaleString()} columns detected. Review or save the mapping before import.`);
+  };
+
+  const handleQuickDetectFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = '';
+    if (!nextFile) {
+      return;
+    }
+
+    try {
+      const table = await readImportTableFile(nextFile);
+      const detected = matchVendorDatapointByHeaders(datapoints, table.headers);
+      if (detected) {
+        setShowImportTypePrompt(false);
+        onSelect(detected.datapoint.id);
+        await applyDetectedFile(nextFile, detected.datapoint, table.headers, detected.columnMap, true);
+        return;
+      }
+
+      setFile(nextFile);
+      setHeaders(table.headers);
+      setColumnMap(suggestInvoiceTableColumnMap(table.headers, selectedDatapoint?.sourceType));
+      setShowMappingEditor(true);
+      setShowImportTypePrompt(true);
+      setPendingDatapointId(selectedDatapoint?.id ?? datapoints[0]?.id ?? '');
+      setPendingSourceType((selectedDatapoint?.sourceType as IntegrationDataSourceType) ?? 'customer-product-breakdown');
+      setPanelMessage('No saved import setup matched these headers. Choose the import type and datapoint, then map columns.');
+    } catch (error) {
+      setPanelMessage(error instanceof Error ? error.message : 'Unable to read this table file.');
+    }
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = '';
+    if (!nextFile || !selectedDatapoint) {
+      return;
+    }
+
+    try {
+      const table = await readImportTableFile(nextFile);
+      const nextMap = mergeInvoiceTableColumnMap(selectedDatapoint.columnMap, table.headers, selectedDatapoint.sourceType);
+      const resolvedMap =
+        Object.keys(nextMap).length > 0
+          ? nextMap
+          : suggestInvoiceTableColumnMap(table.headers, selectedDatapoint.sourceType);
+      const canQuickImport =
+        Object.keys(selectedDatapoint.columnMap).length > 0 &&
+        columnMapSatisfiesSourceType(selectedDatapoint.sourceType, resolvedMap);
+      await applyDetectedFile(nextFile, selectedDatapoint, table.headers, resolvedMap, canQuickImport);
+    } catch (error) {
+      setHeaders([]);
+      setColumnMap(selectedDatapoint.columnMap);
+      setPanelMessage(error instanceof Error ? error.message : 'Unable to read this table file.');
+    }
+  };
+
+  const saveMapping = async () => {
+    if (!selectedDatapoint) {
+      return;
+    }
+
+    setSavingMapping(true);
+    setPanelMessage(`Saving column map for ${selectedDatapoint.displayName}...`);
+    try {
+      const updated = await onSaveMapping(
+        selectedDatapoint,
+        columnMap,
+        mergeKnownHeaders(selectedDatapoint.knownHeaders, headers, mappedColumnHeaders(columnMap)),
+      );
+      setColumnMap(updated.columnMap);
+      setShowMappingEditor(false);
+      setPanelMessage(`Saved column map for ${updated.displayName}. Future uploads can quick import.`);
+    } catch (error) {
+      setPanelMessage(error instanceof Error ? error.message : 'Unable to save vendor datapoint mapping.');
+    } finally {
+      setSavingMapping(false);
+    }
+  };
+
+  const importSelected = async (datapointOverride?: VendorDatapointRecord) => {
+    const targetDatapoint = datapointOverride ?? selectedDatapoint;
+    if (!targetDatapoint || !file) {
+      return;
+    }
+
+    setImporting(true);
+    setPanelMessage(`Importing ${file.name}...`);
+    try {
+      const persistColumnMap = Object.keys(targetDatapoint.columnMap).length === 0;
+      await onImport(targetDatapoint, file, columnMap, persistColumnMap);
+      setShowImportTypePrompt(false);
+      setPanelMessage(`Imported ${file.name} for ${targetDatapoint.displayName}.`);
+      const history = await fetchInvoiceImports(datapointMappingVendorId(targetDatapoint), targetDatapoint.id);
+      setImportHistory(history.imports);
+      setImportHistoryState('ready');
+    } catch (error) {
+      setPanelMessage(error instanceof Error ? error.message : 'Unable to import vendor datapoint file.');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const deleteImport = async (invoiceImport: InvoiceImportSummary) => {
+    if (!selectedDatapoint) {
+      return;
+    }
+
+    setDeletingImportId(invoiceImport.id);
+    try {
+      await onDeleteImport(selectedDatapoint, invoiceImport);
+      setImportHistory((current) => current.filter((item) => item.id !== invoiceImport.id));
+      setPanelMessage(`Deleted import ${invoiceImport.fileName}.`);
+    } catch (error) {
+      setPanelMessage(error instanceof Error ? error.message : 'Unable to delete this import.');
+    } finally {
+      setDeletingImportId(null);
+    }
+  };
+
+  const updateColumn = (key: keyof InvoiceTableColumnMap, value: string) => {
+    setColumnMap((current) => updateInvoiceTableColumnMap(current, key, value));
+  };
+
+  const unmatchedUpload = showImportTypePrompt && Boolean(file && headers.length > 0);
+  const pendingDatapoint = pendingDatapointId ? datapoints.find((item) => item.id === pendingDatapointId) : undefined;
+
+  return (
+    <section className="vendor-datapoints-view">
+      <div className="vendor-datapoints-layout">
+        <aside className="vendor-datapoints-sidebar work-surface">
+          <div className="surface-header vendor-datapoints-sidebar-header">
+            <div>
+              <span className="section-kicker">Saved imports</span>
+              <h2>Vendor datapoints</h2>
+            </div>
+            <button className="button primary compact" onClick={onCreate} type="button">
+              <Plus size={16} />
+              New
+            </button>
+          </div>
+          <div className="vendor-datapoints-sidebar-toolbar">
+            <label className={importing ? 'button secondary compact file-upload-button disabled' : 'button secondary compact file-upload-button'}>
+              <Upload size={16} />
+              Quick import file
+              <input
+                accept=".csv,.json,.xls,.xlsx,text/csv,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                disabled={importing}
+                onChange={(event) => void handleQuickDetectFile(event)}
+                type="file"
+              />
+            </label>
+          </div>
+          {loadState === 'failed' ? <p className="vendor-datapoints-sidebar-status is-error">{message}</p> : null}
+          {loadState !== 'failed' && datapoints.length > 0 ? (
+            <p className="vendor-datapoints-sidebar-status">{message}</p>
+          ) : null}
+          <div className="vendor-datapoint-list">
+            {datapoints.length === 0 ? (
+              <div className="empty-state">
+                <Database size={20} />
+                <strong>{loadState === 'loading' ? 'Loading vendor datapoints.' : 'No vendor datapoints yet.'}</strong>
+                <span>Create one for file-only vendors or supplemental device detail.</span>
+              </div>
+            ) : null}
+            {datapoints.map((datapoint) => (
+              <button
+                className={selectedDatapoint?.id === datapoint.id ? 'vendor-datapoint-item selected' : 'vendor-datapoint-item'}
+                key={datapoint.id}
+                onClick={() => onSelect(datapoint.id)}
+                type="button"
+              >
+                <div className="vendor-datapoint-item-head">
+                  <h3>{datapoint.displayName}</h3>
+                </div>
+                <div className="vendor-datapoint-item-badges">
+                  <span className="vendor-datapoint-chip">{vendorDatapointSourceLabel(datapoint.sourceType)}</span>
+                  <span className={datapoint.syncMode === 'info-only' ? 'vendor-datapoint-chip warn' : 'vendor-datapoint-chip accent'}>
+                    {datapoint.syncMode === 'info-only' ? 'Info only' : 'Full sync'}
+                  </span>
+                  {Object.keys(datapoint.columnMap).length === 0 ? (
+                    <span className="vendor-datapoint-chip warn">Needs mapping</span>
+                  ) : null}
+                </div>
+                <div className="vendor-datapoint-item-stats">
+                  <div className="vendor-datapoint-stat">
+                    <span>Last import</span>
+                    <strong>{datapoint.lastImportedAt ? formatDateTime(datapoint.lastImportedAt) ?? 'Unknown' : 'Never'}</strong>
+                  </div>
+                  <div className="vendor-datapoint-stat">
+                    <span>Rows</span>
+                    <strong>{datapoint.lastImportRowCount?.toLocaleString() ?? '0'}</strong>
+                  </div>
+                </div>
+                {datapoint.linkedIntegrationId ? (
+                  <span className="vendor-datapoint-chip">Linked to {integrationName(datapoint.linkedIntegrationId)}</span>
+                ) : (
+                  <span className="vendor-datapoint-chip">Standalone</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        <div className="vendor-datapoints-main work-surface">
+          {unmatchedUpload ? (
+            <>
+              <div className="surface-header">
+                <div>
+                  <span className="section-kicker">Unmatched file</span>
+                  <h2>{file?.name ?? 'Select import type'}</h2>
+                </div>
+              </div>
+              <p className="vendor-datapoint-status">{panelMessage}</p>
+              <div className="vendor-datapoint-import-body">
+                <label className="config-field">
+                  <span>Import type</span>
+                  <select onChange={(event) => setPendingSourceType(event.target.value as IntegrationDataSourceType)} value={pendingSourceType}>
+                    <option value="customer-product-breakdown">Customer products</option>
+                    <option value="device-count">Device counts</option>
+                    <option value="license-count">License counts</option>
+                    <option value="invoice">Invoices</option>
+                    <option value="user-license-detail">User license detail</option>
+                    <option value="reseller-product-total">Reseller product totals</option>
+                  </select>
+                </label>
+                <label className="config-field">
+                  <span>Vendor datapoint</span>
+                  <select onChange={(event) => setPendingDatapointId(event.target.value)} value={pendingDatapointId}>
+                    <option value="">Select datapoint</option>
+                    {datapoints
+                      .filter((datapoint) => datapoint.sourceType === pendingSourceType)
+                      .map((datapoint) => (
+                        <option key={datapoint.id} value={datapoint.id}>
+                          {datapoint.displayName}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                {pendingDatapoint ? (
+                  <>
+                    <InvoiceColumnMapGrid
+                      columnMap={columnMap}
+                      disabled={importing || savingMapping}
+                      headerOptions={columnMappingHeaderOptions(columnMap, headers, pendingDatapoint.knownHeaders)}
+                      onChange={updateColumn}
+                      sourceType={pendingDatapoint.sourceType}
+                    />
+                    <div className="invoice-table-import-actions">
+                      <button
+                        className="button secondary compact"
+                        disabled={savingMapping || !columnMapSatisfiesSourceType(pendingDatapoint.sourceType, columnMap)}
+                        onClick={() =>
+                          void onSaveMapping(
+                            pendingDatapoint,
+                            columnMap,
+                            mergeKnownHeaders(pendingDatapoint.knownHeaders, headers, mappedColumnHeaders(columnMap)),
+                          ).then((updated) => {
+                            onSelect(updated.id);
+                            setShowMappingEditor(false);
+                            setPanelMessage(`Saved column map for ${updated.displayName}.`);
+                          })
+                        }
+                        type="button"
+                      >
+                        {savingMapping ? 'Saving' : 'Save mapping'}
+                      </button>
+                      <button
+                        className="button primary compact"
+                        disabled={!file || importing || !columnMapSatisfiesSourceType(pendingDatapoint.sourceType, columnMap)}
+                        onClick={() => {
+                          onSelect(pendingDatapoint.id);
+                          void importSelected(pendingDatapoint);
+                        }}
+                        type="button"
+                      >
+                        <Upload size={15} />
+                        {importing ? 'Importing' : 'Import mapped file'}
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </>
+          ) : selectedDatapoint ? (
+            <>
+              <div className="surface-header">
+                <div>
+                  <span className="section-kicker">{hasSavedMap ? 'Quick import' : 'Setup import'}</span>
+                  <h2>{selectedDatapoint.displayName}</h2>
+                </div>
+                <div className="surface-header-actions">
+                  <button className="button secondary compact" onClick={() => onOpenMappings(datapointMappingVendorId(selectedDatapoint))} type="button">
+                    <Link2 size={16} />
+                    Mapping
+                  </button>
+                  <button className="button secondary compact" onClick={() => onEdit(selectedDatapoint.id)} type="button">
+                    <Pencil size={16} />
+                    Edit
+                  </button>
+                  <label className={importing ? 'button primary compact file-upload-button disabled' : 'button primary compact file-upload-button'}>
+                    <FileSpreadsheet size={16} />
+                    {hasSavedMap ? 'Import file' : 'Select file'}
+                    <input
+                      accept=".csv,.json,.xls,.xlsx,text/csv,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      disabled={importing}
+                      onChange={(event) => void handleFileChange(event)}
+                      type="file"
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="vendor-datapoint-detail-meta">
+                <span className="vendor-datapoint-chip">{vendorDatapointSourceLabel(selectedDatapoint.sourceType)}</span>
+                <span className={selectedDatapoint.syncMode === 'info-only' ? 'vendor-datapoint-chip warn' : 'vendor-datapoint-chip accent'}>
+                  {selectedDatapoint.syncMode === 'info-only' ? 'Info only' : 'Full sync'}
+                </span>
+                <span className="vendor-datapoint-chip">
+                  {selectedDatapoint.linkedIntegrationId
+                    ? `Linked to ${integrationName(selectedDatapoint.linkedIntegrationId)}`
+                    : 'Standalone mappings'}
+                </span>
+                <span className="vendor-datapoint-chip">
+                  {Object.keys(selectedDatapoint.columnMap).length > 0 ? 'Saved column map' : 'Needs mapping'}
+                </span>
+              </div>
+              <p className="vendor-datapoint-status">{panelMessage}</p>
+
+              <div className="vendor-datapoint-import-body">
+                {quickImportReady ? (
+                  <div className="invoice-table-import-actions">
+                    <button className="button primary compact" disabled={importing} onClick={() => void importSelected()} type="button">
+                      <Upload size={15} />
+                      {importing ? 'Importing' : `Import ${file?.name ?? 'file'}`}
+                    </button>
+                    <button className="button secondary compact" onClick={() => setShowMappingEditor(true)} type="button">
+                      Review mapping
+                    </button>
+                  </div>
+                ) : null}
+
+                {showMappingEditor || !hasSavedMap ? (
+                  <>
+                    <InvoiceColumnMapGrid
+                      columnMap={columnMap}
+                      disabled={importing || savingMapping}
+                      headerOptions={columnMappingHeaderOptions(columnMap, headers, selectedDatapoint.knownHeaders)}
+                      onChange={updateColumn}
+                      sourceType={selectedDatapoint.sourceType}
+                    />
+                    <div className="invoice-table-import-actions">
+                      <button
+                        className="button secondary compact"
+                        disabled={
+                          columnMappingHeaderOptions(columnMap, headers, selectedDatapoint.knownHeaders).length === 0 ||
+                          savingMapping ||
+                          !mappingReady
+                        }
+                        onClick={() => void saveMapping()}
+                        type="button"
+                      >
+                        {savingMapping ? 'Saving' : 'Save mapping'}
+                      </button>
+                      <button className="button primary compact" disabled={!file || importing || !mappingReady} onClick={() => void importSelected()} type="button">
+                        <Upload size={15} />
+                        {importing ? 'Importing' : 'Import mapped file'}
+                      </button>
+                      {hasSavedMap ? (
+                        <button className="button secondary compact" onClick={() => setShowMappingEditor(false)} type="button">
+                          Hide mapping
+                        </button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+
+              <section className="vendor-datapoint-import-history">
+                <div className="surface-header vendor-datapoint-import-history-header">
+                  <div>
+                    <span className="section-kicker">Import history</span>
+                    <h3>Past imports</h3>
+                  </div>
+                </div>
+                <div className="import-table">
+                  {importHistory.length === 0 ? (
+                    <div className="empty-state">
+                      <FileSpreadsheet size={20} />
+                      <strong>{importHistoryState === 'loading' ? 'Loading import history.' : 'No imports for this datapoint yet.'}</strong>
+                    </div>
+                  ) : null}
+                  {importHistory.map((item) => (
+                    <div className="import-row" key={item.id}>
+                      <span className="vendor-badge">{vendorDatapointSourceLabel(selectedDatapoint.sourceType)}</span>
+                      <div>
+                        <strong>{item.fileName}</strong>
+                        <span>
+                          {formatCount(item.rowCount)} rows / {formatDateTime(item.importedAt)}
+                        </span>
+                      </div>
+                      <div className="match-bar">
+                        <span style={{ width: `${item.rowCount > 0 ? (item.matchedRows / item.rowCount) * 100 : 0}%` }} />
+                      </div>
+                      <strong>{item.exceptionRows} exceptions</strong>
+                      <button
+                        className="button secondary compact"
+                        disabled={deletingImportId === item.id}
+                        onClick={() => void deleteImport(item)}
+                        title="Delete import and remove synced rows"
+                        type="button"
+                      >
+                        <Trash2 size={15} />
+                        {deletingImportId === item.id ? 'Deleting' : 'Delete'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </>
+          ) : (
+            <div className="empty-state tall">
+              <Database size={24} />
+              <strong>Select a vendor datapoint</strong>
+              <span>Choose a saved import on the left, or use Quick import file to auto-detect headers.</span>
+            </div>
+          )}
+        </div>
+      </div>
     </section>
   );
 }
@@ -9532,21 +11083,9 @@ function IntegrationCard(props: {
       <div className="integration-main">
         <div className="integration-title-row">
           <h2>{displayName}</h2>
-          <span className={comingSoon ? 'integration-chip coming-soon-chip' : 'integration-chip'}>{integration.category}</span>
           <span className={comingSoon ? 'integration-status disabled' : `integration-status ${integration.status}`}>
             {comingSoon ? 'Disabled' : integrationStatusLabel(integration.status)}
           </span>
-          <span className="auth-chip">
-            <KeyRound size={13} />
-            {integration.auth}
-          </span>
-        </div>
-
-        <div className="scope-list capability-list" aria-label={`${integration.name} capabilities`}>
-          {integration.capabilities.map((capability) => (
-            <span key={capability}>{integrationCapabilityLabel(capability)}</span>
-          ))}
-          {integration.capabilities.length === 0 ? <span>Roadmap</span> : null}
         </div>
       </div>
 
@@ -9642,7 +11181,9 @@ function IntegrationCard(props: {
         )}
       </div>
 
-      {actionMessage ? <p className="config-note integration-action-message">{actionMessage}</p> : null}
+      <p className={`config-note integration-action-message${actionMessage ? '' : ' is-empty'}`}>
+        {actionMessage ?? '\u00a0'}
+      </p>
     </article>
   );
 }
@@ -9650,18 +11191,10 @@ function IntegrationCard(props: {
 function IntegrationStat(props: { label: string; value: string }) {
   return (
     <div className="integration-stat">
-      <Zap size={14} />
       <span>{props.label}</span>
       <strong>{props.value}</strong>
     </div>
   );
-}
-
-function integrationCapabilityLabel(capability: IntegrationCapability) {
-  if (capability === 'live-api') return 'API sync';
-  if (capability === 'invoice-import') return 'Invoice import';
-  if (capability === 'payment-link') return 'Payment link';
-  return 'Mapping';
 }
 
 function integrationStatusLabel(status: IntegrationStatus) {
@@ -9732,15 +11265,15 @@ function MappingsView(props: {
   onAccountManualSave: (account: AccountMappingCandidate, customerId: string, agreementId: string) => Promise<boolean>;
   onApproveSuggested: () => void;
   onAutomap: () => void;
-  onIntegrationChange: (integrationId: IntegrationId) => void;
+  onIntegrationChange: (integrationId: VendorKey) => void;
   onProductTargetsSave: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     vendorProductKey: string,
     targetProducts: ProductMappingTarget[],
   ) => Promise<void>;
-  onProductBundleDeactivate: (integrationId: IntegrationId, bundleKey: string) => Promise<void>;
+  onProductBundleDeactivate: (integrationId: VendorKey, bundleKey: string) => Promise<void>;
   onProductBundleSave: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     payload: {
       bundleKey?: string;
       bundleName: string;
@@ -9748,10 +11281,10 @@ function MappingsView(props: {
       targetProduct: ProductMappingTarget;
     },
   ) => Promise<boolean>;
-  onProductLinkRuleActiveChange: (integrationId: IntegrationId, ruleId: string, active: boolean) => Promise<void>;
-  onProductLinkRuleDelete: (integrationId: IntegrationId, ruleId: string) => Promise<void>;
+  onProductLinkRuleActiveChange: (integrationId: VendorKey, ruleId: string, active: boolean) => Promise<void>;
+  onProductLinkRuleDelete: (integrationId: VendorKey, ruleId: string) => Promise<void>;
   onProductLinkRuleSave: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     payload: {
       id?: string;
       sourceVendorProductKey: string;
@@ -9761,10 +11294,11 @@ function MappingsView(props: {
   ) => Promise<boolean>;
   onRefresh: () => Promise<MappingStateResponse | null>;
   onNcentralFilterMappingSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
-  onUsageOverrideCreate: (integrationId: IntegrationId, payload: CreateUsageOverridePayload) => Promise<boolean>;
-  onUsageOverrideDeactivate: (integrationId: IntegrationId, overrideId: string) => Promise<void>;
-  selectedIntegrationId: IntegrationId;
+  onUsageOverrideCreate: (integrationId: VendorKey, payload: CreateUsageOverridePayload) => Promise<boolean>;
+  onUsageOverrideDeactivate: (integrationId: VendorKey, overrideId: string) => Promise<void>;
+  selectedIntegrationId: VendorKey;
   usageOverrides: UsageOverride[];
+  vendorDatapoints: VendorDatapointRecord[];
 }) {
   const {
     busyAction,
@@ -9791,6 +11325,7 @@ function MappingsView(props: {
     onUsageOverrideDeactivate,
     selectedIntegrationId,
     usageOverrides,
+    vendorDatapoints,
   } = props;
   const [showMappedAccounts, setShowMappedAccounts] = useState(false);
   const [showMappedProducts, setShowMappedProducts] = useState(false);
@@ -10523,7 +12058,7 @@ function MappingsView(props: {
     }
   };
 
-  const runProductCatalogSearch = async (integrationId: IntegrationId, vendorProductKey: string) => {
+  const runProductCatalogSearch = async (integrationId: VendorKey, vendorProductKey: string) => {
     const query = productCatalogQueries[vendorProductKey]?.trim() ?? '';
     if (!query) {
       setProductCatalogMessages((current) => ({
@@ -10566,14 +12101,20 @@ function MappingsView(props: {
         </div>
         <div className="integrations-live-meta">
           <label className="mapping-integration-select">
-            <span>Integration</span>
+            <span>Vendor</span>
             <select
-              onChange={(event) => onIntegrationChange(event.target.value as IntegrationId)}
+              onChange={(event) => onIntegrationChange(event.target.value as VendorKey)}
               value={selectedIntegrationId}
             >
               {integrations.map((integration) => (
                 <option key={integration.id} value={integration.id}>
                   {integration.name}
+                </option>
+              ))}
+              {vendorDatapoints.map((datapoint) => (
+                <option key={datapoint.vendorId} value={datapointMappingVendorId(datapoint)}>
+                  {datapoint.displayName}
+                  {datapoint.linkedIntegrationId ? ` (${integrationName(datapoint.linkedIntegrationId)})` : ''}
                 </option>
               ))}
             </select>
@@ -11840,6 +13381,171 @@ function deviceIdentityFilter(device: ReconciliationDevice): DimensionMap {
   return {};
 }
 
+function refreshIssueCountsFromDevices(issue: ReconcileIssue): ReconcileIssue {
+  const nextSourceCount = issue.devices.reduce((total, device) => total + device.quantity, 0);
+  const nextIssue: ReconcileIssue = {
+    ...issue,
+    sourceCount: nextSourceCount,
+    measuredSourceCount: nextSourceCount,
+    proposedCount: nextSourceCount,
+  };
+  const nextDelta = reconciliationDelta(nextIssue);
+  const matchedAdditionCount = issue.matchedAgreementAdditions.length;
+  const writeAction =
+    nextDelta === 0
+      ? undefined
+      : matchedAdditionCount === 0
+        ? 'create-addition'
+        : matchedAdditionCount === 1
+          ? 'update-addition'
+          : 'review-required';
+
+  return {
+    ...nextIssue,
+    amount: reconciliationIssueImpact(nextIssue),
+    writeAction,
+    status:
+      nextDelta === 0
+        ? 'matched'
+        : issue.status === 'approved' || issue.status === 'updated'
+          ? issue.status
+          : 'needs-review',
+    baseStatus: nextDelta === 0 ? 'matched' : 'needs-review',
+    reason:
+      nextDelta === 0
+        ? `${issue.product} count matches the agreement addition.`
+        : `${issue.product} count differs from the agreement addition.`,
+  };
+}
+
+function createRemappedDeviceIssue(
+  sourceIssue: ReconcileIssue,
+  target: ReconciliationProductOption,
+  devices: ReconciliationDevice[],
+): ReconcileIssue {
+  return refreshIssueCountsFromDevices({
+    ...sourceIssue,
+    id: `${sourceIssue.clientId}|${sourceIssue.agreementId}|${target.productCode}|base`,
+    product: target.productName,
+    serviceCode: target.productCode,
+    family: 'Base count',
+    lineType: 'base-count',
+    invoiceCount: 0,
+    proposedCount: 0,
+    sourceCount: 0,
+    measuredSourceCount: 0,
+    amount: 0,
+    vendorInvoiceCount: undefined,
+    vendorInvoiceLineCount: undefined,
+    invoiceImportId: undefined,
+    invoiceNumber: undefined,
+    invoiceDate: undefined,
+    linkedCount: undefined,
+    matchedAgreementAdditions: [],
+    adjustments: [],
+    devices,
+    writeAction: 'create-addition',
+    status: 'needs-review',
+    baseStatus: 'needs-review',
+    selectedCountSource: 'api',
+    manualOverrideTotal: undefined,
+    manualOverrideTotalTouched: false,
+    proposedLessIncluded: undefined,
+    lessIncludedTouched: false,
+    appliedUpdate: undefined,
+    reason: `${target.productName} count differs from the agreement addition.`,
+    recommendation: 'Create a ConnectWise agreement addition after review.',
+    audit: [`Remapped from ${sourceIssue.product}.`],
+  });
+}
+
+function applyDeviceRemapsToIssues(
+  issues: ReconcileIssue[],
+  sourceIssue: ReconcileIssue,
+  remaps: Array<{ device: ReconciliationDevice; targetVendorProductKey: string }>,
+  productOptions: ReconciliationProductOption[],
+) {
+  if (remaps.length === 0) {
+    return issues;
+  }
+
+  const remappedIds = new Set(remaps.map((entry) => entry.device.id));
+  const movedByTarget = new Map<string, ReconciliationDevice[]>();
+
+  for (const { device, targetVendorProductKey } of remaps) {
+    const target = productOptions.find((option) => option.vendorProductKey === targetVendorProductKey);
+    if (!target) {
+      continue;
+    }
+
+    const remappedDevice: ReconciliationDevice = {
+      ...device,
+      vendorProductKey: target.vendorProductKey,
+      productCode: target.productCode,
+      productName: target.productName,
+      dimensions: {
+        ...device.dimensions,
+        originalVendorProductKey: device.vendorProductKey,
+        originalProductCode: device.productCode,
+      },
+    };
+    const existing = movedByTarget.get(target.vendorProductKey) ?? [];
+    existing.push(remappedDevice);
+    movedByTarget.set(target.vendorProductKey, existing);
+  }
+
+  let nextIssues = issues.map((current) => {
+    if (current.id !== sourceIssue.id) {
+      return current;
+    }
+
+    return refreshIssueCountsFromDevices({
+      ...current,
+      devices: current.devices.filter((device) => !remappedIds.has(device.id)),
+    });
+  });
+
+  for (const [targetVendorProductKey, devices] of movedByTarget.entries()) {
+    const target = productOptions.find((option) => option.vendorProductKey === targetVendorProductKey);
+    if (!target) {
+      continue;
+    }
+
+    const targetIndex = nextIssues.findIndex(
+      (candidate) =>
+        candidate.vendorId === sourceIssue.vendorId &&
+        candidate.clientId === sourceIssue.clientId &&
+        candidate.agreementId === sourceIssue.agreementId &&
+        (candidate.serviceCode === target.productCode || candidate.product === target.productName),
+    );
+
+    if (targetIndex >= 0) {
+      const targetIssue = nextIssues[targetIndex];
+      nextIssues = [
+        ...nextIssues.slice(0, targetIndex),
+        refreshIssueCountsFromDevices({
+          ...targetIssue,
+          devices: [...targetIssue.devices, ...devices],
+        }),
+        ...nextIssues.slice(targetIndex + 1),
+      ];
+      continue;
+    }
+
+    nextIssues = [...nextIssues, createRemappedDeviceIssue(sourceIssue, target, devices)];
+  }
+
+  return nextIssues.filter(
+    (issue) =>
+      !isZeroZeroReconciliationIssue(issue) &&
+      (issue.devices.length > 0 ||
+        issue.invoiceCount > 0 ||
+        issue.matchedAgreementAdditions.length > 0 ||
+        issue.status === 'approved' ||
+        issue.status === 'updated'),
+  );
+}
+
 function deviceDisplayName(device: ReconciliationDevice) {
   const dimensions = device.dimensions;
   return String(
@@ -12751,6 +14457,36 @@ function buildProductSelectionDefaults(groups: ProductMappingGroup[]) {
   );
 }
 
+function groupOptionalIntegrationSettings(settings: IntegrationNonSecretDefinition[]) {
+  const sections = new Map<string, IntegrationNonSecretDefinition[]>();
+
+  for (const setting of settings) {
+    const sectionKey = setting.section ?? '';
+    sections.set(sectionKey, [...(sections.get(sectionKey) ?? []), setting]);
+  }
+
+  return [...sections.entries()].map(([section, items]) => ({
+    section: section || undefined,
+    items,
+  }));
+}
+
+function optionalIntegrationSettingValue(integration: Integration, setting: IntegrationNonSecretDefinition) {
+  if (setting.inputType === 'checkbox') {
+    if (setting.key === 'detailOnlySync') {
+      return integrationDetailOnlySyncEnabled(integration.nonSecrets, {
+        optionalNonSecrets: [setting],
+      } as IntegrationSettingsDefinition)
+        ? 'true'
+        : 'false';
+    }
+
+    return checkboxSettingEnabled(integration.nonSecrets[setting.key] ?? setting.defaultValue) ? 'true' : 'false';
+  }
+
+  return integration.nonSecrets[setting.key] ?? setting.defaultValue ?? '';
+}
+
 function IntegrationModal(props: {
   integration: Integration;
   onClose: () => void;
@@ -12850,22 +14586,40 @@ function IntegrationModal(props: {
                     <input name={`secret:${setting.key}`} placeholder="Leave blank to keep the existing Key Vault value" type="password" />
                   </label>
                 ))}
-                {integration.optionalNonSecrets.map((setting) => (
-                  <label className="config-checkbox" key={setting.key}>
-                    <input
-                      defaultChecked={
-                        setting.key === 'detailOnlySync'
-                          ? integrationDetailOnlySyncEnabled(integration.nonSecrets, { optionalNonSecrets: [setting] } as IntegrationSettingsDefinition)
-                          : checkboxSettingEnabled(integration.nonSecrets[setting.key] ?? setting.defaultValue)
-                      }
-                      name={`nonSecret:${setting.key}`}
-                      type="checkbox"
-                    />
-                    <span>
-                      <strong>{setting.label}</strong>
-                      {setting.description ? <small>{setting.description}</small> : null}
-                    </span>
-                  </label>
+                {groupOptionalIntegrationSettings(integration.optionalNonSecrets).map(({ section, items }) => (
+                  <div className="integration-settings-section" key={section ?? 'general-optional-settings'}>
+                    {section ? <h3 className="integration-settings-section-title">{section}</h3> : null}
+                    {items.map((setting) =>
+                      setting.inputType === 'select' ? (
+                        <label className="config-field" key={setting.key}>
+                          <span>{setting.label}</span>
+                          <select
+                            defaultValue={optionalIntegrationSettingValue(integration, setting)}
+                            name={`nonSecret:${setting.key}`}
+                          >
+                            {(setting.options ?? []).map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          {setting.description ? <small>{setting.description}</small> : null}
+                        </label>
+                      ) : (
+                        <label className="config-checkbox" key={setting.key}>
+                          <input
+                            defaultChecked={optionalIntegrationSettingValue(integration, setting) === 'true'}
+                            name={`nonSecret:${setting.key}`}
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong>{setting.label}</strong>
+                            {setting.description ? <small>{setting.description}</small> : null}
+                          </span>
+                        </label>
+                      ),
+                    )}
+                  </div>
                 ))}
                 <p className="config-note">
                   {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
@@ -14832,7 +16586,7 @@ function ImportsView(props: {
   onRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
   onReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
   onTableUpload: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     file: File,
     columnMap: InvoiceTableColumnMap,
     sourceType: IntegrationDataSourceType,
@@ -14841,12 +16595,13 @@ function ImportsView(props: {
     linkedIntegrationId?: IntegrationId,
   ) => Promise<InvoiceImportSummary | null>;
   onUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
-  onVendorChange: (integrationId: IntegrationId | '') => void;
+  onVendorChange: (vendorId: VendorKey | '') => void;
   review: InvoiceImportExceptionReview | null;
   reviewLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   reviewMessage: string;
-  selectedVendorId: IntegrationId | '';
+  selectedVendorId: VendorKey | '';
   setImportMode: (value: InvoiceImportMode) => void;
+  vendorDatapoints: VendorDatapointRecord[];
 }) {
   const {
     busyReviewAction,
@@ -14871,6 +16626,7 @@ function ImportsView(props: {
     reviewMessage,
     selectedVendorId,
     setImportMode,
+    vendorDatapoints,
   } = props;
   const latestImport = imports[0];
   const totalRows = imports.reduce((total, item) => total + item.rowCount, 0);
@@ -14899,13 +16655,18 @@ function ImportsView(props: {
               <span>Integration</span>
               <select
                 disabled={importing}
-                onChange={(event) => onVendorChange(event.target.value as IntegrationId | '')}
+                onChange={(event) => onVendorChange(event.target.value as VendorKey | '')}
                 value={selectedVendorId}
               >
                 <option value="">All invoice imports</option>
                 {integrations.map((integration) => (
                   <option key={integration.id} value={integration.id}>
                     {integration.name}
+                  </option>
+                ))}
+                {vendorDatapoints.map((datapoint) => (
+                  <option key={datapoint.vendorId} value={datapoint.vendorId}>
+                    {datapoint.displayName}
                   </option>
                 ))}
               </select>
@@ -14967,7 +16728,7 @@ function ImportsView(props: {
 
           {imports.map((item) => (
             <div className="import-row" key={item.id}>
-              <span className="vendor-badge">{integrationName(item.vendorId)}</span>
+              <span className="vendor-badge">{vendorDisplayName(item.vendorId, vendorDatapoints)}</span>
               <div>
                 <strong>{item.invoiceNumber ? `Invoice ${item.invoiceNumber}` : item.fileName}</strong>
                 <span>
@@ -15036,126 +16797,6 @@ function ImportsView(props: {
     </section>
   );
 }
-
-const invoiceTableFieldDefinitions: Array<{
-  key: keyof InvoiceTableColumnMap;
-  label: string;
-  required?: boolean;
-  aliases: string[];
-}> = [
-  {
-    key: 'externalAccountId',
-    label: 'Customer/account',
-    aliases: ['customer account number', 'account id', 'account number', 'customer id', 'company id', 'tenant id'],
-  },
-  {
-    key: 'externalAccountName',
-    label: 'Customer name',
-    aliases: ['company name', 'customer name', 'account name', 'tenant name', 'client name'],
-  },
-  {
-    key: 'productCode',
-    label: 'Product code',
-    aliases: ['product code', 'sku', 'sku id', 'item code', 'part number', 'license id', 'license sku'],
-  },
-  {
-    key: 'productName',
-    label: 'Product name',
-    required: true,
-    aliases: ['product', 'product name', 'sku name', 'item name', 'description', 'license', 'license name', 'device category'],
-  },
-  {
-    key: 'licenseId',
-    label: 'License ID',
-    aliases: ['license id', 'license sku', 'sku id', 'subscription id', 'plan id'],
-  },
-  {
-    key: 'licenseName',
-    label: 'License name',
-    aliases: ['license', 'license name', 'sku name', 'plan name', 'subscription name'],
-  },
-  {
-    key: 'userPrincipalName',
-    label: 'User principal',
-    aliases: ['user principal name', 'upn', 'username', 'user name', 'login', 'principal name'],
-  },
-  {
-    key: 'email',
-    label: 'Email',
-    aliases: ['email', 'email address', 'mail', 'user email'],
-  },
-  {
-    key: 'deviceId',
-    label: 'Device ID',
-    aliases: ['device id', 'asset id', 'computer id', 'endpoint id', 'machine id'],
-  },
-  {
-    key: 'deviceName',
-    label: 'Device name',
-    aliases: ['device name', 'hostname', 'host name', 'computer name', 'machine name', 'endpoint name'],
-  },
-  {
-    key: 'deviceType',
-    label: 'DeviceType',
-    aliases: ['device type', 'devicetype', 'type', 'system type', 'os type'],
-  },
-  {
-    key: 'deviceClass',
-    label: 'DeviceClass',
-    aliases: ['device class', 'deviceclass', 'class', 'device category', 'physicality', 'asset class'],
-  },
-  {
-    key: 'quantity',
-    label: 'Quantity',
-    required: true,
-    aliases: ['charge qty', 'quantity', 'qty', 'count', 'seats', 'licenses', 'usage quantity'],
-  },
-  {
-    key: 'invoiceNumber',
-    label: 'Invoice number',
-    aliases: ['invoice number', 'invoice #', 'invoice no', 'bill number'],
-  },
-  {
-    key: 'invoiceDate',
-    label: 'Invoice date',
-    aliases: ['invoice date', 'bill date', 'date'],
-  },
-  {
-    key: 'chargeType',
-    label: 'Charge type',
-    aliases: ['charge type', 'line type', 'transaction type', 'type'],
-  },
-  {
-    key: 'billedAmount',
-    label: 'Billed amount',
-    aliases: ['billed amount', 'amount', 'total', 'line total', 'extended amount'],
-  },
-  {
-    key: 'term',
-    label: 'Term',
-    aliases: ['term', 'subscription term', 'commitment term'],
-  },
-  {
-    key: 'billingFrequency',
-    label: 'Frequency',
-    aliases: ['billing frequency', 'frequency', 'billing cycle', 'cycle'],
-  },
-  {
-    key: 'billingPeriodStart',
-    label: 'Period start',
-    aliases: ['start', 'period start', 'billing period start', 'from'],
-  },
-  {
-    key: 'billingPeriodEnd',
-    label: 'Period end',
-    aliases: ['end', 'period end', 'billing period end', 'to'],
-  },
-  {
-    key: 'primaryDomain',
-    label: 'Domain',
-    aliases: ['primary domain', 'domain', 'tenant domain'],
-  },
-];
 
 function importableDataSources(integration: Integration | undefined) {
   return (
@@ -15226,7 +16867,7 @@ function InvoiceTableImportPanel(props: {
   importMode: InvoiceImportMode;
   importing: boolean;
   onImport: (
-    integrationId: IntegrationId,
+    integrationId: VendorKey,
     file: File,
     columnMap: InvoiceTableColumnMap,
     sourceType: IntegrationDataSourceType,
@@ -15250,9 +16891,7 @@ function InvoiceTableImportPanel(props: {
     importDataSources.find((source) => source.sourceType === sourceType) ?? importDataSources[0];
   const requiresCustomerMapping = selectedDataSource?.requiresCustomerMapping ?? true;
   const requiresSourceProductMapping = hasRequiredInvoiceSourceColumn(sourceType, columnMap);
-  const requiredMapped = Boolean(
-    (!requiresCustomerMapping || columnMap.externalAccountId) && requiresSourceProductMapping && columnMap.quantity,
-  );
+  const requiredMapped = columnMapSatisfiesSourceType(sourceType, columnMap, { requiresCustomerMapping });
   const canImport = Boolean(selectedVendor && file && requiredMapped && !importing);
   const linkableIntegrations =
     selectedVendor?.id === 'custom-table'
@@ -15291,7 +16930,7 @@ function InvoiceTableImportPanel(props: {
 
     try {
       const table = await readImportTableFile(nextFile);
-      const nextMap = defaultInvoiceTableColumnMap(table.headers);
+      const nextMap = suggestInvoiceTableColumnMap(table.headers, sourceType);
       setHeaders(table.headers);
       setColumnMap(nextMap);
       setMessage(
@@ -15307,10 +16946,7 @@ function InvoiceTableImportPanel(props: {
   };
 
   const updateColumn = (key: keyof InvoiceTableColumnMap, value: string) => {
-    setColumnMap((current) => ({
-      ...current,
-      [key]: value || undefined,
-    }));
+    setColumnMap((current) => updateInvoiceTableColumnMap(current, key, value));
   };
 
   const importTable = async () => {
@@ -15416,31 +17052,14 @@ function InvoiceTableImportPanel(props: {
             </select>
           </label>
         ) : null}
-        <div className="invoice-column-map-grid">
-          {invoiceTableFieldDefinitions.map((field) => {
-            const required =
-              (field.key === 'externalAccountId' && requiresCustomerMapping) ||
-              field.key === 'quantity' ||
-              isRequiredSourceColumn(sourceType, field.key, columnMap);
-            return (
-              <label className="config-field" key={field.key}>
-                <span>{required ? `${field.label} *` : field.label}</span>
-                <select
-                  disabled={headers.length === 0 || importing}
-                  onChange={(event) => updateColumn(field.key, event.target.value)}
-                  value={columnMap[field.key] ?? ''}
-                >
-                  <option value="">Ignore</option>
-                  {headers.map((header) => (
-                    <option key={header} value={header}>
-                      {header}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            );
-          })}
-        </div>
+        <InvoiceColumnMapGrid
+          columnMap={columnMap}
+          disabled={importing}
+          headerOptions={columnMappingHeaderOptions(columnMap, headers)}
+          onChange={updateColumn}
+          requiresCustomerMapping={requiresCustomerMapping}
+          sourceType={sourceType}
+        />
         <div className="invoice-table-import-actions">
           <button className="button primary compact" disabled={!canImport} onClick={() => void importTable()} type="button">
             <Upload size={15} />
@@ -15492,15 +17111,7 @@ async function readImportTableFile(file: File): Promise<ParsedImportTableFile> {
 }
 
 async function spreadsheetFileToCsv(file: File) {
-  const XLSX = await import('@e965/xlsx');
-  const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-  const firstSheetName = workbook.SheetNames[0];
-  if (!firstSheetName) {
-    throw new Error('The workbook does not contain a worksheet.');
-  }
-
-  const sheet = workbook.Sheets[firstSheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
+  const rows = readWorkbookObjectRows(await file.arrayBuffer());
   return objectRowsToCsv(rows);
 }
 
@@ -15629,40 +17240,6 @@ function csvHeaders(content: string) {
   }
 
   return rows[0] ?? [];
-}
-
-function defaultInvoiceTableColumnMap(headers: string[]): InvoiceTableColumnMap {
-  return Object.fromEntries(
-    invoiceTableFieldDefinitions.flatMap((field) => {
-      const header = bestHeaderMatch(headers, field.aliases);
-      return header ? [[field.key, header]] : [];
-    }),
-  ) as InvoiceTableColumnMap;
-}
-
-function bestHeaderMatch(headers: string[], aliases: string[]) {
-  const normalizedHeaders = headers.map((header) => ({
-    header,
-    normalized: normalizeColumnLabel(header),
-  }));
-
-  for (const alias of aliases) {
-    const normalizedAlias = normalizeColumnLabel(alias);
-    const exact = normalizedHeaders.find((item) => item.normalized === normalizedAlias);
-    if (exact) return exact.header;
-  }
-
-  for (const alias of aliases) {
-    const normalizedAlias = normalizeColumnLabel(alias);
-    const partial = normalizedHeaders.find((item) => item.normalized.includes(normalizedAlias));
-    if (partial) return partial.header;
-  }
-
-  return undefined;
-}
-
-function normalizeColumnLabel(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function InvoiceExceptionReviewPanel(props: {

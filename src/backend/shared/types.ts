@@ -1,3 +1,5 @@
+import type { PsaAgreementReconcileMode } from '../../shared/integrationSettings';
+
 export type CurrencyCode = 'USD';
 
 export type MoneyAmount = {
@@ -29,6 +31,7 @@ export type UsageSnapshot = {
 
 export type AgreementAddition = {
   id: string;
+  connectWiseAdditionId?: string;
   clientId: string;
   agreementId: string;
   productCode: string;
@@ -92,11 +95,26 @@ export type VendorRuleSet = {
   rules: QuantityRule[];
 };
 
+export type VendorProductAdditionPin = {
+  vendorId: string;
+  customerId: string;
+  agreementId: string;
+  vendorProductKey: string;
+  connectWiseAdditionId: string;
+  connectwiseProductCode: string;
+  connectwiseProductName: string;
+  mappingSource: 'auto-reconcile' | 'manual';
+};
+
+export type VendorProductAdditionPinAssignment = VendorProductAdditionPin;
+
 export type ReconcileVendorUsageRequest = {
   vendorId: string;
   rules: QuantityRule[];
   snapshots: UsageSnapshot[];
   agreementAdditions: AgreementAddition[];
+  reconcileMode?: PsaAgreementReconcileMode;
+  additionPins?: VendorProductAdditionPin[];
 };
 
 export type ReconciliationEvidence = {
@@ -130,6 +148,9 @@ export type ReconciliationLine = {
   agreementId: string;
   productCode: string;
   productName: string;
+  vendorProductKey?: string;
+  connectWiseAdditionId?: string;
+  matchedAdditionIds?: string[];
   lineType: ReconciliationLineType;
   ruleId: string;
   sourceQuantity: number;
@@ -150,6 +171,7 @@ export type ReconciliationResult = {
   vendorId: string;
   generatedAt: string;
   lines: ReconciliationLine[];
+  pinAssignments?: VendorProductAdditionPinAssignment[];
   totals: {
     matched: number;
     needsReview: number;

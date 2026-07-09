@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import { isVendorDatapointId, vendorSupportsMapping, type VendorKey } from '../../shared/vendorDatapoints';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import {
   ConnectWiseClient,
@@ -1073,8 +1074,20 @@ app.http('upsertNcentralFilterMapping', {
   handler: upsertNcentralFilterMappingHttp,
 });
 
-function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
-  return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;
+function parseIntegrationId(value: string | undefined): VendorKey | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (isVendorDatapointId(value) || getIntegrationSettingsDefinition(value as IntegrationId)) {
+    return value as VendorKey;
+  }
+
+  return undefined;
+}
+
+function vendorHasMappingWorkspace(vendorId: VendorKey) {
+  return vendorSupportsMapping(vendorId);
 }
 
 function unsupportedVendorResponse(value: string | undefined) {

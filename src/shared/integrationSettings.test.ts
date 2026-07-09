@@ -7,6 +7,8 @@ import {
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationIdsWithCapability,
+  integrationPsaAgreementReconcileMode,
+  psaAgreementReconcileModeSettingKey,
   validateIntegrationRegistry,
   validateIntegrationSettings,
 } from './integrationSettings';
@@ -205,5 +207,11 @@ assert.equal(customTable.displayName, 'Custom Manual Import');
 assert.equal(getIntegrationDataSource('custom-table', 'device-count')?.ingestionMethods.includes('json'), true);
 assert.equal(getIntegrationDataSource('custom-table', 'invoice')?.providesCosts, true);
 assert.equal(getIntegrationDataSource('custom-table', 'license-count')?.requiresCustomerMapping, true);
+
+assert.equal(microsoft365.optionalNonSecrets?.some((setting) => setting.key === psaAgreementReconcileModeSettingKey), true);
+assert.equal(
+  integrationPsaAgreementReconcileMode({ psaAgreementReconcileMode: 'separate-multiple-products' }, microsoft365),
+  'separate-multiple-products',
+);
 
 console.log('integration settings tests passed');

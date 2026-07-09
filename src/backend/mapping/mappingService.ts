@@ -1,4 +1,6 @@
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import { isVendorDatapointId, type VendorKey } from '../../shared/vendorDatapoints';
+import { sqlLatestReconcilableSyncRunCte } from '../shared/reconcilableSyncRuns';
 import { defaultCoveProductMappings, type CoveProductMappingKey } from '../vendor/cove/rules';
 import { defaultNcentralProductMappings } from '../vendor/ncentral/rules';
 
@@ -38,7 +40,7 @@ export type ConnectWiseCustomerCandidate = {
 };
 
 export type AccountMappingCandidate = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   externalAccountId: string;
   externalAccountName: string;
   customerId?: string;
@@ -77,7 +79,7 @@ export type ProductBundleComponent = {
 
 export type ProductBundle = {
   id: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   bundleKey: string;
   bundleName: string;
   components: ProductBundleComponent[];
@@ -94,7 +96,7 @@ export type ProductBundle = {
 export type ProductLinkRuleSource =
   | {
       sourceType: 'vendor-product';
-      vendorId: IntegrationId;
+      vendorId: VendorKey;
       vendorProductKey: string;
       vendorProductName?: string;
     }
@@ -105,7 +107,7 @@ export type ProductLinkRuleSource =
     }
   | {
       sourceType: 'filtered-dataset';
-      vendorId: IntegrationId;
+      vendorId: VendorKey;
       dataset?: 'users' | 'licenses';
       label?: string;
       filter: ProductLinkRuleFilterNode;
@@ -146,7 +148,7 @@ export type ProductLinkRuleAggregation =
 
 export type ProductLinkRule = {
   id: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   sourceVendorProductKey: string;
   ruleName: string;
   sources: ProductLinkRuleSource[];
@@ -173,7 +175,7 @@ export type ProductCatalogSearchResult = ProductMappingTarget & {
 };
 
 export type ProductMappingCandidate = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   vendorProductKey: string;
   vendorProductName: string;
   status: MappingStatus;
@@ -196,7 +198,7 @@ export type ProductMapping = ProductMappingCandidate & {
 };
 
 export type MappingState = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   summary: {
     accountMappings: number;
     approvedAccountMappings: number;
@@ -219,7 +221,7 @@ export type MappingState = {
 };
 
 export type AutomapResult = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   generatedCandidates: number;
   suggestedMappings: number;
   reviewMappings: number;
@@ -227,13 +229,13 @@ export type AutomapResult = {
 };
 
 export type ApproveSuggestedMappingsResult = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   approvedAccountMappings: number;
   skippedExisting: number;
 };
 
 export type ApplyMappingsResult = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   accountSnapshotsUpdated: number;
   productSnapshotsUpdated: number;
 };
@@ -263,7 +265,7 @@ export type ProductMappingCustomer = {
 };
 
 export type ProductMappingCustomerReview = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   vendorProductKey: string;
   vendorProductName: string;
   customerCount: number;
@@ -294,7 +296,7 @@ export type ProductLinkRuleTestSourceTotal = {
 };
 
 export type ProductLinkRuleTestResult = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   ruleId: string;
   ruleName: string;
   sourceVendorProductKey: string;
@@ -478,20 +480,7 @@ function sqlFriendlyLabel(valueExpression: string, accountIdExpression: string) 
 }
 
 function sqlLatestVendorUsageSyncRunCte() {
-  return `latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-         and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
-         and (
-           $1::text <> 'microsoft-365'
-           or coalesce(metadata->>'entity', 'license-snapshots') = any(array['m365-users', 'license-snapshots']::text[])
-         )
-       order by completed_at desc nulls last, started_at desc
-       limit 1
-     )`;
+  return sqlLatestReconcilableSyncRunCte('$1');
 }
 
 function sqlLatestMicrosoft365LicenseSyncRunCte() {
@@ -647,7 +636,7 @@ const ncentralProductClasses: ProductClass[] = [
   },
 ];
 
-export async function listMappingState(database: Queryable, vendorId: IntegrationId): Promise<MappingState> {
+export async function listMappingState(database: Queryable, vendorId: VendorKey): Promise<MappingState> {
   if (vendorId === 'microsoft-365') {
     await refreshMicrosoft365AccountMappingNames(database);
   }
@@ -713,7 +702,7 @@ export async function listMappingState(database: Queryable, vendorId: Integratio
 
 export async function runAccountAutomap(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   options: { actor?: string } = {},
 ): Promise<AutomapResult> {
   const [existingMappings, candidates] = await Promise.all([
@@ -750,7 +739,7 @@ export async function runAccountAutomap(
 
 export async function approveSuggestedAccountMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   options: { actor?: string } = {},
 ): Promise<ApproveSuggestedMappingsResult> {
   const [existingMappings, candidates] = await Promise.all([
@@ -792,7 +781,7 @@ export async function approveSuggestedAccountMappings(
 
 export async function updateAccountMapping(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   externalAccountId: string,
   input: {
     status: MappingStatus;
@@ -849,7 +838,7 @@ export async function updateAccountMapping(
 
 export async function updateProductMapping(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   vendorProductKey: string,
   input: {
     status: MappingStatus;
@@ -938,7 +927,7 @@ export async function updateProductMapping(
   }
 }
 
-export async function listProductBundles(database: Queryable, vendorId: IntegrationId): Promise<ProductBundle[]> {
+export async function listProductBundles(database: Queryable, vendorId: VendorKey): Promise<ProductBundle[]> {
   const result = await database.query<ProductBundleRow>(
     `select
        id,
@@ -965,7 +954,7 @@ export async function listProductBundles(database: Queryable, vendorId: Integrat
   return result.rows.map(mapProductBundleRow);
 }
 
-export async function listProductLinkRules(database: Queryable, vendorId: IntegrationId): Promise<ProductLinkRule[]> {
+export async function listProductLinkRules(database: Queryable, vendorId: VendorKey): Promise<ProductLinkRule[]> {
   const result = await database.query<ProductLinkRuleRow>(
     `select
        id,
@@ -996,7 +985,7 @@ export async function listProductLinkRules(database: Queryable, vendorId: Integr
 
 export async function listProductMappingCustomers(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   vendorProductKey: string,
 ): Promise<ProductMappingCustomerReview> {
   const canonicalProductKey = canonicalVendorProductKey(vendorProductKey);
@@ -1217,7 +1206,7 @@ export async function listProductMappingCustomers(
 
 export async function upsertProductLinkRule(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   input: UpsertProductLinkRuleInput,
 ): Promise<ProductLinkRule> {
   const sourceVendorProductKey = canonicalVendorProductKey(input.sourceVendorProductKey?.trim() ?? '');
@@ -1330,12 +1319,12 @@ export async function upsertProductLinkRule(
 
 export async function deactivateProductLinkRule(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   ruleId: string,
   options: { reviewedBy?: string } = {},
-): Promise<{ vendorId: IntegrationId; ruleId: string; active: false }> {
+): Promise<{ vendorId: VendorKey; ruleId: string; active: false }> {
   return setProductLinkRuleActive(database, vendorId, ruleId, false, options) as Promise<{
-    vendorId: IntegrationId;
+    vendorId: VendorKey;
     ruleId: string;
     active: false;
   }>;
@@ -1343,11 +1332,11 @@ export async function deactivateProductLinkRule(
 
 export async function setProductLinkRuleActive(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   ruleId: string,
   active: boolean,
   options: { reviewedBy?: string } = {},
-): Promise<{ vendorId: IntegrationId; ruleId: string; active: boolean }> {
+): Promise<{ vendorId: VendorKey; ruleId: string; active: boolean }> {
   await database.query(
     `update vendor_product_link_rules
      set active = $3,
@@ -1369,9 +1358,9 @@ export async function setProductLinkRuleActive(
 
 export async function deleteProductLinkRule(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   ruleId: string,
-): Promise<{ vendorId: IntegrationId; ruleId: string; deleted: boolean }> {
+): Promise<{ vendorId: VendorKey; ruleId: string; deleted: boolean }> {
   const result = await database.query<{ id: string }>(
     `delete from vendor_product_link_rules
      where vendor_id = $1
@@ -1389,7 +1378,7 @@ export async function deleteProductLinkRule(
 
 export async function testProductLinkRule(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   input: { ruleId?: string; customerId?: string; agreementId?: string },
 ): Promise<ProductLinkRuleTestResult> {
   const ruleId = input.ruleId?.trim();
@@ -1550,7 +1539,7 @@ type LinkedSqlContext = {
 
 async function loadProductLinkRule(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   ruleId: string,
 ) {
   const result = await database.query<ProductLinkRuleRow>(
@@ -2114,13 +2103,17 @@ function microsoft365DatasetEntities(dataset: 'users' | 'licenses') {
     : ['m365-users', 'license-snapshots'];
 }
 
-function integrationDisplayName(integrationId: IntegrationId) {
+function integrationDisplayName(integrationId: VendorKey) {
+  if (isVendorDatapointId(integrationId)) {
+    return integrationId.slice('datapoint:'.length);
+  }
+
   return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
 }
 
 export async function upsertProductBundle(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   input: {
     bundleKey?: string;
     bundleName?: string;
@@ -2227,10 +2220,10 @@ export async function upsertProductBundle(
 
 export async function deactivateProductBundle(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   bundleKey: string,
   options: { reviewedBy?: string } = {},
-): Promise<{ vendorId: IntegrationId; bundleKey: string; active: false }> {
+): Promise<{ vendorId: VendorKey; bundleKey: string; active: false }> {
   await database.query(
     `update vendor_product_bundles
      set active = false,
@@ -2329,7 +2322,7 @@ export async function upsertConnectWiseCatalogProducts(
 
 export async function applyApprovedMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<ApplyMappingsResult> {
   await setMissingVendorProductKeys(database, vendorId);
 
@@ -2407,7 +2400,7 @@ export async function applyApprovedMappings(
 
 export async function generateAccountMappingCandidates(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<AccountMappingCandidate[]> {
   const [sources, customers, preferredProductCodes] = await Promise.all([
     loadVendorAccountSources(database, vendorId),
@@ -2419,7 +2412,7 @@ export async function generateAccountMappingCandidates(
 }
 
 export function buildAccountMappingCandidates(
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   sources: VendorAccountSource[],
   customers: ConnectWiseCustomerCandidate[],
   preferredProductCodes: string[] = [],
@@ -2492,7 +2485,7 @@ export function buildAccountMappingCandidates(
 
 export async function generateProductMappingCandidates(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<ProductMappingCandidate[]> {
   const classes = productClassesForVendor(vendorId);
   if (classes.length === 0) {
@@ -2551,7 +2544,7 @@ export async function generateProductMappingCandidates(
 
 async function generateDynamicProductMappingCandidates(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<ProductMappingCandidate[]> {
   const [sources, products] = await Promise.all([
     loadVendorProductSources(database, vendorId),
@@ -2562,7 +2555,7 @@ async function generateDynamicProductMappingCandidates(
 }
 
 function dynamicProductMappingCandidate(
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   source: {
     vendorProductKey: string;
     vendorProductName: string;
@@ -2699,7 +2692,7 @@ function isContainedPhrase(longer: string, shorter: string) {
   return sharedPrefixTokens && Boolean(shorterLastToken) && longerLastToken.startsWith(shorterLastToken);
 }
 
-async function listAccountMappings(database: Queryable, vendorId: IntegrationId): Promise<AccountMapping[]> {
+async function listAccountMappings(database: Queryable, vendorId: VendorKey): Promise<AccountMapping[]> {
   const result = await database.query<AccountMappingRow>(
     `with ${sqlLatestVendorUsageSyncRunCte()},
      ${sqlMicrosoft365AccountNameCtes()},
@@ -2846,7 +2839,7 @@ async function listAccountMappings(database: Queryable, vendorId: IntegrationId)
   return dedupeAccountMappingsForDisplay(vendorId, result.rows.map(mapAccountMappingRow));
 }
 
-async function listProductMappings(database: Queryable, vendorId: IntegrationId): Promise<ProductMapping[]> {
+async function listProductMappings(database: Queryable, vendorId: VendorKey): Promise<ProductMapping[]> {
   const result = await database.query<ProductMappingRow>(
     `select
        vendor_product_mappings.id,
@@ -2951,7 +2944,7 @@ async function listProductMappings(database: Queryable, vendorId: IntegrationId)
   return result.rows.map(mapProductMappingRow);
 }
 
-async function loadVendorAccountSources(database: Queryable, vendorId: IntegrationId): Promise<VendorAccountSource[]> {
+async function loadVendorAccountSources(database: Queryable, vendorId: VendorKey): Promise<VendorAccountSource[]> {
   const result = await database.query<AccountSourceRow>(
     `with ${sqlLatestVendorUsageSyncRunCte()},
      ${sqlMicrosoft365AccountNameCtes()},
@@ -3088,7 +3081,7 @@ async function loadVendorAccountSources(database: Queryable, vendorId: Integrati
 
 async function loadVendorProductSources(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<Array<{ vendorProductKey: string; vendorProductName: string; rowCount: number; customerCount: number }>> {
   const result = await database.query<VendorProductSourceRow>(
     `with ${sqlLatestVendorUsageSyncRunCte()},
@@ -3210,7 +3203,7 @@ async function loadConnectWiseCustomers(database: Queryable): Promise<ConnectWis
   return [...customersById.values()];
 }
 
-async function loadPreferredProductCodes(database: Queryable, vendorId: IntegrationId) {
+async function loadPreferredProductCodes(database: Queryable, vendorId: VendorKey) {
   const result = await database.query<{ connectwise_product_code: string }>(
     `select connectwise_product_code
      from vendor_product_mappings
@@ -3297,7 +3290,7 @@ async function loadExistingConnectWiseProductTarget(
   };
 }
 
-async function countUnmappedSnapshots(database: Queryable, vendorId: IntegrationId) {
+async function countUnmappedSnapshots(database: Queryable, vendorId: VendorKey) {
   const result = await database.query<{ count: string | number }>(
     `with latest_invoice_import as (
        select id
@@ -3399,7 +3392,7 @@ async function upsertAccountMapping(
   );
 }
 
-async function loadExternalAccountName(database: Queryable, vendorId: IntegrationId, externalAccountId: string) {
+async function loadExternalAccountName(database: Queryable, vendorId: VendorKey, externalAccountId: string) {
   const result = await database.query<{ external_account_name: string | null }>(
     `with usage_account_name as (
        select ${sqlUsageSnapshotAccountNameAggregate()} as external_account_name
@@ -3475,7 +3468,7 @@ async function refreshMicrosoft365AccountMappingNames(database: Queryable) {
 
 async function loadCanonicalVendorAccount(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   externalAccountId: string,
   externalAccountName?: string,
 ) {
@@ -3549,7 +3542,7 @@ async function loadCanonicalVendorAccount(
 
 async function deactivateSupersededAccountAliasMapping(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   externalAccountId: string,
   reviewedBy: string,
 ) {
@@ -3565,7 +3558,7 @@ async function deactivateSupersededAccountAliasMapping(
   );
 }
 
-async function setMissingVendorProductKeys(database: Queryable, vendorId: IntegrationId) {
+async function setMissingVendorProductKeys(database: Queryable, vendorId: VendorKey) {
   if (vendorId !== 'cove') {
     if (vendorId !== 'ncentral') {
       return;
@@ -3716,7 +3709,7 @@ function normalizeProductCode(value: string) {
 }
 
 function productMappingCandidate(
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   productClass: ProductClass,
   product: ConnectWiseProductRow,
   customerCount = 0,
@@ -3757,7 +3750,7 @@ function productMappingCandidate(
   };
 }
 
-function productClassesForVendor(vendorId: IntegrationId): ProductClass[] {
+function productClassesForVendor(vendorId: VendorKey): ProductClass[] {
   if (vendorId === 'cove') {
     return coveProductClasses;
   }
@@ -3817,7 +3810,7 @@ function mapAccountMappingRow(row: AccountMappingRow): AccountMapping {
   };
 }
 
-function dedupeAccountMappingsForDisplay(vendorId: IntegrationId, mappings: AccountMapping[]) {
+function dedupeAccountMappingsForDisplay(vendorId: VendorKey, mappings: AccountMapping[]) {
   if (vendorId !== 'opentext-appriver') {
     return mappings;
   }
@@ -3910,7 +3903,7 @@ function mapProductLinkRuleRow(row: ProductLinkRuleRow): ProductLinkRule {
 }
 
 function mapProductMappingCustomerReview(
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   vendorProductKey: string,
   rows: ProductMappingCustomerReviewRow[],
 ): ProductMappingCustomerReview {
@@ -4008,7 +4001,10 @@ function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
     if (source.sourceType === 'vendor-product') {
       const vendorId = source.vendorId;
       const vendorProductKey = canonicalVendorProductKey(source.vendorProductKey?.trim() ?? '');
-      if (!vendorId || !getIntegrationSettingsDefinition(vendorId) || !vendorProductKey) {
+      if (!vendorId || !vendorProductKey) {
+        continue;
+      }
+      if (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId)) {
         continue;
       }
 
@@ -4039,7 +4035,7 @@ function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
       const vendorId = source.vendorId;
       const filter = normalizeProductLinkFilterNode(source.filter);
       const aggregation = normalizeProductLinkAggregation(source.aggregation);
-      if (!vendorId || !getIntegrationSettingsDefinition(vendorId) || !filter || !aggregation) {
+      if (!vendorId || (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId)) || !filter || !aggregation) {
         continue;
       }
 

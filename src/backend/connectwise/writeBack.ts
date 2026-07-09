@@ -212,7 +212,9 @@ function toWritePlanItem(line: ReconciliationLine): ConnectWiseWritePlanItem {
     clientId: line.clientId,
     agreementId: line.agreementId,
     action: line.writeAction === 'create-addition' ? 'create-addition' : 'update-addition',
-    connectWiseAdditionRef: `${line.clientId}:${line.agreementId}:${line.productCode}`,
+    connectWiseAdditionRef: line.connectWiseAdditionId
+      ? `${line.clientId}:${line.agreementId}:${line.connectWiseAdditionId}`
+      : `${line.clientId}:${line.agreementId}:${line.productCode}`,
     productCode: line.productCode,
     productName: line.productName,
     currentQuantity: line.agreementQuantity,

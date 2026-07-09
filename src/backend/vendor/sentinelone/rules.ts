@@ -1,6 +1,7 @@
 import type { MoneyAmount, VendorRuleSet } from '../../shared/types';
+import { billableUnitForVendorProductKey } from '../../shared/vendorProductUnits';
 
-export type SentinelOneProductMappingKey = 'sentinelone-server' | 'sentinelone-workstation';
+export type SentinelOneProductMappingKey = string;
 
 export type SentinelOneProductMapping = {
   vendorProductKey: SentinelOneProductMappingKey;
@@ -12,7 +13,7 @@ export type SentinelOneProductMapping = {
 
 export const sentinelOneProductKeys = ['sentinelone-server', 'sentinelone-workstation'] as const;
 
-export const defaultSentinelOneProductMappings: Record<SentinelOneProductMappingKey, SentinelOneProductMapping> = {
+export const defaultSentinelOneProductMappings: Record<string, SentinelOneProductMapping> = {
   'sentinelone-server': {
     vendorProductKey: 'sentinelone-server',
     productCode: 'SENTINELONE-SERVER',
@@ -25,8 +26,12 @@ export const defaultSentinelOneProductMappings: Record<SentinelOneProductMapping
   },
 };
 
+function isManualDeviceProductKey(vendorProductKey: string) {
+  return vendorProductKey.startsWith('device:');
+}
+
 export function buildSentinelOneRuleSet(
-  mappings: Partial<Record<SentinelOneProductMappingKey, SentinelOneProductMapping>> = {},
+  mappings: Partial<Record<string, SentinelOneProductMapping>> = {},
 ): VendorRuleSet {
   const resolvedMappings = {
     ...defaultSentinelOneProductMappings,
@@ -36,27 +41,40 @@ export function buildSentinelOneRuleSet(
   return {
     vendorId: 'sentinelone',
     vendorName: 'SentinelOne',
-    rules: Object.values(resolvedMappings).map((mapping) => ({
-      id: `${mapping.vendorProductKey}-count`,
-      vendorId: 'sentinelone',
-      vendorProductKey: mapping.vendorProductKey,
-      productCode: mapping.productCode,
-      targetProductCodes: targetProductCodes(mapping),
-      productName: mapping.productName,
-      sourceMetric: 'snapshot-count',
-      billableUnit: mapping.vendorProductKey === 'sentinelone-workstation' ? 'workstation' : 'server',
-      dimensions: { sentinelOneMachineType: mapping.vendorProductKey.replace('sentinelone-', '') },
-      unitPrice: mapping.unitPrice,
-      requiresExistingAgreementProduct: true,
-      notes: `${mapping.productName} is counted from synced SentinelOne agents when the agreement already has this product.`,
-    })),
+    rules: Object.values(resolvedMappings)
+      .filter((mapping): mapping is SentinelOneProductMapping => Boolean(mapping?.vendorProductKey && mapping.productCode))
+      .map((mapping) => {
+        const manualDeviceKey = isManualDeviceProductKey(mapping.vendorProductKey);
+        return {
+          id: `${mapping.vendorProductKey}-count`,
+          vendorId: 'sentinelone',
+          vendorProductKey: mapping.vendorProductKey,
+          productCode: mapping.productCode,
+          targetProductCodes: targetProductCodes(mapping),
+          productName: mapping.productName,
+          sourceMetric: 'snapshot-count' as const,
+          billableUnit: manualDeviceKey
+            ? billableUnitForVendorProductKey(mapping.vendorProductKey)
+            : mapping.vendorProductKey === 'sentinelone-workstation'
+              ? 'workstation'
+              : 'server',
+          dimensions: manualDeviceKey
+            ? undefined
+            : { sentinelOneMachineType: mapping.vendorProductKey.replace('sentinelone-', '') },
+          unitPrice: mapping.unitPrice,
+          requiresExistingAgreementProduct: !manualDeviceKey,
+          notes: manualDeviceKey
+            ? `${mapping.productName} is counted from imported device rows with approved product mappings.`
+            : `${mapping.productName} is counted from synced SentinelOne agents when the agreement already has this product.`,
+        };
+      }),
   };
 }
 
 export const sentinelOneRuleSet = buildSentinelOneRuleSet();
 
-export function isSentinelOneProductMappingKey(value: string): value is SentinelOneProductMappingKey {
-  return sentinelOneProductKeys.includes(value as SentinelOneProductMappingKey);
+export function isSentinelOneProductMappingKey(value: string): value is (typeof sentinelOneProductKeys)[number] {
+  return sentinelOneProductKeys.includes(value as (typeof sentinelOneProductKeys)[number]);
 }
 
 function targetProductCodes(mapping: SentinelOneProductMapping) {

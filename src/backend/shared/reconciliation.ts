@@ -1,7 +1,5 @@
 import type {
   AgreementAddition,
-  BillingUnit,
-  DimensionFilter,
   MoneyAmount,
   QuantityRule,
   ReconcileVendorUsageRequest,
@@ -10,14 +8,25 @@ import type {
   ReconciliationStatus,
   UsageSnapshot,
 } from './types';
+import {
+  findAdditions,
+  matchesDimensions,
+  matchesRuleProduct,
+  normalizeProductCode,
+  sumAdditions,
+  targetProductCodes,
+} from './reconciliationProductMatching';
+import { reconcileSeparateVendorUsage } from './reconciliationSeparateMode';
 
 const zeroUsd: MoneyAmount = { amount: 0, currency: 'USD' };
 
 export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): ReconciliationResult {
-  const lines = [
-    ...request.rules.flatMap((rule) => reconcileRule(request, rule)),
-    ...reconcileUnmappedSnapshots(request),
-  ];
+  const separateResult =
+    request.reconcileMode === 'separate-multiple-products' ? reconcileSeparateVendorUsage(request) : undefined;
+  const lines = separateResult
+    ? [...separateResult.lines, ...reconcileUnmappedSnapshots(request)]
+    : [...request.rules.flatMap((rule) => reconcileRule(request, rule)), ...reconcileUnmappedSnapshots(request)];
+
   const totals = lines.reduce(
     (summary, line) => {
       if (line.status === 'matched') summary.matched += 1;
@@ -40,6 +49,7 @@ export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): Reco
     vendorId: request.vendorId,
     generatedAt: new Date().toISOString(),
     lines,
+    pinAssignments: separateResult?.pinAssignments?.length ? separateResult.pinAssignments : undefined,
     totals,
   };
 }
@@ -124,9 +134,15 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
 
   const groupedSnapshots = groupSnapshotsByAgreement(scopedSnapshots);
   const groupedRelevantAdditions = groupAdditionsForSnapshotAgreements(
-    request.agreementAdditions.filter((addition) =>
-      [...targetProductCodes(rule), ...(rule.addOn ? targetProductCodes(rule.addOn) : [])].includes(addition.productCode),
-    ),
+    request.agreementAdditions.filter((addition) => {
+      const productCodes = [
+        ...targetProductCodes(rule),
+        ...(rule.addOn ? targetProductCodes(rule.addOn) : []),
+      ];
+      return productCodes.some(
+        (code) => normalizeProductCode(code) === normalizeProductCode(addition.productCode),
+      );
+    }),
     groupedSnapshots,
   );
   const agreementKeys = new Set([...groupedSnapshots.keys(), ...groupedRelevantAdditions.keys()]);
@@ -269,7 +285,11 @@ function unitPriceForImpact(
   fallback?: MoneyAmount,
 ): MoneyAmount | undefined {
   return (
-    additions.find((addition) => addition.productCode === preferredProductCode && addition.unitPrice)?.unitPrice ??
+    additions.find(
+      (addition) =>
+        normalizeProductCode(addition.productCode) === normalizeProductCode(preferredProductCode) &&
+        addition.unitPrice,
+    )?.unitPrice ??
     additions.find((addition) => addition.unitPrice)?.unitPrice ??
     fallback
   );
@@ -335,49 +355,6 @@ function groupAdditionsForSnapshotAgreements(
 
     return groups;
   }, new Map<string, AgreementAddition[]>());
-}
-
-function findAdditions(
-  additions: AgreementAddition[],
-  clientId: string,
-  agreementId: string,
-  productCodes: string[],
-) {
-  const targetCodes = new Set(productCodes);
-  return additions.filter(
-    (addition) =>
-      addition.clientId === clientId &&
-      addition.agreementId === agreementId &&
-      targetCodes.has(addition.productCode),
-  );
-}
-
-function sumAdditions(additions: AgreementAddition[]) {
-  return additions.reduce((total, addition) => total + addition.quantity, 0);
-}
-
-function targetProductCodes(target: { productCode: string; targetProductCodes?: string[] }) {
-  return [...new Set([target.productCode, ...(target.targetProductCodes ?? [])])];
-}
-
-function matchesRuleProduct(snapshot: UsageSnapshot, rule: QuantityRule) {
-  const vendorProductKeys = ruleVendorProductKeys(rule);
-  if (vendorProductKeys.length > 0 && snapshot.vendorProductKey) {
-    return vendorProductKeys.includes(snapshot.vendorProductKey);
-  }
-
-  return targetProductCodes(rule).includes(snapshot.productCode);
-}
-
-function ruleVendorProductKeys(rule: QuantityRule) {
-  return [
-    ...new Set([rule.vendorProductKey, ...(rule.vendorProductKeys ?? [])].filter((key): key is string => Boolean(key))),
-  ];
-}
-
-function matchesDimensions(snapshot: UsageSnapshot, dimensions?: DimensionFilter) {
-  if (!dimensions) return true;
-  return Object.entries(dimensions).every(([key, expected]) => snapshot.dimensions[key] === expected);
 }
 
 function sumMetric(snapshots: UsageSnapshot[], metric: string) {

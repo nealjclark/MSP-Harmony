@@ -94,7 +94,13 @@ export default defineConfig(async () => {
   const authHeaders = localAuthHeaders();
 
   return {
+    optimizeDeps: {
+      include: ['@e965/xlsx'],
+    },
     server: {
+      fs: {
+        allow: [workspaceRoot],
+      },
       proxy: {
         '/api': {
           target: functionsUrl,

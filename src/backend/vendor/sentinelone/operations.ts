@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import { sqlLatestReconcilableSyncRunIdExpression } from '../../shared/reconcilableSyncRuns';
 import {
   SentinelOneClient,
   sentinelOneCredentialsFromSettings,
@@ -12,7 +13,6 @@ import {
 import {
   buildSentinelOneRuleSet,
   defaultSentinelOneProductMappings,
-  isSentinelOneProductMappingKey,
   type SentinelOneProductMapping,
   type SentinelOneProductMappingKey,
 } from './rules';
@@ -210,7 +210,7 @@ export function assertSentinelOneReady(settings: IntegrationRuntimeSettings) {
 
 export async function loadSentinelOneProductMappings(
   database: Queryable,
-): Promise<Record<SentinelOneProductMappingKey, SentinelOneProductMapping>> {
+): Promise<Record<string, SentinelOneProductMapping>> {
   const result = await database.query<VendorProductMappingRow>(
     `select vendor_product_key, target_index, connectwise_product_code, connectwise_product_name, unit_price
      from vendor_product_mappings
@@ -219,14 +219,10 @@ export async function loadSentinelOneProductMappings(
        and mapping_status = 'approved'
      order by target_index, connectwise_product_code`,
   );
-  const mappings = { ...defaultSentinelOneProductMappings };
-  const rowsByKey = new Map<SentinelOneProductMappingKey, VendorProductMappingRow[]>();
+  const mappings: Record<string, SentinelOneProductMapping> = { ...defaultSentinelOneProductMappings };
+  const rowsByKey = new Map<string, VendorProductMappingRow[]>();
 
   for (const row of result.rows) {
-    if (!isSentinelOneProductMappingKey(row.vendor_product_key)) {
-      continue;
-    }
-
     rowsByKey.set(row.vendor_product_key, [...(rowsByKey.get(row.vendor_product_key) ?? []), row]);
   }
 
@@ -254,7 +250,45 @@ export async function loadSentinelOneProductMappings(
 }
 
 export async function loadSentinelOneRuleSet(database: Queryable) {
-  return buildSentinelOneRuleSet(await loadSentinelOneProductMappings(database));
+  const [productMappings, snapshotProducts] = await Promise.all([
+    loadSentinelOneProductMappings(database),
+    loadDistinctSentinelOneSnapshotProducts(database),
+  ]);
+
+  const resolvedMappings = { ...productMappings };
+  for (const snapshotProduct of snapshotProducts) {
+    if (!snapshotProduct.vendor_product_key || resolvedMappings[snapshotProduct.vendor_product_key]) {
+      continue;
+    }
+
+    resolvedMappings[snapshotProduct.vendor_product_key] = {
+      vendorProductKey: snapshotProduct.vendor_product_key,
+      productCode: snapshotProduct.product_code,
+      productName: snapshotProduct.product_name,
+    };
+  }
+
+  return buildSentinelOneRuleSet(resolvedMappings);
+}
+
+async function loadDistinctSentinelOneSnapshotProducts(database: Queryable) {
+  const result = await database.query<{
+    vendor_product_key: string;
+    product_code: string;
+    product_name: string;
+  }>(
+    `select distinct on (vendor_product_key)
+       vendor_product_key,
+       product_code,
+       product_name
+     from vendor_usage_snapshots
+     where vendor_id = 'sentinelone'
+       and vendor_product_key is not null
+       and sync_run_id = (${sqlLatestReconcilableSyncRunIdExpression("'sentinelone'")})
+     order by vendor_product_key, observed_at desc`,
+  );
+
+  return result.rows;
 }
 
 async function loadSentinelOneAccountMappings(database: Queryable) {

@@ -7,13 +7,15 @@ import {
   type IntegrationDataSourceType,
   type IntegrationId,
 } from '../../shared/integrationSettings';
+import { isVendorDatapointId, type VendorDatapointId, type VendorKey } from '../../shared/vendorDatapoints';
+import { CONSTANT_QUANTITY_ONE, isConstantQuantityOne, normalizeImportedCustomerLabel } from '../../shared/invoiceTableMapping';
 import { appRiverIntegrationId } from '../vendor/appriver/client';
 import { loadAppRiverProductMappings, type Queryable } from '../vendor/appriver/operations';
 import type { AppRiverProductMapping } from '../vendor/appriver/rules';
 
 export type InvoiceImportSummary = {
   id: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   fileName: string;
   invoiceNumber?: string;
   importedAt: string;
@@ -51,6 +53,7 @@ export type InvoiceTableColumnMap = {
   deviceName?: string;
   deviceType?: string;
   deviceClass?: string;
+  lastCheckIn?: string;
   quantity?: string;
   invoiceNumber?: string;
   invoiceDate?: string;
@@ -266,9 +269,9 @@ type ParsedCsv = {
 };
 
 type NormalizedInvoiceLine = {
-  vendorId: IntegrationId;
-  importVendorId: IntegrationId;
-  mappingVendorId: IntegrationId;
+  vendorId: VendorKey;
+  importVendorId: VendorKey;
+  mappingVendorId: VendorKey;
   sourceType: InvoiceImportSourceType;
   syncMode: ManualImportSyncMode;
   requiresCustomerMapping: boolean;
@@ -312,6 +315,7 @@ type NormalizedInvoiceLine = {
   deviceClass?: string;
   deviceCategory?: string;
   deviceCategoryLabel?: string;
+  lastCheckIn?: string;
 };
 
 type ProductMappingIndex = {
@@ -482,6 +486,9 @@ export async function importMappedInvoiceTableCsv(
   input: {
     vendorId: IntegrationId;
     linkedIntegrationId?: IntegrationId;
+    datapointId?: string;
+    datapointVendorId?: VendorDatapointId;
+    storageVendorIdOverride?: VendorKey;
     fileName: string;
     content: string;
     columnMap: InvoiceTableColumnMap;
@@ -491,13 +498,13 @@ export async function importMappedInvoiceTableCsv(
   },
 ): Promise<InvoiceImportSummary> {
   assertInvoiceImportCapable(input.vendorId);
-  const importVendorId = input.vendorId;
-  const mappingVendorId = linkedMappingVendorId(input.vendorId, input.linkedIntegrationId);
+  const importVendorId = input.datapointVendorId ?? input.vendorId;
+  const mappingVendorId = input.storageVendorIdOverride ?? linkedMappingVendorId(input.vendorId, input.linkedIntegrationId);
   const storageVendorId = mappingVendorId;
-  assertInvoiceImportCapable(storageVendorId);
+  assertMappedImportStorageVendor(storageVendorId);
   const importMode = input.importMode ?? 'merge';
   const syncMode = input.syncMode ?? 'full-vendor-sync';
-  const sourceType = supportedInvoiceImportSourceType(importVendorId, input.sourceType);
+  const sourceType = supportedInvoiceImportSourceType(input.vendorId, input.sourceType);
   const parsed = parseTabularContent({ fileName: input.fileName, content: input.content });
   if (parsed.rows.length === 0) {
     throw new Error('Invoice table import did not contain any data rows.');
@@ -565,6 +572,8 @@ export async function importMappedInvoiceTableCsv(
         importVendorId,
         mappingVendorId,
         linkedIntegrationId: input.linkedIntegrationId ?? undefined,
+        datapointId: input.datapointId ?? undefined,
+        datapointVendorId: input.datapointVendorId ?? undefined,
         syncMode,
         sourceType,
         columnMap,
@@ -603,7 +612,7 @@ export async function importMappedInvoiceTableCsv(
 
 export async function listInvoiceImports(
   database: Queryable,
-  options: { vendorId?: IntegrationId; limit?: number } = {},
+  options: { vendorId?: VendorKey; datapointId?: string; limit?: number } = {},
 ): Promise<InvoiceImportSummary[]> {
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 50), 100));
   const result = await database.query<InvoiceImportRow>(
@@ -621,17 +630,51 @@ export async function listInvoiceImports(
             status
        from invoice_imports
       where ($1::text is null or vendor_id = $1)
+        and ($3::text is null or raw_summary->>'datapointId' = $3)
       order by invoice_date desc nulls last, imported_at desc
       limit $2`,
-    [options.vendorId ?? null, limit],
+    [options.vendorId ?? null, limit, options.datapointId ?? null],
   );
 
   return result.rows.map(mapInvoiceImportRow);
 }
 
+export async function deleteInvoiceImport(
+  database: Queryable,
+  vendorId: VendorKey,
+  importId: string,
+): Promise<InvoiceImportSummary | undefined> {
+  const invoiceImport = await loadInvoiceImportForVendor(database, importId, vendorId);
+  if (!invoiceImport) {
+    return undefined;
+  }
+
+  const syncRuns = await database.query<{ id: string }>(
+    `select id
+       from sync_runs
+      where integration_id = $1
+        and metadata->>'invoiceImportId' = $2`,
+    [vendorId, importId],
+  );
+
+  for (const syncRun of syncRuns.rows) {
+    await database.query('delete from vendor_usage_snapshots where sync_run_id = $1::uuid', [syncRun.id]);
+    await database.query('delete from sync_runs where id = $1::uuid', [syncRun.id]);
+  }
+
+  await database.query(
+    `delete from invoice_imports
+      where id = $1::uuid
+        and vendor_id = $2`,
+    [importId, vendorId],
+  );
+
+  return invoiceImport;
+}
+
 export async function getInvoiceImportExceptionReview(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   importId: string,
 ): Promise<InvoiceImportExceptionReview | undefined> {
   const invoiceImport = await loadInvoiceImportForVendor(database, importId, vendorId);
@@ -710,7 +753,7 @@ export async function getInvoiceImportExceptionReview(
 
 export async function refreshInvoiceImportMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   importId: string,
 ): Promise<InvoiceImportRefreshResult | undefined> {
   const invoiceImport = await loadInvoiceImportForVendor(database, importId, vendorId);
@@ -850,6 +893,22 @@ export async function refreshInvoiceImportMappings(
     [importId, vendorId],
   );
 
+  await database.query(
+    `update invoice_line_items
+        set quantity = 1,
+            charge_type = 'Renewal'
+       from invoice_imports
+      where invoice_line_items.invoice_import_id = invoice_imports.id
+        and invoice_imports.id = $1::uuid
+        and invoice_line_items.vendor_id = $2
+        and coalesce(invoice_imports.raw_summary->>'sourceType', '') = 'device-count'
+        and (
+          invoice_line_items.quantity is distinct from 1
+          or coalesce(invoice_line_items.charge_type, '') is distinct from 'Renewal'
+        )`,
+    [importId, vendorId],
+  );
+
   const refreshedImport = await recountInvoiceImport(database, importId, vendorId);
   if (!refreshedImport) {
     return undefined;
@@ -865,7 +924,7 @@ export async function refreshInvoiceImportMappings(
 
 export async function loadLatestInvoiceImportSummary(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<InvoiceImportSummary | undefined> {
   const result = await database.query<InvoiceImportRow>(
     `select id,
@@ -894,7 +953,7 @@ export async function loadLatestInvoiceImportSummary(
 
 export async function loadLatestInvoiceQuantitiesForLines(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   lines: Array<{ clientId: string; agreementId: string; productCode: string }>,
 ): Promise<{ latestInvoice?: InvoiceImportSummary; quantities: Map<string, InvoiceQuantity> }> {
   const latestInvoice = await loadLatestInvoiceImportSummary(database, vendorId);
@@ -1005,9 +1064,9 @@ function normalizeInvoiceLine(
 
 function normalizeMappedInvoiceLine(
   row: ParsedCsv['rows'][number],
-  vendorId: IntegrationId,
-  importVendorId: IntegrationId,
-  mappingVendorId: IntegrationId,
+  vendorId: VendorKey,
+  importVendorId: VendorKey,
+  mappingVendorId: VendorKey,
   sourceType: InvoiceImportSourceType,
   syncMode: ManualImportSyncMode,
   columnMap: Required<Pick<InvoiceTableColumnMap, 'externalAccountId' | 'productName' | 'quantity'>> &
@@ -1016,8 +1075,9 @@ function normalizeMappedInvoiceLine(
   productIndex: ProductMappingIndex,
 ): NormalizedInvoiceLine {
   const values = row.values;
-  const externalAccountId = mappedString(values, columnMap.externalAccountId) ?? '';
-  const externalAccountName = mappedString(values, columnMap.externalAccountName) ?? externalAccountId;
+  const externalAccountId = normalizeImportedCustomerLabel(mappedString(values, columnMap.externalAccountId)) ?? '';
+  const externalAccountName =
+    normalizeImportedCustomerLabel(mappedString(values, columnMap.externalAccountName)) ?? externalAccountId;
   const deviceType = mappedString(values, columnMap.deviceType);
   const deviceClass = mappedString(values, columnMap.deviceClass);
   const deviceCategory = sourceType === 'device-count' ? deviceCategoryForValues(deviceType, deviceClass) : undefined;
@@ -1052,7 +1112,10 @@ function normalizeMappedInvoiceLine(
         'Primary Domain': mappedString(values, columnMap.primaryDomain) ?? '',
       })
     : undefined;
-  const chargeType = mappedString(values, columnMap.chargeType) ?? 'Renewal';
+  const chargeType =
+    sourceType === 'device-count' || sourceType === 'license-count'
+      ? 'Renewal'
+      : mappedString(values, columnMap.chargeType) ?? 'Renewal';
 
   return {
     vendorId,
@@ -1075,7 +1138,7 @@ function normalizeMappedInvoiceLine(
     connectWiseProductCode: productMapping?.productCode,
     connectWiseProductName: productMapping?.productName,
     chargeType,
-    quantity: numericValue(mappedString(values, columnMap.quantity)),
+    quantity: resolvedImportQuantity(sourceType, columnMap.quantity, values),
     billedAmount: optionalNumericValue(mappedString(values, columnMap.billedAmount)),
     invoiceDate: parseInvoiceDate(mappedString(values, columnMap.invoiceDate)),
     billingPeriodStart: parseInvoiceDate(mappedString(values, columnMap.billingPeriodStart)),
@@ -1093,14 +1156,35 @@ function normalizeMappedInvoiceLine(
     deviceClass,
     deviceCategory: deviceCategory?.key,
     deviceCategoryLabel: deviceCategory?.label,
+    lastCheckIn: parseInvoiceDate(mappedString(values, columnMap.lastCheckIn)),
   };
 }
 
 function mappedString(values: Record<string, string>, columnName: string | undefined) {
-  return columnName ? stringValue(values[columnName]) : undefined;
+  if (!columnName || isConstantQuantityOne(columnName)) {
+    return undefined;
+  }
+  return stringValue(values[columnName]);
 }
 
-function linkedMappingVendorId(vendorId: IntegrationId, linkedIntegrationId: IntegrationId | undefined) {
+function resolvedImportQuantity(
+  sourceType: InvoiceImportSourceType,
+  quantityColumn: string | undefined,
+  values: Record<string, string>,
+) {
+  // Device lists are one device per CSV row. Never treat core/CPU counts as quantity.
+  if (sourceType === 'device-count') {
+    return 1;
+  }
+
+  if (isConstantQuantityOne(quantityColumn)) {
+    return 1;
+  }
+
+  return numericValue(mappedString(values, quantityColumn));
+}
+
+function linkedMappingVendorId(vendorId: IntegrationId, linkedIntegrationId: IntegrationId | undefined): VendorKey {
   if (vendorId !== 'custom-table') {
     return vendorId;
   }
@@ -1204,7 +1288,13 @@ function normalizedInvoiceTableColumnMap(
   const byNormalizedHeader = new Map(headers.map((header) => [normalizeHeader(header), header]));
   const normalized = Object.fromEntries(
     Object.entries(columnMap).flatMap(([key, value]) => {
-      const header = typeof value === 'string' ? byNormalizedHeader.get(normalizeHeader(value)) : undefined;
+      if (typeof value !== 'string') {
+        return [];
+      }
+      if (isConstantQuantityOne(value)) {
+        return [[key, CONSTANT_QUANTITY_ONE]];
+      }
+      const header = byNormalizedHeader.get(normalizeHeader(value));
       return header ? [[key, header]] : [];
     }),
   ) as InvoiceTableColumnMap;
@@ -1235,7 +1325,7 @@ function assertRequiredTableColumns(
   const missing = [
     requiresCustomerMapping && !columnMap.externalAccountId ? 'Customer/account column' : undefined,
     hasSourceProduct ? undefined : sourceProductRequirementLabel(sourceType),
-    columnMap.quantity ? undefined : 'Quantity column',
+    sourceType === 'device-count' || columnMap.quantity ? undefined : 'Quantity column',
   ].filter((value): value is string => Boolean(value));
 
   if (missing.length > 0) {
@@ -1364,6 +1454,8 @@ function rawPayloadForLine(line: NormalizedInvoiceLine) {
     deviceClass: line.deviceClass,
     deviceCategory: line.deviceCategory,
     deviceCategoryLabel: line.deviceCategoryLabel,
+    lastCheckIn: line.lastCheckIn,
+    lastApplianceCheckinTime: line.lastCheckIn,
   };
 }
 
@@ -1392,7 +1484,7 @@ async function loadInvoiceImport(database: Queryable, importId: string) {
 async function loadInvoiceImportForVendor(
   database: Queryable,
   importId: string,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ) {
   const result = await database.query<InvoiceImportRow>(
     `select id,
@@ -1419,7 +1511,7 @@ async function loadInvoiceImportForVendor(
 async function recountInvoiceImport(
   database: Queryable,
   importId: string,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ) {
   const result = await database.query<InvoiceImportRow>(
     `with import_scope as (
@@ -1483,7 +1575,7 @@ async function recountInvoiceImport(
 
 async function loadInvoiceAccountExistingMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   externalAccountIds: string[],
 ): Promise<Map<string, InvoiceAccountExistingMapping>> {
   if (externalAccountIds.length === 0) {
@@ -1531,7 +1623,7 @@ async function loadInvoiceAccountExistingMappings(
 
 async function loadInvoiceProductExistingMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
   vendorProductKeys: string[],
 ): Promise<Map<string, InvoiceProductExistingMapping[]>> {
   if (vendorProductKeys.length === 0) {
@@ -1680,7 +1772,7 @@ async function deleteExistingInvoiceImports(
     fileName: string;
     invoiceNumber?: string;
     invoiceDate?: string;
-    vendorId: IntegrationId;
+    vendorId: VendorKey;
   },
 ) {
   if (input.invoiceNumber) {
@@ -1766,7 +1858,7 @@ async function loadAppRiverAccountIndex(database: Queryable): Promise<AccountMap
 
 async function loadGenericAccountIndex(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<AccountMappingIndex> {
   const result = await database.query<AccountMappingRow>(
     `select external_account_id,
@@ -1793,7 +1885,7 @@ async function loadGenericAccountIndex(
 
 async function loadGenericProductMappings(
   database: Queryable,
-  vendorId: IntegrationId,
+  vendorId: VendorKey,
 ): Promise<Record<string, InvoiceProductMapping>> {
   const result = await database.query<GenericProductMappingRow>(
     `select vendor_product_key,
@@ -2059,6 +2151,14 @@ function assertInvoiceImportCapable(vendorId: IntegrationId) {
   }
 }
 
+function assertMappedImportStorageVendor(vendorId: VendorKey) {
+  if (isVendorDatapointId(vendorId)) {
+    return;
+  }
+
+  assertInvoiceImportCapable(vendorId);
+}
+
 function supportedInvoiceImportSourceType(
   vendorId: IntegrationId,
   requestedSourceType: InvoiceImportSourceType | undefined,
@@ -2075,7 +2175,7 @@ function supportedInvoiceImportSourceType(
   return sourceType;
 }
 
-async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: IntegrationId, importId: string) {
+async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: VendorKey, importId: string) {
   const syncRunId = await ensureInvoiceImportSyncRun(database, vendorId, importId);
   await database.query('delete from vendor_usage_snapshots where sync_run_id = $1::uuid', [syncRunId]);
   await database.query(
@@ -2132,7 +2232,12 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
          'deviceType', invoice_line_items.raw_payload->>'deviceType',
          'deviceClass', invoice_line_items.raw_payload->>'deviceClass',
          'deviceCategory', invoice_line_items.raw_payload->>'deviceCategory',
-         'deviceCategoryLabel', invoice_line_items.raw_payload->>'deviceCategoryLabel'
+         'deviceCategoryLabel', invoice_line_items.raw_payload->>'deviceCategoryLabel',
+         'lastCheckIn', invoice_line_items.raw_payload->>'lastCheckIn',
+         'lastApplianceCheckinTime', coalesce(
+           invoice_line_items.raw_payload->>'lastApplianceCheckinTime',
+           invoice_line_items.raw_payload->>'lastCheckIn'
+         )
        ) || invoice_line_items.raw_payload,
        invoice_line_items.raw_payload
      from invoice_line_items
@@ -2141,7 +2246,10 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
      where invoice_line_items.invoice_import_id = $2::uuid
        and invoice_line_items.vendor_id = $3
        and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
-       and coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'`,
+       and (
+         coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count')
+         or coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
+       )`,
     [syncRunId, importId, vendorId],
   );
   await database.query(
@@ -2154,7 +2262,10 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
               from invoice_line_items
               where invoice_line_items.invoice_import_id = invoice_imports.id
                 and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
-                and coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
+                and (
+                  coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count')
+                  or coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
+                )
             ),
             metadata = sync_runs.metadata || jsonb_build_object(
               'source',
@@ -2189,7 +2300,7 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: In
   );
 }
 
-async function ensureInvoiceImportSyncRun(database: Queryable, vendorId: IntegrationId, importId: string) {
+async function ensureInvoiceImportSyncRun(database: Queryable, vendorId: VendorKey, importId: string) {
   const existing = await database.query<{ id: string }>(
     `select id
        from sync_runs
@@ -2370,7 +2481,7 @@ function parseCsv(content: string): ParsedCsv {
     rows.push(row);
   }
 
-  const headers = rows[0]?.map((header) => header.trim()) ?? [];
+  const headers = rows[0]?.map((header) => (header ?? '').trim()).filter(Boolean) ?? [];
   return {
     headers,
     rows: rows.slice(1).map((values, index) => ({
@@ -2388,8 +2499,8 @@ function assertRequiredHeaders(headers: string[], requiredHeaders: string[]) {
   }
 }
 
-function normalizeHeader(value: string) {
-  return value.trim().toLowerCase();
+function normalizeHeader(value: string | undefined) {
+  return (value ?? '').trim().toLowerCase();
 }
 
 function mapInvoiceImportRow(row: InvoiceImportRow): InvoiceImportSummary {

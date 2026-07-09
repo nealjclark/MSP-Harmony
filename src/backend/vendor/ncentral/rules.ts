@@ -47,6 +47,7 @@ export function buildNcentralRuleSet(
     vendorName: 'N-able N-central',
     rules: Object.values(resolvedMappings).filter(isProductMapping).map((mapping) => {
       const productType = productTypeForKey(mapping.vendorProductKey);
+      const isManualDeviceKey = mapping.vendorProductKey.startsWith('device:');
       return {
         id: `${mapping.vendorProductKey}-count`,
         vendorId: 'ncentral',
@@ -55,11 +56,11 @@ export function buildNcentralRuleSet(
         targetProductCodes: targetProductCodes(mapping),
         productName: mapping.productName,
         sourceMetric: 'snapshot-count',
-        billableUnit: productType === 'workstation' ? 'workstation' : 'server',
-        dimensions: { ncentralProductType: productType },
+        billableUnit: productType === 'workstation' ? 'workstation' : isManualDeviceKey ? 'device' : 'server',
+        dimensions: isManualDeviceKey ? undefined : { ncentralProductType: productType },
         unitPrice: mapping.unitPrice,
         requiresExistingAgreementProduct: false,
-        notes: `${mapping.productName} is counted from its configured N-central product filter. Compare against agreement additions directly or pin linked counts in Mappings.`,
+        notes: `${mapping.productName} is counted from vendor usage snapshots. Compare against agreement additions directly or pin linked counts in Mappings.`,
       };
     }),
   };

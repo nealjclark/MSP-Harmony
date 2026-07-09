@@ -14,8 +14,10 @@ import type {
   VendorRuleSet,
 } from '../shared/types';
 import type { ReconciliationAdjustment } from './reconciliationAdjustments';
-import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import { getIntegrationSettingsDefinition, integrationPsaAgreementReconcileMode, type IntegrationId } from '../../shared/integrationSettings';
+import { isVendorDatapointId, isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
 import { getVendorRuleSet } from './reconciliation';
+import { loadAdditionPins, upsertAdditionPins } from '../mapping/additionPinService';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
 import { loadDattoRuleSet } from '../vendor/datto/operations';
 import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
@@ -37,6 +39,11 @@ import {
   type InvoiceImportSummary,
   type InvoiceQuantity,
 } from '../invoices/appriverInvoiceImports';
+import {
+  sqlLatestReconcilableSyncRunCte,
+  sqlLatestReconcilableSyncRunIdExpression,
+} from '../shared/reconcilableSyncRuns';
+import { billableUnitForVendorProductKey } from '../shared/vendorProductUnits';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -279,6 +286,16 @@ export async function reconcileVendorFromDatabase(
     ...overriddenSnapshots,
     ...linkedContext.anchorSnapshots,
   ]);
+  const agreementIds = [
+    ...new Set(
+      [...overriddenSnapshots, ...linkedContext.anchorSnapshots].map((snapshot) => snapshot.agreementId),
+    ),
+  ];
+  const reconcileMode = await loadVendorReconcileMode(database, vendorId);
+  const additionPins =
+    reconcileMode === 'separate-multiple-products'
+      ? await loadAdditionPins(database, vendorId, agreementIds)
+      : [];
   const snapshots = [
     ...applyProductBundles(
       overriddenSnapshots,
@@ -292,7 +309,12 @@ export async function reconcileVendorFromDatabase(
     rules: ruleSet.rules,
     snapshots,
     agreementAdditions,
+    reconcileMode,
+    additionPins,
   });
+  if (result.pinAssignments?.length) {
+    await upsertAdditionPins(database, result.pinAssignments);
+  }
   const linkedLines = applyLinkedCountsToLines(result.lines, linkedContext.countsByLineKey);
   const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, linkedLines);
 
@@ -363,6 +385,10 @@ function totalsForLines(lines: ReconciliationLine[]) {
 }
 
 async function loadRuleSet(database: Queryable, vendorId: string): Promise<VendorRuleSet> {
+  if (isVendorDatapointId(vendorId)) {
+    return loadMappedInvoiceRuleSet(database, vendorId);
+  }
+
   if (vendorId === 'cove') {
     return loadCoveRuleSet(database);
   }
@@ -417,7 +443,7 @@ async function loadMappedInvoiceRuleSet(database: Queryable, vendorId: string): 
     productCode: row.connectwise_product_code,
     productName: row.connectwise_product_name,
     sourceMetric: 'snapshot-count' as const,
-    billableUnit: 'license' as const,
+    billableUnit: billableUnitForVendorProductKey(row.vendor_product_key),
     unitPrice:
       row.unit_price === null
         ? undefined
@@ -425,7 +451,7 @@ async function loadMappedInvoiceRuleSet(database: Queryable, vendorId: string): 
             amount: numericValue(row.unit_price),
             currency: 'USD' as const,
           },
-    notes: `${displayName} invoice table quantity for ${row.connectwise_product_name}.`,
+    notes: `${displayName} mapped quantity for ${row.connectwise_product_name}.`,
   }));
 
   return {
@@ -437,13 +463,7 @@ async function loadMappedInvoiceRuleSet(database: Queryable, vendorId: string): 
 
 async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
   const result = await database.query<SyncRunRow>(
-    `select id
-     from sync_runs
-     where integration_id = $1
-       and status = 'complete'
-       and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
-     order by completed_at desc nulls last, started_at desc
-     limit 1`,
+    `select ${sqlLatestReconcilableSyncRunIdExpression('$1')} as id`,
     [vendorId],
   );
 
@@ -452,7 +472,19 @@ async function loadLatestSyncRunId(database: Queryable, vendorId: string) {
 
 async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRunId: string | undefined) {
   const result = await database.query<SnapshotRow>(
-    `with approved_account_mappings as (
+    `with approved_product_mappings as (
+       select vendor_id,
+              replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
+              min(connectwise_product_code) as connectwise_product_code,
+              min(connectwise_product_name) as connectwise_product_name
+       from vendor_product_mappings
+       where vendor_id = $1
+         and active = true
+         and mapping_status = 'approved'
+       group by vendor_id, replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/')
+       having count(distinct connectwise_product_code) = 1
+     ),
+     approved_account_mappings as (
        select vendor_id,
               external_account_id,
               customer_id,
@@ -461,31 +493,13 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
        where vendor_id = $1
          and active = true
          and mapping_status = 'approved'
-     ),
-     approved_product_mappings as (
-       select vendor_id,
-              replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/') as vendor_product_key,
-              min(connectwise_product_code) as connectwise_product_code,
-              min(connectwise_product_name) as connectwise_product_name,
-              count(distinct connectwise_product_code) as target_count
-       from vendor_product_mappings
-       where vendor_id = $1
-         and active = true
-         and mapping_status = 'approved'
-       group by vendor_id, replace(replace(vendor_product_key, '%2F', '/'), '%2f', '/')
-       having count(distinct connectwise_product_code) = 1
+         and agreement_id is not null
      )
      select
        vendor_usage_snapshots.id,
        vendor_usage_snapshots.vendor_id,
-       case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
-         else vendor_usage_snapshots.customer_id
-       end as customer_id,
-       case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
-       else vendor_usage_snapshots.agreement_id
-       end as agreement_id,
+       coalesce(vendor_usage_snapshots.customer_id, approved_account_mappings.customer_id) as customer_id,
+       coalesce(vendor_usage_snapshots.agreement_id, approved_account_mappings.agreement_id) as agreement_id,
        vendor_usage_snapshots.external_account_id,
        vendor_usage_snapshots.vendor_product_key,
        coalesce(approved_product_mappings.connectwise_product_code, vendor_usage_snapshots.product_code) as product_code,
@@ -497,19 +511,17 @@ async function loadUsageSnapshots(database: Queryable, vendorId: string, syncRun
      left join approved_account_mappings
        on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
       and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+      and vendor_usage_snapshots.customer_id is null
      left join approved_product_mappings
        on approved_product_mappings.vendor_id = vendor_usage_snapshots.vendor_id
       and approved_product_mappings.vendor_product_key = vendor_usage_snapshots.vendor_product_key
      where vendor_usage_snapshots.vendor_id = $1
-       and case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
-         else vendor_usage_snapshots.customer_id
-       end is not null
-       and case
-         when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
-         else vendor_usage_snapshots.agreement_id
-       end is not null
-       and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+       and coalesce(vendor_usage_snapshots.customer_id, approved_account_mappings.customer_id) is not null
+       and coalesce(vendor_usage_snapshots.agreement_id, approved_account_mappings.agreement_id) is not null
+       and (
+         lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         or approved_product_mappings.vendor_product_key is not null
+       )
        and ($2::uuid is null or vendor_usage_snapshots.sync_run_id = $2::uuid)
      order by customer_id, agreement_id, product_code, vendor_usage_snapshots.observed_at`,
     [vendorId, syncRunId ?? null],
@@ -868,14 +880,7 @@ async function loadVendorProductLinkedSourceTotals(
   const dedupeKeySql = linkedDatasetDedupeKeySql('vendor_usage_snapshots', 'vendor-usage');
   const result = await database.query<LinkedSourceQuantityRow>(
     `with latest_sync_run as (
-       select id
-       from sync_runs
-       where integration_id = $1
-         and status = 'complete'
-         and coalesce(metadata->>'source', '') <> 'invoice-table'
-         and coalesce(metadata->>'syncMode', 'full-vendor-sync') <> 'info-only'
-       order by completed_at desc nulls last, started_at desc
-       limit 1
+       select ${sqlLatestReconcilableSyncRunIdExpression('$1')} as id
      ),
      approved_account_mappings as (
        select vendor_id,
@@ -907,7 +912,10 @@ async function loadVendorProductLinkedSourceTotals(
        where vendor_usage_snapshots.vendor_id = $1
          and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
-         and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         and (
+         lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         or approved_product_mappings.vendor_product_key is not null
+       )
          and exists (
            select 1
            from vendor_product_mappings
@@ -1456,8 +1464,27 @@ function canonicalVendorProductKey(value: string) {
   }
 }
 
-function integrationDisplayName(integrationId: IntegrationId) {
+function integrationDisplayName(integrationId: VendorKey) {
+  if (isVendorDatapointId(integrationId)) {
+    return integrationId.slice('datapoint:'.length);
+  }
+
   return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
+}
+
+async function loadVendorReconcileMode(database: Queryable, vendorId: string) {
+  const result = await database.query<{ non_secret_settings: unknown }>(
+    `select non_secret_settings
+       from integration_settings
+      where integration_id = $1`,
+    [vendorId],
+  );
+  const nonSecrets = recordFromJson(result.rows[0]?.non_secret_settings) as Record<string, string | undefined>;
+
+  return integrationPsaAgreementReconcileMode(
+    nonSecrets,
+    getIntegrationSettingsDefinition(vendorId as IntegrationId),
+  );
 }
 
 async function withLineDetails(
@@ -1501,13 +1528,28 @@ async function withLineDetails(
       },
     ]),
   );
+  const snapshotsByClient = indexSnapshotsByClient(snapshots);
   return lines.map((line) => ({
     ...line,
     ...labelsByLineKey.get(`${line.clientId}|${line.agreementId}`),
     ...invoiceDetailsForLine(invoiceQuantities, line),
-    matchedAgreementAdditions: matchedAgreementAdditionsForLine(line, agreementAdditions, snapshots, ruleSet),
-    devices: devicesForLine(line, snapshots, ruleSet),
+    matchedAgreementAdditions: matchedAgreementAdditionsForLine(
+      line,
+      agreementAdditions,
+      snapshotsByClient.get(line.clientId) ?? [],
+      ruleSet,
+    ),
+    devices: devicesForLine(line, snapshotsByClient.get(line.clientId) ?? [], ruleSet),
   }));
+}
+
+function indexSnapshotsByClient(snapshots: UsageSnapshot[]) {
+  return snapshots.reduce((groups, snapshot) => {
+    const existing = groups.get(snapshot.clientId) ?? [];
+    existing.push(snapshot);
+    groups.set(snapshot.clientId, existing);
+    return groups;
+  }, new Map<string, UsageSnapshot[]>());
 }
 
 function invoiceDetailsForLine(quantities: Map<string, InvoiceQuantity>, line: ReconciliationLine) {
@@ -1533,6 +1575,7 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
       (snapshot) =>
         snapshot.clientId === line.clientId &&
         snapshot.agreementId === line.agreementId &&
+        (!line.vendorProductKey || snapshot.vendorProductKey === line.vendorProductKey) &&
         (line.lineType === 'unmapped-vendor'
           ? snapshotMatchesUnmappedLine(snapshot, line)
           : !rule || snapshotMatchesRule(snapshot, rule)),
@@ -1544,8 +1587,55 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
       productName: snapshot.productName,
       quantity: snapshot.quantity,
       observedAt: snapshot.observedAt,
-      dimensions: snapshot.dimensions,
+      dimensions: compactDeviceDimensions(snapshot.dimensions),
     }));
+}
+
+const deviceDimensionKeys = [
+  'hostname',
+  'deviceName',
+  'computerName',
+  'deviceId',
+  'ncentralDeviceId',
+  'serialNumber',
+  'accountId',
+  'externalId',
+  'externalAccountId',
+  'externalAccountName',
+  'userPrincipalName',
+  'email',
+  'deviceType',
+  'deviceClass',
+  'deviceCategory',
+  'protectedSystemType',
+  'physicality',
+  'selectedStorageGb',
+  'os',
+  'operatingSystem',
+  'ncentralProductType',
+  'lastCheckIn',
+  'lastApplianceCheckinTime',
+  'appRiverBundle',
+  'appRiverBundleKey',
+  'appRiverBundleName',
+  'subscriptionSource',
+] as const;
+
+function compactDeviceDimensions(dimensions: DimensionMap): DimensionMap {
+  const compact: DimensionMap = {};
+  for (const [key, value] of Object.entries(dimensions)) {
+    if (typeof value === 'undefined' || value === null || value === '') {
+      continue;
+    }
+    if (
+      deviceDimensionKeys.includes(key as (typeof deviceDimensionKeys)[number]) ||
+      key.startsWith('appRiver') ||
+      key.startsWith('linkedCount')
+    ) {
+      compact[key] = value;
+    }
+  }
+  return compact;
 }
 
 function matchedAgreementAdditionsForLine(
@@ -1564,7 +1654,10 @@ function matchedAgreementAdditionsForLine(
       (addition) =>
         addition.clientId === line.clientId &&
         (shouldUseCustomerAgreementScope || addition.agreementId === line.agreementId) &&
-        addition.productCode.trim().toLowerCase() === line.productCode.trim().toLowerCase(),
+        addition.productCode.trim().toLowerCase() === line.productCode.trim().toLowerCase() &&
+        (!line.connectWiseAdditionId ||
+          addition.connectWiseAdditionId === line.connectWiseAdditionId ||
+          addition.id === line.connectWiseAdditionId),
     )
     .map((addition) => ({
       id: addition.id,

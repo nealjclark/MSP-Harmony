@@ -651,3 +651,46 @@ ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS written_at timestamptz
 ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS error_message text;
 ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS request_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS response_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE TABLE IF NOT EXISTS vendor_datapoints (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  display_name text NOT NULL,
+  description text,
+  linked_integration_id text,
+  source_type text NOT NULL,
+  sync_mode text NOT NULL DEFAULT 'full-vendor-sync' CHECK (sync_mode IN ('info-only', 'full-vendor-sync')),
+  column_map jsonb NOT NULL DEFAULT '{}'::jsonb,
+  default_import_mode text NOT NULL DEFAULT 'merge' CHECK (default_import_mode IN ('merge', 'overwrite')),
+  active boolean NOT NULL DEFAULT true,
+  last_imported_at timestamptz,
+  last_import_file_name text,
+  last_import_row_count integer,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_datapoints_active_name
+  ON vendor_datapoints(active, display_name);
+
+ALTER TABLE vendor_datapoints ADD COLUMN IF NOT EXISTS known_headers jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE TABLE IF NOT EXISTS vendor_product_addition_pins (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  agreement_id uuid NOT NULL REFERENCES agreements(id),
+  vendor_product_key text NOT NULL,
+  connectwise_addition_id text NOT NULL,
+  connectwise_product_code text NOT NULL,
+  connectwise_product_name text NOT NULL,
+  mapping_source text NOT NULL DEFAULT 'auto-reconcile',
+  active boolean NOT NULL DEFAULT true,
+  reviewed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (vendor_id, agreement_id, vendor_product_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_product_addition_pins_scope
+  ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key)
+  WHERE active;

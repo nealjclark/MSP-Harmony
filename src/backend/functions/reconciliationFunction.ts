@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import { isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
 import {
   applyReconciliationAgreementAdditionUpdates,
   type ReconciliationAgreementAdditionUpdateInput,
@@ -38,8 +39,8 @@ export async function runVendorReconciliationHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const integrationId = parseIntegrationId(request.params.vendorId);
-  if (!integrationId) {
+  const vendorId = parseReconciliationVendorId(request.params.vendorId);
+  if (!vendorId) {
     return jsonResponse(400, {
       error: `Reconciliation is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
     });
@@ -56,7 +57,7 @@ export async function runVendorReconciliationHttp(
   const body = (await request.json().catch(() => ({}))) as ReconciliationBody;
 
   try {
-    const result = await reconcileVendorFromDatabase(repositoryContext.pool, integrationId, {
+    const result = await reconcileVendorFromDatabase(repositoryContext.pool, vendorId, {
       syncRunId: typeof body.syncRunId === 'string' && body.syncRunId.trim().length > 0 ? body.syncRunId : undefined,
     });
 
@@ -294,6 +295,10 @@ app.http('deactivateReconciliationAdjustment', {
   route: 'reconciliation/{vendorId}/adjustments/{adjustmentId}/deactivate',
   handler: deactivateReconciliationAdjustmentHttp,
 });
+
+function parseReconciliationVendorId(value: string | undefined): VendorKey | undefined {
+  return value && isVendorKey(value) ? value : undefined;
+}
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
   return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;

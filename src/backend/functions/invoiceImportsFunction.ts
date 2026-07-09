@@ -1,7 +1,9 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
-import { type IntegrationDataSourceType, type IntegrationId, getIntegrationSettingsDefinition } from '../../shared/integrationSettings';
+import { getIntegrationSettingsDefinition, type IntegrationDataSourceType, type IntegrationId } from '../../shared/integrationSettings';
+import { isVendorDatapointId, vendorSupportsInvoiceImport, type VendorKey } from '../../shared/vendorDatapoints';
 import {
+  deleteInvoiceImport,
   detectInvoiceVendor,
   getInvoiceImportExceptionReview,
   importMappedInvoiceTableCsv,
@@ -142,8 +144,8 @@ export async function importMappedInvoiceTableHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const vendorId = parseIntegrationId(request.params.vendorId);
-  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
+  const vendorId = parseRegistryIntegrationId(request.params.vendorId);
+  if (!vendorId || !integrationSupportsRegistryInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
 
@@ -154,7 +156,7 @@ export async function importMappedInvoiceTableHttp(
   const columnMap = body.columnMap && typeof body.columnMap === 'object' ? body.columnMap : undefined;
   const sourceType = parseInvoiceImportSourceType(body.sourceType);
   const syncMode = parseManualImportSyncMode(body.syncMode);
-  const linkedIntegrationId = parseIntegrationId(body.linkedIntegrationId);
+  const linkedIntegrationId = parseRegistryIntegrationId(body.linkedIntegrationId);
 
   if (!fileName || !content || !columnMap) {
     return jsonResponse(400, {
@@ -207,6 +209,7 @@ export async function listInvoiceImportsHttp(
   if (auth.response) return auth.response;
 
   const vendorId = parseIntegrationId(request.query.get('vendorId') ?? undefined);
+  const datapointId = request.query.get('datapointId')?.trim() || undefined;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -217,7 +220,7 @@ export async function listInvoiceImportsHttp(
 
   try {
     return jsonResponse(200, {
-      imports: await listInvoiceImports(repositoryContext.pool, { vendorId }),
+      imports: await listInvoiceImports(repositoryContext.pool, { vendorId, datapointId }),
     });
   } catch (error) {
     return jsonResponse(400, {
@@ -237,7 +240,7 @@ export async function getInvoiceImportExceptionsHttp(
 
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;
-  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
+  if (!vendorId || !vendorSupportsInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
   if (!importId) {
@@ -277,7 +280,7 @@ export async function refreshInvoiceImportMappingsHttp(
 
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;
-  if (!vendorId || !integrationSupportsInvoiceImport(vendorId)) {
+  if (!vendorId || !vendorSupportsInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
   if (!importId) {
@@ -302,6 +305,46 @@ export async function refreshInvoiceImportMappingsHttp(
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to refresh invoice mappings.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deleteInvoiceImportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const vendorId = parseIntegrationId(request.params.vendorId);
+  const importId = request.params.importId;
+  if (!vendorId || !vendorSupportsInvoiceImport(vendorId)) {
+    return unsupportedInvoiceVendorResponse(request.params.vendorId);
+  }
+  if (!importId) {
+    return jsonResponse(400, { error: 'Invoice import delete requires importId.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Invoice import delete needs PostgreSQL settings before it can update.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const deleted = await deleteInvoiceImport(repositoryContext.pool, vendorId, importId);
+    if (!deleted) {
+      return jsonResponse(404, { error: 'Invoice import was not found.' });
+    }
+
+    return jsonResponse(200, { import: deleted });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to delete invoice import.',
     });
   } finally {
     await repositoryContext.close();
@@ -350,8 +393,27 @@ app.http('refreshInvoiceImportMappings', {
   handler: refreshInvoiceImportMappingsHttp,
 });
 
-function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
+app.http('deleteInvoiceImport', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'invoice-imports/{vendorId}/{importId}',
+  handler: deleteInvoiceImportHttp,
+});
+
+function parseRegistryIntegrationId(value: string | undefined): IntegrationId | undefined {
   return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;
+}
+
+function parseIntegrationId(value: string | undefined): VendorKey | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (vendorSupportsInvoiceImport(value)) {
+    return value as VendorKey;
+  }
+
+  return undefined;
 }
 
 function parseInvoiceImportMode(value: string | undefined): InvoiceImportMode {
@@ -377,7 +439,7 @@ function parseInvoiceImportSourceType(value: string | undefined): IntegrationDat
   return undefined;
 }
 
-function integrationSupportsInvoiceImport(value: IntegrationId) {
+function integrationSupportsRegistryInvoiceImport(value: IntegrationId) {
   return supportedInvoiceVendorIds.includes(value);
 }
 

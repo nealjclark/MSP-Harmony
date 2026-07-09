@@ -2,6 +2,27 @@
 
 Guidance for AI agents working in this repository.
 
+## Database migrations and backend rebuild
+
+This environment is **not production**. When a task changes the database schema or adds backend code that depends on new tables/columns, finish the work by applying the schema and rebuilding the backend — do not leave that as a manual follow-up unless the user explicitly says not to run it.
+
+After any update that touches `infra/database/schema.sql` or depends on new persistence:
+
+```powershell
+npm run db:migrate
+npm run db:check
+```
+
+After backend or shared TypeScript changes (including `src/shared/integrationSettings.ts`, new API behavior, or Azure Functions handlers), rebuild so the running Functions host picks up the changes:
+
+```powershell
+npm run backend:build
+```
+
+If both schema and backend changed, run migration first, then `backend:build`. Mention what was applied in the completion summary (for example new tables such as `vendor_product_addition_pins`).
+
+See [`docs/database.md`](docs/database.md) for connection settings and Azure notes.
+
 ## Frontend layout
 
 - Main scroll container: `.content` (`overflow: auto` inside `.app-main`). **Prefer whole-page scroll** unless the user explicitly asks for a nested table scroller.

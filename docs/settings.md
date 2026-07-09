@@ -157,6 +157,16 @@ WisePay is not synchronized as a data integration. MSP Harmony only stores a Wis
 
 `[invnumber]` comes from the ConnectWise invoice number, `[invamount]` uses the outstanding invoice balance, and `[companyid]` uses the ConnectWise company identifier with company ID as a fallback. The key is saved through the Integrations settings flow and should live in Azure Key Vault for deployed environments.
 
+## PSA Agreement Reconcile Options
+
+Mapping-capable vendor integrations expose a **PSA Agreement Reconcile options** section in the Configure modal.
+
+- `merge-multiple-products` (default): reconciliation matches ConnectWise additions by product code and sums all matching additions on an agreement.
+- `separate-multiple-products`: when an agreement has multiple active additions with the same product code, reconciliation creates one line per mapped vendor class (for example server vs workstation), assigns each class to the closest matching addition quantity, and stores a per-agreement sticky pin in `vendor_product_addition_pins` for future runs.
+- If only one active addition exists for that product on the agreement, separate mode still merges vendor classes into one line.
+
+Setting key: `psaAgreementReconcileMode` in `integration_settings.non_secret_settings`.
+
 ## Microsoft 365 Graph Application Notes
 
 The Microsoft 365 integration uses Microsoft Graph application permissions with client credentials. `MICROSOFT365_ENDPOINT` should normally be `https://graph.microsoft.com`, `MICROSOFT365_CLIENT_ID` is the application/client ID, and `MICROSOFT365_TENANT_ID` is the partner/home tenant ID where the CIPP-SAM or equivalent multitenant application is registered.

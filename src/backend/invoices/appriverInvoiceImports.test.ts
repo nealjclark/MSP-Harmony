@@ -726,6 +726,7 @@ async function run() {
   assert.equal(customLines[0]?.values?.[8], 'device:virtual-server');
   assert.equal(customLines[0]?.values?.[9], 'Device Count - Virtual Server');
   assert.equal(customLines[0]?.values?.[10], null);
+  assert.equal(customLines[0]?.values?.[14], 1);
   const customPayload = JSON.parse(String(customLines[0]?.values?.[30]));
   assert.equal(customPayload.importVendorId, 'custom-table');
   assert.equal(customPayload.mappingVendorId, 'ncentral');
@@ -734,6 +735,35 @@ async function run() {
   assert.equal(customPayload.deviceCategory, 'device:virtual-server');
   assert.equal(customSyncQueries.some((query) => query.sql.includes("'detailOnlySync'")), true);
   assert.equal(customSyncQueries.some((query) => query.sql.includes("'manual-info-only'")), true);
+
+  await importMappedInvoiceTableCsv(customDatabase, {
+    vendorId: 'custom-table',
+    linkedIntegrationId: 'ncentral',
+    fileName: 'devices-per-line.json',
+    content: JSON.stringify([
+      {
+        Client: 'client-42',
+        DeviceType: 'Server',
+        DeviceClass: 'Virtual',
+      },
+      {
+        Client: 'client-42',
+        DeviceType: 'Workstation',
+        DeviceClass: 'Physical',
+      },
+    ]),
+    columnMap: {
+      externalAccountId: 'Client',
+      deviceType: 'DeviceType',
+      deviceClass: 'DeviceClass',
+    },
+    sourceType: 'device-count',
+    syncMode: 'info-only',
+  });
+
+  assert.equal(customLines.length, 3);
+  assert.equal(customLines[1]?.values?.[14], 1);
+  assert.equal(customLines[2]?.values?.[14], 1);
 
   console.log('AppRiver invoice import tests passed');
 }

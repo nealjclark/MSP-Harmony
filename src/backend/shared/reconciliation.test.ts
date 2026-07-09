@@ -161,6 +161,138 @@ assert.equal(linkedAnchorLine?.delta, -1);
 assert.equal(linkedAnchorResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
 assert.equal(linkedAnchorResult.totals.unmapped, 0);
 
+const sentinelRules = [
+  {
+    id: 'sentinelone-server-count',
+    vendorId: 'sentinelone',
+    vendorProductKey: 'sentinelone-server',
+    productCode: 'S1-ENDPOINT',
+    productName: 'SentinelOne Endpoint',
+    sourceMetric: 'snapshot-count' as const,
+    billableUnit: 'server' as const,
+    requiresExistingAgreementProduct: true,
+    notes: 'Server agents',
+  },
+  {
+    id: 'sentinelone-workstation-count',
+    vendorId: 'sentinelone',
+    vendorProductKey: 'sentinelone-workstation',
+    productCode: 'S1-ENDPOINT',
+    productName: 'SentinelOne Endpoint',
+    sourceMetric: 'snapshot-count' as const,
+    billableUnit: 'workstation' as const,
+    requiresExistingAgreementProduct: true,
+    notes: 'Workstation agents',
+  },
+];
+
+const separateModeResult = reconcileVendorUsage({
+  vendorId: 'sentinelone',
+  reconcileMode: 'separate-multiple-products',
+  rules: sentinelRules,
+  snapshots: [
+    {
+      id: 'server-1',
+      vendorId: 'sentinelone',
+      clientId: 'client-advanced',
+      agreementId: 'agreement-advanced',
+      vendorProductKey: 'sentinelone-server',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 1,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+    {
+      id: 'workstation-1',
+      vendorId: 'sentinelone',
+      clientId: 'client-advanced',
+      agreementId: 'agreement-advanced',
+      vendorProductKey: 'sentinelone-workstation',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 5,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'addition-workstation-bulk',
+      connectWiseAdditionId: '701',
+      clientId: 'client-advanced',
+      agreementId: 'agreement-advanced',
+      productCode: 's1-endpoint',
+      productName: 'SentinelOne Endpoint',
+      quantity: 7,
+    },
+    {
+      id: 'addition-server-single',
+      connectWiseAdditionId: '702',
+      clientId: 'client-advanced',
+      agreementId: 'agreement-advanced',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 1,
+    },
+  ],
+});
+
+const serverLine = separateModeResult.lines.find((line) => line.vendorProductKey === 'sentinelone-server');
+const workstationLine = separateModeResult.lines.find((line) => line.vendorProductKey === 'sentinelone-workstation');
+assert.equal(separateModeResult.lines.filter((line) => line.lineType === 'base-count').length, 2);
+assert.equal(serverLine?.connectWiseAdditionId, '702');
+assert.equal(serverLine?.agreementQuantity, 1);
+assert.equal(workstationLine?.connectWiseAdditionId, '701');
+assert.equal(workstationLine?.agreementQuantity, 7);
+assert.equal(workstationLine?.delta, -2);
+
+const singleAdditionSeparateResult = reconcileVendorUsage({
+  vendorId: 'sentinelone',
+  reconcileMode: 'separate-multiple-products',
+  rules: sentinelRules,
+  snapshots: [
+    {
+      id: 'server-only',
+      vendorId: 'sentinelone',
+      clientId: 'client-1',
+      agreementId: 'agreement-1',
+      vendorProductKey: 'sentinelone-server',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 3,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+    {
+      id: 'workstation-only',
+      vendorId: 'sentinelone',
+      clientId: 'client-1',
+      agreementId: 'agreement-1',
+      vendorProductKey: 'sentinelone-workstation',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 48,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'addition-combined',
+      connectWiseAdditionId: '201',
+      clientId: 'client-1',
+      agreementId: 'agreement-1',
+      productCode: 'S1-ENDPOINT',
+      productName: 'SentinelOne Endpoint',
+      quantity: 51,
+    },
+  ],
+});
+assert.equal(singleAdditionSeparateResult.lines.filter((line) => line.lineType === 'base-count').length, 1);
+assert.equal(singleAdditionSeparateResult.lines[0]?.sourceQuantity, 51);
+assert.equal(singleAdditionSeparateResult.lines[0]?.agreementQuantity, 51);
+
 console.log('backend reconciliation tests passed');
 
 function ncentralSnapshot(id: string): UsageSnapshot {

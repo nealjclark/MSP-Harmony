@@ -24,11 +24,13 @@ export type IntegrationDataSourceType =
   | 'device-count'
   | 'invoice'
   | 'license-count';
-export type IntegrationNonSecretInputType = 'text' | 'checkbox';
+export type IntegrationNonSecretInputType = 'text' | 'checkbox' | 'select';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
+export type PsaAgreementReconcileMode = 'merge-multiple-products' | 'separate-multiple-products';
 
 export const detailOnlySyncSettingKey = 'detailOnlySync';
+export const psaAgreementReconcileModeSettingKey = 'psaAgreementReconcileMode';
 
 export type IntegrationSecretDefinition = {
   key: string;
@@ -46,6 +48,8 @@ export type IntegrationNonSecretDefinition = {
   defaultValue?: string;
   inputType?: IntegrationNonSecretInputType;
   description?: string;
+  section?: string;
+  options?: Array<{ value: string; label: string }>;
 };
 
 export type IntegrationDataSourceDefinition = {
@@ -161,7 +165,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'API Endpoint', 'COVE_ENDPOINT', 'https://api.backup.management'),
       nonSecret('partnerName', 'Partner Name', 'COVE_PARTNER_NAME'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('COVE_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('COVE'),
     scopes: ['devices.read', 'usage.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -188,7 +192,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: 'https://ncentral.example.com',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
     requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'NCENTRAL_ENDPOINT', 'https://ncentral.example.com')],
-    optionalNonSecrets: [detailOnlySyncOption('NCENTRAL_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('NCENTRAL'),
     scopes: ['device-filters.read', 'devices.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -215,7 +219,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: 'https://usea1.sentinelone.net',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-sentinelone-api-token', 'SENTINELONE_API_TOKEN')],
     requiredNonSecrets: [nonSecret('endpoint', 'Management Console URL', 'SENTINELONE_ENDPOINT', 'https://usea1.sentinelone.net')],
-    optionalNonSecrets: [detailOnlySyncOption('SENTINELONE_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('SENTINELONE'),
     scopes: ['sites.read', 'agents.read'],
     syncFrequency: 'hourly',
     webhookSupported: true,
@@ -245,7 +249,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       secret('password', 'Password', 'mspharmony-proofpoint-password', 'PROOFPOINT_PASSWORD'),
     ],
     requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'PROOFPOINT_ENDPOINT', 'https://api.proofpointessentials.com')],
-    optionalNonSecrets: [detailOnlySyncOption('PROOFPOINT_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('PROOFPOINT'),
     scopes: ['domains.read', 'users.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -277,7 +281,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     requiredNonSecrets: [
       nonSecret('endpoint', 'Datto REST API Endpoint', 'DATTO_ENDPOINT', 'https://api.datto.com'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('DATTO_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('DATTO'),
     scopes: ['bcdr.status.read', 'saas.domains.read', 'saas.seats.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -319,7 +323,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('clientId', 'Application (Client) ID', 'MICROSOFT365_CLIENT_ID'),
       nonSecret('tenantId', 'Partner/Home Tenant ID', 'MICROSOFT365_TENANT_ID'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('MICROSOFT365_DETAIL_ONLY_SYNC', 'true')],
+    optionalNonSecrets: mappingIntegrationOptions('MICROSOFT365', 'true'),
     scopes: [
       'Application: Directory.Read.All',
       'Application: User.Read.All',
@@ -356,7 +360,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'SecureCloud API Endpoint', 'OPENTEXT_APPRIVER_ENDPOINT', 'https://unityapi.webrootcloudav.com'),
       nonSecret('clientId', 'API Client ID', 'OPENTEXT_APPRIVER_CLIENT_ID'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('OPENTEXT_APPRIVER_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('OPENTEXT_APPRIVER'),
     scopes: ['SecureCloud.Customers', 'SecureCloud.Usage'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -383,7 +387,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: '',
     requiredSecrets: [],
     requiredNonSecrets: [],
-    optionalNonSecrets: [detailOnlySyncOption('HUNTRESS_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('HUNTRESS'),
     scopes: ['invoice-table.import'],
     syncFrequency: 'manual',
     webhookSupported: false,
@@ -415,7 +419,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('clientId', 'Client ID', 'AZURE_CLIENT_ID'),
       nonSecret('subscriptionId', 'Subscription ID', 'AZURE_SUBSCRIPTION_ID'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('AZURE_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('AZURE'),
     scopes: ['Billing.Read', 'Consumption.Read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -445,7 +449,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'API Endpoint', 'PAX8_ENDPOINT', 'https://api.pax8.com'),
       nonSecret('clientId', 'Client ID', 'PAX8_CLIENT_ID'),
     ],
-    optionalNonSecrets: [detailOnlySyncOption('PAX8_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('PAX8'),
     scopes: ['companies.read', 'subscriptions.read', 'products.read'],
     syncFrequency: 'daily',
     webhookSupported: true,
@@ -489,7 +493,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: '',
     requiredSecrets: [],
     requiredNonSecrets: [],
-    optionalNonSecrets: [detailOnlySyncOption('CUSTOM_TABLE_DETAIL_ONLY_SYNC')],
+    optionalNonSecrets: mappingIntegrationOptions('CUSTOM_TABLE'),
     scopes: ['invoice-table.import'],
     syncFrequency: 'manual',
     webhookSupported: false,
@@ -551,6 +555,21 @@ export function integrationDetailOnlySyncEnabled(
 
 export function integrationSupportsDetailOnlySync(definition: IntegrationSettingsDefinition) {
   return Boolean(definition.optionalNonSecrets?.some((setting) => setting.key === detailOnlySyncSettingKey));
+}
+
+export function integrationPsaAgreementReconcileMode(
+  nonSecrets: Record<string, string | undefined> = {},
+  definition?: IntegrationSettingsDefinition,
+): PsaAgreementReconcileMode {
+  const configuredValue =
+    nonSecrets[psaAgreementReconcileModeSettingKey] ??
+    definition?.optionalNonSecrets?.find((setting) => setting.key === psaAgreementReconcileModeSettingKey)?.defaultValue;
+
+  return configuredValue === 'separate-multiple-products' ? 'separate-multiple-products' : 'merge-multiple-products';
+}
+
+export function integrationSupportsPsaAgreementReconcileOptions(definition: IntegrationSettingsDefinition) {
+  return definition.capabilities.includes('mapping');
 }
 
 export function validateIntegrationSettings(
@@ -625,6 +644,8 @@ function optionalNonSecret(
   defaultValue: string | undefined,
   inputType: IntegrationNonSecretInputType,
   description?: string,
+  section?: string,
+  options?: Array<{ value: string; label: string }>,
 ): IntegrationNonSecretDefinition {
   return {
     key,
@@ -634,6 +655,8 @@ function optionalNonSecret(
     defaultValue,
     inputType,
     description,
+    section,
+    options,
   };
 }
 
@@ -646,6 +669,32 @@ function detailOnlySyncOption(envVar: string, defaultValue = 'false') {
     'checkbox',
     'Customer-mapped detail is stored for reports and linked counts without product mapping.',
   );
+}
+
+function psaAgreementReconcileModeOption(envVar: string) {
+  return optionalNonSecret(
+    psaAgreementReconcileModeSettingKey,
+    'Agreement reconcile mode',
+    envVar,
+    'merge-multiple-products',
+    'select',
+    'Choose how multiple ConnectWise additions with the same product are reconciled.',
+    'PSA Agreement Reconcile options',
+    [
+      { value: 'merge-multiple-products', label: 'Merge multiple products (default)' },
+      {
+        value: 'separate-multiple-products',
+        label: 'Separate multiple products',
+      },
+    ],
+  );
+}
+
+function mappingIntegrationOptions(envVarPrefix: string, detailOnlyDefault = 'false') {
+  return [
+    detailOnlySyncOption(`${envVarPrefix}_DETAIL_ONLY_SYNC`, detailOnlyDefault),
+    psaAgreementReconcileModeOption(`${envVarPrefix}_PSA_AGREEMENT_RECONCILE_MODE`),
+  ];
 }
 
 function dataSource(

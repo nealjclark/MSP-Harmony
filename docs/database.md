@@ -81,14 +81,22 @@ The schema intentionally does not create `pgcrypto`. Azure PostgreSQL 16 exposes
 
 ## Schema Change Workflow
 
-Whenever a change touches `infra/database/schema.sql` or adds code that depends on new tables, columns, indexes, or constraints, Codex should explicitly offer to run the database migration and connection check. If the configured environment is safe to update, Codex should run both automatically:
+Whenever a change touches `infra/database/schema.sql` or adds code that depends on new tables, columns, indexes, or constraints, run the migration and connection check before considering the task complete. In this dev environment it is safe to apply schema changes directly; do not wait for production-style approval.
 
 ```powershell
 npm run db:migrate
 npm run db:check
 ```
 
-Do not leave a feature that depends on new schema in a state where the app can be run before the migration step is called out or completed.
+If the same change also modified backend or shared TypeScript, rebuild the Functions output afterward:
+
+```powershell
+npm run backend:build
+```
+
+Agents should run these commands automatically when `.env` database settings are present. Call out the migration in the completion summary so the user knows the database was updated.
+
+Do not leave a feature that depends on new schema in a state where the app can be run before the migration step is completed.
 
 ## Azure App Settings
 
