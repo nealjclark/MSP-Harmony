@@ -912,10 +912,6 @@ async function loadVendorProductLinkedSourceTotals(
        where vendor_usage_snapshots.vendor_id = $1
          and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
-         and (
-         lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
-         or approved_product_mappings.vendor_product_key is not null
-       )
          and exists (
            select 1
            from vendor_product_mappings

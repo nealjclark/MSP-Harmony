@@ -188,6 +188,16 @@ async function run() {
   assert.equal(linkedStandardLine?.linkedCount?.sources.length, 2);
   assert.equal(linkedStandardLine?.devices[0]?.dimensions.linkedCountAnchor, true);
   assert.equal(appRiverLinkedResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
+  const linkedVendorProductSql =
+    appRiverLinkedMicrosoftQueries.find(
+      (query) =>
+        query.sql.includes('matched_rows') &&
+        query.sql.includes('vendor_usage_snapshots') &&
+        query.sql.includes('approved_account_mappings'),
+    )?.sql ?? '';
+  assert.equal(linkedVendorProductSql.includes('approved_account_mappings'), true);
+  assert.equal(linkedVendorProductSql.includes('approved_product_mappings'), false);
+  assert.equal(linkedVendorProductSql.includes('from vendor_product_mappings'), true);
 
   appRiverLinkedFilteredMicrosoftQueries.splice(0, appRiverLinkedFilteredMicrosoftQueries.length);
   const appRiverFilteredLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedFilteredMicrosoftDatabase, 'opentext-appriver', { syncRunId });
@@ -676,8 +686,11 @@ const appRiverUnmappedProductDatabase: Queryable = {
   },
 };
 
+const appRiverLinkedMicrosoftQueries: Array<{ sql: string; values?: unknown[] }> = [];
 const appRiverLinkedMicrosoftDatabase: Queryable = {
   async query<T = unknown>(sql: string, values?: unknown[]) {
+    appRiverLinkedMicrosoftQueries.push({ sql, values });
+
     if (sql.includes('from vendor_product_link_rules')) {
       return {
         rows: [
