@@ -33,10 +33,22 @@ function isManualDeviceProductKey(vendorProductKey: string) {
 export function buildSentinelOneRuleSet(
   mappings: Partial<Record<string, SentinelOneProductMapping>> = {},
 ): VendorRuleSet {
-  const resolvedMappings = {
-    ...defaultSentinelOneProductMappings,
-    ...mappings,
-  };
+  const providedKeys = Object.keys(mappings).filter((key) => Boolean(mappings[key]?.productCode));
+  const hasManualDeviceMappings = providedKeys.some(isManualDeviceProductKey);
+  const hasApiMappings = providedKeys.some((key) =>
+    sentinelOneProductKeys.includes(key as (typeof sentinelOneProductKeys)[number]),
+  );
+  const resolvedMappings: Partial<Record<string, SentinelOneProductMapping>> = { ...mappings };
+
+  if (!hasManualDeviceMappings) {
+    for (const [key, mapping] of Object.entries(defaultSentinelOneProductMappings)) {
+      if (!resolvedMappings[key]) {
+        resolvedMappings[key] = mapping;
+      }
+    }
+  } else if (!hasApiMappings) {
+    // CSV/device imports are active — do not seed unused API placeholder rules.
+  }
 
   return {
     vendorId: 'sentinelone',
@@ -75,6 +87,26 @@ export const sentinelOneRuleSet = buildSentinelOneRuleSet();
 
 export function isSentinelOneProductMappingKey(value: string): value is (typeof sentinelOneProductKeys)[number] {
   return sentinelOneProductKeys.includes(value as (typeof sentinelOneProductKeys)[number]);
+}
+
+export function canonicalSentinelOneVendorProductKey(vendorProductKey: string) {
+  if (vendorProductKey === 'sentinelone-server') {
+    return 'device:server';
+  }
+  if (vendorProductKey === 'sentinelone-workstation') {
+    return 'device:workstation';
+  }
+  return vendorProductKey;
+}
+
+export function sentinelOneApiVendorProductKey(vendorProductKey: string) {
+  if (vendorProductKey === 'device:server') {
+    return 'sentinelone-server';
+  }
+  if (vendorProductKey === 'device:workstation') {
+    return 'sentinelone-workstation';
+  }
+  return vendorProductKey;
 }
 
 function targetProductCodes(mapping: SentinelOneProductMapping) {

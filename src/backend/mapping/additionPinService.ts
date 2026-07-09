@@ -67,7 +67,9 @@ export async function upsertAdditionPins(database: Queryable, assignments: Vendo
          connectwise_product_name = excluded.connectwise_product_name,
          mapping_source = excluded.mapping_source,
          active = true,
-         updated_at = now()`,
+         updated_at = now()
+       where vendor_product_addition_pins.mapping_source <> 'manual'
+          or excluded.mapping_source = 'manual'`,
       [
         assignment.vendorId,
         assignment.customerId,
@@ -80,4 +82,31 @@ export async function upsertAdditionPins(database: Queryable, assignments: Vendo
       ],
     );
   }
+}
+
+export async function upsertManualAdditionPin(
+  database: Queryable,
+  assignment: VendorProductAdditionPinAssignment,
+) {
+  await upsertAdditionPins(database, [{ ...assignment, mappingSource: 'manual' }]);
+  return {
+    ...assignment,
+    mappingSource: 'manual' as const,
+  };
+}
+
+export async function deactivateAdditionPin(
+  database: Queryable,
+  input: { vendorId: string; agreementId: string; vendorProductKey: string },
+) {
+  await database.query(
+    `update vendor_product_addition_pins
+        set active = false,
+            updated_at = now()
+      where vendor_id = $1
+        and agreement_id = $2::uuid
+        and vendor_product_key = $3
+        and active = true`,
+    [input.vendorId, input.agreementId, input.vendorProductKey],
+  );
 }

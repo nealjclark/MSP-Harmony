@@ -293,6 +293,101 @@ assert.equal(singleAdditionSeparateResult.lines.filter((line) => line.lineType =
 assert.equal(singleAdditionSeparateResult.lines[0]?.sourceQuantity, 51);
 assert.equal(singleAdditionSeparateResult.lines[0]?.agreementQuantity, 51);
 
+const overlappingTargetRules = [
+  {
+    id: 'device:workstation-count',
+    vendorId: 'sentinelone',
+    vendorProductKey: 'device:workstation',
+    productCode: 'Managed Endpoint Protection',
+    targetProductCodes: ['Managed Endpoint Protection', 'Managed Threat Response PC'],
+    productName: 'Managed Endpoint Protection',
+    sourceMetric: 'snapshot-count' as const,
+    billableUnit: 'workstation' as const,
+    notes: 'Workstation devices',
+  },
+  {
+    id: 'device:server-count',
+    vendorId: 'sentinelone',
+    vendorProductKey: 'device:server',
+    productCode: 'Managed Threat Response Server',
+    targetProductCodes: ['Managed Threat Response Server', 'Managed Endpoint Protection'],
+    productName: 'Managed Threat Response Server',
+    sourceMetric: 'snapshot-count' as const,
+    billableUnit: 'server' as const,
+    notes: 'Server devices',
+  },
+];
+
+const overlappingTargetResult = reconcileVendorUsage({
+  vendorId: 'sentinelone',
+  reconcileMode: 'separate-multiple-products',
+  rules: overlappingTargetRules,
+  snapshots: [
+    {
+      id: 'ao-server',
+      vendorId: 'sentinelone',
+      clientId: 'client-ao',
+      agreementId: 'agreement-ao',
+      vendorProductKey: 'device:server',
+      productCode: 'Managed Threat Response Server',
+      productName: 'Managed Threat Response Server',
+      quantity: 1,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+    {
+      id: 'ao-workstation',
+      vendorId: 'sentinelone',
+      clientId: 'client-ao',
+      agreementId: 'agreement-ao',
+      vendorProductKey: 'device:workstation',
+      productCode: 'Managed Endpoint Protection',
+      productName: 'Managed Endpoint Protection',
+      quantity: 5,
+      observedAt: '2026-07-08T00:00:00.000Z',
+      dimensions: {},
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'ao-2594',
+      connectWiseAdditionId: '2594',
+      clientId: 'client-ao',
+      agreementId: 'agreement-ao',
+      productCode: 'Managed Endpoint Protection',
+      productName: 'Managed Endpoint Protection',
+      quantity: 7,
+      unitPrice: { amount: 14.95, currency: 'USD' },
+    },
+    {
+      id: 'ao-2595',
+      connectWiseAdditionId: '2595',
+      clientId: 'client-ao',
+      agreementId: 'agreement-ao',
+      productCode: 'Managed Endpoint Protection',
+      productName: 'Managed Endpoint Protection',
+      quantity: 1,
+      unitPrice: { amount: 19.95, currency: 'USD' },
+    },
+  ],
+});
+
+const overlappingWorkstation = overlappingTargetResult.lines.find((line) => line.vendorProductKey === 'device:workstation');
+const overlappingServer = overlappingTargetResult.lines.find((line) => line.vendorProductKey === 'device:server');
+assert.equal(overlappingTargetResult.lines.filter((line) => line.lineType === 'base-count').length, 2);
+assert.equal(overlappingWorkstation?.connectWiseAdditionId, '2594');
+assert.equal(overlappingWorkstation?.sourceQuantity, 5);
+assert.equal(overlappingWorkstation?.agreementQuantity, 7);
+assert.equal(overlappingWorkstation?.unitPrice?.amount, 14.95);
+assert.equal(overlappingServer?.connectWiseAdditionId, '2595');
+assert.equal(overlappingServer?.sourceQuantity, 1);
+assert.equal(overlappingServer?.agreementQuantity, 1);
+assert.equal(overlappingServer?.unitPrice?.amount, 19.95);
+assert.equal(
+  overlappingTargetResult.lines.filter((line) => line.id.includes('merged-base')).length,
+  0,
+);
+
 console.log('backend reconciliation tests passed');
 
 function ncentralSnapshot(id: string): UsageSnapshot {

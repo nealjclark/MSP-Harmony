@@ -216,7 +216,7 @@ async function run() {
   assert.equal(accountSourceSql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'tenantName'"), true);
   assert.equal(accountSourceSql.includes("dimensions->>'tenantDefaultDomainName'"), true);
-  assert.equal(accountSourceSql.includes("array['m365-users', 'license-snapshots']"), true);
+  assert.equal(accountSourceSql.includes("array['m365-licenses', 'license-snapshots']"), true);
   assert.equal(accountSourceSql.includes('microsoft365_subscription_account_names'), true);
   assert.equal(accountSourceSql.includes('app_river_account_aliases'), true);
   assert.equal(accountSourceSql.includes('having count(distinct external_account_id) = 1'), true);
@@ -904,7 +904,7 @@ async function run() {
     microsoft365MappingQueries.find(
       (query) => query.sql.includes('from vendor_account_mappings') && query.sql.includes('inner join customers'),
     )?.sql ?? '';
-  assert.equal(microsoft365AccountMappingSql.includes("array['m365-users', 'license-snapshots']"), true);
+  assert.equal(microsoft365AccountMappingSql.includes("array['m365-licenses', 'license-snapshots']"), true);
   assert.equal(microsoft365AccountMappingSql.includes('microsoft365_subscription_account_names'), true);
   assert.equal(microsoft365AccountMappingSql.includes('latest_m365_license_sync_run'), true);
   assert.equal(

@@ -12,7 +12,9 @@ import {
 } from './client';
 import {
   buildSentinelOneRuleSet,
+  canonicalSentinelOneVendorProductKey,
   defaultSentinelOneProductMappings,
+  sentinelOneApiVendorProductKey,
   type SentinelOneProductMapping,
   type SentinelOneProductMappingKey,
 } from './rules';
@@ -133,15 +135,26 @@ export async function syncSentinelOneUsageSnapshots(input: {
     let workstationSnapshots = 0;
 
     for (const agent of agents) {
-      const productKey = productKeyForAgent(agent);
-      if (!productKey) {
+      const apiProductKey = productKeyForAgent(agent);
+      if (!apiProductKey) {
         skippedSnapshots += 1;
         continue;
       }
 
       const externalAccountId = externalAccountIdForAgent(agent);
       const accountMapping = externalAccountId ? accountMappings.get(externalAccountId) : undefined;
-      const productMapping = productMappings[productKey];
+      const deviceProductKey = canonicalSentinelOneVendorProductKey(apiProductKey);
+      const preferDeviceKeys = Object.keys(productMappings).some((key) => key.startsWith('device:'));
+      const productKey = preferDeviceKeys ? deviceProductKey : apiProductKey;
+      const productMapping =
+        productMappings[productKey] ??
+        productMappings[apiProductKey] ??
+        productMappings[deviceProductKey] ??
+        defaultSentinelOneProductMappings[apiProductKey];
+      if (!productMapping) {
+        skippedSnapshots += 1;
+        continue;
+      }
 
       if (accountMapping) {
         mappedSnapshots += 1;
@@ -149,7 +162,7 @@ export async function syncSentinelOneUsageSnapshots(input: {
         unmappedSnapshots += 1;
       }
 
-      if (productKey === 'sentinelone-server') {
+      if (apiProductKey === 'sentinelone-server' || productKey === 'device:server') {
         serverSnapshots += 1;
       } else {
         workstationSnapshots += 1;
@@ -219,7 +232,7 @@ export async function loadSentinelOneProductMappings(
        and mapping_status = 'approved'
      order by target_index, connectwise_product_code`,
   );
-  const mappings: Record<string, SentinelOneProductMapping> = { ...defaultSentinelOneProductMappings };
+  const mappings: Record<string, SentinelOneProductMapping> = {};
   const rowsByKey = new Map<string, VendorProductMappingRow[]>();
 
   for (const row of result.rows) {
@@ -237,13 +250,30 @@ export async function loadSentinelOneProductMappings(
       continue;
     }
 
-    mappings[vendorProductKey] = {
+    const mapping: SentinelOneProductMapping = {
       vendorProductKey,
       productCode: primary.connectwise_product_code,
       productName: primary.connectwise_product_name,
       targetProductCodes: [...new Set(orderedRows.map((row) => row.connectwise_product_code))],
       unitPrice: nullableMoney(primary.unit_price),
     };
+    mappings[vendorProductKey] = mapping;
+
+    // Keep CSV device:* and live API sentinelone-* keys interchangeable for reconcile.
+    const aliasKey =
+      vendorProductKey.startsWith('device:')
+        ? sentinelOneApiVendorProductKey(vendorProductKey)
+        : canonicalSentinelOneVendorProductKey(vendorProductKey);
+    if (aliasKey !== vendorProductKey && !mappings[aliasKey]) {
+      mappings[aliasKey] = {
+        ...mapping,
+        vendorProductKey: aliasKey,
+      };
+    }
+  }
+
+  if (Object.keys(mappings).length === 0) {
+    return { ...defaultSentinelOneProductMappings };
   }
 
   return mappings;

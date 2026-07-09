@@ -12,6 +12,7 @@ import {
   type CreateReconciliationAdjustmentInput,
 } from '../api/reconciliationAdjustments';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
+import { deactivateAdditionPin, upsertManualAdditionPin } from '../mapping/additionPinService';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { requireRole } from './auth';
@@ -294,6 +295,134 @@ app.http('deactivateReconciliationAdjustment', {
   authLevel: 'anonymous',
   route: 'reconciliation/{vendorId}/adjustments/{adjustmentId}/deactivate',
   handler: deactivateReconciliationAdjustmentHttp,
+});
+
+type AdditionPinBody = {
+  customerId?: string;
+  agreementId?: string;
+  vendorProductKey?: string;
+  connectWiseAdditionId?: string;
+  connectwiseProductCode?: string;
+  connectwiseProductName?: string;
+};
+
+export async function upsertReconciliationAdditionPinHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const vendorId = parseReconciliationVendorId(request.params.vendorId);
+  if (!vendorId) {
+    return jsonResponse(400, {
+      error: `Addition pins are not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as AdditionPinBody;
+  if (
+    !body.customerId ||
+    !isUuid(body.customerId) ||
+    !body.agreementId ||
+    !isUuid(body.agreementId) ||
+    !body.vendorProductKey?.trim() ||
+    !body.connectWiseAdditionId?.trim() ||
+    !body.connectwiseProductCode?.trim() ||
+    !body.connectwiseProductName?.trim()
+  ) {
+    return jsonResponse(400, {
+      error:
+        'Addition pins require customerId, agreementId, vendorProductKey, connectWiseAdditionId, connectwiseProductCode, and connectwiseProductName.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Addition pins need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const pin = await upsertManualAdditionPin(repositoryContext.pool, {
+      vendorId,
+      customerId: body.customerId,
+      agreementId: body.agreementId,
+      vendorProductKey: body.vendorProductKey.trim(),
+      connectWiseAdditionId: body.connectWiseAdditionId.trim(),
+      connectwiseProductCode: body.connectwiseProductCode.trim(),
+      connectwiseProductName: body.connectwiseProductName.trim(),
+      mappingSource: 'manual',
+    });
+    return jsonResponse(200, { pin });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save addition pin.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deactivateReconciliationAdditionPinHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const vendorId = parseReconciliationVendorId(request.params.vendorId);
+  if (!vendorId) {
+    return jsonResponse(400, {
+      error: `Addition pins are not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as AdditionPinBody;
+  if (!body.agreementId || !isUuid(body.agreementId) || !body.vendorProductKey?.trim()) {
+    return jsonResponse(400, {
+      error: 'Addition pin removal requires agreementId and vendorProductKey.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Addition pin removal needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    await deactivateAdditionPin(repositoryContext.pool, {
+      vendorId,
+      agreementId: body.agreementId,
+      vendorProductKey: body.vendorProductKey.trim(),
+    });
+    return jsonResponse(200, { deactivated: true });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to remove addition pin.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+app.http('upsertReconciliationAdditionPin', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/{vendorId}/addition-pins',
+  handler: upsertReconciliationAdditionPinHttp,
+});
+
+app.http('deactivateReconciliationAdditionPin', {
+  methods: ['DELETE', 'POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/{vendorId}/addition-pins/deactivate',
+  handler: deactivateReconciliationAdditionPinHttp,
 });
 
 function parseReconciliationVendorId(value: string | undefined): VendorKey | undefined {

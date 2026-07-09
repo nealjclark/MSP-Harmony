@@ -3867,6 +3867,33 @@ async function createUsageOverrideRequest(integrationId: VendorKey, payload: Cre
   return body as unknown as { vendorId: IntegrationId; override: UsageOverride };
 }
 
+async function saveAdditionPinRequest(
+  vendorId: VendorKey,
+  payload: {
+    customerId: string;
+    agreementId: string;
+    vendorProductKey: string;
+    connectWiseAdditionId: string;
+    connectwiseProductCode: string;
+    connectwiseProductName: string;
+  },
+) {
+  const response = await fetch(`/api/reconciliation/${encodeURIComponent(vendorId)}/addition-pins`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Addition pin save failed with HTTP ${response.status}.`));
+  }
+
+  return body as { pin: { connectWiseAdditionId: string; vendorProductKey: string; mappingSource: string } };
+}
+
 async function deactivateUsageOverrideRequest(integrationId: VendorKey, overrideId: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/overrides/${encodeURIComponent(overrideId)}/deactivate`,
@@ -6882,6 +6909,71 @@ function App() {
     }
   };
 
+  const saveReconciliationAdditionPin = async (
+    issue: ReconcileIssue,
+    addition: ReconciliationMatchedAgreementAddition | AgreementAddition,
+  ) => {
+    const vendorProductKey = issue.vendorProductKey;
+    if (!vendorProductKey) {
+      setManualOverrideMessage('This row does not have a vendor product key to pin.');
+      return false;
+    }
+
+    setSavingManualOverride(true);
+    setManualOverrideMessage('Saving agreement addition pin...');
+
+    try {
+      await saveAdditionPinRequest(issue.vendorId, {
+        customerId: issue.clientId,
+        agreementId: issue.agreementId,
+        vendorProductKey,
+        connectWiseAdditionId: addition.connectWiseAdditionId,
+        connectwiseProductCode: addition.productCode,
+        connectwiseProductName: addition.productName,
+      });
+      setIssues((currentIssues) =>
+        currentIssues.map((current) =>
+          current.id === issue.id
+            ? {
+                ...current,
+                connectWiseAdditionId: addition.connectWiseAdditionId,
+                invoiceCount: addition.quantity,
+                unitPriceAmount: addition.unitPrice?.amount ?? current.unitPriceAmount,
+                unitPriceCurrency: addition.unitPrice?.currency ?? current.unitPriceCurrency,
+                matchedAgreementAdditions: [
+                  {
+                    id: 'id' in addition ? addition.id : addition.connectWiseAdditionId,
+                    agreementId: issue.agreementId,
+                    connectWiseAdditionId: addition.connectWiseAdditionId,
+                    productCode: addition.productCode,
+                    productName: addition.productName,
+                    quantity: addition.quantity,
+                    unitPrice: addition.unitPrice,
+                    lessIncluded: 'lessIncluded' in addition ? addition.lessIncluded : undefined,
+                    billedQuantity: 'billedQuantity' in addition ? addition.billedQuantity : undefined,
+                    additionStatus: addition.additionStatus,
+                    updatedAt: addition.updatedAt,
+                  },
+                ],
+                amount:
+                  typeof (addition.unitPrice?.amount ?? current.unitPriceAmount) === 'number'
+                    ? (reconciliationSelectedCount(current) - addition.quantity) *
+                      (addition.unitPrice?.amount ?? current.unitPriceAmount ?? 0)
+                    : current.amount,
+              }
+            : current,
+        ),
+      );
+      setManualOverrideMessage(`Pinned ${issue.unit || vendorProductKey} to CW ${addition.connectWiseAdditionId}. Re-run compare to refresh all rows.`);
+      return true;
+    } catch (error) {
+      setManualOverrideMessage(error instanceof Error ? error.message : 'Addition pin failed.');
+      return false;
+    } finally {
+      setSavingManualOverride(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Main navigation">
@@ -7389,15 +7481,31 @@ function App() {
       )}
       {manualOverrideIssue && (
         <ManualOverrideModal
+          agreementAdditions={
+            agreementAdditionsSelection?.agreementId === manualOverrideIssue.agreementId
+              ? agreementAdditions
+              : manualOverrideIssue.matchedAgreementAdditions
+          }
           issue={manualOverrideIssue}
           message={manualOverrideMessage}
           onClose={() => {
             setManualOverrideIssue(null);
             setManualOverrideMessage('');
           }}
+          onAdditionPinSave={saveReconciliationAdditionPin}
           onLessCountSave={queueLessIncludedUpdate}
           onManualTotalSave={queueManualTotalUpdate}
           onDeviceRemapsSave={remapReconciliationDevices}
+          onLoadAgreementAdditions={async () => {
+            if (
+              agreementAdditionsSelection?.agreementId === manualOverrideIssue.agreementId &&
+              agreementAdditions.length > 0
+            ) {
+              return agreementAdditions;
+            }
+            const response = await fetchAgreementAdditions(manualOverrideIssue.agreementId);
+            return response.additions;
+          }}
           productOptions={reconciliationProductOptionsByVendor[manualOverrideIssue.vendorId] ?? []}
           saving={savingManualOverride}
         />
@@ -8654,6 +8762,7 @@ function ReconcileView(props: {
                                       <em>
                                         {issue.serviceCode}
                                         {issue.vendorProductKey ? ` / ${issue.unit}` : ''}
+                                        {issue.connectWiseAdditionId ? ` / CW ${issue.connectWiseAdditionId}` : ''}
                                         {' / '}
                                         {issue.family}
                                       </em>
@@ -9571,24 +9680,45 @@ function TicketModal(props: {
 }
 
 function ManualOverrideModal(props: {
+  agreementAdditions: Array<AgreementAddition | ReconciliationMatchedAgreementAddition>;
   issue: ReconcileIssue;
   message: string;
   onClose: () => void;
+  onAdditionPinSave: (
+    issue: ReconcileIssue,
+    addition: AgreementAddition | ReconciliationMatchedAgreementAddition,
+  ) => Promise<boolean>;
   onDeviceRemapsSave: (
     issue: ReconcileIssue,
     remaps: Array<{ device: ReconciliationDevice; targetVendorProductKey: string }>,
   ) => Promise<boolean>;
   onLessCountSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
+  onLoadAgreementAdditions: () => Promise<Array<AgreementAddition | ReconciliationMatchedAgreementAddition>>;
   onManualTotalSave: (issue: ReconcileIssue, quantity: number) => Promise<boolean>;
   productOptions: ReconciliationProductOption[];
   saving: boolean;
 }) {
-  const { issue, message, onClose, onDeviceRemapsSave, onLessCountSave, onManualTotalSave, productOptions, saving } = props;
+  const {
+    agreementAdditions,
+    issue,
+    message,
+    onClose,
+    onAdditionPinSave,
+    onDeviceRemapsSave,
+    onLessCountSave,
+    onLoadAgreementAdditions,
+    onManualTotalSave,
+    productOptions,
+    saving,
+  } = props;
   const [manualTotal, setManualTotal] = useState(
     String(validManualOverrideTotal(issue) ?? reconciliationSelectedCount(issue)),
   );
   const [lessCount, setLessCount] = useState(String(proposedLessIncluded(issue)));
   const [remapTargets, setRemapTargets] = useState<Record<string, string>>({});
+  const [pinAdditions, setPinAdditions] = useState(agreementAdditions);
+  const [pinAdditionId, setPinAdditionId] = useState(issue.connectWiseAdditionId ?? '');
+  const [loadingPinAdditions, setLoadingPinAdditions] = useState(false);
   const manualTotalValue = Number(manualTotal);
   const lessCountValue = Number(lessCount);
   const selectedAddition = selectedAgreementAddition(issue);
@@ -9603,6 +9733,44 @@ function ManualOverrideModal(props: {
     return [{ device, targetVendorProductKey }];
   });
   const hasRemapChanges = pendingRemaps.length > 0;
+  const selectedPinAddition = pinAdditions.find((addition) => addition.connectWiseAdditionId === pinAdditionId);
+  const canSavePin =
+    Boolean(issue.vendorProductKey) &&
+    Boolean(selectedPinAddition) &&
+    selectedPinAddition?.connectWiseAdditionId !== issue.connectWiseAdditionId &&
+    !saving;
+
+  useEffect(() => {
+    setPinAdditions(agreementAdditions);
+    setPinAdditionId(issue.connectWiseAdditionId ?? '');
+  }, [agreementAdditions, issue.connectWiseAdditionId, issue.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (pinAdditions.length > 0 || !issue.vendorProductKey) {
+      return;
+    }
+    setLoadingPinAdditions(true);
+    void onLoadAgreementAdditions()
+      .then((additions) => {
+        if (!cancelled) {
+          setPinAdditions(additions);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPinAdditions([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingPinAdditions(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [issue.id, issue.vendorProductKey, onLoadAgreementAdditions, pinAdditions.length]);
 
   const updateRemapTarget = (deviceId: string, value: string) => {
     setRemapTargets((current) => {
@@ -9639,6 +9807,54 @@ function ManualOverrideModal(props: {
           <IntegrationStat label="Change To" value={reconciliationSelectedCount(issue).toLocaleString()} />
           <IntegrationStat label="Impact" value={formatCurrency(reconciliationIssueImpact(issue))} />
         </div>
+
+        {issue.vendorProductKey ? (
+          <section className="manual-section" aria-label="Agreement addition pin">
+            <div className="manual-section-header">
+              <span className="section-kicker">Pin to agreement addition</span>
+              <strong>{issue.unit || issue.vendorProductKey}</strong>
+            </div>
+            <div className="cw-addition-context">
+              <span>
+                Choose which ConnectWise addition this vendor product should reconcile against for {issue.customer}.
+              </span>
+            </div>
+            <div className="manual-count-form">
+              <label>
+                <span>Agreement addition</span>
+                <select
+                  disabled={saving || loadingPinAdditions || pinAdditions.length === 0}
+                  onChange={(event) => setPinAdditionId(event.target.value)}
+                  value={pinAdditionId}
+                >
+                  <option value="">
+                    {loadingPinAdditions ? 'Loading additions...' : 'Select CW addition'}
+                  </option>
+                  {pinAdditions.map((addition) => (
+                    <option key={addition.connectWiseAdditionId} value={addition.connectWiseAdditionId}>
+                      {`CW ${addition.connectWiseAdditionId} · ${addition.productName} · qty ${addition.quantity.toLocaleString()}${
+                        addition.unitPrice ? ` · ${formatCurrency(addition.unitPrice.amount)}` : ''
+                      }`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="button primary compact"
+                disabled={!canSavePin}
+                onClick={() => {
+                  if (selectedPinAddition) {
+                    void onAdditionPinSave(issue, selectedPinAddition);
+                  }
+                }}
+                type="button"
+              >
+                <Check size={16} />
+                Save Pin
+              </button>
+            </div>
+          </section>
+        ) : null}
 
         <section className="manual-section" aria-label="Manual total update">
           <div className="manual-section-header">
