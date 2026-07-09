@@ -6942,15 +6942,15 @@ function App() {
                 unitPriceCurrency: addition.unitPrice?.currency ?? current.unitPriceCurrency,
                 matchedAgreementAdditions: [
                   {
-                    id: 'id' in addition ? addition.id : addition.connectWiseAdditionId,
+                    id: addition.id,
                     agreementId: issue.agreementId,
                     connectWiseAdditionId: addition.connectWiseAdditionId,
                     productCode: addition.productCode,
                     productName: addition.productName,
                     quantity: addition.quantity,
                     unitPrice: addition.unitPrice,
-                    lessIncluded: 'lessIncluded' in addition ? addition.lessIncluded : undefined,
-                    billedQuantity: 'billedQuantity' in addition ? addition.billedQuantity : undefined,
+                    lessIncluded: addition.lessIncluded,
+                    billedQuantity: addition.billedQuantity,
                     additionStatus: addition.additionStatus,
                     updatedAt: addition.updatedAt,
                   },
