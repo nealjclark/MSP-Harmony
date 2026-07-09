@@ -292,6 +292,12 @@ export class ConnectWiseClient {
     return this.request<ConnectWiseInvoice>(`/finance/invoices/${encodeURIComponent(String(invoiceId))}`);
   }
 
+  async getInvoicePdf(invoiceId: number | string) {
+    return this.requestBinary(`/finance/invoices/${encodeURIComponent(String(invoiceId))}/pdf`, {
+      accept: 'application/pdf',
+    });
+  }
+
   async getInvoiceEmailTemplate(templateId: number | string) {
     return this.request<ConnectWiseInvoiceEmailTemplate>(
       `/finance/invoiceEmailTemplates/${encodeURIComponent(String(templateId))}`,
@@ -325,10 +331,37 @@ export class ConnectWiseClient {
   }
 
   private async request<T>(path: string, init: Pick<RequestInit, 'method' | 'body'> = {}): Promise<T> {
+    const response = await this.fetchResponse(path, init);
+
+    return response.json() as Promise<T>;
+  }
+
+  private async requestBinary(
+    path: string,
+    options: { accept: string } & Pick<RequestInit, 'method' | 'body'> = { accept: 'application/pdf' },
+  ): Promise<Buffer> {
+    const response = await this.fetchResponse(path, {
+      method: options.method,
+      body: options.body,
+      headers: {
+        Accept: options.accept,
+      },
+    });
+
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  private async fetchResponse(
+    path: string,
+    init: Pick<RequestInit, 'method' | 'body' | 'headers'> = {},
+  ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     const response = await fetch(url, {
       method: init.method ?? 'GET',
-      headers: this.headers,
+      headers: {
+        ...this.headers,
+        ...(init.headers ?? {}),
+      },
       body: init.body,
     });
 
@@ -344,7 +377,7 @@ export class ConnectWiseClient {
       );
     }
 
-    return response.json() as Promise<T>;
+    return response;
   }
 }
 

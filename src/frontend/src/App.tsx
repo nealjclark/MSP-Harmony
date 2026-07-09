@@ -3552,6 +3552,24 @@ async function fetchOverdueInvoices() {
   return body as unknown as OverdueInvoicesResponse;
 }
 
+async function downloadInvoicePdf(invoice: Pick<OverdueInvoice, 'invoiceId' | 'invoiceNumber'>) {
+  const response = await fetch(`/api/invoices/${encodeURIComponent(invoice.invoiceId)}/pdf`);
+
+  if (!response.ok) {
+    const body = await responseJson(response);
+    throw new Error(String(body.error ?? `Invoice PDF download failed with HTTP ${response.status}.`));
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const safeNumber = (invoice.invoiceNumber ?? invoice.invoiceId).replace(/[^\w.-]+/g, '_');
+  link.href = url;
+  link.download = `invoice-${safeNumber}.pdf`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 async function postInvoiceNotification(input: {
   invoiceId?: string;
   invoiceIds?: string[];
@@ -16610,6 +16628,9 @@ function OverdueInvoicesTab(props: {
     key: 'pastDueStatus',
     direction: 'desc',
   });
+  const [downloadCustomer, setDownloadCustomer] = useState<OverdueInvoiceCustomerGroup | null>(null);
+  const [downloadBusyInvoiceId, setDownloadBusyInvoiceId] = useState<string | null>(null);
+  const [downloadMessage, setDownloadMessage] = useState('');
   const sortedCustomerGroups = useMemo(
     () => sortOverdueCustomerGroups(customerGroups, sortState.key, sortState.direction),
     [customerGroups, sortState],
@@ -16641,6 +16662,28 @@ function OverdueInvoicesTab(props: {
       return;
     }
     onSelectedOverdueCustomerKeysChange(sortedCustomerGroups.map((customer) => customer.customerKey));
+  };
+  const openInvoiceDownloads = (customer: OverdueInvoiceCustomerGroup) => {
+    setDownloadCustomer(customer);
+    setDownloadBusyInvoiceId(null);
+    setDownloadMessage('');
+  };
+  const closeInvoiceDownloads = () => {
+    setDownloadCustomer(null);
+    setDownloadBusyInvoiceId(null);
+    setDownloadMessage('');
+  };
+  const downloadCustomerInvoice = async (invoice: OverdueInvoice) => {
+    setDownloadBusyInvoiceId(invoice.invoiceId);
+    setDownloadMessage(`Downloading ${invoice.invoiceNumber ?? `invoice ${invoice.invoiceId}`}...`);
+    try {
+      await downloadInvoicePdf(invoice);
+      setDownloadMessage(`Downloaded ${invoice.invoiceNumber ?? `invoice ${invoice.invoiceId}`}.`);
+    } catch (error) {
+      setDownloadMessage(error instanceof Error ? error.message : 'Unable to download invoice PDF.');
+    } finally {
+      setDownloadBusyInvoiceId(null);
+    }
   };
 
   return (
@@ -16761,7 +16804,7 @@ function OverdueInvoicesTab(props: {
                     </button>
                   </th>
                   <th>
-                    <span className="invoice-table-heading-label">Preview Email</span>
+                    <span className="invoice-table-heading-label">Actions</span>
                   </th>
                 </tr>
               </thead>
@@ -16805,15 +16848,25 @@ function OverdueInvoicesTab(props: {
                         </div>
                       </td>
                       <td>
-                        <button
-                          className="button primary compact table-action-button invoice-preview-action"
-                          disabled={Boolean(noticeBusyKey)}
-                          onClick={() => void onNoticePreview(customer)}
-                          type="button"
-                        >
-                          <ExternalLink size={15} />
-                          {noticeBusyKey === previewKey ? 'Previewing' : 'Preview'}
-                        </button>
+                        <div className="invoice-row-actions">
+                          <button
+                            className="button primary compact table-action-button invoice-preview-action"
+                            disabled={Boolean(noticeBusyKey)}
+                            onClick={() => void onNoticePreview(customer)}
+                            type="button"
+                          >
+                            <ExternalLink size={15} />
+                            {noticeBusyKey === previewKey ? 'Previewing' : 'Preview'}
+                          </button>
+                          <button
+                            className="button secondary compact table-action-button invoice-download-action"
+                            onClick={() => openInvoiceDownloads(customer)}
+                            type="button"
+                          >
+                            <Download size={15} />
+                            Download
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -16835,6 +16888,16 @@ function OverdueInvoicesTab(props: {
         />
       ) : null}
 
+      {downloadCustomer ? (
+        <InvoiceDownloadModal
+          busyInvoiceId={downloadBusyInvoiceId}
+          customer={downloadCustomer}
+          message={downloadMessage}
+          onClose={closeInvoiceDownloads}
+          onDownload={(invoice) => void downloadCustomerInvoice(invoice)}
+        />
+      ) : null}
+
       {bulkNoticeCustomers ? (
         <BulkInvoiceNoticeModal
           busy={bulkNoticeBusy}
@@ -16846,6 +16909,85 @@ function OverdueInvoicesTab(props: {
         />
       ) : null}
     </>
+  );
+}
+
+function InvoiceDownloadModal(props: {
+  busyInvoiceId: string | null;
+  customer: OverdueInvoiceCustomerGroup;
+  message: string;
+  onClose: () => void;
+  onDownload: (invoice: OverdueInvoice) => void;
+}) {
+  const { busyInvoiceId, customer, message, onClose, onDownload } = props;
+  const invoices = [...customer.invoices].sort((left, right) => right.daysPastDue - left.daysPastDue);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="invoice-notice-modal invoice-download-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invoice-download-modal-title"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="invoice-download-modal-title">
+              <Download size={18} />
+              Download Invoices
+            </h2>
+            <p>
+              {customer.company.name} / {formatCount(customer.invoiceCount)} overdue invoice
+              {customer.invoiceCount === 1 ? '' : 's'}
+            </p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="invoice-notice-modal-body">
+          <div className="invoice-download-list">
+            {invoices.map((invoice) => (
+              <div className="invoice-download-row" key={invoice.invoiceId}>
+                <div>
+                  <strong>{invoice.invoiceNumber ?? `Invoice ${invoice.invoiceId}`}</strong>
+                  <span>
+                    Due {formatDateOnly(invoice.dueDate) ?? 'unknown'} / {invoice.daysPastDue} days past due
+                  </span>
+                  <span>
+                    {invoice.invoiceStatus}
+                    {invoice.billingTerms ? ` / ${invoice.billingTerms}` : ''}
+                  </span>
+                </div>
+                <div className="invoice-download-meta">
+                  <strong>{formatMoneyValue(invoice.balance)}</strong>
+                  <span>Balance</span>
+                </div>
+                <button
+                  className="button primary compact table-action-button"
+                  disabled={Boolean(busyInvoiceId)}
+                  onClick={() => onDownload(invoice)}
+                  type="button"
+                >
+                  <Download size={15} />
+                  {busyInvoiceId === invoice.invoiceId ? 'Downloading' : 'Download'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="invoice-notice-modal-footer">
+          <div className="modal-actions invoice-notice-actions">
+            {message ? <span className="invoice-action-message">{message}</span> : null}
+            <button className="button secondary compact" onClick={onClose} type="button">
+              Close
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 

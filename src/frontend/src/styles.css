@@ -5523,9 +5523,9 @@ h2 {
 
 .invoice-overdue-table th:nth-child(6),
 .invoice-overdue-table td:nth-child(6) {
-  width: 8.25rem;
-  min-width: 8.25rem;
-  max-width: 8.25rem;
+  width: 12.5rem;
+  min-width: 12.5rem;
+  max-width: 12.5rem;
   padding-left: 10px;
   padding-right: 10px;
   text-align: center;
@@ -5539,7 +5539,14 @@ h2 {
   text-align: center;
 }
 
-.invoice-overdue-table td:nth-child(6) .invoice-preview-action {
+.invoice-row-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: stretch;
+}
+
+.invoice-overdue-table td:nth-child(6) .invoice-preview-action,
+.invoice-overdue-table td:nth-child(6) .invoice-download-action {
   display: inline-flex;
   width: 100%;
   max-width: 100%;
@@ -5973,6 +5980,63 @@ h2 {
 .invoice-email-invoice-row > div > span {
   color: var(--muted);
   font-size: 0.84rem;
+}
+
+.invoice-download-modal {
+  width: min(760px, 100%);
+}
+
+.invoice-download-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.invoice-download-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(88px, auto) minmax(118px, auto);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  min-height: 72px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.invoice-download-row:first-child {
+  border-top: 0;
+}
+
+.invoice-download-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.invoice-download-row strong,
+.invoice-download-row span {
+  overflow-wrap: anywhere;
+}
+
+.invoice-download-row > div:first-child > span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.invoice-download-meta {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  text-align: right;
+}
+
+.invoice-download-meta span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .invoice-preview-meta,
@@ -6867,6 +6931,7 @@ h2 {
   .integration-card,
   .invoice-customer-header,
   .invoice-email-invoice-row,
+  .invoice-download-row,
   .invoice-live-row,
   .import-row,
   .agreement-row,

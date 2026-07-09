@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
+import { ConnectWiseApiError, ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import {
   listConnectWiseMonthlyInvoiceCandidates,
   listConnectWiseOverdueInvoices,
@@ -196,6 +197,50 @@ export async function listStandardInvoicesHttp(
   }
 }
 
+export async function downloadInvoicePdfHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const invoiceId = stringValue(request.params.invoiceId);
+  if (!invoiceId) {
+    return jsonResponse(400, {
+      error: 'Invoice PDF download requires invoiceId.',
+    });
+  }
+
+  const runtime = await createInvoiceRuntime();
+
+  try {
+    const settings = await runtime.provider.getIntegrationSettings('connectwise');
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(settings));
+    const pdf = await client.getInvoicePdf(invoiceId);
+    const filename = `invoice-${invoiceId}.pdf`;
+
+    return {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'no-store',
+      },
+      body: pdf,
+    };
+  } catch (error) {
+    if (error instanceof ConnectWiseApiError) {
+      return jsonResponse(error.status >= 400 && error.status < 600 ? error.status : 400, {
+        error: error.message,
+      });
+    }
+
+    return invoiceErrorResponse(error, 'Unable to download ConnectWise invoice PDF.');
+  } finally {
+    await runtime.repositoryContext.close();
+  }
+}
+
 app.http('listOverdueInvoices', {
   methods: ['GET'],
   authLevel: 'anonymous',
@@ -229,6 +274,13 @@ app.http('listStandardInvoices', {
   authLevel: 'anonymous',
   route: 'invoices/standard',
   handler: listStandardInvoicesHttp,
+});
+
+app.http('downloadInvoicePdf', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'invoices/{invoiceId}/pdf',
+  handler: downloadInvoicePdfHttp,
 });
 
 async function createInvoiceRuntime() {

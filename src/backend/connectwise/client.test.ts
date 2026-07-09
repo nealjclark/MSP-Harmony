@@ -56,6 +56,21 @@ async function run() {
     { op: 'replace', path: '/lessIncluded', value: 5 },
   ]);
   await client.getSystemInfo();
+
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({
+      url: String(input),
+      method: init?.method,
+      body: init?.body,
+      headers: init?.headers as Record<string, string>,
+    });
+
+    return new Response(Buffer.from('%PDF-1.4 invoice'), {
+      status: 200,
+      headers: { 'Content-Type': 'application/pdf' },
+    });
+  };
+  const pdf = await client.getInvoicePdf(789);
   globalThis.fetch = originalFetch;
 
   assert.equal(companies[0]?.name, 'Acme');
@@ -114,6 +129,12 @@ async function run() {
     ]),
   );
   assert.equal(requests[11]?.url, 'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/system/info');
+  assert.equal(
+    requests[12]?.url,
+    'https://api-na.myconnectwise.net/v4_6_release/apis/3.0/finance/invoices/789/pdf',
+  );
+  assert.equal(requests[12]?.headers.Accept, 'application/pdf');
+  assert.equal(pdf.toString('utf8'), '%PDF-1.4 invoice');
 
   assert.throws(
     () =>
