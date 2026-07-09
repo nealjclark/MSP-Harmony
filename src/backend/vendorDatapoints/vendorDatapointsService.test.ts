@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { mergeInvoiceTableColumnMap, suggestInvoiceTableColumnMap } from '../../shared/invoiceTableMapping';
+import {
+  CONSTANT_QUANTITY_ONE,
+  mergeInvoiceTableColumnMap,
+  suggestInvoiceTableColumnMap,
+} from '../../shared/invoiceTableMapping';
 import { vendorDatapointVendorId } from '../../shared/vendorDatapoints';
 import {
   createVendorDatapoint,
@@ -139,10 +143,13 @@ async function run() {
   const listed = await listVendorDatapoints(database);
   assert.equal(listed.length, 1);
 
-  const suggested = suggestInvoiceTableColumnMap(['Client', 'DeviceType', 'DeviceClass', 'Count']);
+  const suggested = suggestInvoiceTableColumnMap(
+    ['Client', 'DeviceType', 'DeviceClass', 'Count'],
+    'device-count',
+  );
   assert.equal(suggested.externalAccountId, 'Client');
   assert.equal(suggested.deviceType, 'DeviceType');
-  assert.equal(suggested.quantity, 'Count');
+  assert.equal(suggested.quantity, CONSTANT_QUANTITY_ONE);
 
   const merged = mergeInvoiceTableColumnMap(
     {
@@ -151,10 +158,11 @@ async function run() {
       quantity: 'Qty',
     },
     ['Client', 'DeviceType', 'DeviceClass', 'Count'],
+    'device-count',
   );
   assert.equal(merged.externalAccountId, 'Client');
   assert.equal(merged.deviceType, 'DeviceType');
-  assert.equal(merged.quantity, 'Count');
+  assert.equal(merged.quantity, CONSTANT_QUANTITY_ONE);
 
   const imported = await importVendorDatapointFile(database, created.id, {
     fileName: 'devices.csv',
@@ -165,6 +173,7 @@ async function run() {
 
   assert.equal(imported.import.vendorId, 'sentinelone');
   assert.equal(imported.datapoint.columnMap.externalAccountId, 'Client');
+  assert.equal(imported.datapoint.columnMap.quantity, CONSTANT_QUANTITY_ONE);
   assert.deepEqual(imported.datapoint.knownHeaders, ['Client', 'Count', 'DeviceClass', 'DeviceType']);
   assert.equal(JSON.parse(String(imports[0]?.values?.[10])).datapointId, created.id);
 

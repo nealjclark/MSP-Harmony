@@ -165,12 +165,14 @@ async function run() {
   assert.equal(syncResult.workstationSnapshots, 1);
   assert.equal(insertedSnapshots.length, 2);
   assert.equal(insertedSnapshots[0]?.[3], 'site-1');
-  assert.equal(insertedSnapshots[0]?.[4], 'sentinelone-workstation');
-  assert.equal(insertedSnapshots[1]?.[4], 'sentinelone-server');
+  // Live API snapshots use device:* keys when product mappings are present so CSV and API reconcile together.
+  assert.equal(insertedSnapshots[0]?.[4], 'device:workstation');
+  assert.equal(insertedSnapshots[1]?.[4], 'device:server');
 
   const ruleSet = await loadSentinelOneRuleSet(database);
   assert.equal(ruleSet.vendorId, 'sentinelone');
-  assert.equal(ruleSet.rules.length, 2);
+  assert.equal(ruleSet.rules.some((rule) => rule.vendorProductKey === 'device:server'), true);
+  assert.equal(ruleSet.rules.some((rule) => rule.vendorProductKey === 'device:workstation'), true);
   assert.equal(ruleSet.rules.some((rule) => rule.productCode === 'CW-S1-SERVER'), true);
 
   console.log('sentinelone operations tests passed');
