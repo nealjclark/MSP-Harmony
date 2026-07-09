@@ -911,6 +911,7 @@ type InvoiceNotificationPreview = {
   invoices: InvoiceNotificationPreviewInvoice[];
   companyKey?: string;
   companyName: string;
+  fromEmail?: string;
   recipientName: string;
   recipientEmail?: string;
   ccEmails: string[];
@@ -3165,6 +3166,7 @@ async function fetchCommunicationSettings() {
 }
 
 async function saveCommunicationSettingsRequest(payload: {
+  invoiceFromEmail: string;
   invoiceBccEmails: string;
   invoiceNoticeTemplates: InvoiceNoticeTemplates;
 }) {
@@ -8222,6 +8224,7 @@ function SettingsIntegrationsStub(props: { onOpenIntegrations: () => void }) {
 
 function SettingsEmailCommunicationView() {
   const [settings, setSettings] = useState<CommunicationSettings>(defaultCommunicationSettings);
+  const [invoiceFromEmail, setInvoiceFromEmail] = useState(defaultCommunicationSettings.invoiceFromEmail);
   const [invoiceBccEmails, setInvoiceBccEmails] = useState('');
   const [templates, setTemplates] = useState<InvoiceNoticeTemplates>(defaultInvoiceNoticeTemplates);
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
@@ -8230,6 +8233,7 @@ function SettingsEmailCommunicationView() {
 
   const applySettings = (next: CommunicationSettings) => {
     setSettings(next);
+    setInvoiceFromEmail(next.invoiceFromEmail);
     setInvoiceBccEmails(next.invoiceBccEmails);
     setTemplates(next.invoiceNoticeTemplates);
   };
@@ -8265,6 +8269,15 @@ function SettingsEmailCommunicationView() {
 
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const fromEmail = invoiceFromEmail.trim();
+    if (!fromEmail) {
+      setMessage('From address is required.');
+      return;
+    }
+    if (!isValidEmail(fromEmail)) {
+      setMessage(`Invalid from email address: ${fromEmail}`);
+      return;
+    }
     const validation = validateEmailList(invoiceBccEmails);
     if (validation.invalid.length > 0) {
       setMessage(`Invalid BCC email address(es): ${validation.invalid.join(', ')}`);
@@ -8276,6 +8289,7 @@ function SettingsEmailCommunicationView() {
 
     try {
       const response = await saveCommunicationSettingsRequest({
+        invoiceFromEmail: fromEmail,
         invoiceBccEmails,
         invoiceNoticeTemplates: templates,
       });
@@ -8296,7 +8310,7 @@ function SettingsEmailCommunicationView() {
           <div>
             <span className="section-kicker">Billing email</span>
             <h2>Invoice communication</h2>
-            <p>Configure past-due invoice wording and shared BCC recipients for billing emails.</p>
+            <p>Configure the from address, past-due invoice wording, and shared BCC recipients for billing emails.</p>
           </div>
           <button
             className="button secondary compact"
@@ -8314,6 +8328,27 @@ function SettingsEmailCommunicationView() {
       </section>
 
       <form className="settings-email-form" onSubmit={(event) => void saveSettings(event)}>
+        <section className="settings-panel settings-email-panel" aria-label="Invoice sender settings">
+          <div className="settings-panel-header">
+            <div>
+              <span className="section-kicker">Sender</span>
+              <h2>From address</h2>
+              <p>Used as the from address for all emails sent from the system.</p>
+            </div>
+          </div>
+          <div className="settings-email-panel-body">
+            <label className="settings-email-field">
+              <span>From email</span>
+              <input
+                onChange={(event) => setInvoiceFromEmail(event.target.value)}
+                placeholder="tconnover@bmbsolutions.com"
+                type="email"
+                value={invoiceFromEmail}
+              />
+            </label>
+          </div>
+        </section>
+
         <section className="settings-panel settings-email-panel" aria-label="Invoice BCC settings">
           <div className="settings-panel-header">
             <div>
@@ -17031,6 +17066,9 @@ function InvoiceNotificationModal(props: {
               <CircleDollarSign size={18} />
               Overdue Email Preview
             </h2>
+            <p>
+              From: {preview.fromEmail ?? 'tconnover@bmbsolutions.com'}
+            </p>
             <p>
               To: {preview.recipientName}
               {preview.recipientEmail ? ` <${preview.recipientEmail}>` : ''} / {preview.companyName}

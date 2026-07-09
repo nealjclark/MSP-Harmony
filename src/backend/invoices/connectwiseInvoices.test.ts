@@ -236,6 +236,7 @@ async function testInvoiceNotificationStubAudit() {
     today: '2026-07-07',
   });
   assert.equal(preview.status, 'preview');
+  assert.equal(preview.preview.fromEmail, 'tconnover@bmbsolutions.com');
   assert.equal(preview.preview.emailTemplateName, 'WisePay reminder');
   assert.equal(preview.preview.recipientName, 'Avery Billing');
   assert.equal(preview.preview.recipientEmail, 'avery.billing@example.com');
@@ -264,8 +265,12 @@ async function testInvoiceNotificationStubAudit() {
   assert.equal(queries[0]?.values?.[0], 'analyst@example.com');
   assert.equal(queries[0]?.values?.[1], 'connectwise.invoice.notice.stubbed');
   assert.equal(queries[0]?.values?.[2], '501');
-  const auditPayload = JSON.parse(String(queries[0]?.values?.[4] ?? '{}')) as { paymentLink?: string };
+  const auditPayload = JSON.parse(String(queries[0]?.values?.[4] ?? '{}')) as {
+    paymentLink?: string;
+    fromEmail?: string;
+  };
   assert.equal(auditPayload.paymentLink, preview.preview.paymentLink);
+  assert.equal(auditPayload.fromEmail, 'tconnover@bmbsolutions.com');
 }
 
 async function testCustomerInvoiceNoticePreview() {

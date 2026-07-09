@@ -181,6 +181,7 @@ export type InvoiceNotificationPreview = {
   invoices: InvoiceNotificationPreviewInvoice[];
   companyKey?: string;
   companyName: string;
+  fromEmail: string;
   recipientName: string;
   recipientEmail?: string;
   ccEmails: string[];
@@ -609,6 +610,7 @@ export async function previewOrStubConnectWiseInvoiceNotice(
           bodyPreview: preview.bodyPreview,
           companyKey: preview.companyKey,
           companyName: preview.companyName,
+          fromEmail: preview.fromEmail,
           recipientName: preview.recipientName,
           recipientEmail: preview.recipientEmail,
           ccEmails: preview.ccEmails,
@@ -928,6 +930,7 @@ function buildInvoiceNotificationPreview(
     invoices: previewInvoices,
     companyKey: customerKeyFromInvoice(firstInvoice),
     companyName: company,
+    fromEmail: communicationSettings.invoiceFromEmail,
     recipientName,
     recipientEmail: billingContact?.email,
     ccEmails,

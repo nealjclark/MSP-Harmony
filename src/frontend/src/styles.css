@@ -1297,6 +1297,11 @@ h2 {
   padding-bottom: 12px;
 }
 
+.invoice-notice-modal-body > .invoice-download-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .invoice-notice-modal-footer {
   display: grid;
   gap: 12px;
@@ -5988,7 +5993,8 @@ h2 {
 
 .invoice-download-list {
   display: grid;
-  overflow: hidden;
+  min-height: 0;
+  overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;

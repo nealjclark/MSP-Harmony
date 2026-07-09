@@ -697,15 +697,20 @@ CREATE INDEX IF NOT EXISTS idx_vendor_product_addition_pins_scope
 
 CREATE TABLE IF NOT EXISTS communication_settings (
   id text PRIMARY KEY DEFAULT 'default',
+  invoice_from_email text NOT NULL DEFAULT 'tconnover@bmbsolutions.com',
   invoice_bcc_emails text NOT NULL DEFAULT '',
   invoice_notice_templates jsonb NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
   updated_by text
 );
 
-INSERT INTO communication_settings (id, invoice_bcc_emails, invoice_notice_templates, updated_by)
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS invoice_from_email text NOT NULL DEFAULT 'tconnover@bmbsolutions.com';
+
+INSERT INTO communication_settings (id, invoice_from_email, invoice_bcc_emails, invoice_notice_templates, updated_by)
 VALUES (
   'default',
+  'tconnover@bmbsolutions.com',
   '',
   '{
     "past-due-reminder": {
@@ -724,3 +729,8 @@ VALUES (
   'system'
 )
 ON CONFLICT (id) DO NOTHING;
+
+UPDATE communication_settings
+SET invoice_from_email = 'tconnover@bmbsolutions.com'
+WHERE id = 'default'
+  AND (invoice_from_email IS NULL OR btrim(invoice_from_email) = '');

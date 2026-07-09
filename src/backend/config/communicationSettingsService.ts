@@ -1,7 +1,9 @@
 import {
   defaultCommunicationSettings,
+  defaultInvoiceFromEmail,
   defaultInvoiceNoticeTemplates,
   formatEmailList,
+  normalizeInvoiceFromEmail,
   normalizeInvoiceNoticeTemplates,
   validateEmailList,
   type CommunicationSettings,
@@ -18,6 +20,7 @@ export type Queryable = {
 
 type CommunicationSettingsRow = {
   id: string;
+  invoice_from_email: string | null;
   invoice_bcc_emails: string;
   invoice_notice_templates: unknown;
   updated_at: Date | string | null;
@@ -25,12 +28,14 @@ type CommunicationSettingsRow = {
 };
 
 export type UpdateCommunicationSettingsInput = {
+  invoiceFromEmail?: unknown;
   invoiceBccEmails?: unknown;
   invoiceNoticeTemplates?: unknown;
 };
 
 const settingsColumns = `
   id,
+  invoice_from_email,
   invoice_bcc_emails,
   invoice_notice_templates,
   updated_at,
@@ -63,6 +68,10 @@ export async function updateCommunicationSettings(
   await ensureDefaultCommunicationSettings(database);
 
   const current = await getCommunicationSettings(database);
+  const invoiceFromEmail =
+    input.invoiceFromEmail === undefined
+      ? current.invoiceFromEmail
+      : normalizeInvoiceFromEmail(input.invoiceFromEmail);
   const invoiceBccEmails =
     input.invoiceBccEmails === undefined
       ? current.invoiceBccEmails
@@ -74,13 +83,14 @@ export async function updateCommunicationSettings(
 
   const result = await database.query<CommunicationSettingsRow>(
     `update communication_settings
-     set invoice_bcc_emails = $1,
-         invoice_notice_templates = $2::jsonb,
+     set invoice_from_email = $1,
+         invoice_bcc_emails = $2,
+         invoice_notice_templates = $3::jsonb,
          updated_at = now(),
-         updated_by = $3
+         updated_by = $4
      where id = 'default'
      returning ${settingsColumns}`,
-    [invoiceBccEmails, JSON.stringify(invoiceNoticeTemplates), actor],
+    [invoiceFromEmail, invoiceBccEmails, JSON.stringify(invoiceNoticeTemplates), actor],
   );
 
   const row = result.rows[0];
@@ -93,10 +103,10 @@ export async function updateCommunicationSettings(
 
 export async function ensureDefaultCommunicationSettings(database: Queryable): Promise<void> {
   await database.query(
-    `insert into communication_settings (id, invoice_bcc_emails, invoice_notice_templates, updated_by)
-     values ('default', '', $1::jsonb, 'system')
+    `insert into communication_settings (id, invoice_from_email, invoice_bcc_emails, invoice_notice_templates, updated_by)
+     values ('default', $1, '', $2::jsonb, 'system')
      on conflict (id) do nothing`,
-    [JSON.stringify(defaultInvoiceNoticeTemplates)],
+    [defaultInvoiceFromEmail, JSON.stringify(defaultInvoiceNoticeTemplates)],
   );
 }
 
@@ -114,7 +124,9 @@ function normalizeBccEmails(value: unknown): string {
 }
 
 function mapCommunicationSettingsRow(row: CommunicationSettingsRow): CommunicationSettings {
+  const fromEmail = row.invoice_from_email?.trim();
   return {
+    invoiceFromEmail: fromEmail && fromEmail.length > 0 ? fromEmail : defaultInvoiceFromEmail,
     invoiceBccEmails: row.invoice_bcc_emails ?? '',
     invoiceNoticeTemplates: normalizeInvoiceNoticeTemplates(row.invoice_notice_templates) as InvoiceNoticeTemplates,
     updatedAt: row.updated_at ? isoDate(row.updated_at) : undefined,

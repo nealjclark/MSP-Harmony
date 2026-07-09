@@ -8,11 +8,14 @@ export type InvoiceNoticeTemplate = {
 export type InvoiceNoticeTemplates = Record<InvoiceNoticeType, InvoiceNoticeTemplate>;
 
 export type CommunicationSettings = {
+  invoiceFromEmail: string;
   invoiceBccEmails: string;
   invoiceNoticeTemplates: InvoiceNoticeTemplates;
   updatedAt?: string;
   updatedBy?: string;
 };
+
+export const defaultInvoiceFromEmail = 'tconnover@bmbsolutions.com';
 
 export const invoiceNoticeTypes: InvoiceNoticeType[] = [
   'past-due-reminder',
@@ -71,6 +74,7 @@ export const defaultInvoiceNoticeTemplates: InvoiceNoticeTemplates = {
 };
 
 export const defaultCommunicationSettings: CommunicationSettings = {
+  invoiceFromEmail: defaultInvoiceFromEmail,
   invoiceBccEmails: '',
   invoiceNoticeTemplates: defaultInvoiceNoticeTemplates,
 };
@@ -153,6 +157,23 @@ export function validateEmailList(value: string): { emails: string[]; invalid: s
 
 export function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+export function normalizeInvoiceFromEmail(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new Error('invoiceFromEmail must be a string.');
+  }
+
+  const email = value.trim();
+  if (!email) {
+    return defaultInvoiceFromEmail;
+  }
+
+  if (!isValidEmail(email)) {
+    throw new Error(`Invalid from email address: ${email}`);
+  }
+
+  return email;
 }
 
 export function renderTemplate(template: string, values: Record<string, string | number | undefined>): string {
