@@ -26,7 +26,6 @@ const syncRuns: Record<string, string> = {
   ncentral: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   sentinelone: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   'microsoft-365': 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-  'opentext-appriver': 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
 };
 
 const snapshots: Record<string, SnapshotFixture[]> = {
@@ -44,26 +43,6 @@ const snapshots: Record<string, SnapshotFixture[]> = {
     microsoftUser('m365-user-disabled', customerA, 'Mapped Client', 'disabled@contoso.com', false, ['EXCHANGE_S_STANDARD']),
     microsoftUser('m365-user-sharepoint', customerA, 'Mapped Client', 'sharepoint@contoso.com', true, ['SHAREPOINTSTANDARD']),
     microsoftUser('m365-user-other-customer', customerB, 'Other Client', 'third@contoso.com', true, ['EXCHANGE_S_STANDARD']),
-  ],
-  'opentext-appriver': [
-    {
-      id: 'appriver-1',
-      vendor_id: 'opentext-appriver',
-      customer_id: customerA,
-      connectwise_company_id: 'cw-101',
-      customer_name: 'Mapped Client',
-      external_account_id: 'appriver-101',
-      vendor_product_key: 'Email Protection|Monthly|Monthly',
-      product_code: 'EMAIL-PROTECTION',
-      product_name: 'Email Protection',
-      quantity: '1',
-      observed_at: new Date('2026-06-29T10:00:00Z'),
-      dimensions: {
-        domain: 'contoso.com',
-        customerName: 'Mapped Client',
-        subscriptionSource: 'appriver-securecloud-subscription',
-      },
-    },
   ],
 };
 
@@ -112,21 +91,8 @@ async function run() {
   assert.equal(deviceRow.status, 'warning');
   assert.deepEqual(deviceRow.missingFromLeft.map((item) => item.displayName), ['SERVER-03']);
   assert.deepEqual(deviceRow.missingFromRight.map((item) => item.displayName), ['LAPTOP-02']);
-
-  const appRiverRow = report.rows.find((row) => row.comparisonPair.id === 'appriver-microsoft365-users');
-  assert.ok(appRiverRow);
-  assert.equal(appRiverRow.customer.customerId, customerA);
-  assert.equal(appRiverRow.domain, 'contoso.com');
-  assert.equal(appRiverRow.leftCount, 1);
-  assert.equal(appRiverRow.rightCount, 2);
-  assert.equal(appRiverRow.delta, -1);
-  assert.equal(appRiverRow.status, 'warning');
-  assert.equal(appRiverRow.aggregateOnly, true);
-  assert.equal(appRiverRow.referenceItems.length, 2);
-  assert.deepEqual(appRiverRow.referenceItems.map((item) => item.identity), ['alpha@contoso.com', 'bravo@contoso.com']);
-  assert.equal(appRiverRow.referenceItems.some((item) => item.identity === 'third@contoso.com'), false);
-  assert.deepEqual(appRiverRow.missingFromLeft, []);
-  assert.deepEqual(appRiverRow.missingFromRight, []);
+  assert.equal(deviceRow.missingFromLeft[0]?.details.LastCheckIn, '2026-06-29T09:45:00Z');
+  assert.equal(deviceRow.missingFromRight[0]?.details.LastCheckIn, '2026-06-29T09:30:00Z');
 
   const proofpointRow = report.rows.find((row) => row.comparisonPair.id === 'proofpoint-microsoft365-users');
   assert.ok(proofpointRow);
@@ -156,6 +122,13 @@ function device(
   customerName: string,
   hostname: string,
 ): SnapshotFixture {
+  const lastCheckIn =
+    id === 'ncentral-2'
+      ? '2026-06-29T09:30:00Z'
+      : id === 'sentinel-2'
+        ? '2026-06-29T09:45:00Z'
+        : '2026-06-29T09:15:00Z';
+
   return {
     id,
     vendor_id: vendorId,
@@ -171,6 +144,9 @@ function device(
     dimensions: {
       hostname,
       deviceName: hostname,
+      ...(vendorId === 'ncentral'
+        ? { lastApplianceCheckinTime: lastCheckIn }
+        : { lastCheckIn, lastActiveDate: lastCheckIn }),
     },
   };
 }

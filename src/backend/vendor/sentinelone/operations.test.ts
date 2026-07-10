@@ -133,6 +133,7 @@ async function run() {
             siteId: 'site-1',
             siteName: 'Northstar Dental',
             accountId: 'acct-1',
+            lastActiveDate: '2026-06-29T09:15:00Z',
             raw: { id: 'agent-1' },
           },
           {
@@ -142,6 +143,7 @@ async function run() {
             siteId: 'site-1',
             siteName: 'Northstar Dental',
             accountId: 'acct-1',
+            lastActiveDate: '2026-06-29T09:45:00Z',
             raw: { id: 'agent-2' },
           },
           {
@@ -168,6 +170,8 @@ async function run() {
   // Live API snapshots use device:* keys when product mappings are present so CSV and API reconcile together.
   assert.equal(insertedSnapshots[0]?.[4], 'device:workstation');
   assert.equal(insertedSnapshots[1]?.[4], 'device:server');
+  assert.equal(JSON.parse(String(insertedSnapshots[0]?.[8])).lastCheckIn, '2026-06-29T09:15:00Z');
+  assert.equal(JSON.parse(String(insertedSnapshots[1]?.[8])).lastActiveDate, '2026-06-29T09:45:00Z');
 
   const ruleSet = await loadSentinelOneRuleSet(database);
   assert.equal(ruleSet.vendorId, 'sentinelone');

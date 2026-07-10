@@ -82,8 +82,10 @@ async function run() {
       id: 'agent-3',
       computerName: 'sql-01',
       osType: 'Windows Server 2022',
+      lastActiveDate: '2026-06-29T10:00:00Z',
     });
     assert.equal(parsed?.machineType, 'server');
+    assert.equal(parsed?.lastActiveDate, '2026-06-29T10:00:00Z');
     assert.equal(machineTypeForAgent({ machineType: 'laptop' }), 'workstation');
 
     assert.throws(

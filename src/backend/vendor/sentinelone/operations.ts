@@ -456,6 +456,8 @@ function dimensionsForAgent(agent: SentinelOneAgent) {
     accountName: agent.accountName,
     osType: agent.osType,
     agentId: agent.agentId,
+    lastCheckIn: agent.lastActiveDate,
+    lastActiveDate: agent.lastActiveDate,
   };
 }
 

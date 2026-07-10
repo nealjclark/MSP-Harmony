@@ -28,6 +28,7 @@ export type SentinelOneAgent = {
   accountId?: string;
   accountName?: string;
   osType?: string;
+  lastActiveDate?: string;
   raw: unknown;
 };
 
@@ -243,6 +244,7 @@ export function parseAgent(record: Record<string, unknown>): SentinelOneAgent | 
     accountId: stringValue(record.accountId ?? record.AccountId),
     accountName: stringValue(record.accountName ?? record.AccountName),
     osType: stringValue(record.osType ?? record.osName ?? record.OsType),
+    lastActiveDate: stringValue(record.lastActiveDate ?? record.LastActiveDate ?? record.lastSeen),
     raw: record,
   };
 }

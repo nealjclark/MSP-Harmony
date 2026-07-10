@@ -8247,12 +8247,15 @@ function latestDiscrepancySync(row: DiscrepancyRow) {
 }
 
 function discrepancyItemDetail(item: DiscrepancyItem) {
+  const lastCheckIn =
+    formatDateTime(stringDetail(item.details.LastCheckIn)) ??
+    formatDateTime(item.observedAt);
   const values = [
     item.domain,
     stringDetail(item.details.Tenant),
     stringDetail(item.details.Site),
     stringDetail(item.details.OS),
-    formatDateTime(item.observedAt),
+    lastCheckIn ? `Check-in ${lastCheckIn}` : undefined,
   ].filter((value): value is string => Boolean(value));
 
   return values.join(' / ') || 'No extra detail';
@@ -14380,6 +14383,16 @@ const ncentralVendorDataColumns: VendorDataColumn[] = [
   { label: 'Tags', value: deviceTagLabel },
 ];
 
+const sentinelOneVendorDataColumns: VendorDataColumn[] = [
+  { label: 'Device Name', primary: true, value: deviceDisplayName },
+  { label: 'ID', value: deviceIdentityLabel },
+  { label: 'Type', value: deviceTypeLabel },
+  { label: 'Product', value: (device) => device.productName },
+  { label: 'OS', value: deviceOsLabel },
+  { label: 'Site', value: (device) => device.dimensions.siteName },
+  { label: 'Last Check-In', format: 'date', value: deviceLastCheckIn },
+];
+
 const appRiverVendorDataColumns: VendorDataColumn[] = [
   { label: 'Subscription', primary: true, value: (device) => device.dimensions.productName ?? device.productName },
   { label: 'Product Code', value: (device) => device.dimensions.productCode ?? device.productCode },
@@ -14419,6 +14432,7 @@ const genericVendorDataColumns: VendorDataColumn[] = [
   { label: 'Product', value: (device) => device.productName },
   { label: 'Code', value: (device) => device.productCode },
   { label: 'Quantity', value: (device) => device.quantity },
+  { label: 'Last Check-In', format: 'date', value: deviceLastCheckIn },
   { label: 'Observed', format: 'date', value: (device) => device.observedAt },
 ];
 
@@ -14427,6 +14441,7 @@ function vendorDataColumns(selection: VendorDataSelection) {
   if (selection.vendorId === 'microsoft-365') return microsoft365VendorDataColumns;
   if (selection.vendorId === 'cove') return coveVendorDataColumns;
   if (selection.vendorId === 'ncentral') return ncentralVendorDataColumns;
+  if (selection.vendorId === 'sentinelone') return sentinelOneVendorDataColumns;
   return genericVendorDataColumns;
 }
 
@@ -14703,12 +14718,17 @@ function deviceProductCodeLabel(device: ReconciliationDevice) {
 }
 
 function deviceOsLabel(device: ReconciliationDevice) {
-  const value = device.dimensions.operatingSystem ?? device.dimensions.os;
+  const value = device.dimensions.operatingSystem ?? device.dimensions.os ?? device.dimensions.osType;
   return typeof value === 'string' || typeof value === 'number' ? String(value) : '-';
 }
 
 function deviceLastCheckIn(device: ReconciliationDevice) {
-  const value = device.dimensions.lastApplianceCheckinTime ?? device.dimensions.lastCheckIn;
+  const value =
+    device.dimensions.lastApplianceCheckinTime ??
+    device.dimensions.lastCheckIn ??
+    device.dimensions.lastActiveDate ??
+    device.dimensions.lastSeen ??
+    device.dimensions.lastComplete;
   return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
 }
 

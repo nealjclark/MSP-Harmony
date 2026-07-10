@@ -184,16 +184,6 @@ export const discrepancyComparisonDefinitions: DiscrepancyComparisonDefinition[]
     aggregateOnly: false,
   }),
   comparisonDefinition({
-    id: 'appriver-microsoft365-users',
-    label: 'AppRiver vs Microsoft 365 mailbox users',
-    basis: 'user',
-    leftVendorId: 'opentext-appriver',
-    rightVendorId: 'microsoft-365',
-    matchingStrategy: 'aggregate-count',
-    productFamily: 'Licensed mailbox users',
-    aggregateOnly: true,
-  }),
-  comparisonDefinition({
     id: 'proofpoint-microsoft365-users',
     label: 'Proofpoint vs Microsoft 365 mailbox users',
     basis: 'user',
@@ -624,6 +614,8 @@ function deviceItemFromSnapshot(row: SnapshotRecord): ComparisonItem[] {
     return [];
   }
 
+  const lastCheckIn = deviceLastCheckInFromDimensions(row.dimensions);
+
   return [
     {
       id: row.id,
@@ -640,11 +632,23 @@ function deviceItemFromSnapshot(row: SnapshotRecord): ComparisonItem[] {
         Hostname: rawName ?? identity,
         DeviceId: primitiveDetail(row.dimensions.ncentralDeviceId ?? row.dimensions.deviceId ?? row.dimensions.agentId),
         Site: stringValue(row.dimensions.siteName) ?? null,
-        OS: stringValue(row.dimensions.operatingSystem ?? row.dimensions.os) ?? null,
+        OS: stringValue(row.dimensions.operatingSystem ?? row.dimensions.os ?? row.dimensions.osType) ?? null,
         Product: row.productName,
+        LastCheckIn: lastCheckIn,
       },
     },
   ];
+}
+
+function deviceLastCheckInFromDimensions(dimensions: Record<string, unknown>) {
+  return (
+    stringValue(dimensions.lastApplianceCheckinTime) ??
+    stringValue(dimensions.lastCheckIn) ??
+    stringValue(dimensions.lastActiveDate) ??
+    stringValue(dimensions.lastSeen) ??
+    stringValue(dimensions.lastComplete) ??
+    null
+  );
 }
 
 function microsoftExchangeUserItemFromSnapshot(row: SnapshotRecord): ComparisonItem[] {
