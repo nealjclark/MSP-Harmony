@@ -7,13 +7,29 @@ export type InvoiceNoticeTemplate = {
 
 export type InvoiceNoticeTemplates = Record<InvoiceNoticeType, InvoiceNoticeTemplate>;
 
+export type EmailDeliveryProvider = 'microsoft-graph';
+
+export type EmailDeliveryTestResult = 'untested' | 'success' | 'failed';
+
 export type CommunicationSettings = {
   invoiceFromEmail: string;
   invoiceBccEmails: string;
   invoiceNoticeTemplates: InvoiceNoticeTemplates;
+  emailDeliveryProvider: EmailDeliveryProvider;
+  graphTenantId: string;
+  graphClientId: string;
+  sendAsMailbox: string;
+  graphClientSecretPresent: boolean;
+  deliveryConfigured: boolean;
+  lastTestedAt?: string;
+  lastTestResult: EmailDeliveryTestResult;
+  lastTestError?: string;
   updatedAt?: string;
   updatedBy?: string;
 };
+
+export const emailGraphClientSecretName = 'mspharmony-email-graph-client-secret';
+export const emailGraphClientSecretEnvVar = 'EMAIL_GRAPH_CLIENT_SECRET';
 
 export const defaultInvoiceFromEmail = 'tconnover@bmbsolutions.com';
 
@@ -77,7 +93,69 @@ export const defaultCommunicationSettings: CommunicationSettings = {
   invoiceFromEmail: defaultInvoiceFromEmail,
   invoiceBccEmails: '',
   invoiceNoticeTemplates: defaultInvoiceNoticeTemplates,
+  emailDeliveryProvider: 'microsoft-graph',
+  graphTenantId: '',
+  graphClientId: '',
+  sendAsMailbox: defaultInvoiceFromEmail,
+  graphClientSecretPresent: false,
+  deliveryConfigured: false,
+  lastTestResult: 'untested',
 };
+
+export function isEmailDeliveryConfigured(input: {
+  graphTenantId?: string;
+  graphClientId?: string;
+  sendAsMailbox?: string;
+  graphClientSecretPresent?: boolean;
+}): boolean {
+  return (
+    Boolean(input.graphTenantId?.trim()) &&
+    Boolean(input.graphClientId?.trim()) &&
+    Boolean(input.sendAsMailbox?.trim()) &&
+    Boolean(input.graphClientSecretPresent)
+  );
+}
+
+export function normalizeGraphTenantId(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value !== 'string') {
+    throw new Error('graphTenantId must be a string.');
+  }
+  return value.trim();
+}
+
+export function normalizeGraphClientId(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value !== 'string') {
+    throw new Error('graphClientId must be a string.');
+  }
+  return value.trim();
+}
+
+export function normalizeSendAsMailbox(value: unknown, fallback = defaultInvoiceFromEmail): string {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return fallback;
+  }
+  if (typeof value !== 'string') {
+    throw new Error('sendAsMailbox must be a string.');
+  }
+  const email = value.trim();
+  if (!isValidEmail(email)) {
+    throw new Error(`Invalid send-as mailbox: ${email}`);
+  }
+  return email;
+}
+
+export function normalizeEmailDeliveryTestResult(value: unknown): EmailDeliveryTestResult {
+  if (value === 'success' || value === 'failed' || value === 'untested') {
+    return value;
+  }
+  return 'untested';
+}
 
 export function isInvoiceNoticeType(value: unknown): value is InvoiceNoticeType {
   return (

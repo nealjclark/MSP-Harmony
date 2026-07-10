@@ -34,6 +34,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Huntress | none for manual invoice imports |
 | Microsoft Azure | `mspharmony-azure-client-secret` |
 | Pax8 | `mspharmony-pax8-client-secret` |
+| Email delivery (Graph) | `mspharmony-email-graph-client-secret` |
 
 ## Non-Secret Settings
 
@@ -192,3 +193,32 @@ The Datto Backup integration covers Kaseya Datto BCDR and SaaS Protection under 
 Completed syncs store SaaS product-line summaries and optional BCDR protected agents in `vendor_usage_snapshots` with `vendor_id = 'datto'`. Default product keys are `datto-bcdr-agent`, `datto-saas-office365-icr`, `datto-saas-office365-tbr`, `datto-saas-googleapps-icr`, and `datto-saas-googleapps-tbr`; unknown Datto product/retention pairs become dynamic `datto-saas-{productType}-{retentionType}` keys for product mapping review.
 
 Datto SaaS external account IDs include the Datto account/domain key and product key, so a customer can map Office 365 ICR, Office 365 TBR, and Google Workspace product lines to different ConnectWise agreements when needed.
+
+## Email Communication (Microsoft Graph)
+
+Past-due invoice notices are configured under **Settings → Email Communication**. Content (from address, BCC, templates) lives in PostgreSQL `communication_settings`. Delivery uses Microsoft Graph `sendMail` with app-only client credentials.
+
+### Delivery settings
+
+| Field | Storage |
+| --- | --- |
+| Tenant ID | `communication_settings.graph_tenant_id` |
+| Client ID | `communication_settings.graph_client_id` |
+| Send-as mailbox | `communication_settings.send_as_mailbox` |
+| Client secret | Key Vault `mspharmony-email-graph-client-secret` (or env `EMAIL_GRAPH_CLIENT_SECRET` for local) |
+
+### Entra app requirements
+
+1. Register an app in the BMB tenant.
+2. Grant Microsoft Graph **application** permission `Mail.Send` and grant admin consent.
+3. Create a client secret and paste it into Settings → Email Communication → Delivery.
+4. Set send-as mailbox to a real user or shared mailbox the app can send as (typically the same as the invoice from address).
+
+### API
+
+- `GET /api/settings/communication` — load settings (secret never returned; `graphClientSecretPresent` / `deliveryConfigured` only)
+- `PUT /api/settings/communication` — save content + delivery non-secrets; optional `graphClientSecret`
+- `POST /api/settings/communication/test` — `{ recipientEmail }` sends a real Graph test message
+
+When delivery is configured, invoice Confirm / Send test call Graph and audit as `connectwise.invoice.notice.sent` / `test-sent`. When not configured, behavior remains stub-only audit events.
+

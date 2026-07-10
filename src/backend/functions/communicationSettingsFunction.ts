@@ -2,8 +2,12 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { config as loadDotEnv } from 'dotenv';
 import {
   getCommunicationSettings,
+  recordEmailDeliveryTestResult,
+  resolveGraphEmailDeliveryCredentials,
   updateCommunicationSettings,
 } from '../config/communicationSettingsService';
+import { sendGraphEmail } from '../email/graphEmailSender';
+import { isValidEmail } from '../../shared/communicationSettings';
 import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
@@ -50,15 +54,102 @@ export async function updateCommunicationSettingsHttp(
     });
   }
 
+  const payload = body as Record<string, unknown>;
+  const hasSecretUpdate =
+    typeof payload.graphClientSecret === 'string' && payload.graphClientSecret.trim().length > 0;
+
   try {
     const settings = await updateCommunicationSettings(
       repositoryContext.pool,
-      body as Record<string, unknown>,
+      payload,
       auth.principal.email ?? auth.principal.name,
+      {
+        keyVaultUrl: process.env.KEY_VAULT_URL,
+      },
     );
-    return jsonResponse(200, { settings });
+    return jsonResponse(200, {
+      settings,
+      secretWritten: hasSecretUpdate,
+    });
   } catch (error) {
     return communicationSettingsErrorResponse(error, 'Unable to save communication settings.');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function testCommunicationSettingsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
+  }
+
+  const body = await request.json().catch(() => undefined);
+  if (!body || typeof body !== 'object') {
+    return jsonResponse(400, {
+      error: 'Request body must be valid JSON.',
+    });
+  }
+
+  const recipientEmail = textValue((body as Record<string, unknown>).recipientEmail);
+  if (!recipientEmail || !isValidEmail(recipientEmail)) {
+    return jsonResponse(400, {
+      error: 'A valid recipientEmail is required for the delivery test.',
+    });
+  }
+
+  const actor = auth.principal.email ?? auth.principal.name;
+
+  try {
+    const credentials = await resolveGraphEmailDeliveryCredentials(repositoryContext.pool, {
+      keyVaultUrl: process.env.KEY_VAULT_URL,
+    });
+    await sendGraphEmail(credentials, {
+      subject: 'MSP Harmony email delivery test',
+      body: [
+        'This is a test message from MSP Harmony.',
+        '',
+        `Sent as: ${credentials.sendAsMailbox}`,
+        `Requested by: ${actor}`,
+        `Sent at: ${new Date().toISOString()}`,
+      ].join('\n'),
+      to: [{ address: recipientEmail }],
+    });
+
+    const settings = await recordEmailDeliveryTestResult(repositoryContext.pool, {
+      result: 'success',
+      actor,
+    });
+
+    return jsonResponse(200, {
+      ok: true,
+      recipientEmail,
+      sendAsMailbox: credentials.sendAsMailbox,
+      settings,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to send test email.';
+    try {
+      const settings = await recordEmailDeliveryTestResult(repositoryContext.pool, {
+        result: 'failed',
+        error: message,
+        actor,
+      });
+      return jsonResponse(400, {
+        error: message,
+        settings,
+      });
+    } catch {
+      return jsonResponse(400, {
+        error: message,
+      });
+    }
   } finally {
     await repositoryContext.close();
   }
@@ -78,6 +169,13 @@ app.http('updateCommunicationSettings', {
   handler: updateCommunicationSettingsHttp,
 });
 
+app.http('testCommunicationSettings', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'settings/communication/test',
+  handler: testCommunicationSettingsHttp,
+});
+
 function missingDatabaseResponse(missingDatabaseSettings: string[]) {
   return jsonResponse(500, {
     error: 'PostgreSQL settings are required to manage communication settings.',
@@ -90,4 +188,12 @@ function communicationSettingsErrorResponse(error: unknown, fallback: string) {
   return jsonResponse(400, {
     error: message,
   });
+}
+
+function textValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }

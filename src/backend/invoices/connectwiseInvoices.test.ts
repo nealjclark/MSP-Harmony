@@ -42,6 +42,7 @@ async function run() {
   await testStandardInvoiceCandidateShape();
   await testInvoiceNotificationStubAudit();
   await testCustomerInvoiceNoticePreview();
+  await testInvoiceNoticeSendsViaGraphWhenConfigured();
 
   console.log('connectwise invoice tests passed');
 }
@@ -372,6 +373,87 @@ async function testCustomerInvoiceNoticePreview() {
   assert.deepEqual(auditPayload.invoiceIds, ['701', '702']);
   assert.equal(auditPayload.totalBalance, 400);
   assert.equal(auditPayload.notes, 'Please call AP today.');
+}
+
+async function testInvoiceNoticeSendsViaGraphWhenConfigured() {
+  const client = fakeClient({
+    invoices: [
+      invoice({
+        id: 801,
+        invoiceNumber: 'INV-801',
+        companyId: 42,
+        companyName: 'Acme',
+        dueDate: '2026-05-01',
+        balance: 90,
+      }),
+    ],
+    contacts: [
+      contact({
+        id: 903,
+        companyId: 42,
+        firstName: 'Avery',
+        lastName: 'Billing',
+        email: 'avery.billing@example.com',
+        defaultBillingFlag: true,
+      }),
+    ],
+  });
+  const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  const database: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      queries.push({ sql, values });
+      return { rows: [] as T[] };
+    },
+  };
+  const sent: Array<{ subject: string; to: string; body: string; bodyContentType?: string }> = [];
+
+  const confirmed = await previewOrStubConnectWiseInvoiceNotice(client, {
+    actor: 'analyst@example.com',
+    database,
+    invoiceId: '801',
+    noticeType: 'past-due-reminder',
+    confirm: true,
+    communicationSettings: {
+      ...defaultCommunicationSettings,
+      deliveryConfigured: true,
+      graphTenantId: 'tenant',
+      graphClientId: 'client',
+      sendAsMailbox: 'billing@bmbsolutions.com',
+      graphClientSecretPresent: true,
+    },
+    graphCredentials: {
+      tenantId: 'tenant',
+      clientId: 'client',
+      clientSecret: 'secret',
+      sendAsMailbox: 'billing@bmbsolutions.com',
+    },
+    emailSender: {
+      async send(_credentials, message) {
+        sent.push({
+          subject: message.subject,
+          to: message.to[0]?.address ?? '',
+          body: message.body,
+          bodyContentType: message.bodyContentType,
+        });
+        return {
+          sendAsMailbox: 'billing@bmbsolutions.com',
+          recipientCount: 1,
+        };
+      },
+    },
+    today: '2026-07-07',
+  });
+
+  assert.equal(confirmed.status, 'sent');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.to, 'avery.billing@example.com');
+  assert.match(sent[0]?.body ?? '', /<!DOCTYPE html>/);
+  assert.match(sent[0]?.body ?? '', /INV-801/);
+  assert.match(sent[0]?.body ?? '', /min-width:420px/);
+  assert.match(sent[0]?.body ?? '', /Pay now|N\/A/);
+  assert.equal(sent[0]?.bodyContentType, 'HTML');
+  assert.equal(queries[0]?.values?.[1], 'connectwise.invoice.notice.sent');
+  assert.equal(confirmed.preview.fromEmail, 'billing@bmbsolutions.com');
 }
 
 function fakeClient(input: FakeClientInput): FakeClient {

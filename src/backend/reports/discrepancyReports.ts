@@ -741,6 +741,8 @@ function severityForMismatch(score: number): DiscrepancySeverity {
   return 'critical';
 }
 
+const STALE_SYNC_THRESHOLD_MS = 8 * 24 * 60 * 60 * 1000;
+
 function sideIsStale(side: VendorSnapshotSet, now: string) {
   const syncTime = side.syncRun?.completedAt ?? side.syncRun?.startedAt;
   if (!syncTime) {
@@ -753,15 +755,7 @@ function sideIsStale(side: VendorSnapshotSet, now: string) {
     return false;
   }
 
-  return anchor - observed > staleThresholdMs(side.vendorId);
-}
-
-function staleThresholdMs(vendorId: string) {
-  const frequency = getIntegrationSettingsDefinition(vendorId as never)?.syncFrequency;
-  if (frequency === 'hourly') return 2 * 60 * 60 * 1000;
-  if (frequency === 'weekly') return 8 * 24 * 60 * 60 * 1000;
-  if (frequency === 'manual') return Number.POSITIVE_INFINITY;
-  return 36 * 60 * 60 * 1000;
+  return anchor - observed > STALE_SYNC_THRESHOLD_MS;
 }
 
 function syncTimestamps(left: VendorSnapshotSet, right: VendorSnapshotSet) {

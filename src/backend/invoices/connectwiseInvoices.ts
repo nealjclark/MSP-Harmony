@@ -4,6 +4,7 @@ import {
 } from '../config/settingsProvider';
 import {
   getCommunicationSettings,
+  resolveGraphEmailDeliveryCredentials,
   type Queryable as CommunicationQueryable,
 } from '../config/communicationSettingsService';
 import {
@@ -16,6 +17,12 @@ import {
   type ConnectWiseInvoiceEmailTemplate,
   type ConnectWiseListOptions,
 } from '../connectwise/client';
+import {
+  sendGraphEmail,
+  type GraphEmailCredentials,
+  type GraphEmailMessage,
+  type GraphEmailSendResult,
+} from '../email/graphEmailSender';
 import {
   defaultCommunicationSettings,
   isInvoiceNoticeType,
@@ -237,10 +244,15 @@ export type InvoiceNotificationAuditSummary = {
 };
 
 export type InvoiceNotificationAuditResult = {
-  status: 'preview' | 'stubbed' | 'test-stubbed';
+  status: 'preview' | 'stubbed' | 'test-stubbed' | 'sent' | 'test-sent' | 'failed';
   generatedAt: string;
   preview: InvoiceNotificationPreview;
   audit?: InvoiceNotificationAuditSummary;
+  deliveryError?: string;
+};
+
+export type InvoiceEmailSender = {
+  send: (credentials: GraphEmailCredentials, message: GraphEmailMessage) => Promise<GraphEmailSendResult>;
 };
 
 export type ConnectWiseInvoiceReader = {
@@ -527,6 +539,8 @@ export async function previewOrStubConnectWiseInvoiceNotice(
     today?: string;
     paymentLinkConfig?: WisePayPaymentLinkConfig;
     communicationSettings?: CommunicationSettings;
+    emailSender?: InvoiceEmailSender;
+    graphCredentials?: GraphEmailCredentials;
   },
 ): Promise<InvoiceNotificationAuditResult> {
   const today = input.today ?? currentDateKey();
@@ -590,7 +604,38 @@ export async function previewOrStubConnectWiseInvoiceNotice(
   }
 
   const occurredAt = new Date().toISOString();
-  const eventType = testMode ? 'connectwise.invoice.notice.test-stubbed' : 'connectwise.invoice.notice.stubbed';
+  const shouldSend = communicationSettings.deliveryConfigured || Boolean(input.graphCredentials);
+  let deliveryStatus: InvoiceNotificationAuditResult['status'] = testMode ? 'test-stubbed' : 'stubbed';
+  let deliveryError: string | undefined;
+  let eventType = testMode ? 'connectwise.invoice.notice.test-stubbed' : 'connectwise.invoice.notice.stubbed';
+
+  if (shouldSend) {
+    if (!preview.recipientEmail) {
+      throw new Error('Invoice notice cannot be sent without a recipient email address.');
+    }
+
+    try {
+      const credentials =
+        input.graphCredentials ??
+        (await resolveGraphEmailDeliveryCredentials(input.database as CommunicationQueryable));
+      const sender = input.emailSender ?? { send: sendGraphEmail };
+      await sender.send(credentials, {
+        subject: preview.subject,
+        body: buildInvoiceNoticeHtmlEmail(preview),
+        bodyContentType: 'HTML',
+        to: [{ address: preview.recipientEmail, name: preview.recipientName }],
+        cc: preview.ccEmails.map((address) => ({ address })),
+        bcc: preview.bccEmails.map((address) => ({ address })),
+      });
+      deliveryStatus = testMode ? 'test-sent' : 'sent';
+      eventType = testMode ? 'connectwise.invoice.notice.test-sent' : 'connectwise.invoice.notice.sent';
+    } catch (error) {
+      deliveryError = error instanceof Error ? error.message : 'Unable to send invoice notice email.';
+      deliveryStatus = 'failed';
+      eventType = 'connectwise.invoice.notice.failed';
+    }
+  }
+
   for (const invoice of invoices) {
     const previewInvoice = preview.invoices.find((item) => item.invoiceId === String(invoice.id));
     await input.database.query(
@@ -617,6 +662,8 @@ export async function previewOrStubConnectWiseInvoiceNotice(
           bccEmails: preview.bccEmails,
           notes: preview.notes,
           testMode,
+          deliveryStatus,
+          deliveryError,
           billingContact: preview.billingContact,
           agreementName: previewInvoice?.agreementName,
           dueDate: previewInvoice?.dueDate,
@@ -629,10 +676,15 @@ export async function previewOrStubConnectWiseInvoiceNotice(
     );
   }
 
+  if (deliveryStatus === 'failed') {
+    throw new Error(deliveryError ?? 'Unable to send invoice notice email.');
+  }
+
   return {
-    status: testMode ? 'test-stubbed' : 'stubbed',
+    status: deliveryStatus,
     generatedAt: occurredAt,
     preview,
+    deliveryError,
     audit: {
       noticeType: input.noticeType,
       actor: input.actor,
@@ -930,7 +982,7 @@ function buildInvoiceNotificationPreview(
     invoices: previewInvoices,
     companyKey: customerKeyFromInvoice(firstInvoice),
     companyName: company,
-    fromEmail: communicationSettings.invoiceFromEmail,
+    fromEmail: communicationSettings.sendAsMailbox || communicationSettings.invoiceFromEmail,
     recipientName,
     recipientEmail: billingContact?.email,
     ccEmails,
@@ -973,6 +1025,103 @@ function buildNotificationBodyPreview(
   sections.push(invoiceLines.join('\n'));
 
   return sections.filter(Boolean).join('\n\n');
+}
+
+/** Outlook-friendly HTML that mirrors the portal overdue email preview. */
+export function buildInvoiceNoticeHtmlEmail(preview: InvoiceNotificationPreview): string {
+  const paragraphs = (preview.templateBody || preview.bodyPreview.split(/\n\nNOTE:/)[0] || '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const noteText = preview.notes?.trim();
+
+  const paragraphHtml = paragraphs
+    .map(
+      (paragraph) =>
+        `<p style="margin:0 0 12px 0;color:#1f2a24;font-size:15px;line-height:1.5;font-family:Segoe UI,Arial,sans-serif;">${escapeHtml(paragraph)}</p>`,
+    )
+    .join('');
+
+  const noteHtml = noteText
+    ? [
+        `<div style="margin:16px 0;padding:12px 14px;border:1px solid #d7e1eb;border-radius:8px;background:#f8fbfb;">`,
+        `<p style="margin:0 0 6px 0;color:#1f2a24;font-size:13px;font-weight:700;font-family:Segoe UI,Arial,sans-serif;">NOTE:</p>`,
+        `<p style="margin:0;color:#1f2a24;font-size:14px;line-height:1.5;font-family:Segoe UI,Arial,sans-serif;white-space:pre-wrap;">${escapeHtml(noteText)}</p>`,
+        `</div>`,
+      ].join('')
+    : '';
+
+  const invoiceRows = preview.invoices
+    .map((invoice, index) => {
+      const invoiceNumber = escapeHtml(invoice.invoiceNumber ?? `Invoice ${invoice.invoiceId}`);
+      const dueLabel = escapeHtml(
+        `${invoice.dueDate ? formatEmailDate(invoice.dueDate) : 'No due date'} / ${invoice.daysPastDue} days past due`,
+      );
+      const balance = escapeHtml(formatUsd(invoice.balance));
+      const borderTop = index === 0 ? '0' : '1px solid #d7e1eb';
+      const payCell = invoice.paymentLink
+        ? `<a href="${escapeHtmlAttribute(invoice.paymentLink)}" style="display:inline-block;min-width:72px;box-sizing:border-box;padding:8px 10px;border-radius:6px;background:#1f6b4a;color:#ffffff;font-size:13px;font-weight:700;line-height:1.2;text-align:center;text-decoration:none;white-space:nowrap;font-family:Segoe UI,Arial,sans-serif;">Pay now</a>`
+        : `<span style="display:inline-block;min-width:72px;box-sizing:border-box;padding:6px 8px;border-radius:999px;background:#f3e8e8;color:#8a2f2f;font-size:11px;font-weight:700;line-height:1.2;text-align:center;white-space:nowrap;font-family:Segoe UI,Arial,sans-serif;">N/A</span>`;
+
+      return [
+        `<tr>`,
+        `<td style="padding:12px 10px 12px 12px;border-top:${borderTop};vertical-align:middle;">`,
+        `<div style="color:#1f2a24;font-size:14px;font-weight:700;font-family:Segoe UI,Arial,sans-serif;">${invoiceNumber}</div>`,
+        `<div style="margin-top:3px;color:#5b6b63;font-size:12px;font-family:Segoe UI,Arial,sans-serif;">${dueLabel}</div>`,
+        `</td>`,
+        `<td width="76" style="width:76px;min-width:76px;padding:12px 6px;border-top:${borderTop};vertical-align:middle;text-align:right;white-space:nowrap;color:#1f2a24;font-size:13px;font-weight:700;font-family:Segoe UI,Arial,sans-serif;">${balance}</td>`,
+        `<td width="88" style="width:88px;min-width:88px;padding:12px 12px 12px 4px;border-top:${borderTop};vertical-align:middle;text-align:right;">${payCell}</td>`,
+        `</tr>`,
+      ].join('');
+    })
+    .join('');
+
+  const invoiceTable = [
+    `<div style="margin-top:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;">`,
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="min-width:420px;width:100%;border:1px solid #d7e1eb;border-radius:8px;border-collapse:separate;background:#ffffff;">`,
+    invoiceRows ||
+      `<tr><td style="padding:14px;color:#5b6b63;font-family:Segoe UI,Arial,sans-serif;">No invoices listed.</td></tr>`,
+    `</table>`,
+    `</div>`,
+  ].join('');
+
+  return [
+    `<!DOCTYPE html>`,
+    `<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>`,
+    `<body style="margin:0;padding:0;background:#f4f7f5;">`,
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f4f7f5;">`,
+    `<tr><td align="center" style="padding:24px 12px;">`,
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="max-width:640px;width:100%;background:#ffffff;border:1px solid #dfe7e2;border-radius:8px;">`,
+    `<tr><td style="padding:18px 20px;font-family:Segoe UI,Arial,sans-serif;">`,
+    paragraphHtml,
+    noteHtml,
+    invoiceTable,
+    `</td></tr></table>`,
+    `</td></tr></table>`,
+    `</body></html>`,
+  ].join('');
+}
+
+function formatEmailDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (!match) {
+    return value;
+  }
+  const [, year, month, day] = match;
+  return `${month}/${day}/${year}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value).replace(/`/g, '&#96;');
 }
 
 async function resolveBillToCcEmails(
@@ -1173,7 +1322,11 @@ async function loadLatestNoticeAudits(database: Queryable, invoiceIds: string[])
        occurred_at,
        payload
      from audit_events
-     where event_type = 'connectwise.invoice.notice.stubbed'
+     where event_type in (
+         'connectwise.invoice.notice.stubbed',
+         'connectwise.invoice.notice.sent',
+         'connectwise.invoice.notice.test-sent'
+       )
        and entity_type = 'connectwise_invoice'
        and entity_id = any($1::text[])
      order by entity_id, occurred_at desc`,

@@ -700,12 +700,44 @@ CREATE TABLE IF NOT EXISTS communication_settings (
   invoice_from_email text NOT NULL DEFAULT 'tconnover@bmbsolutions.com',
   invoice_bcc_emails text NOT NULL DEFAULT '',
   invoice_notice_templates jsonb NOT NULL,
+  email_delivery_provider text NOT NULL DEFAULT 'microsoft-graph',
+  graph_tenant_id text NOT NULL DEFAULT '',
+  graph_client_id text NOT NULL DEFAULT '',
+  send_as_mailbox text NOT NULL DEFAULT 'tconnover@bmbsolutions.com',
+  graph_client_secret_present boolean NOT NULL DEFAULT false,
+  last_tested_at timestamptz,
+  last_test_result text NOT NULL DEFAULT 'untested',
+  last_test_error text,
   updated_at timestamptz NOT NULL DEFAULT now(),
   updated_by text
 );
 
 ALTER TABLE communication_settings
   ADD COLUMN IF NOT EXISTS invoice_from_email text NOT NULL DEFAULT 'tconnover@bmbsolutions.com';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS email_delivery_provider text NOT NULL DEFAULT 'microsoft-graph';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS graph_tenant_id text NOT NULL DEFAULT '';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS graph_client_id text NOT NULL DEFAULT '';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS send_as_mailbox text NOT NULL DEFAULT 'tconnover@bmbsolutions.com';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS graph_client_secret_present boolean NOT NULL DEFAULT false;
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS last_tested_at timestamptz;
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS last_test_result text NOT NULL DEFAULT 'untested';
+
+ALTER TABLE communication_settings
+  ADD COLUMN IF NOT EXISTS last_test_error text;
 
 INSERT INTO communication_settings (id, invoice_from_email, invoice_bcc_emails, invoice_notice_templates, updated_by)
 VALUES (
@@ -734,3 +766,8 @@ UPDATE communication_settings
 SET invoice_from_email = 'tconnover@bmbsolutions.com'
 WHERE id = 'default'
   AND (invoice_from_email IS NULL OR btrim(invoice_from_email) = '');
+
+UPDATE communication_settings
+SET send_as_mailbox = invoice_from_email
+WHERE id = 'default'
+  AND (send_as_mailbox IS NULL OR btrim(send_as_mailbox) = '');

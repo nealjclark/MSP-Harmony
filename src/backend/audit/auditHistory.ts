@@ -367,12 +367,22 @@ function summarizeAuditEvent(
       };
     }
     case 'connectwise.invoice.notice.stubbed':
+    case 'connectwise.invoice.notice.sent':
+    case 'connectwise.invoice.notice.test-sent':
       return {
         title: stringValue(payload.companyName) ?? 'Invoice notice',
         subtitle: stringValue(payload.invoiceNumber)
           ? `Invoice ${stringValue(payload.invoiceNumber)}`
-          : 'Overdue notice recorded',
+          : eventType === 'connectwise.invoice.notice.sent' || eventType === 'connectwise.invoice.notice.test-sent'
+            ? 'Overdue notice sent'
+            : 'Overdue notice recorded',
         status: 'approved',
+      };
+    case 'connectwise.invoice.notice.failed':
+      return {
+        title: stringValue(payload.companyName) ?? 'Invoice notice',
+        subtitle: stringValue(payload.deliveryError) ?? 'Overdue notice failed',
+        status: 'failed',
       };
     default:
       return {
@@ -415,6 +425,12 @@ function auditEventLabel(eventType: string) {
       return 'Integration settings updated';
     case 'connectwise.invoice.notice.stubbed':
       return 'Invoice notice recorded';
+    case 'connectwise.invoice.notice.sent':
+      return 'Invoice notice sent';
+    case 'connectwise.invoice.notice.test-sent':
+      return 'Invoice notice test sent';
+    case 'connectwise.invoice.notice.failed':
+      return 'Invoice notice failed';
     default:
       return eventType.replace(/\./g, ' · ');
   }

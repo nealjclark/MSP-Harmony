@@ -39,6 +39,7 @@ import {
   Fragment,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type FormEvent,
@@ -157,6 +158,19 @@ type ReconciliationMatchedAgreementAddition = {
 type ReconciliationVendorOption = {
   id: VendorKey;
   name: string;
+  sourceKind: 'sync' | 'import';
+  lastRefreshedLabel?: string;
+  canSync: boolean;
+  syncIntegrationId?: IntegrationId;
+};
+
+type CompareFreshnessRow = {
+  id: string;
+  name: string;
+  sourceKind: 'sync' | 'import';
+  lastRefreshedLabel: string;
+  canSync: boolean;
+  syncIntegrationId?: IntegrationId;
 };
 
 type ReconcileIssue = {
@@ -954,10 +968,11 @@ type InvoiceNotificationPreviewInvoice = {
 };
 
 type InvoiceNotificationResponse = {
-  status: 'preview' | 'stubbed' | 'test-stubbed';
+  status: 'preview' | 'stubbed' | 'test-stubbed' | 'sent' | 'test-sent' | 'failed';
   generatedAt: string;
   preview: InvoiceNotificationPreview;
   audit?: InvoiceNotificationAuditSummary;
+  deliveryError?: string;
 };
 
 type CommunicationSettingsResponse = {
@@ -3169,6 +3184,10 @@ async function saveCommunicationSettingsRequest(payload: {
   invoiceFromEmail: string;
   invoiceBccEmails: string;
   invoiceNoticeTemplates: InvoiceNoticeTemplates;
+  graphTenantId?: string;
+  graphClientId?: string;
+  sendAsMailbox?: string;
+  graphClientSecret?: string;
 }) {
   const response = await fetch('/api/settings/communication', {
     method: 'PUT',
@@ -3184,6 +3203,27 @@ async function saveCommunicationSettingsRequest(payload: {
   }
 
   return body as unknown as CommunicationSettingsResponse;
+}
+
+async function testCommunicationSettingsRequest(recipientEmail: string) {
+  const response = await fetch('/api/settings/communication/test', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ recipientEmail }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Email delivery test failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CommunicationSettingsResponse & {
+    ok: boolean;
+    recipientEmail: string;
+    sendAsMailbox: string;
+  };
 }
 
 async function createManagedUserRequest(payload: {
@@ -5389,7 +5429,11 @@ function App() {
         notes,
       });
       setInvoiceNoticeResult(response);
-      setInvoiceNoticeMessage('Overdue email event saved to audit history.');
+      setInvoiceNoticeMessage(
+        response.status === 'sent'
+          ? `Overdue email sent to ${response.preview.recipientEmail ?? 'recipient'}.`
+          : 'Overdue email event saved to audit history. Configure Microsoft Graph under Settings → Email Communication to send for real.',
+      );
       await loadOverdueInvoiceWorkspace({ forceRefresh: true });
       return response;
     } catch (error) {
@@ -5417,10 +5461,14 @@ function App() {
         notes,
       });
       setInvoiceNoticeResult(response);
-      setInvoiceNoticeMessage(`Test email stubbed to ${testRecipientEmail}.`);
+      setInvoiceNoticeMessage(
+        response.status === 'test-sent'
+          ? `Test email sent to ${testRecipientEmail}.`
+          : `Test email stubbed to ${testRecipientEmail}. Configure Microsoft Graph under Settings → Email Communication to send for real.`,
+      );
       return response;
     } catch (error) {
-      setInvoiceNoticeMessage(error instanceof Error ? error.message : 'Unable to stub test email.');
+      setInvoiceNoticeMessage(error instanceof Error ? error.message : 'Unable to send test email.');
       return null;
     } finally {
       setInvoiceNoticeBusyKey(null);
@@ -5455,8 +5503,8 @@ function App() {
       }
       setBulkNoticeCustomers(null);
       setSelectedOverdueCustomerKeys([]);
-      setBulkNoticeMessage(`Saved ${successCount} overdue email event${successCount === 1 ? '' : 's'} to audit history.`);
-      setInvoiceNoticeMessage(`Saved ${successCount} overdue email event${successCount === 1 ? '' : 's'} to audit history.`);
+      setBulkNoticeMessage(`Sent ${successCount} overdue email${successCount === 1 ? '' : 's'}.`);
+      setInvoiceNoticeMessage(`Sent ${successCount} overdue email${successCount === 1 ? '' : 's'}.`);
       await loadOverdueInvoiceWorkspace({ forceRefresh: true });
     } catch (error) {
       setBulkNoticeMessage(error instanceof Error ? error.message : 'Unable to send selected overdue emails.');
@@ -5475,8 +5523,9 @@ function App() {
 
     try {
       let successCount = 0;
+      let sentCount = 0;
       for (const customer of customers) {
-        await postInvoiceNotification({
+        const response = await postInvoiceNotification({
           companyKey: customer.customerKey,
           invoiceIds: customer.invoices.map((invoice) => invoice.invoiceId),
           noticeType: normalizeInvoiceNoticeType(customer.noticeType, customer.oldestDaysPastDue),
@@ -5486,12 +5535,19 @@ function App() {
           notes,
         });
         successCount += 1;
+        if (response.status === 'test-sent') {
+          sentCount += 1;
+        }
         setBulkNoticeMessage(`Tested ${successCount} of ${customers.length}...`);
       }
-      setBulkNoticeMessage(`Stubbed ${successCount} test email${successCount === 1 ? '' : 's'} to ${testRecipientEmail}.`);
-      setInvoiceNoticeMessage(`Stubbed ${successCount} test email${successCount === 1 ? '' : 's'} to ${testRecipientEmail}.`);
+      const message =
+        sentCount > 0
+          ? `Sent ${sentCount} test email${sentCount === 1 ? '' : 's'} to ${testRecipientEmail}.`
+          : `Stubbed ${successCount} test email${successCount === 1 ? '' : 's'} to ${testRecipientEmail}. Configure Microsoft Graph under Settings → Email Communication to send for real.`;
+      setBulkNoticeMessage(message);
+      setInvoiceNoticeMessage(message);
     } catch (error) {
-      setBulkNoticeMessage(error instanceof Error ? error.message : 'Unable to stub test batch emails.');
+      setBulkNoticeMessage(error instanceof Error ? error.message : 'Unable to send test batch emails.');
     } finally {
       setBulkNoticeBusy(false);
     }
@@ -6073,12 +6129,19 @@ function App() {
         ...enabledReconciliationIntegrations.map((integration) => ({
           id: integration.id,
           name: integration.name,
+          sourceKind: 'sync' as const,
+          lastRefreshedLabel: integration.lastSync ?? 'Never',
+          canSync: hasLiveIntegrationActions(integration.id),
+          syncIntegrationId: hasLiveIntegrationActions(integration.id) ? integration.id : undefined,
         })),
         ...vendorDatapoints
           .filter(isEnabledReconciliationDatapoint)
           .map((datapoint) => ({
             id: datapoint.vendorId,
             name: datapoint.displayName,
+            sourceKind: 'import' as const,
+            lastRefreshedLabel: formatDateTime(datapoint.lastImportedAt) ?? 'Never',
+            canSync: false,
           })),
       ].sort((left, right) => left.name.localeCompare(right.name)),
     [enabledReconciliationIntegrations, vendorDatapoints],
@@ -7325,7 +7388,21 @@ function App() {
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
               onLoadVendorData={loadCustomerVendorData}
+              busyIntegrationAction={busyIntegrationAction}
+              connectWiseLastSync={connectWiseIntegration?.lastSync ?? 'Never'}
+              integrationActionMessages={integrationActionMessages}
               onCompareReconciliation={() => loadSelectedVendorReconciliations(selectedReconciliationIntegrationIds)}
+              onSyncIntegration={(integrationId) => {
+                if (integrationId === 'microsoft-365') {
+                  void syncIntegration(integrationId, 'licenses');
+                  return;
+                }
+                if (integrationId === 'datto') {
+                  void syncIntegration(integrationId, 'datto-saas-bcdr');
+                  return;
+                }
+                void syncIntegration(integrationId);
+              }}
               onReconciliationSourceToggle={(integrationId) => {
                 const nextSelectedIds = selectedReconciliationIntegrationIds.includes(integrationId)
                   ? selectedReconciliationIntegrationIds.filter((selectedId) => selectedId !== integrationId)
@@ -7995,6 +8072,7 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
   const { onClose, row } = props;
   const leftLabel = row.comparisonPair.leftVendorName;
   const rightLabel = row.comparisonPair.rightVendorName;
+  const deltaLabel = row.delta > 0 ? `+${row.delta}` : String(row.delta);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -8003,59 +8081,88 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
           <div>
             <h2 id="discrepancy-detail-title">
               <Link2 size={18} />
-              Discrepancy Details
+              Discrepancy details
             </h2>
-            <p>{row.customer.customerName} / {row.comparisonPair.label}</p>
+            <p>
+              {row.customer.customerName}
+              <span aria-hidden="true"> · </span>
+              {row.comparisonPair.label}
+            </p>
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={20} />
           </button>
         </div>
 
-        <section className="discrepancy-detail-summary">
-          <IntegrationStat label={leftLabel} value={row.leftCount.toLocaleString()} />
-          <IntegrationStat label={rightLabel} value={row.rightCount.toLocaleString()} />
-          <IntegrationStat label="Delta" value={row.delta > 0 ? `+${row.delta}` : String(row.delta)} />
-          <IntegrationStat label="Status" value={discrepancyStatusLabel(row.status)} />
-        </section>
-
-        {row.unavailableReason ? (
-          <div className="empty-state discrepancy-unavailable-note">
-            <Database size={20} />
-            <strong>Waiting for comparable data.</strong>
-            <span>{row.unavailableReason}</span>
+        <section className="discrepancy-detail-summary" aria-label="Comparison summary">
+          <div className="discrepancy-detail-stat">
+            <span>{leftLabel}</span>
+            <strong>{row.leftCount.toLocaleString()}</strong>
           </div>
-        ) : null}
-
-        <section className="discrepancy-detail-grid">
-          <DiscrepancyItemPanel
-            emptyLabel={`No ${rightLabel} items are missing from ${leftLabel}.`}
-            items={row.missingFromLeft}
-            title={`In ${rightLabel}, not in ${leftLabel}`}
-          />
-          <DiscrepancyItemPanel
-            emptyLabel={`No ${leftLabel} items are missing from ${rightLabel}.`}
-            items={row.missingFromRight}
-            title={`In ${leftLabel}, not in ${rightLabel}`}
-          />
+          <div className="discrepancy-detail-stat">
+            <span>{rightLabel}</span>
+            <strong>{row.rightCount.toLocaleString()}</strong>
+          </div>
+          <div className={`discrepancy-detail-stat ${row.delta === 0 ? 'matched' : row.delta > 0 ? 'positive' : 'negative'}`}>
+            <span>Delta</span>
+            <strong>{deltaLabel}</strong>
+          </div>
+          <div className="discrepancy-detail-stat status">
+            <span>Status</span>
+            <strong>
+              <span className={`status-pill ${discrepancyStatusClass(row.status)}`}>
+                {discrepancyStatusLabel(row.status)}
+              </span>
+              {row.stale ? <span className="stale-chip">Stale</span> : null}
+            </strong>
+          </div>
         </section>
 
-        {row.aggregateOnly ? (
-          <section className="discrepancy-reference-panel">
-            <div className="surface-header compact-header">
-              <div>
-                <span className="section-kicker">Reference detail</span>
-                <h3>Microsoft mailbox users used for the comparison</h3>
-              </div>
-              <span className="status-pill ready">{row.referenceItems.length.toLocaleString()} users</span>
+        <section className="discrepancy-detail-body">
+          {row.unavailableReason ? (
+            <div className="empty-state discrepancy-unavailable-note">
+              <Database size={20} />
+              <strong>Waiting for comparable data</strong>
+              <span>{row.unavailableReason}</span>
             </div>
-            <DiscrepancyItemList items={row.referenceItems} />
-          </section>
-        ) : null}
+          ) : (
+            <section className="discrepancy-detail-grid">
+              <DiscrepancyItemPanel
+                emptyLabel={`No ${rightLabel} items are missing from ${leftLabel}.`}
+                items={row.missingFromLeft}
+                title={`In ${rightLabel}, not in ${leftLabel}`}
+              />
+              <DiscrepancyItemPanel
+                emptyLabel={`No ${leftLabel} items are missing from ${rightLabel}.`}
+                items={row.missingFromRight}
+                title={`In ${leftLabel}, not in ${rightLabel}`}
+              />
+            </section>
+          )}
 
-        <section className="discrepancy-sync-panel">
-          <span>{leftLabel}: {formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}</span>
-          <span>{rightLabel}: {formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}</span>
+          {row.aggregateOnly ? (
+            <section className="discrepancy-reference-panel">
+              <div className="surface-header compact-header">
+                <div>
+                  <span className="section-kicker">Reference detail</span>
+                  <h3>Microsoft mailbox users used for the comparison</h3>
+                </div>
+                <span className="status-pill ready">{row.referenceItems.length.toLocaleString()} users</span>
+              </div>
+              <DiscrepancyItemList items={row.referenceItems} />
+            </section>
+          ) : null}
+        </section>
+
+        <section className="discrepancy-sync-panel" aria-label="Sync freshness">
+          <div>
+            <span>{leftLabel}</span>
+            <strong>{formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}</strong>
+          </div>
+          <div>
+            <span>{rightLabel}</span>
+            <strong>{formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}</strong>
+          </div>
         </section>
       </section>
     </div>
@@ -8070,7 +8177,9 @@ function DiscrepancyItemPanel(props: { emptyLabel: string; items: DiscrepancyIte
           <span className="section-kicker">Missing items</span>
           <h3>{props.title}</h3>
         </div>
-        <span className="status-pill ready">{props.items.length.toLocaleString()}</span>
+        <span className={`status-pill ${props.items.length === 0 ? 'approved' : 'needs-review'}`}>
+          {props.items.length.toLocaleString()}
+        </span>
       </div>
       {props.items.length === 0 ? (
         <div className="empty-state discrepancy-item-empty">
@@ -8098,8 +8207,8 @@ function DiscrepancyItemList(props: { items: DiscrepancyItem[] }) {
             <span>{item.identity}</span>
           </div>
           <div>
-            <span>{item.productName ?? item.productKey ?? item.vendorId}</span>
-            <small>{discrepancyItemDetail(item)}</small>
+            <strong>{item.productName ?? item.productKey ?? item.vendorId}</strong>
+            <span>{discrepancyItemDetail(item)}</span>
           </div>
         </article>
       ))}
@@ -8227,15 +8336,24 @@ function SettingsEmailCommunicationView() {
   const [invoiceFromEmail, setInvoiceFromEmail] = useState(defaultCommunicationSettings.invoiceFromEmail);
   const [invoiceBccEmails, setInvoiceBccEmails] = useState('');
   const [templates, setTemplates] = useState<InvoiceNoticeTemplates>(defaultInvoiceNoticeTemplates);
+  const [graphTenantId, setGraphTenantId] = useState('');
+  const [graphClientId, setGraphClientId] = useState('');
+  const [sendAsMailbox, setSendAsMailbox] = useState(defaultCommunicationSettings.sendAsMailbox);
+  const [graphClientSecret, setGraphClientSecret] = useState('');
+  const [testRecipientEmail, setTestRecipientEmail] = useState('');
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [message, setMessage] = useState('Loading email communication settings...');
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   const applySettings = (next: CommunicationSettings) => {
     setSettings(next);
     setInvoiceFromEmail(next.invoiceFromEmail);
     setInvoiceBccEmails(next.invoiceBccEmails);
     setTemplates(next.invoiceNoticeTemplates);
+    setGraphTenantId(next.graphTenantId);
+    setGraphClientId(next.graphClientId);
+    setSendAsMailbox(next.sendAsMailbox || next.invoiceFromEmail);
   };
 
   const refreshSettings = async () => {
@@ -8278,6 +8396,11 @@ function SettingsEmailCommunicationView() {
       setMessage(`Invalid from email address: ${fromEmail}`);
       return;
     }
+    const mailbox = sendAsMailbox.trim() || fromEmail;
+    if (!isValidEmail(mailbox)) {
+      setMessage(`Invalid send-as mailbox: ${mailbox}`);
+      return;
+    }
     const validation = validateEmailList(invoiceBccEmails);
     if (validation.invalid.length > 0) {
       setMessage(`Invalid BCC email address(es): ${validation.invalid.join(', ')}`);
@@ -8292,16 +8415,64 @@ function SettingsEmailCommunicationView() {
         invoiceFromEmail: fromEmail,
         invoiceBccEmails,
         invoiceNoticeTemplates: templates,
+        graphTenantId: graphTenantId.trim(),
+        graphClientId: graphClientId.trim(),
+        sendAsMailbox: mailbox,
+        ...(graphClientSecret.trim() ? { graphClientSecret: graphClientSecret.trim() } : {}),
       });
       applySettings(response.settings);
+      setGraphClientSecret('');
       setLoadState('ready');
-      setMessage('Email communication settings saved.');
+      setMessage(
+        response.settings.deliveryConfigured
+          ? 'Email communication settings saved. Microsoft Graph delivery is configured.'
+          : 'Email communication settings saved. Add Graph tenant, client ID, and client secret to enable sending.',
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to save communication settings.');
     } finally {
       setSaving(false);
     }
   };
+
+  const testDelivery = async () => {
+    const recipient = testRecipientEmail.trim();
+    if (!recipient || !isValidEmail(recipient)) {
+      setMessage('Enter a valid test recipient email address.');
+      return;
+    }
+    if (!settings.deliveryConfigured) {
+      setMessage('Save Microsoft Graph delivery settings before sending a test email.');
+      return;
+    }
+
+    setTesting(true);
+    setMessage(`Sending delivery test to ${recipient}...`);
+
+    try {
+      const response = await testCommunicationSettingsRequest(recipient);
+      applySettings(response.settings);
+      setMessage(`Test email sent to ${recipient} from ${response.sendAsMailbox}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to send delivery test.');
+      try {
+        const refreshed = await fetchCommunicationSettings();
+        applySettings(refreshed.settings);
+      } catch {
+        // Keep the test error message if refresh fails.
+      }
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const deliveryStatusLabel = settings.deliveryConfigured
+    ? settings.lastTestResult === 'success'
+      ? 'Configured · last test succeeded'
+      : settings.lastTestResult === 'failed'
+        ? 'Configured · last test failed'
+        : 'Configured · not tested'
+    : 'Not configured';
 
   return (
     <section className="settings-email-communication" aria-label="Email communication settings">
@@ -8310,11 +8481,11 @@ function SettingsEmailCommunicationView() {
           <div>
             <span className="section-kicker">Billing email</span>
             <h2>Invoice communication</h2>
-            <p>Configure the from address, past-due invoice wording, and shared BCC recipients for billing emails.</p>
+            <p>Configure Microsoft Graph delivery, the from address, past-due invoice wording, and shared BCC recipients.</p>
           </div>
           <button
             className="button secondary compact"
-            disabled={saving || loadState === 'loading'}
+            disabled={saving || testing || loadState === 'loading'}
             onClick={() => void refreshSettings()}
             type="button"
           >
@@ -8328,12 +8499,92 @@ function SettingsEmailCommunicationView() {
       </section>
 
       <form className="settings-email-form" onSubmit={(event) => void saveSettings(event)}>
+        <section className="settings-panel settings-email-panel" aria-label="Email delivery settings">
+          <div className="settings-panel-header">
+            <div>
+              <span className="section-kicker">Delivery</span>
+              <h2>Microsoft Graph</h2>
+              <p>
+                App-only send via Graph <code>sendMail</code>. Requires an Entra app with application permission{' '}
+                <code>Mail.Send</code> and admin consent. Client secret is stored in Azure Key Vault.
+              </p>
+            </div>
+            <span className={`status-pill ${settings.deliveryConfigured ? 'approved' : 'ready'}`}>{deliveryStatusLabel}</span>
+          </div>
+          <div className="settings-email-panel-body">
+            <div className="settings-email-delivery-grid">
+              <label className="settings-email-field">
+                <span>Tenant ID</span>
+                <input
+                  onChange={(event) => setGraphTenantId(event.target.value)}
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  type="text"
+                  value={graphTenantId}
+                />
+              </label>
+              <label className="settings-email-field">
+                <span>Client ID</span>
+                <input
+                  onChange={(event) => setGraphClientId(event.target.value)}
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  type="text"
+                  value={graphClientId}
+                />
+              </label>
+              <label className="settings-email-field">
+                <span>Send-as mailbox</span>
+                <input
+                  onChange={(event) => setSendAsMailbox(event.target.value)}
+                  placeholder="tconnover@bmbsolutions.com"
+                  type="email"
+                  value={sendAsMailbox}
+                />
+              </label>
+              <label className="settings-email-field">
+                <span>Client secret {settings.graphClientSecretPresent ? '(leave blank to keep existing)' : ''}</span>
+                <input
+                  autoComplete="new-password"
+                  onChange={(event) => setGraphClientSecret(event.target.value)}
+                  placeholder={settings.graphClientSecretPresent ? '••••••••' : 'Paste client secret'}
+                  type="password"
+                  value={graphClientSecret}
+                />
+              </label>
+            </div>
+            <div className="settings-email-delivery-test">
+              <label className="settings-email-field">
+                <span>Test recipient</span>
+                <input
+                  onChange={(event) => setTestRecipientEmail(event.target.value)}
+                  placeholder="you@bmbsolutions.com"
+                  type="email"
+                  value={testRecipientEmail}
+                />
+              </label>
+              <button
+                className="button secondary compact"
+                disabled={saving || testing || loadState === 'loading' || !settings.deliveryConfigured}
+                onClick={() => void testDelivery()}
+                type="button"
+              >
+                {testing ? 'Sending test' : 'Send test email'}
+              </button>
+            </div>
+            {settings.lastTestedAt ? (
+              <p className="settings-email-status">
+                Last tested {formatDateTime(settings.lastTestedAt)}
+                {settings.lastTestResult === 'failed' && settings.lastTestError ? ` — ${settings.lastTestError}` : ''}
+              </p>
+            ) : null}
+          </div>
+        </section>
+
         <section className="settings-panel settings-email-panel" aria-label="Invoice sender settings">
           <div className="settings-panel-header">
             <div>
               <span className="section-kicker">Sender</span>
               <h2>From address</h2>
-              <p>Used as the from address for all emails sent from the system.</p>
+              <p>Display from address for billing emails. Prefer matching the Graph send-as mailbox.</p>
             </div>
           </div>
           <div className="settings-email-panel-body">
@@ -8412,7 +8663,7 @@ function SettingsEmailCommunicationView() {
         </section>
 
         <div className="settings-email-actions">
-          <button className="button primary compact" disabled={saving || loadState === 'loading'} type="submit">
+          <button className="button primary compact" disabled={saving || testing || loadState === 'loading'} type="submit">
             <Check size={15} />
             {saving ? 'Saving' : 'Save email settings'}
           </button>
@@ -8777,8 +9028,12 @@ function ReconcileView(props: {
   onManualOverride: (issue: ReconcileIssue) => void;
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
+  busyIntegrationAction: IntegrationActionKey | null;
+  connectWiseLastSync: string;
+  integrationActionMessages: Partial<Record<IntegrationId, string>>;
   onCompareReconciliation: () => Promise<ReconciliationRunResponse[] | null>;
   onReconciliationSourceToggle: (vendorId: VendorKey) => void;
+  onSyncIntegration: (integrationId: IntegrationId) => void;
   pendingCount: number;
   query: string;
   reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
@@ -8799,11 +9054,14 @@ function ReconcileView(props: {
     approveClient,
     approveIssue,
     agreementUpdateMessage,
+    busyIntegrationAction,
     clientGroups,
+    connectWiseLastSync,
     connectWiseSyncSummary,
     exportingReport,
     expandedClientNames,
     filteredIssues,
+    integrationActionMessages,
     issues,
     needsReviewOnly,
     onCountSourceSelect,
@@ -8814,6 +9072,7 @@ function ReconcileView(props: {
     onOpenTicket,
     onCompareReconciliation,
     onReconciliationSourceToggle,
+    onSyncIntegration,
     pendingCount,
     query,
     reconciliationLoadState,
@@ -8832,6 +9091,7 @@ function ReconcileView(props: {
   } = props;
   const [expandedProductLists, setExpandedProductLists] = useState<Record<string, boolean>>({});
   const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
+  const [compareFreshnessOpen, setCompareFreshnessOpen] = useState(false);
   const filteredReviewCount = filteredIssues.filter(isReviewViewIssue).length;
   const hasSelectedReconciliationVendors = selectedReconciliationIntegrationIds.length > 0;
   const selectedSourceName =
@@ -8847,6 +9107,30 @@ function ReconcileView(props: {
     );
     return ['All', ...selectedVendors.map((vendor) => vendor.name)];
   }, [reconciliationIntegrations, selectedReconciliationIntegrationIds]);
+  const compareFreshnessRows = useMemo((): CompareFreshnessRow[] => {
+    const selectedVendors = reconciliationIntegrations
+      .filter((vendor) => selectedReconciliationIntegrationIds.includes(vendor.id))
+      .map((vendor) => ({
+        id: vendor.id,
+        name: vendor.name,
+        sourceKind: vendor.sourceKind,
+        lastRefreshedLabel: vendor.lastRefreshedLabel ?? 'Never',
+        canSync: vendor.canSync,
+        syncIntegrationId: vendor.syncIntegrationId,
+      }));
+
+    return [
+      {
+        id: 'connectwise',
+        name: 'ConnectWise',
+        sourceKind: 'sync',
+        lastRefreshedLabel: connectWiseLastSync,
+        canSync: true,
+        syncIntegrationId: 'connectwise',
+      },
+      ...selectedVendors,
+    ];
+  }, [connectWiseLastSync, reconciliationIntegrations, selectedReconciliationIntegrationIds]);
   const workflowSteps = workflow.map((step) => {
     if (step.label === 'Vendor API Data') return { ...step, value: vendorDataSummary };
     if (step.label === 'Vendor Invoice') return { ...step, value: vendorInvoiceSummary };
@@ -8930,7 +9214,7 @@ function ReconcileView(props: {
           <button
             className="button secondary compact"
             disabled={reconciliationLoadState === 'loading' || !hasSelectedReconciliationVendors}
-            onClick={() => void onCompareReconciliation()}
+            onClick={() => setCompareFreshnessOpen(true)}
             type="button"
           >
             <Search size={16} />
@@ -8938,6 +9222,20 @@ function ReconcileView(props: {
           </button>
         </div>
       </section>
+
+      {compareFreshnessOpen ? (
+        <CompareFreshnessModal
+          actionMessages={integrationActionMessages}
+          busyAction={busyIntegrationAction}
+          onClose={() => setCompareFreshnessOpen(false)}
+          onContinue={() => {
+            setCompareFreshnessOpen(false);
+            void onCompareReconciliation();
+          }}
+          onSync={onSyncIntegration}
+          rows={compareFreshnessRows}
+        />
+      ) : null}
 
       <section className="workflow-band" aria-label="Reconciliation workflow">
         {workflowSteps.map((step, index) => {
@@ -9592,6 +9890,151 @@ function AgreementAdditionsModal(props: {
             </table>
           </div>
         )}
+      </section>
+    </div>
+  );
+}
+
+function isCompareFreshnessSyncBusy(busyAction: IntegrationActionKey | null, integrationId: IntegrationId) {
+  return (
+    busyAction === `${integrationId}:sync` ||
+    busyAction === `${integrationId}:sync-users` ||
+    busyAction === `${integrationId}:sync-licenses` ||
+    busyAction === `${integrationId}:sync-datto-saas` ||
+    busyAction === `${integrationId}:sync-datto-saas-bcdr`
+  );
+}
+
+function compareFreshnessBusyIntegrationId(busyAction: IntegrationActionKey | null): IntegrationId | null {
+  if (!busyAction || !busyAction.includes(':sync')) {
+    return null;
+  }
+
+  return busyAction.split(':')[0] as IntegrationId;
+}
+
+function CompareFreshnessModal(props: {
+  actionMessages: Partial<Record<IntegrationId, string>>;
+  busyAction: IntegrationActionKey | null;
+  onClose: () => void;
+  onContinue: () => void;
+  onSync: (integrationId: IntegrationId) => void;
+  rows: CompareFreshnessRow[];
+}) {
+  const { actionMessages, busyAction, onClose, onContinue, onSync, rows } = props;
+  const [optimisticSyncId, setOptimisticSyncId] = useState<IntegrationId | null>(null);
+  const syncStartedAtRef = useRef<number | null>(null);
+  const clearOptimisticTimeoutRef = useRef<number | null>(null);
+  const busySyncIntegrationId = compareFreshnessBusyIntegrationId(busyAction);
+  const activeSyncId = busySyncIntegrationId ?? optimisticSyncId;
+  const anySyncBusy = activeSyncId != null;
+
+  useEffect(() => {
+    return () => {
+      if (clearOptimisticTimeoutRef.current != null) {
+        window.clearTimeout(clearOptimisticTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (busySyncIntegrationId) {
+      if (clearOptimisticTimeoutRef.current != null) {
+        window.clearTimeout(clearOptimisticTimeoutRef.current);
+        clearOptimisticTimeoutRef.current = null;
+      }
+      setOptimisticSyncId(busySyncIntegrationId);
+      syncStartedAtRef.current = Date.now();
+      return;
+    }
+
+    if (!optimisticSyncId) {
+      return;
+    }
+
+    const startedAt = syncStartedAtRef.current ?? Date.now();
+    const remainingMs = Math.max(0, 900 - (Date.now() - startedAt));
+
+    clearOptimisticTimeoutRef.current = window.setTimeout(() => {
+      setOptimisticSyncId(null);
+      syncStartedAtRef.current = null;
+      clearOptimisticTimeoutRef.current = null;
+    }, remainingMs);
+  }, [busySyncIntegrationId, optimisticSyncId]);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="compare-freshness-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="compare-freshness-title"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="compare-freshness-title">
+              <RefreshCcw size={18} />
+              Confirm data freshness
+            </h2>
+            <p>Review the last sync or import for each source before comparing.</p>
+          </div>
+          <button className="modal-close" disabled={anySyncBusy} onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="compare-freshness-list">
+          {rows.map((row) => {
+            const syncIntegrationId = row.syncIntegrationId;
+            const syncing = syncIntegrationId != null && activeSyncId === syncIntegrationId;
+            const sourceLabel = row.sourceKind === 'import' ? 'Last imported' : 'Last synced';
+            const actionMessage = syncIntegrationId ? actionMessages[syncIntegrationId] : undefined;
+
+            return (
+              <article className={syncing ? 'compare-freshness-row syncing' : 'compare-freshness-row'} key={row.id}>
+                <div>
+                  <strong>{row.name}</strong>
+                  <span>
+                    {sourceLabel} {row.lastRefreshedLabel}
+                  </span>
+                  {actionMessage ? <em className="compare-freshness-status">{actionMessage}</em> : null}
+                </div>
+                {row.canSync && syncIntegrationId ? (
+                  <button
+                    aria-busy={syncing}
+                    className={syncing ? 'button secondary compact sync-busy' : 'button secondary compact'}
+                    disabled={anySyncBusy}
+                    onClick={() => {
+                      if (clearOptimisticTimeoutRef.current != null) {
+                        window.clearTimeout(clearOptimisticTimeoutRef.current);
+                        clearOptimisticTimeoutRef.current = null;
+                      }
+                      syncStartedAtRef.current = Date.now();
+                      setOptimisticSyncId(syncIntegrationId);
+                      onSync(syncIntegrationId);
+                    }}
+                    type="button"
+                  >
+                    <RefreshCcw className={syncing ? 'sync-button-spin' : undefined} size={16} />
+                    {syncing ? 'Syncing' : 'Sync'}
+                  </button>
+                ) : (
+                  <span className="compare-freshness-import-note">File import</span>
+                )}
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="modal-actions">
+          <button className="button secondary" disabled={anySyncBusy} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="button primary" disabled={anySyncBusy} onClick={onContinue} type="button">
+            <Search size={17} />
+            Continue compare
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -17055,7 +17498,11 @@ function InvoiceNotificationModal(props: {
     .map((line) => line.trim())
     .filter(Boolean);
   const noteText = notes.trim();
-  const completed = result.status === 'stubbed' || result.status === 'test-stubbed';
+  const completed =
+    result.status === 'stubbed' ||
+    result.status === 'test-stubbed' ||
+    result.status === 'sent' ||
+    result.status === 'test-sent';
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -17167,7 +17614,13 @@ function InvoiceNotificationModal(props: {
             {message ? <span className="invoice-action-message">{message}</span> : null}
             {completed ? (
               <span className="status-pill approved">
-                {result.status === 'test-stubbed' ? 'Test stubbed' : 'Saved'}{' '}
+                {result.status === 'test-sent'
+                  ? 'Test sent'
+                  : result.status === 'sent'
+                    ? 'Sent'
+                    : result.status === 'test-stubbed'
+                      ? 'Test stubbed'
+                      : 'Saved'}{' '}
                 {formatDateTime(result.audit?.occurredAt) ?? formatDateTime(result.generatedAt)}
               </span>
             ) : (
