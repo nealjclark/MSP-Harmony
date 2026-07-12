@@ -695,6 +695,106 @@ CREATE INDEX IF NOT EXISTS idx_vendor_product_addition_pins_scope
   ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key)
   WHERE active;
 
+CREATE TABLE IF NOT EXISTS vendor_labor_mappings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  label text NOT NULL,
+  board_id integer,
+  board_name text,
+  type_id integer,
+  type_name text,
+  subtype_id integer,
+  subtype_name text,
+  type_ids integer[] NOT NULL DEFAULT '{}'::integer[],
+  type_names text[] NOT NULL DEFAULT '{}'::text[],
+  subtype_ids integer[] NOT NULL DEFAULT '{}'::integer[],
+  subtype_names text[] NOT NULL DEFAULT '{}'::text[],
+  priority integer NOT NULL DEFAULT 100,
+  active boolean NOT NULL DEFAULT true,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE vendor_labor_mappings ADD COLUMN IF NOT EXISTS type_ids integer[] NOT NULL DEFAULT '{}'::integer[];
+ALTER TABLE vendor_labor_mappings ADD COLUMN IF NOT EXISTS type_names text[] NOT NULL DEFAULT '{}'::text[];
+ALTER TABLE vendor_labor_mappings ADD COLUMN IF NOT EXISTS subtype_ids integer[] NOT NULL DEFAULT '{}'::integer[];
+ALTER TABLE vendor_labor_mappings ADD COLUMN IF NOT EXISTS subtype_names text[] NOT NULL DEFAULT '{}'::text[];
+
+UPDATE vendor_labor_mappings
+SET type_ids = ARRAY[type_id]
+WHERE type_id IS NOT NULL
+  AND coalesce(array_length(type_ids, 1), 0) = 0;
+
+UPDATE vendor_labor_mappings
+SET type_names = ARRAY[type_name]
+WHERE type_name IS NOT NULL
+  AND btrim(type_name) <> ''
+  AND coalesce(array_length(type_names, 1), 0) = 0;
+
+UPDATE vendor_labor_mappings
+SET subtype_ids = ARRAY[subtype_id]
+WHERE subtype_id IS NOT NULL
+  AND coalesce(array_length(subtype_ids, 1), 0) = 0;
+
+UPDATE vendor_labor_mappings
+SET subtype_names = ARRAY[subtype_name]
+WHERE subtype_name IS NOT NULL
+  AND btrim(subtype_name) <> ''
+  AND coalesce(array_length(subtype_names, 1), 0) = 0;
+
+CREATE INDEX IF NOT EXISTS idx_vendor_labor_mappings_vendor_active
+  ON vendor_labor_mappings(vendor_id, active, priority);
+
+DROP INDEX IF EXISTS ux_vendor_labor_mappings_identity;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_vendor_labor_mappings_identity
+  ON vendor_labor_mappings(
+    vendor_id,
+    label,
+    coalesce(board_id, 0),
+    type_ids,
+    subtype_ids
+  );
+
+CREATE TABLE IF NOT EXISTS connectwise_tickets (
+  connectwise_ticket_id bigint PRIMARY KEY,
+  summary text,
+  board_id integer,
+  board_name text,
+  type_id integer,
+  type_name text,
+  subtype_id integer,
+  subtype_name text,
+  actual_hours numeric(18, 4) NOT NULL DEFAULT 0,
+  closed_flag boolean NOT NULL DEFAULT false,
+  closed_at timestamptz,
+  company_id integer,
+  company_name text,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  synced_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_connectwise_tickets_closed_at
+  ON connectwise_tickets(closed_at)
+  WHERE closed_flag;
+
+CREATE INDEX IF NOT EXISTS idx_connectwise_tickets_classification
+  ON connectwise_tickets(board_id, type_id, subtype_id);
+
+CREATE TABLE IF NOT EXISTS saved_product_profitability_reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  vendor_ids text[] NOT NULL DEFAULT '{}'::text[],
+  report_json jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by text
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_product_profitability_reports_created_at
+  ON saved_product_profitability_reports(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS communication_settings (
   id text PRIMARY KEY DEFAULT 'default',
   invoice_from_email text NOT NULL DEFAULT 'tconnover@bmbsolutions.com',

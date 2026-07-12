@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   ClipboardCheck,
+  Clock3,
   Database,
   Download,
   ExternalLink,
@@ -25,6 +26,7 @@ import {
   Plug,
   Plus,
   RefreshCcw,
+  Save,
   Search,
   Settings,
   SlidersHorizontal,
@@ -73,6 +75,14 @@ import {
   type VendorDatapointRecord,
   type VendorKey,
 } from '../../shared/vendorDatapoints';
+import {
+  formatLaborFilterSummary,
+  integrationSupportsLaborMapping,
+  type ConnectWiseBoardOption,
+  type ConnectWiseSubTypeOption,
+  type ConnectWiseTypeOption,
+  type LaborMappingRecord,
+} from '../../shared/laborMappings';
 import {
   columnMapSatisfiesSourceType,
   columnMappingHeaderOptions,
@@ -129,7 +139,7 @@ type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'api' | 'invoice';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -386,6 +396,8 @@ type ProductProfitabilityMonth = {
   revenue: number;
   cost: number;
   profit: number;
+  laborHours?: number;
+  laborCost?: number;
 };
 
 type ProductProfitabilityIntegrationSeries = {
@@ -395,8 +407,27 @@ type ProductProfitabilityIntegrationSeries = {
   totalRevenue: number;
   totalCost: number;
   totalProfit: number;
+  totalLaborHours?: number;
+  totalLaborCost?: number;
   productCount: number;
   missingCostRows: number;
+};
+
+type ProductProfitabilityLaborMonth = {
+  month: string;
+  hours: number;
+  cost?: number;
+  ticketCount: number;
+};
+
+type ProductProfitabilityLaborRow = {
+  vendorId: string;
+  vendorName: string;
+  label: string;
+  months: ProductProfitabilityLaborMonth[];
+  totalHours: number;
+  totalCost?: number;
+  ticketCount: number;
 };
 
 type ProductProfitabilityReportResponse = {
@@ -406,15 +437,36 @@ type ProductProfitabilityReportResponse = {
   startMonth: string;
   endMonth: string;
   months: string[];
+  billingBasis?: 'latest-addition-per-month';
+  laborHourlyRate?: number;
   summary: {
     integrationCount: number;
     productCount: number;
     totalRevenue: number;
     totalCost: number;
     totalProfit: number;
+    totalLaborHours?: number;
+    totalLaborCost?: number;
     missingCostRows: number;
   };
+  labor?: {
+    months: ProductProfitabilityLaborMonth[];
+    rows: ProductProfitabilityLaborRow[];
+    warning?: string;
+  };
   integrations: ProductProfitabilityIntegrationSeries[];
+};
+
+type SavedProductProfitabilityReportSummary = {
+  id: string;
+  name: string;
+  vendorIds: string[];
+  createdAt: string;
+  createdBy: string | null;
+};
+
+type SavedProductProfitabilityReportResponse = SavedProductProfitabilityReportSummary & {
+  report: ProductProfitabilityReportResponse;
 };
 
 type CustomerLicenseVendorId = Extract<IntegrationId, 'cove' | 'ncentral' | 'microsoft-365' | 'opentext-appriver'>;
@@ -1471,6 +1523,20 @@ type NcentralFilterMappingsResponse = {
   mappings: NcentralFilterMapping[];
 };
 
+type LaborMapping = LaborMappingRecord;
+
+type LaborMappingsResponse = {
+  integrationId: VendorKey;
+  mappings: LaborMapping[];
+};
+
+type LaborClassificationsResponse = {
+  boards?: ConnectWiseBoardOption[];
+  boardId?: number;
+  types: ConnectWiseTypeOption[];
+  subTypes: ConnectWiseSubTypeOption[];
+};
+
 type NcentralFiltersResponse = {
   integrationId: 'ncentral';
   filters: NcentralFilter[];
@@ -1739,6 +1805,17 @@ function hasMappingWorkspace(integrationId: IntegrationId) {
   return integrationHasCapability(integrationId, 'mapping');
 }
 
+function hasLaborMappingWorkspace(vendorId: VendorKey) {
+  return integrationSupportsLaborMapping(vendorId);
+}
+
+function hasAnyMappingWorkspace(vendorId: VendorKey) {
+  if (isVendorDatapointId(vendorId)) {
+    return true;
+  }
+  return hasMappingWorkspace(vendorId) || hasLaborMappingWorkspace(vendorId);
+}
+
 function isImplementedIntegration(integrationId: IntegrationId) {
   return integrationHasAnyCapability(integrationId);
 }
@@ -1868,6 +1945,20 @@ function formatCurrencyCompact(value: number) {
     notation: 'compact',
     style: 'currency',
   }).format(value);
+}
+
+function formatHoursValue(value: number) {
+  return `${Number(value || 0).toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 0,
+  })}h`;
+}
+
+function formatHoursCompact(value: number) {
+  return `${Number(value || 0).toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+    notation: 'compact',
+  })}h`;
 }
 
 function formatMoneyAmount(value?: { amount: number; currency: string }) {
@@ -2101,7 +2192,7 @@ function hasMappingWorkspaceForVendor(vendorId: VendorKey) {
     return true;
   }
 
-  return hasMappingWorkspace(vendorId);
+  return hasAnyMappingWorkspace(vendorId);
 }
 
 function isRegistryIntegrationId(vendorId: VendorKey): vendorId is IntegrationId {
@@ -3333,6 +3424,47 @@ async function fetchProductProfitabilityReport() {
   return body as unknown as ProductProfitabilityReportResponse;
 }
 
+async function fetchSavedProductProfitabilityReports() {
+  const response = await fetch('/api/reports/product-profitability/saved');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Saved profitability reports load failed with HTTP ${response.status}.`));
+  }
+
+  return (body as { reports?: SavedProductProfitabilityReportSummary[] }).reports ?? [];
+}
+
+async function fetchSavedProductProfitabilityReport(id: string) {
+  const response = await fetch(`/api/reports/product-profitability/saved/${encodeURIComponent(id)}`);
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Saved profitability report load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as SavedProductProfitabilityReportResponse;
+}
+
+async function saveProductProfitabilityReportSnapshot(payload: {
+  name: string;
+  vendorIds: string[];
+  report: ProductProfitabilityReportResponse;
+}) {
+  const response = await fetch('/api/reports/product-profitability/saved', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Save profitability report failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as SavedProductProfitabilityReportSummary;
+}
+
 async function fetchDiscrepancyReport(options: {
   basis?: DiscrepancyBasis;
   severity?: DiscrepancySeverity;
@@ -4067,6 +4199,49 @@ async function saveNcentralFilterMappingRequest(payload: Partial<NcentralFilterM
   return body as unknown as { integrationId: 'ncentral'; mapping: NcentralFilterMapping };
 }
 
+async function fetchLaborMappings(integrationId: VendorKey) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/labor-mappings`);
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Labor mapping load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as LaborMappingsResponse;
+}
+
+async function saveLaborMappingRequest(integrationId: VendorKey, payload: Partial<LaborMapping>) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/labor-mappings`, {
+    method: payload.id ? 'PUT' : 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Labor mapping save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { integrationId: VendorKey; mapping: LaborMapping };
+}
+
+async function fetchLaborClassifications(boardId?: number | null) {
+  const params = new URLSearchParams();
+  if (boardId != null) {
+    params.set('boardId', String(boardId));
+  }
+  const query = params.toString();
+  const response = await fetch(
+    `/api/mappings/connectwise/labor-classifications${query ? `?${query}` : ''}`,
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Labor classification load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as LaborClassificationsResponse;
+}
+
 async function createReconciliationAdjustmentRequest(
   integrationId: VendorKey,
   payload: CreateReconciliationAdjustmentPayload,
@@ -4791,7 +4966,7 @@ function App() {
   const [productProfitabilityLoadState, setProductProfitabilityLoadState] =
     useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
-    'Load net profit by active integration.',
+    'Click Generate to load net profit by mapped vendor.',
   );
   const [discrepancyReport, setDiscrepancyReport] = useState<DiscrepancyReportResponse | null>(null);
   const [discrepancyLoadState, setDiscrepancyLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
@@ -4814,6 +4989,9 @@ function App() {
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
   const [ncentralFilters, setNcentralFilters] = useState<NcentralFilter[]>([]);
   const [ncentralFilterMappings, setNcentralFilterMappings] = useState<NcentralFilterMapping[]>([]);
+  const [laborMappings, setLaborMappings] = useState<LaborMapping[]>([]);
+  const [laborBoards, setLaborBoards] = useState<ConnectWiseBoardOption[]>([]);
+  const [laborClassificationMessage, setLaborClassificationMessage] = useState('');
   const [mappingLoadState, setMappingLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [mappingMessage, setMappingMessage] = useState('Load an integration to review account and product mappings.');
   const [busyMappingAction, setBusyMappingAction] = useState<string | null>(null);
@@ -5124,7 +5302,7 @@ function App() {
 
   const loadProductProfitabilityReport = async () => {
     setProductProfitabilityLoadState('loading');
-    setProductProfitabilityMessage('Loading product profitability...');
+    setProductProfitabilityMessage('Generating product profitability...');
 
     try {
       const report = await fetchProductProfitabilityReport();
@@ -5132,14 +5310,14 @@ function App() {
       setProductProfitabilityLoadState('ready');
       setProductProfitabilityMessage(
         report.integrations.length > 0
-          ? `Loaded ${report.summary.integrationCount.toLocaleString()} active integrations across ${report.months.length.toLocaleString()} months.`
-          : 'No active integrations have profitability data yet.',
+          ? `Generated ${report.summary.integrationCount.toLocaleString()} mapped vendors across ${report.months.length.toLocaleString()} months.`
+          : 'No vendors with approved product mappings have profitability data yet.',
       );
       return report;
     } catch (error) {
       setProductProfitabilityReport(null);
       setProductProfitabilityLoadState('failed');
-      setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to load product profitability.');
+      setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to generate product profitability.');
       return null;
     }
   };
@@ -5842,15 +6020,56 @@ function App() {
     }
   };
 
+  const loadLaborMappingWorkspace = async (integrationId: VendorKey) => {
+    if (!hasLaborMappingWorkspace(integrationId)) {
+      setLaborMappings([]);
+      setLaborBoards([]);
+      setLaborClassificationMessage('');
+      return;
+    }
+
+    try {
+      const [mappingsResponse, classifications] = await Promise.all([
+        fetchLaborMappings(integrationId),
+        fetchLaborClassifications().catch((error) => {
+          setLaborClassificationMessage(
+            error instanceof Error ? error.message : 'Unable to load ConnectWise boards.',
+          );
+          return { boards: [] as ConnectWiseBoardOption[], types: [], subTypes: [] };
+        }),
+      ]);
+      setLaborMappings(mappingsResponse.mappings);
+      setLaborBoards(classifications.boards ?? []);
+      if ((classifications.boards ?? []).length > 0) {
+        setLaborClassificationMessage('');
+      }
+    } catch (error) {
+      setLaborMappings([]);
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to load labor mappings.');
+    }
+  };
+
   const refreshMappingWorkspace = async (integrationId: VendorKey) => {
-    const state = await loadMappings(integrationId);
-    await loadUsageOverrides(integrationId);
+    const isLaborOnly = integrationId === 'connectwise';
+    const state = isLaborOnly
+      ? null
+      : await loadMappings(integrationId);
+    if (!isLaborOnly) {
+      await loadUsageOverrides(integrationId);
+    } else {
+      setMappingState(null);
+      setUsageOverrides([]);
+      setMappingLoadState('ready');
+      setMappingMessage('Configure labeled labor filters for ConnectWise ticket hours.');
+    }
     if (integrationId === 'ncentral') {
       await loadNcentralFilterWorkspace();
     } else {
       setNcentralFilters([]);
       setNcentralFilterMappings([]);
     }
+    await loadLaborMappingWorkspace(integrationId);
     return state;
   };
 
@@ -6042,14 +6261,6 @@ function App() {
 
     void loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
   }, [reportSection, selectedRawSyncDataset, selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
-
-  useEffect(() => {
-    if (view !== 'reports' || reportSection !== 'product-profitability') {
-      return;
-    }
-
-    void loadProductProfitabilityReport();
-  }, [reportSection, view]);
 
   useEffect(() => {
     if (view !== 'discrepancies') {
@@ -6923,6 +7134,23 @@ function App() {
     }
   };
 
+  const saveLaborMapping = async (payload: Partial<LaborMapping>) => {
+    setBusyMappingAction(payload.id ? `labor:${payload.id}` : 'labor:new');
+    setMappingMessage('Saving labor mapping...');
+
+    try {
+      await saveLaborMappingRequest(selectedMappingIntegrationId, payload);
+      await loadLaborMappingWorkspace(selectedMappingIntegrationId);
+      setMappingLoadState('ready');
+      setMappingMessage('Labor mapping saved.');
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to save labor mapping.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
   const saveUsageOverride = async (integrationId: VendorKey, payload: CreateUsageOverridePayload) => {
     setBusyMappingAction('override:create');
     try {
@@ -7537,6 +7765,9 @@ function App() {
               mappingState={mappingState}
               ncentralFilterMappings={ncentralFilterMappings}
               ncentralFilters={ncentralFilters}
+              laborBoards={laborBoards}
+              laborClassificationMessage={laborClassificationMessage}
+              laborMappings={laborMappings}
               onAccountApprove={approveAccountCandidate}
               onAccountManualSave={saveManualAccountMapping}
               onApproveSuggested={() => runMappingAction('approve-suggested')}
@@ -7553,6 +7784,7 @@ function App() {
               onProductLinkRuleSave={saveProductLinkRule}
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
+              onLaborMappingSave={saveLaborMapping}
               onUsageOverrideCreate={saveUsageOverride}
               onUsageOverrideDeactivate={deactivateUsageOverride}
               selectedIntegrationId={selectedMappingIntegrationId}
@@ -12277,7 +12509,7 @@ function IntegrationCard(props: {
               <KeyRound size={16} />
               {integration.enabled ? 'Configure' : 'Configure to enable'}
             </button>
-            {hasMappingWorkspace(integration.id) ? (
+            {hasAnyMappingWorkspace(integration.id) ? (
               <button className="button secondary compact" onClick={() => onOpenMappings?.(integration.id)} type="button">
                 <Link2 size={16} />
                 Mapping
@@ -12367,6 +12599,9 @@ function MappingsView(props: {
   mappingState: MappingStateResponse | null;
   ncentralFilterMappings: NcentralFilterMapping[];
   ncentralFilters: NcentralFilter[];
+  laborBoards: ConnectWiseBoardOption[];
+  laborClassificationMessage: string;
+  laborMappings: LaborMapping[];
   onAccountApprove: (candidate: AccountMappingCandidate) => void;
   onAccountManualSave: (account: AccountMappingCandidate, customerId: string, agreementId: string) => Promise<boolean>;
   onApproveSuggested: () => void;
@@ -12400,6 +12635,7 @@ function MappingsView(props: {
   ) => Promise<boolean>;
   onRefresh: () => Promise<MappingStateResponse | null>;
   onNcentralFilterMappingSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
+  onLaborMappingSave: (payload: Partial<LaborMapping>) => Promise<void>;
   onUsageOverrideCreate: (integrationId: VendorKey, payload: CreateUsageOverridePayload) => Promise<boolean>;
   onUsageOverrideDeactivate: (integrationId: VendorKey, overrideId: string) => Promise<void>;
   selectedIntegrationId: VendorKey;
@@ -12414,6 +12650,9 @@ function MappingsView(props: {
     mappingState,
     ncentralFilterMappings,
     ncentralFilters,
+    laborBoards,
+    laborClassificationMessage,
+    laborMappings,
     onAccountApprove,
     onAccountManualSave,
     onApproveSuggested,
@@ -12427,6 +12666,7 @@ function MappingsView(props: {
     onProductLinkRuleSave,
     onRefresh,
     onNcentralFilterMappingSave,
+    onLaborMappingSave,
     onUsageOverrideCreate,
     onUsageOverrideDeactivate,
     selectedIntegrationId,
@@ -12497,6 +12737,8 @@ function MappingsView(props: {
   const [overrideHostname, setOverrideHostname] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
   const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
+  const isLaborOnlyMappingWorkspace = selectedIntegrationId === 'connectwise';
+  const showLaborMappingSection = hasLaborMappingWorkspace(selectedIntegrationId);
   const accountMappings = filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountCandidates = filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountRows = showMappedAccounts ? [...accountMappings, ...accountCandidates] : accountCandidates;
@@ -13229,33 +13471,59 @@ function MappingsView(props: {
             <RefreshCcw size={16} />
             Refresh
           </button>
-          <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
-            <Zap size={16} />
-            {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
-          </button>
-          <button
-            className="button primary compact"
-            disabled={Boolean(busyAction) || !canBulkApproveSuggested}
-            onClick={onApproveSuggested}
-            title={
-              isDattoMappingWorkspace
-                ? 'Approve Datto SaaS and BCDR mappings individually from their dataset table.'
-                : suggestedAccountCount === 0
-                  ? 'No suggested customer mappings are ready to approve.'
-                  : 'Approve all suggested customer mappings.'
-            }
-            type="button"
-          >
-            <Link2 size={16} />
-            {busyAction === 'approve-suggested'
-              ? 'Approving'
-              : isDattoMappingWorkspace
-                ? 'Approve rows individually'
-                : `Approve suggested (${suggestedAccountCount})`}
-          </button>
+          {!isLaborOnlyMappingWorkspace ? (
+            <>
+              <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
+                <Zap size={16} />
+                {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
+              </button>
+              <button
+                className="button primary compact"
+                disabled={Boolean(busyAction) || !canBulkApproveSuggested}
+                onClick={onApproveSuggested}
+                title={
+                  isDattoMappingWorkspace
+                    ? 'Approve Datto SaaS and BCDR mappings individually from their dataset table.'
+                    : suggestedAccountCount === 0
+                      ? 'No suggested customer mappings are ready to approve.'
+                      : 'Approve all suggested customer mappings.'
+                }
+                type="button"
+              >
+                <Link2 size={16} />
+                {busyAction === 'approve-suggested'
+                  ? 'Approving'
+                  : isDattoMappingWorkspace
+                    ? 'Approve rows individually'
+                    : `Approve suggested (${suggestedAccountCount})`}
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 
+      {showLaborMappingSection ? (
+        <MappingSectionDrawer
+          defaultOpen={isLaborOnlyMappingWorkspace}
+          meta="Ticket board / type / subtype filters for profitability hours"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="labor"
+          status={`${laborMappings.length.toLocaleString()} labeled`}
+          title="Labor mapping"
+        >
+          <LaborMappingPanel
+            boards={laborBoards}
+            busyAction={busyAction}
+            classificationMessage={laborClassificationMessage}
+            mappings={laborMappings}
+            onSave={onLaborMappingSave}
+          />
+        </MappingSectionDrawer>
+      ) : null}
+
+      {!isLaborOnlyMappingWorkspace ? (
+        <>
       {isDattoMappingWorkspace ? (
         <section className="mapping-dataset-tabs" aria-label="Datto mapping dataset">
           {(['saas', 'bcdr'] as const).map((dataset) => {
@@ -14290,6 +14558,8 @@ function MappingsView(props: {
         </div>
       </section>
       </MappingSectionDrawer>
+        </>
+      ) : null}
 
       {productCustomerReview ? (
         <ProductCustomerReviewModal
@@ -15022,6 +15292,400 @@ function NcentralFilterMappingRow(props: {
       ) : null}
     </article>
   );
+}
+
+function LaborMappingPanel(props: {
+  boards: ConnectWiseBoardOption[];
+  busyAction: string | null;
+  classificationMessage: string;
+  mappings: LaborMapping[];
+  onSave: (payload: Partial<LaborMapping>) => Promise<void>;
+}) {
+  const { boards, busyAction, classificationMessage, mappings, onSave } = props;
+  const [label, setLabel] = useState('');
+  const [boardId, setBoardId] = useState('');
+  const [typeIds, setTypeIds] = useState<string[]>([]);
+  const [subTypeIds, setSubTypeIds] = useState<string[]>([]);
+  const [priority, setPriority] = useState(100);
+  const [types, setTypes] = useState<ConnectWiseTypeOption[]>([]);
+  const [subTypes, setSubTypes] = useState<ConnectWiseSubTypeOption[]>([]);
+  const [classificationBusy, setClassificationBusy] = useState(false);
+  const [localMessage, setLocalMessage] = useState('');
+
+  const selectedBoard = boards.find((board) => String(board.id) === boardId);
+
+  useEffect(() => {
+    if (!boardId) {
+      setTypes([]);
+      setSubTypes([]);
+      setTypeIds([]);
+      setSubTypeIds([]);
+      return;
+    }
+
+    let cancelled = false;
+    setClassificationBusy(true);
+    setLocalMessage('');
+    void fetchLaborClassifications(Number(boardId))
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setTypes(response.types);
+        setSubTypes(response.subTypes);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setTypes([]);
+        setSubTypes([]);
+        setLocalMessage(error instanceof Error ? error.message : 'Unable to load types for this board.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setClassificationBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId]);
+
+  const submitNewMapping = async () => {
+    const selectedTypes = types.filter((type) => typeIds.includes(String(type.id)));
+    const selectedSubTypes = subTypes.filter((subType) => subTypeIds.includes(String(subType.id)));
+    await onSave({
+      label: label.trim(),
+      boardId: boardId ? Number(boardId) : null,
+      boardName: selectedBoard?.name ?? null,
+      typeIds: selectedTypes.map((type) => type.id),
+      typeNames: selectedTypes.map((type) => type.name),
+      subTypeIds: selectedSubTypes.map((subType) => subType.id),
+      subTypeNames: selectedSubTypes.map((subType) => subType.name),
+      priority,
+      active: true,
+    });
+    setLabel('');
+    setBoardId('');
+    setTypeIds([]);
+    setSubTypeIds([]);
+    setPriority(100);
+  };
+
+  return (
+    <section className="work-surface ncentral-filter-panel labor-mapping-panel" aria-label="Labor mapping">
+      <div className="surface-header">
+        <div>
+          <span className="section-kicker">Labor mapping</span>
+          <h2>{mappings.length.toLocaleString()} labeled labor filters</h2>
+          <p className="config-note">
+            Match ConnectWise tickets by board plus one or more types/subtypes. Leave a list empty for Any. Reports
+            use the label and sum ticket actual hours once per ticket id.
+          </p>
+        </div>
+        <span className="status-pill ready">{boards.length.toLocaleString()} boards</span>
+      </div>
+
+      {classificationMessage || localMessage ? (
+        <p className="config-note">{classificationMessage || localMessage}</p>
+      ) : null}
+
+      <div className="ncentral-filter-list labor-mapping-list">
+        {mappings.length === 0 ? (
+          <div className="empty-state">
+            <Filter size={20} />
+            <strong>No labor mappings yet.</strong>
+            <span>Add a report label and optional board / type / subtype filter.</span>
+          </div>
+        ) : null}
+        {mappings.map((mapping) => (
+          <LaborMappingRow
+            boards={boards}
+            busyAction={busyAction}
+            key={mapping.id}
+            mapping={mapping}
+            onSave={onSave}
+          />
+        ))}
+      </div>
+
+      <div className="ncentral-filter-form labor-mapping-form">
+        <label>
+          <span>Report label</span>
+          <input
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="Datto BCDR labor"
+            value={label}
+          />
+        </label>
+        <label>
+          <span>Board</span>
+          <select
+            onChange={(event) => {
+              setBoardId(event.target.value);
+              setTypeIds([]);
+              setSubTypeIds([]);
+            }}
+            value={boardId}
+          >
+            <option value="">Any board</option>
+            {boards.map((board) => (
+              <option key={board.id} value={board.id}>
+                {board.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Types (multi-select)</span>
+          <select
+            disabled={!boardId || classificationBusy}
+            multiple
+            onChange={(event) => {
+              setTypeIds(selectedOptionValues(event.currentTarget));
+              setSubTypeIds([]);
+            }}
+            size={Math.min(6, Math.max(3, types.length || 3))}
+            value={typeIds}
+          >
+            {types.map((type) => (
+              <option key={type.id} value={type.id}>
+                {type.name}
+              </option>
+            ))}
+          </select>
+          <small>{typeIds.length === 0 ? 'Any type' : `${typeIds.length} selected`}</small>
+        </label>
+        <label>
+          <span>Subtypes (multi-select)</span>
+          <select
+            disabled={!boardId || classificationBusy || typeIds.length === 0}
+            multiple
+            onChange={(event) => setSubTypeIds(selectedOptionValues(event.currentTarget))}
+            size={Math.min(6, Math.max(3, subTypes.length || 3))}
+            value={subTypeIds}
+          >
+            {subTypes.map((subType) => (
+              <option key={subType.id} value={subType.id}>
+                {subType.name}
+              </option>
+            ))}
+          </select>
+          <small>
+            {typeIds.length === 0 ? 'Select types first, or leave Any' : subTypeIds.length === 0 ? 'Any subtype' : `${subTypeIds.length} selected`}
+          </small>
+        </label>
+        <label>
+          <span>Priority</span>
+          <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
+        </label>
+        <button
+          className="button primary compact"
+          disabled={Boolean(busyAction) || !label.trim()}
+          onClick={() => void submitNewMapping()}
+          type="button"
+        >
+          <Filter size={16} />
+          Add labor mapping
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function LaborMappingRow(props: {
+  boards: ConnectWiseBoardOption[];
+  busyAction: string | null;
+  mapping: LaborMapping;
+  onSave: (payload: Partial<LaborMapping>) => Promise<void>;
+}) {
+  const { boards, busyAction, mapping, onSave } = props;
+  const actionKey = `labor:${mapping.id}`;
+  const [editing, setEditing] = useState(false);
+  const [label, setLabel] = useState(mapping.label);
+  const [boardId, setBoardId] = useState(mapping.boardId != null ? String(mapping.boardId) : '');
+  const [typeIds, setTypeIds] = useState<string[]>((mapping.typeIds ?? []).map(String));
+  const [subTypeIds, setSubTypeIds] = useState<string[]>((mapping.subTypeIds ?? []).map(String));
+  const [priority, setPriority] = useState(mapping.priority);
+  const [types, setTypes] = useState<ConnectWiseTypeOption[]>([]);
+  const [subTypes, setSubTypes] = useState<ConnectWiseSubTypeOption[]>([]);
+  const [classificationBusy, setClassificationBusy] = useState(false);
+
+  useEffect(() => {
+    if (!editing || !boardId) {
+      return;
+    }
+
+    let cancelled = false;
+    setClassificationBusy(true);
+    void fetchLaborClassifications(Number(boardId))
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setTypes(response.types);
+        setSubTypes(response.subTypes);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setTypes([]);
+        setSubTypes([]);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setClassificationBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId, editing]);
+
+  const selectedBoard = boards.find((board) => String(board.id) === boardId);
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setLabel(mapping.label);
+    setBoardId(mapping.boardId != null ? String(mapping.boardId) : '');
+    setTypeIds((mapping.typeIds ?? []).map(String));
+    setSubTypeIds((mapping.subTypeIds ?? []).map(String));
+    setPriority(mapping.priority);
+  };
+
+  const saveEdit = async () => {
+    const selectedTypes = types.filter((type) => typeIds.includes(String(type.id)));
+    const selectedSubTypes = subTypes.filter((subType) => subTypeIds.includes(String(subType.id)));
+    await onSave({
+      ...mapping,
+      label: label.trim(),
+      boardId: boardId ? Number(boardId) : null,
+      boardName: boardId ? selectedBoard?.name ?? mapping.boardName ?? null : null,
+      typeIds: typeIds.length === 0 ? [] : selectedTypes.map((type) => type.id),
+      typeNames: typeIds.length === 0 ? [] : selectedTypes.map((type) => type.name),
+      subTypeIds: subTypeIds.length === 0 ? [] : selectedSubTypes.map((subType) => subType.id),
+      subTypeNames: subTypeIds.length === 0 ? [] : selectedSubTypes.map((subType) => subType.name),
+      priority,
+    });
+    setEditing(false);
+  };
+
+  return (
+    <article className={editing ? 'ncentral-filter-row editing' : 'ncentral-filter-row'}>
+      <div className="ncentral-filter-row-main">
+        <div>
+          <strong>{mapping.label}</strong>
+          <span>{formatLaborFilterSummary(mapping)}</span>
+          <small>Priority {mapping.priority}</small>
+        </div>
+        <span className={`status-pill ${mapping.active ? 'approved' : 'needs-review'}`}>
+          {mapping.active ? 'Active' : 'Inactive'}
+        </span>
+        <em>Hours only</em>
+        <div className="ncentral-filter-row-actions">
+          <button className="button secondary compact" disabled={busyAction === actionKey} onClick={() => setEditing(true)} type="button">
+            <Pencil size={15} />
+            Edit
+          </button>
+          <button
+            className="button secondary compact"
+            disabled={busyAction === actionKey}
+            onClick={() => void onSave({ ...mapping, active: !mapping.active })}
+            type="button"
+          >
+            {mapping.active ? 'Disable' : 'Enable'}
+          </button>
+        </div>
+      </div>
+
+      {editing ? (
+        <div className="ncentral-filter-edit-panel">
+          <label>
+            <span>Report label</span>
+            <input onChange={(event) => setLabel(event.target.value)} value={label} />
+          </label>
+          <label>
+            <span>Board</span>
+            <select
+              onChange={(event) => {
+                setBoardId(event.target.value);
+                setTypeIds([]);
+                setSubTypeIds([]);
+              }}
+              value={boardId}
+            >
+              <option value="">Any board</option>
+              {boards.map((board) => (
+                <option key={board.id} value={board.id}>
+                  {board.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Types (multi-select)</span>
+            <select
+              disabled={!boardId || classificationBusy}
+              multiple
+              onChange={(event) => {
+                setTypeIds(selectedOptionValues(event.currentTarget));
+                setSubTypeIds([]);
+              }}
+              size={Math.min(6, Math.max(3, types.length || 3))}
+              value={typeIds}
+            >
+              {types.map((type) => (
+                <option key={type.id} value={type.id}>
+                  {type.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Subtypes (multi-select)</span>
+            <select
+              disabled={!boardId || classificationBusy || typeIds.length === 0}
+              multiple
+              onChange={(event) => setSubTypeIds(selectedOptionValues(event.currentTarget))}
+              size={Math.min(6, Math.max(3, subTypes.length || 3))}
+              value={subTypeIds}
+            >
+              {subTypes.map((subType) => (
+                <option key={subType.id} value={subType.id}>
+                  {subType.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Priority</span>
+            <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
+          </label>
+          <div className="ncentral-filter-edit-actions">
+            <button
+              className="button primary compact"
+              disabled={busyAction === actionKey || !label.trim()}
+              onClick={() => void saveEdit()}
+              type="button"
+            >
+              Save
+            </button>
+            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function selectedOptionValues(select: HTMLSelectElement) {
+  return Array.from(select.selectedOptions).map((option) => option.value);
 }
 
 type ProductMappingRow = ProductMapping | ProductMappingCandidate;
@@ -16235,14 +16899,35 @@ function ProductProfitabilityReportView(props: {
   onRefresh: () => Promise<ProductProfitabilityReportResponse | null>;
   report: ProductProfitabilityReportResponse | null;
 }) {
-  const { loadMessage, loadState, onRefresh, report } = props;
+  const { loadMessage, loadState, onRefresh, report: liveReport } = props;
+  const [savedReports, setSavedReports] = useState<SavedProductProfitabilityReportSummary[]>([]);
+  const [savedView, setSavedView] = useState<SavedProductProfitabilityReportResponse | null>(null);
+  const [savedBusy, setSavedBusy] = useState(false);
+  const [actionMessage, setActionMessage] = useState('');
+
+  const report = savedView?.report ?? liveReport;
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const reports = await fetchSavedProductProfitabilityReports();
+        setSavedReports(reports);
+      } catch (error) {
+        setActionMessage(error instanceof Error ? error.message : 'Unable to load saved reports.');
+      }
+    })();
+  }, []);
+
   const months = report?.months ?? [];
   const integrations = report?.integrations ?? [];
+  const laborMonths = report?.labor?.months ?? [];
+  const laborRows = report?.labor?.rows ?? [];
+  const laborHourlyRate = report?.laborHourlyRate ?? 50;
   const chartWidth = 920;
   const chartHeight = 360;
   const plot = {
     left: 72,
-    right: 24,
+    right: 64,
     top: 24,
     bottom: 54,
   };
@@ -16255,10 +16940,14 @@ function ProductProfitabilityReportView(props: {
   const valueMin = rawMin - rawRange * 0.08;
   const valueMax = rawMax + rawRange * 0.08;
   const valueRange = valueMax - valueMin || 1;
+  const laborValues = laborMonths.map((month) => month.hours);
+  const laborMax = Math.max(1, ...(laborValues.length > 0 ? laborValues : [0]));
   const xForMonth = (index: number) =>
     plot.left + (months.length <= 1 ? plotWidth / 2 : (index / (months.length - 1)) * plotWidth);
   const yForValue = (value: number) => plot.top + ((valueMax - value) / valueRange) * plotHeight;
+  const yForLaborHours = (hours: number) => plot.top + ((laborMax - hours) / laborMax) * plotHeight;
   const yTicks = Array.from({ length: 5 }, (_, index) => valueMax - (valueRange * index) / 4);
+  const laborTicks = Array.from({ length: 5 }, (_, index) => laborMax - (laborMax * index) / 4);
   const zeroY = yForValue(0);
   const chartLines = integrations.map((integration, index) => {
     const color = profitabilityPalette[index % profitabilityPalette.length];
@@ -16279,147 +16968,359 @@ function ProductProfitabilityReportView(props: {
       points,
     };
   });
+  const laborPoints = months.map((month, monthIndex) => {
+    const hours = laborMonths.find((item) => item.month === month)?.hours ?? 0;
+    return {
+      month,
+      value: hours,
+      x: xForMonth(monthIndex),
+      y: yForLaborHours(hours),
+    };
+  });
+  const laborPath = profitabilityPath(laborPoints);
+  const laborColor = '#b45309';
+
+  const handleGenerate = async () => {
+    setSavedView(null);
+    setActionMessage('');
+    await onRefresh();
+  };
+
+  const handleSave = async () => {
+    if (!report) {
+      return;
+    }
+    const defaultName = `Profitability ${report.endMonth || 'report'}`;
+    const name = window.prompt('Name this saved report', defaultName)?.trim();
+    if (!name) {
+      return;
+    }
+    setSavedBusy(true);
+    setActionMessage('Saving report...');
+    try {
+      const saved = await saveProductProfitabilityReportSnapshot({
+        name,
+        vendorIds: report.integrations.map((integration) => integration.integrationId),
+        report,
+      });
+      const reports = await fetchSavedProductProfitabilityReports();
+      setSavedReports(reports);
+      setActionMessage(`Saved “${saved.name}”.`);
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Unable to save report.');
+    } finally {
+      setSavedBusy(false);
+    }
+  };
+
+  const handleLoadSaved = async (savedId: string) => {
+    if (!savedId) {
+      setSavedView(null);
+      setActionMessage('');
+      return;
+    }
+    setSavedBusy(true);
+    setActionMessage('Loading saved report...');
+    try {
+      const saved = await fetchSavedProductProfitabilityReport(savedId);
+      setSavedView(saved);
+      setActionMessage(`Showing saved report “${saved.name}”.`);
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Unable to load saved report.');
+    } finally {
+      setSavedBusy(false);
+    }
+  };
+
+  const handleExportPdf = () => {
+    window.print();
+  };
 
   return (
     <section className="reports-page product-profitability-page" aria-label="Product profitability report">
-      <div className="integrations-live-bar report-reminder">
+      <div className="integrations-live-bar report-reminder no-print">
         <div>
-          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
-          <strong>{loadState === 'failed' ? 'Report issue' : loadState === 'loading' ? 'Loading' : 'Product profitability'}</strong>
-          <span>{loadMessage}</span>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : loadState === 'idle' ? 'idle' : 'ready'}`} />
+          <strong>
+            {savedView
+              ? `Saved: ${savedView.name}`
+              : loadState === 'failed'
+                ? 'Report issue'
+                : loadState === 'loading'
+                  ? 'Generating'
+                  : 'Product profitability'}
+          </strong>
+          <span>{actionMessage || loadMessage}</span>
         </div>
-        <div className="integrations-live-meta">
+        <div className="integrations-live-meta profitability-toolbar">
+          <label className="profitability-saved-select">
+            <span>Saved reports</span>
+            <select
+              disabled={savedBusy || loadState === 'loading'}
+              onChange={(event) => void handleLoadSaved(event.target.value)}
+              value={savedView?.id ?? ''}
+            >
+              <option value="">Live report</option>
+              {savedReports.map((saved) => (
+                <option key={saved.id} value={saved.id}>
+                  {saved.name} ({formatMonthLabel(saved.createdAt.slice(0, 7), true)})
+                </option>
+              ))}
+            </select>
+          </label>
           <span>{report ? formatMonthRange(report.months) : 'Most recent 12 months'}</span>
-          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
+          <button className="button secondary compact" disabled={!report || savedBusy} onClick={() => void handleSave()} type="button">
+            <Save size={16} />
+            Save
+          </button>
+          <button className="button secondary compact" disabled={!report} onClick={handleExportPdf} type="button">
+            <Download size={16} />
+            Export PDF
+          </button>
+          <button className="button compact" disabled={loadState === 'loading' || savedBusy} onClick={() => void handleGenerate()} type="button">
             <RefreshCcw size={16} />
-            {loadState === 'loading' ? 'Refreshing' : 'Refresh'}
+            {loadState === 'loading' ? 'Generating' : 'Generate'}
           </button>
         </div>
       </div>
 
-      <section className="metric-grid report-metrics" aria-label="Product profitability summary">
-        <MetricCard icon={CircleDollarSign} label="Net profit" tone="money" value={formatMoneyValue(report?.summary.totalProfit ?? 0)} />
-        <MetricCard icon={BarChart3} label="Revenue" tone="ready" value={formatMoneyValue(report?.summary.totalRevenue ?? 0)} />
-        <MetricCard icon={Activity} label="Cost" tone="warn" value={formatMoneyValue(report?.summary.totalCost ?? 0)} />
-        <MetricCard icon={Plug} label="Active integrations" tone="approved" value={formatCount(report?.summary.integrationCount ?? 0)} />
-      </section>
+      <div className="profitability-print-root">
+        <section className="metric-grid report-metrics" aria-label="Product profitability summary">
+          <MetricCard icon={CircleDollarSign} label="Net profit" tone="money" value={formatMoneyValue(report?.summary.totalProfit ?? 0)} />
+          <MetricCard icon={BarChart3} label="Revenue" tone="ready" value={formatMoneyValue(report?.summary.totalRevenue ?? 0)} />
+          <MetricCard icon={Activity} label="Cost" tone="warn" value={formatMoneyValue(report?.summary.totalCost ?? 0)} />
+          <MetricCard icon={Clock3} label="Labor hours" tone="approved" value={formatHoursValue(report?.summary.totalLaborHours ?? 0)} />
+          <MetricCard
+            icon={CircleDollarSign}
+            label={`Labor cost ($${laborHourlyRate}/hr)`}
+            tone="warn"
+            value={formatMoneyValue(report?.summary.totalLaborCost ?? 0)}
+          />
+        </section>
 
-      <section className="work-surface report-surface profitability-surface">
-        <div className="surface-header">
-          <div>
-            <span className="section-kicker">{report ? formatMonthRange(report.months) : 'Profit trend'}</span>
-            <h2>Month-to-month net profit by integration</h2>
-          </div>
-          <span className="status-pill approved">{formatCount(report?.summary.productCount ?? 0)} products</span>
-        </div>
+        {report?.billingBasis === 'latest-addition-per-month' ? (
+          <p className="config-note">
+            Revenue and product cost use the latest ConnectWise addition snapshot per agreement line for each month
+            (once-a-month billing), not the sum of every sync. Summary totals cover the most recent 12 months.
+          </p>
+        ) : null}
+        {report?.labor?.warning ? <p className="config-note">{report.labor.warning}</p> : null}
 
-        {!report || integrations.length === 0 ? (
-          <div className="empty-state report-empty">
-            <FileSpreadsheet size={20} />
-            <strong>No profitability data loaded.</strong>
-            <span>Active integrations need mapped products and ConnectWise addition history with price or cost data.</span>
+        <section className="work-surface report-surface profitability-surface">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">{report ? formatMonthRange(report.months) : 'Profit trend'}</span>
+              <h2>Month-to-month net profit by integration</h2>
+            </div>
+            <span className="status-pill approved">{formatCount(report?.summary.productCount ?? 0)} products</span>
           </div>
-        ) : (
-          <>
-            <div className="profitability-chart-wrap">
-              <svg
-                aria-label="Monthly net profit by integration"
-                className="profitability-chart"
-                role="img"
-                viewBox={`0 0 ${chartWidth} ${chartHeight}`}
-              >
-                {yTicks.map((tick) => {
-                  const y = yForValue(tick);
-                  return (
-                    <g className="profitability-grid-line" key={tick.toFixed(2)}>
-                      <line x1={plot.left} x2={chartWidth - plot.right} y1={y} y2={y} />
-                      <text x={plot.left - 10} y={y + 4}>
-                        {formatCurrencyCompact(tick)}
-                      </text>
-                    </g>
-                  );
-                })}
-                <line className="profitability-zero-line" x1={plot.left} x2={chartWidth - plot.right} y1={zeroY} y2={zeroY} />
-                {months.map((month, index) => {
-                  const showLabel = index === 0 || index === months.length - 1 || index % 2 === 1;
-                  const x = xForMonth(index);
-                  return (
-                    <g className="profitability-month-tick" key={month}>
-                      <line x1={x} x2={x} y1={plot.top} y2={plot.top + plotHeight} />
-                      {showLabel ? (
-                        <text x={x} y={chartHeight - 18}>
-                          {formatMonthLabel(month, index === 0 || index === months.length - 1)}
+
+          {!report ? (
+            <div className="empty-state report-empty">
+              <FileSpreadsheet size={20} />
+              <strong>Report not generated yet.</strong>
+              <span>Click Generate to load profitability from ConnectWise agreement additions for mapped vendors.</span>
+            </div>
+          ) : integrations.length === 0 ? (
+            <div className="empty-state report-empty">
+              <FileSpreadsheet size={20} />
+              <strong>No profitability data loaded.</strong>
+              <span>Approve product mappings for vendors, then generate again. WisePay and unmapped integrations are hidden until mapped.</span>
+            </div>
+          ) : (
+            <>
+              <div className="profitability-chart-wrap">
+                <svg
+                  aria-label="Monthly net profit by integration with labor hours"
+                  className="profitability-chart"
+                  role="img"
+                  viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+                >
+                  {yTicks.map((tick) => {
+                    const y = yForValue(tick);
+                    return (
+                      <g className="profitability-grid-line" key={`money-${tick.toFixed(2)}`}>
+                        <line x1={plot.left} x2={chartWidth - plot.right} y1={y} y2={y} />
+                        <text x={plot.left - 10} y={y + 4}>
+                          {formatCurrencyCompact(tick)}
                         </text>
-                      ) : null}
-                    </g>
-                  );
-                })}
-                {chartLines.map((line) => (
-                  <path
-                    className="profitability-line"
-                    d={line.path}
-                    key={line.integration.integrationId}
-                    stroke={line.color}
-                  />
-                ))}
-                {chartLines.flatMap((line) =>
-                  line.points.map((point) => (
+                      </g>
+                    );
+                  })}
+                  {laborTicks.map((tick) => {
+                    const y = yForLaborHours(tick);
+                    return (
+                      <text className="profitability-labor-axis" key={`labor-${tick.toFixed(2)}`} x={chartWidth - plot.right + 8} y={y + 4}>
+                        {formatHoursCompact(tick)}
+                      </text>
+                    );
+                  })}
+                  <line className="profitability-zero-line" x1={plot.left} x2={chartWidth - plot.right} y1={zeroY} y2={zeroY} />
+                  {months.map((month, index) => {
+                    const showLabel = index === 0 || index === months.length - 1 || index % 2 === 1;
+                    const x = xForMonth(index);
+                    return (
+                      <g className="profitability-month-tick" key={month}>
+                        <line x1={x} x2={x} y1={plot.top} y2={plot.top + plotHeight} />
+                        {showLabel ? (
+                          <text x={x} y={chartHeight - 18}>
+                            {formatMonthLabel(month, index === 0 || index === months.length - 1)}
+                          </text>
+                        ) : null}
+                      </g>
+                    );
+                  })}
+                  {chartLines.map((line) => (
+                    <path
+                      className="profitability-line"
+                      d={line.path}
+                      key={line.integration.integrationId}
+                      stroke={line.color}
+                    />
+                  ))}
+                  <path className="profitability-line profitability-labor-line" d={laborPath} stroke={laborColor} />
+                  {chartLines.flatMap((line) =>
+                    line.points.map((point) => (
+                      <circle
+                        className="profitability-point"
+                        cx={point.x}
+                        cy={point.y}
+                        fill={line.color}
+                        key={`${line.integration.integrationId}-${point.month}`}
+                        r={3.5}
+                      >
+                        <title>
+                          {line.integration.integrationName} / {formatMonthLabel(point.month, true)} / {formatMoneyValue(point.value)}
+                        </title>
+                      </circle>
+                    )),
+                  )}
+                  {laborPoints.map((point) => (
                     <circle
                       className="profitability-point"
                       cx={point.x}
                       cy={point.y}
-                      fill={line.color}
-                      key={`${line.integration.integrationId}-${point.month}`}
+                      fill={laborColor}
+                      key={`labor-${point.month}`}
                       r={3.5}
                     >
                       <title>
-                        {line.integration.integrationName} / {formatMonthLabel(point.month, true)} / {formatMoneyValue(point.value)}
+                        Labor hours / {formatMonthLabel(point.month, true)} / {formatHoursValue(point.value)}
                       </title>
                     </circle>
-                  )),
-                )}
-              </svg>
-            </div>
+                  ))}
+                </svg>
+              </div>
 
-            <div className="profitability-legend" aria-label="Chart legend">
-              {chartLines.map((line) => (
-                <div className="profitability-legend-item" key={line.integration.integrationId}>
-                  <span className="profitability-legend-swatch" style={{ backgroundColor: line.color }} />
-                  <strong>{line.integration.integrationName}</strong>
-                  <span>{formatMoneyValue(line.integration.totalProfit)}</span>
+              <div className="profitability-legend" aria-label="Chart legend">
+                {chartLines.map((line) => (
+                  <div className="profitability-legend-item" key={line.integration.integrationId}>
+                    <span className="profitability-legend-swatch" style={{ backgroundColor: line.color }} />
+                    <strong>{line.integration.integrationName}</strong>
+                    <span>{formatMoneyValue(line.integration.totalProfit)}</span>
+                  </div>
+                ))}
+                <div className="profitability-legend-item">
+                  <span className="profitability-legend-swatch" style={{ backgroundColor: laborColor }} />
+                  <strong>Labor hours</strong>
+                  <span>{formatHoursValue(report.summary.totalLaborHours ?? 0)}</span>
                 </div>
-              ))}
-            </div>
+              </div>
 
+              <div className="profitability-table-scroll">
+                <table className="profitability-table">
+                  <thead>
+                    <tr>
+                      <th>Integration</th>
+                      <th>Revenue</th>
+                      <th>Cost</th>
+                      <th>Net profit</th>
+                      <th>Labor hours</th>
+                      <th>Labor cost</th>
+                      <th>Products</th>
+                      <th>Missing cost rows</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {integrations.map((integration) => (
+                      <tr key={integration.integrationId}>
+                        <td>{integration.integrationName}</td>
+                        <td>{formatMoneyValue(integration.totalRevenue)}</td>
+                        <td>{formatMoneyValue(integration.totalCost)}</td>
+                        <td>{formatMoneyValue(integration.totalProfit)}</td>
+                        <td>{formatHoursValue(integration.totalLaborHours ?? 0)}</td>
+                        <td>{formatMoneyValue(integration.totalLaborCost ?? (integration.totalLaborHours ?? 0) * laborHourlyRate)}</td>
+                        <td>{formatCount(integration.productCount)}</td>
+                        <td>{formatCount(integration.missingCostRows)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
+
+        <section className="work-surface report-surface profitability-surface" aria-label="Labor expenses">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">Labor</span>
+              <h2>Labor hours and cost by mapping label (${laborHourlyRate}/hr)</h2>
+            </div>
+            <span className="status-pill ready">
+              {formatHoursValue(report?.summary.totalLaborHours ?? 0)} / {formatMoneyValue(report?.summary.totalLaborCost ?? 0)}
+            </span>
+          </div>
+          {!report || laborRows.length === 0 ? (
+            <div className="empty-state report-empty">
+              <Clock3 size={20} />
+              <strong>{report ? 'No matched labor hours yet.' : 'Generate the report to load labor hours.'}</strong>
+              <span>Add Labor mapping filters, then generate. Hours come from closed ConnectWise tickets (actualHours).</span>
+            </div>
+          ) : (
             <div className="profitability-table-scroll">
               <table className="profitability-table">
                 <thead>
                   <tr>
-                    <th>Integration</th>
-                    <th>Revenue</th>
-                    <th>Cost</th>
-                    <th>Net profit</th>
-                    <th>Products</th>
-                    <th>Missing cost rows</th>
+                    <th>Vendor</th>
+                    <th>Labor label</th>
+                    <th>Tickets</th>
+                    <th>Total hours</th>
+                    <th>Total cost</th>
+                    {months.map((month) => (
+                      <th key={month}>{formatMonthLabel(month, false)}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {integrations.map((integration) => (
-                    <tr key={integration.integrationId}>
-                      <td>{integration.integrationName}</td>
-                      <td>{formatMoneyValue(integration.totalRevenue)}</td>
-                      <td>{formatMoneyValue(integration.totalCost)}</td>
-                      <td>{formatMoneyValue(integration.totalProfit)}</td>
-                      <td>{formatCount(integration.productCount)}</td>
-                      <td>{formatCount(integration.missingCostRows)}</td>
+                  {laborRows.map((row) => (
+                    <tr key={`${row.vendorId}-${row.label}`}>
+                      <td>{row.vendorName}</td>
+                      <td>{row.label}</td>
+                      <td>{formatCount(row.ticketCount)}</td>
+                      <td>{formatHoursValue(row.totalHours)}</td>
+                      <td>{formatMoneyValue(row.totalCost ?? row.totalHours * laborHourlyRate)}</td>
+                      {months.map((month) => {
+                        const monthRow = row.months.find((item) => item.month === month);
+                        const hours = monthRow?.hours ?? 0;
+                        const cost = monthRow?.cost ?? hours * laborHourlyRate;
+                        return (
+                          <td key={`${row.vendorId}-${row.label}-${month}`}>
+                            <span className="profitability-labor-cell">
+                              <strong>{formatHoursValue(hours)}</strong>
+                              <em>{formatMoneyValue(cost)}</em>
+                            </span>
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </>
-        )}
-      </section>
+          )}
+        </section>
+      </div>
     </section>
   );
 }

@@ -1,11 +1,22 @@
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import {
+  selectLaborMappingForTicket,
+  sumDistinctTicketHours,
+  type LaborMappingRecord,
+} from '../../shared/laborMappings';
+import type { StoredConnectWiseTicket } from '../connectwise/ticketSync';
 import type { Queryable } from './agreementReports';
+
+/** Fixed billable labor rate used until per-member time-entry costs exist. */
+export const LABOR_HOURLY_RATE = 50;
 
 export type ProductProfitabilityMonth = {
   month: string;
   revenue: number;
   cost: number;
   profit: number;
+  laborHours: number;
+  laborCost: number;
 };
 
 export type ProductProfitabilityIntegrationSeries = {
@@ -15,8 +26,27 @@ export type ProductProfitabilityIntegrationSeries = {
   totalRevenue: number;
   totalCost: number;
   totalProfit: number;
+  totalLaborHours: number;
+  totalLaborCost: number;
   productCount: number;
   missingCostRows: number;
+};
+
+export type ProductProfitabilityLaborMonth = {
+  month: string;
+  hours: number;
+  cost: number;
+  ticketCount: number;
+};
+
+export type ProductProfitabilityLaborRow = {
+  vendorId: string;
+  vendorName: string;
+  label: string;
+  months: ProductProfitabilityLaborMonth[];
+  totalHours: number;
+  totalCost: number;
+  ticketCount: number;
 };
 
 export type ProductProfitabilityReport = {
@@ -26,13 +56,22 @@ export type ProductProfitabilityReport = {
   startMonth: string;
   endMonth: string;
   months: string[];
+  billingBasis: 'latest-addition-per-month';
+  laborHourlyRate: number;
   summary: {
     integrationCount: number;
     productCount: number;
     totalRevenue: number;
     totalCost: number;
     totalProfit: number;
+    totalLaborHours: number;
+    totalLaborCost: number;
     missingCostRows: number;
+  };
+  labor: {
+    months: ProductProfitabilityLaborMonth[];
+    rows: ProductProfitabilityLaborRow[];
+    warning?: string;
   };
   integrations: ProductProfitabilityIntegrationSeries[];
 };
@@ -61,17 +100,39 @@ type IntegrationAccumulator = {
 
 export async function getProductProfitabilityReport(
   database: Queryable,
-  options: { monthCount?: number } = {},
+  options: {
+    monthCount?: number;
+    vendorIds?: string[];
+    laborMappings?: LaborMappingRecord[];
+    laborTickets?: StoredConnectWiseTicket[];
+    laborWarning?: string;
+  } = {},
 ): Promise<ProductProfitabilityReport> {
   const monthCount = Math.min(Math.max(options.monthCount ?? 12, 1), 24);
-  const activeIntegrationResult = await database.query<ActiveIntegrationRow>(
-    `select integration_id, display_name
-     from integration_settings
-     where configured_status <> 'not-configured'
-       and integration_id <> 'connectwise'
-     order by display_name, integration_id`,
+  const mappedVendorResult = await database.query<ActiveIntegrationRow>(
+    `with mapped_vendors as (
+       select distinct vendor_id
+       from vendor_product_mappings
+       where active = true
+         and mapping_status = 'approved'
+         and coalesce(connectwise_product_code, '') <> ''
+       union
+       select distinct vendor_id
+       from vendor_product_bundles
+       where active = true
+         and mapping_status = 'approved'
+         and coalesce(connectwise_product_code, '') <> ''
+     )
+     select integration_settings.integration_id, integration_settings.display_name
+     from mapped_vendors
+     inner join integration_settings
+       on integration_settings.integration_id = mapped_vendors.vendor_id
+     where integration_settings.configured_status <> 'not-configured'
+       and integration_settings.integration_id <> 'connectwise'
+     order by integration_settings.display_name, integration_settings.integration_id`,
   );
-  const activeIntegrations = activeIntegrationResult.rows.map((row) => ({
+
+  let activeIntegrations = mappedVendorResult.rows.map((row) => ({
     integrationId: row.integration_id,
     integrationName:
       getIntegrationSettingsDefinition(row.integration_id as IntegrationId)?.displayName ??
@@ -79,9 +140,19 @@ export async function getProductProfitabilityReport(
       row.integration_id,
   }));
 
+  const requestedVendorIds = normalizeVendorIds(options.vendorIds);
+  if (requestedVendorIds.length > 0) {
+    const allowed = new Set(requestedVendorIds);
+    activeIntegrations = activeIntegrations.filter((integration) => allowed.has(integration.integrationId));
+  }
+
   if (activeIntegrations.length === 0) {
     const months = monthKeysForAnchor(new Date(), monthCount);
-    return buildReport(months, []);
+    return buildReport(
+      months,
+      [],
+      buildLaborSection(months, options.laborMappings ?? [], options.laborTickets ?? [], options.laborWarning),
+    );
   }
 
   const activeIntegrationIds = activeIntegrations.map((integration) => integration.integrationId);
@@ -117,25 +188,39 @@ export async function getProductProfitabilityReport(
          and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
          and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
          and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
+     ),
+     monthly_latest as (
+       select
+         addition_history.agreement_addition_id,
+         date_trunc('month', addition_history.observed_at) as observed_month,
+         max(addition_history.observed_at) as latest_observed_at
+       from addition_history
+       inner join mapped_products
+         on lower(mapped_products.product_code) = lower(addition_history.product_code)
+       cross join latest
+       where mapped_products.vendor_id = any($1::text[])
+         and addition_history.observed_at >= date_trunc('month', coalesce(latest.latest_observed_at, now())) - (($2::int - 1) * interval '1 month')
+         and addition_history.observed_at < date_trunc('month', coalesce(latest.latest_observed_at, now())) + interval '1 month'
+       group by addition_history.agreement_addition_id, date_trunc('month', addition_history.observed_at)
      )
      select
        mapped_products.vendor_id,
-       date_trunc('month', addition_history.observed_at) as observed_month,
+       monthly_latest.observed_month,
        addition_history.product_code,
        addition_history.observed_quantity,
        addition_history.unit_price,
        addition_history.raw_payload
      from addition_history
+     inner join monthly_latest
+       on monthly_latest.agreement_addition_id = addition_history.agreement_addition_id
+      and monthly_latest.latest_observed_at = addition_history.observed_at
      inner join agreement_additions
        on agreement_additions.id = addition_history.agreement_addition_id
      inner join agreements
        on agreements.id = addition_history.agreement_id
      inner join mapped_products
        on lower(mapped_products.product_code) = lower(addition_history.product_code)
-     cross join latest
      where mapped_products.vendor_id = any($1::text[])
-       and addition_history.observed_at >= date_trunc('month', coalesce(latest.latest_observed_at, now())) - (($2::int - 1) * interval '1 month')
-       and addition_history.observed_at < date_trunc('month', coalesce(latest.latest_observed_at, now())) + interval '1 month'
        and coalesce(addition_history.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(addition_history.raw_payload->>'additionStatus', addition_history.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(addition_history.raw_payload->>'agreementStatus', addition_history.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
@@ -144,7 +229,7 @@ export async function getProductProfitabilityReport(
        and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'
-     order by observed_month, mapped_products.vendor_id, addition_history.product_code`,
+     order by monthly_latest.observed_month, mapped_products.vendor_id, addition_history.product_code`,
     [activeIntegrationIds, monthCount],
   );
 
@@ -161,17 +246,7 @@ export async function getProductProfitabilityReport(
       {
         integrationId: integration.integrationId,
         integrationName: integration.integrationName,
-        months: new Map(
-          months.map((month) => [
-            month,
-            {
-              month,
-              revenue: 0,
-              cost: 0,
-              profit: 0,
-            },
-          ]),
-        ),
+        months: new Map(months.map((month) => [month, emptyMonth(month)])),
         productCodes: new Set<string>(),
         missingCostRows: 0,
       },
@@ -213,16 +288,159 @@ export async function getProductProfitabilityReport(
     }
   }
 
-  return buildReport(months, Array.from(accumulators.values()));
+  const labor = buildLaborSection(months, options.laborMappings ?? [], options.laborTickets ?? [], options.laborWarning);
+  applyLaborHoursToIntegrations(accumulators, labor.rows);
+
+  return buildReport(months, Array.from(accumulators.values()), labor);
 }
 
-function buildReport(months: string[], accumulators: IntegrationAccumulator[]): ProductProfitabilityReport {
+function applyLaborHoursToIntegrations(
+  accumulators: Map<string, IntegrationAccumulator>,
+  laborRows: ProductProfitabilityLaborRow[],
+) {
+  for (const row of laborRows) {
+    const accumulator = accumulators.get(row.vendorId);
+    if (!accumulator) {
+      continue;
+    }
+    for (const monthRow of row.months) {
+      const monthTotals = accumulator.months.get(monthRow.month);
+      if (!monthTotals) {
+        continue;
+      }
+      monthTotals.laborHours += monthRow.hours;
+      monthTotals.laborCost += monthRow.cost;
+    }
+  }
+}
+
+export function buildLaborSection(
+  months: string[],
+  mappings: LaborMappingRecord[],
+  tickets: StoredConnectWiseTicket[],
+  warning?: string,
+): ProductProfitabilityReport['labor'] {
+  const monthSet = new Set(months);
+  const activeMappings = mappings.filter((mapping) => mapping.active);
+  const claimedTickets = new Set<string>();
+  const rowMap = new Map<string, ProductProfitabilityLaborRow>();
+
+  for (const mapping of activeMappings) {
+    const key = `${mapping.vendorId}::${mapping.label}`;
+    if (!rowMap.has(key)) {
+      rowMap.set(key, {
+        vendorId: mapping.vendorId,
+        vendorName:
+          getIntegrationSettingsDefinition(mapping.vendorId as IntegrationId)?.displayName ?? mapping.vendorId,
+        label: mapping.label,
+        months: months.map((month) => ({ month, hours: 0, cost: 0, ticketCount: 0 })),
+        totalHours: 0,
+        totalCost: 0,
+        ticketCount: 0,
+      });
+    }
+  }
+
+  for (const ticket of tickets) {
+    const ticketKey = String(ticket.ticketId);
+    if (claimedTickets.has(ticketKey)) {
+      continue;
+    }
+
+    const closedAt = ticket.closedAt ? dateValue(ticket.closedAt) : undefined;
+    const month = closedAt ? formatMonthKey(closedAt) : undefined;
+    if (!month || !monthSet.has(month)) {
+      continue;
+    }
+
+    const mapping = selectLaborMappingForTicket(activeMappings, {
+      boardId: ticket.boardId,
+      typeId: ticket.typeId,
+      subTypeId: ticket.subTypeId,
+    });
+    if (!mapping) {
+      continue;
+    }
+
+    claimedTickets.add(ticketKey);
+    const row = rowMap.get(`${mapping.vendorId}::${mapping.label}`);
+    if (!row) {
+      continue;
+    }
+
+    const hours = Number(ticket.actualHours) || 0;
+    const monthRow = row.months.find((item) => item.month === month);
+    if (!monthRow) {
+      continue;
+    }
+    monthRow.hours += hours;
+    monthRow.ticketCount += 1;
+    row.totalHours += hours;
+    row.ticketCount += 1;
+  }
+
+  const rows = Array.from(rowMap.values())
+    .map((row) => ({
+      ...row,
+      months: row.months.map((month) => {
+        const hours = roundHours(month.hours);
+        return {
+          ...month,
+          hours,
+          cost: laborCostForHours(hours),
+        };
+      }),
+      totalHours: roundHours(row.totalHours),
+      totalCost: laborCostForHours(roundHours(row.totalHours)),
+    }))
+    .filter((row) => row.totalHours > 0 || activeMappings.some((mapping) => mapping.vendorId === row.vendorId && mapping.label === row.label))
+    .sort((left, right) => right.totalHours - left.totalHours || left.vendorName.localeCompare(right.vendorName) || left.label.localeCompare(right.label));
+
+  const monthsSummary = months.map((month) => {
+    const monthTickets = tickets.filter((ticket) => {
+      const closedAt = ticket.closedAt ? dateValue(ticket.closedAt) : undefined;
+      return closedAt ? formatMonthKey(closedAt) === month : false;
+    });
+    const matched = monthTickets.filter((ticket) =>
+      Boolean(
+        selectLaborMappingForTicket(activeMappings, {
+          boardId: ticket.boardId,
+          typeId: ticket.typeId,
+          subTypeId: ticket.subTypeId,
+        }),
+      ),
+    );
+    const hours = roundHours(
+      sumDistinctTicketHours(matched.map((ticket) => ({ ticketId: ticket.ticketId, actualHours: ticket.actualHours }))),
+    );
+    return {
+      month,
+      hours,
+      cost: laborCostForHours(hours),
+      ticketCount: new Set(matched.map((ticket) => String(ticket.ticketId))).size,
+    };
+  });
+
+  return {
+    months: monthsSummary,
+    rows,
+    warning,
+  };
+}
+
+function buildReport(
+  months: string[],
+  accumulators: IntegrationAccumulator[],
+  labor: ProductProfitabilityReport['labor'],
+): ProductProfitabilityReport {
   const integrations = accumulators
     .map((accumulator) => {
       const monthRows = months.map((month) => roundMonth(accumulator.months.get(month) ?? emptyMonth(month)));
       const totalRevenue = roundMoney(monthRows.reduce((total, row) => total + row.revenue, 0));
       const totalCost = roundMoney(monthRows.reduce((total, row) => total + row.cost, 0));
       const totalProfit = roundMoney(totalRevenue - totalCost);
+      const totalLaborHours = roundHours(monthRows.reduce((total, row) => total + row.laborHours, 0));
+      const totalLaborCost = laborCostForHours(totalLaborHours);
 
       return {
         integrationId: accumulator.integrationId,
@@ -231,6 +449,8 @@ function buildReport(months: string[], accumulators: IntegrationAccumulator[]): 
         totalRevenue,
         totalCost,
         totalProfit,
+        totalLaborHours,
+        totalLaborCost,
         productCount: accumulator.productCodes.size,
         missingCostRows: accumulator.missingCostRows,
       };
@@ -240,6 +460,8 @@ function buildReport(months: string[], accumulators: IntegrationAccumulator[]): 
   const totalRevenue = roundMoney(integrations.reduce((total, integration) => total + integration.totalRevenue, 0));
   const totalCost = roundMoney(integrations.reduce((total, integration) => total + integration.totalCost, 0));
   const totalProfit = roundMoney(totalRevenue - totalCost);
+  const totalLaborHours = roundHours(labor.months.reduce((total, month) => total + month.hours, 0));
+  const totalLaborCost = laborCostForHours(totalLaborHours);
 
   return {
     reportType: 'product-profitability',
@@ -248,14 +470,19 @@ function buildReport(months: string[], accumulators: IntegrationAccumulator[]): 
     startMonth: months[0] ?? '',
     endMonth: months[months.length - 1] ?? '',
     months,
+    billingBasis: 'latest-addition-per-month',
+    laborHourlyRate: LABOR_HOURLY_RATE,
     summary: {
       integrationCount: integrations.length,
       productCount: integrations.reduce((total, integration) => total + integration.productCount, 0),
       totalRevenue,
       totalCost,
       totalProfit,
+      totalLaborHours,
+      totalLaborCost,
       missingCostRows: integrations.reduce((total, integration) => total + integration.missingCostRows, 0),
     },
+    labor,
     integrations,
   };
 }
@@ -266,16 +493,32 @@ function emptyMonth(month: string): ProductProfitabilityMonth {
     revenue: 0,
     cost: 0,
     profit: 0,
+    laborHours: 0,
+    laborCost: 0,
   };
 }
 
 function roundMonth(month: ProductProfitabilityMonth): ProductProfitabilityMonth {
+  const laborHours = roundHours(month.laborHours);
   return {
     month: month.month,
     revenue: roundMoney(month.revenue),
     cost: roundMoney(month.cost),
     profit: roundMoney(month.profit),
+    laborHours,
+    laborCost: laborCostForHours(laborHours),
   };
+}
+
+function laborCostForHours(hours: number) {
+  return roundMoney(hours * LABOR_HOURLY_RATE);
+}
+
+function normalizeVendorIds(vendorIds: string[] | undefined) {
+  if (!vendorIds || vendorIds.length === 0) {
+    return [];
+  }
+  return [...new Set(vendorIds.map((id) => id.trim()).filter((id) => id.length > 0))];
 }
 
 function monthKeysForAnchor(anchor: Date, count: number) {
@@ -341,5 +584,9 @@ function optionalNumericValue(value: unknown) {
 }
 
 function roundMoney(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function roundHours(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }

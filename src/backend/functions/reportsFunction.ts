@@ -12,8 +12,18 @@ import {
   isDiscrepancyBasis,
   isDiscrepancySeverity,
 } from '../reports/discrepancyReports';
-import { getProductProfitabilityReport } from '../reports/productProfitabilityReports';
+import { getProductProfitabilityReport, type ProductProfitabilityReport } from '../reports/productProfitabilityReports';
+import {
+  getSavedProductProfitabilityReport,
+  listSavedProductProfitabilityReports,
+  saveProductProfitabilityReport,
+} from '../reports/savedProductProfitabilityReports';
 import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../reports/rawSyncReports';
+import { createIntegrationSettingsProvider } from '../config/settingsProvider';
+import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
+import { assertConnectWiseReady } from '../connectwise/operations';
+import { listClosedTicketsInRange, syncClosedTicketsForRange } from '../connectwise/ticketSync';
+import { listAllActiveLaborMappings } from '../mapping/laborMappings';
 import { hasMinimumRole, requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
@@ -230,8 +240,8 @@ export async function getProductProfitabilityReportHttp(
   }
 
   try {
-    const report = await getProductProfitabilityReport(repositoryContext.pool);
-
+    const vendorIds = parseVendorIdsQuery(request.query.get('vendorIds'));
+    const report = await buildLiveProductProfitabilityReport(repositoryContext, { vendorIds });
     return jsonResponse(200, report);
   } catch (error) {
     return jsonResponse(500, {
@@ -240,6 +250,207 @@ export async function getProductProfitabilityReportHttp(
   } finally {
     await repositoryContext.close();
   }
+}
+
+export async function listSavedProductProfitabilityReportsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Saved profitability reports need PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const reports = await listSavedProductProfitabilityReports(repositoryContext.pool);
+    return jsonResponse(200, { reports });
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to list saved profitability reports.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function getSavedProductProfitabilityReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const savedId = request.params.id;
+  if (!savedId || !isUuid(savedId)) {
+    return jsonResponse(400, {
+      error: 'Saved profitability report id must be a UUID.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Saved profitability reports need PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const saved = await getSavedProductProfitabilityReport(repositoryContext.pool, savedId);
+    if (!saved) {
+      return jsonResponse(404, {
+        error: 'Saved profitability report was not found.',
+      });
+    }
+    return jsonResponse(200, saved);
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load saved profitability report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function saveProductProfitabilityReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const body = (await request.json().catch(() => ({}))) as {
+    name?: string;
+    vendorIds?: string[];
+    report?: ProductProfitabilityReport;
+  };
+
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name) {
+    return jsonResponse(400, {
+      error: 'Saved report name is required.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Saved profitability reports need PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const vendorIds = Array.isArray(body.vendorIds)
+      ? body.vendorIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      : undefined;
+    const report =
+      body.report && body.report.reportType === 'product-profitability'
+        ? body.report
+        : await buildLiveProductProfitabilityReport(repositoryContext, { vendorIds });
+
+    const saved = await saveProductProfitabilityReport(repositoryContext.pool, {
+      name,
+      vendorIds,
+      report,
+      createdBy: auth.principal.email ?? auth.principal.name,
+    });
+
+    return jsonResponse(201, saved);
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to save profitability report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+async function buildLiveProductProfitabilityReport(
+  repositoryContext: Awaited<ReturnType<typeof createOptionalPostgresSettingsRepository>>,
+  options: { vendorIds?: string[] } = {},
+) {
+  const pool = repositoryContext.pool;
+  if (!pool) {
+    throw new Error('PostgreSQL pool is required for product profitability reporting.');
+  }
+
+  const laborMappings = await listAllActiveLaborMappings(pool).catch(() => []);
+  let laborWarning: string | undefined;
+  let laborTickets: Awaited<ReturnType<typeof listClosedTicketsInRange>> = [];
+
+  const monthCount = 12;
+  const endExclusive = new Date();
+  endExclusive.setUTCDate(1);
+  endExclusive.setUTCHours(0, 0, 0, 0);
+  endExclusive.setUTCMonth(endExclusive.getUTCMonth() + 1);
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setUTCMonth(startInclusive.getUTCMonth() - monthCount);
+
+  if (laborMappings.length > 0) {
+    try {
+      const provider = createIntegrationSettingsProvider({
+        loadLocalEnv: true,
+        metadataReader: repositoryContext.repository,
+      });
+      const settings = await provider.getIntegrationSettings('connectwise');
+      assertConnectWiseReady(settings);
+      const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(settings));
+      const boardIds = [
+        ...new Set(
+          laborMappings
+            .map((mapping) => mapping.boardId)
+            .filter((boardId): boardId is number => typeof boardId === 'number'),
+        ),
+      ];
+      await syncClosedTicketsForRange(pool, client, {
+        startInclusive,
+        endExclusive,
+        boardIds: boardIds.length > 0 ? boardIds : undefined,
+      });
+      laborTickets = await listClosedTicketsInRange(pool, {
+        startInclusive,
+        endExclusive,
+      });
+    } catch (error) {
+      laborWarning =
+        error instanceof Error
+          ? `Labor hours unavailable: ${error.message}`
+          : 'Labor hours unavailable from ConnectWise tickets.';
+      laborTickets = await listClosedTicketsInRange(pool, {
+        startInclusive,
+        endExclusive,
+      }).catch(() => []);
+    }
+  }
+
+  return getProductProfitabilityReport(pool, {
+    monthCount,
+    vendorIds: options.vendorIds,
+    laborMappings,
+    laborTickets,
+    laborWarning,
+  });
+}
+
+function parseVendorIdsQuery(value: string | null) {
+  if (!value || !value.trim()) {
+    return undefined;
+  }
+  const vendorIds = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return vendorIds.length > 0 ? vendorIds : undefined;
 }
 
 export async function getDiscrepancyReportHttp(
@@ -442,6 +653,27 @@ app.http('getProductProfitabilityReport', {
   authLevel: 'anonymous',
   route: 'reports/product-profitability',
   handler: getProductProfitabilityReportHttp,
+});
+
+app.http('listSavedProductProfitabilityReports', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/product-profitability/saved',
+  handler: listSavedProductProfitabilityReportsHttp,
+});
+
+app.http('getSavedProductProfitabilityReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/product-profitability/saved/{id}',
+  handler: getSavedProductProfitabilityReportHttp,
+});
+
+app.http('saveProductProfitabilityReport', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reports/product-profitability/saved',
+  handler: saveProductProfitabilityReportHttp,
 });
 
 app.http('getDiscrepancyReport', {

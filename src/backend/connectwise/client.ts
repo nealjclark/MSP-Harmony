@@ -204,6 +204,61 @@ export type ConnectWiseCatalogItem = {
   [key: string]: unknown;
 };
 
+export type ConnectWiseBoard = {
+  id: number;
+  name: string;
+  inactiveFlag?: boolean;
+  [key: string]: unknown;
+};
+
+export type ConnectWiseBoardType = {
+  id: number;
+  name: string;
+  board?: {
+    id?: number;
+    name?: string;
+  };
+  inactiveFlag?: boolean;
+  [key: string]: unknown;
+};
+
+export type ConnectWiseBoardSubType = {
+  id: number;
+  name: string;
+  board?: {
+    id?: number;
+    name?: string;
+  };
+  inactiveFlag?: boolean;
+  [key: string]: unknown;
+};
+
+export type ConnectWiseServiceTicket = {
+  id: number;
+  summary?: string;
+  closedFlag?: boolean;
+  closedDate?: string;
+  actualHours?: number;
+  board?: {
+    id?: number;
+    name?: string;
+  };
+  type?: {
+    id?: number;
+    name?: string;
+  };
+  subType?: {
+    id?: number;
+    name?: string;
+  };
+  company?: {
+    id?: number;
+    name?: string;
+    identifier?: string;
+  };
+  [key: string]: unknown;
+};
+
 export type ConnectWiseSystemInfo = {
   version?: string;
   serverTime?: string;
@@ -324,6 +379,26 @@ export class ConnectWiseClient {
 
   async listCatalogItems(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseCatalogItem[]>(`/procurement/catalog?${listParams(options).toString()}`);
+  }
+
+  async listBoards(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseBoard[]>(`/service/boards?${listParams(options).toString()}`);
+  }
+
+  async listBoardTypes(boardId: number | string, options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseBoardType[]>(
+      `/service/boards/${encodeURIComponent(String(boardId))}/types?${listParams(options).toString()}`,
+    );
+  }
+
+  async listBoardSubTypes(boardId: number | string, options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseBoardSubType[]>(
+      `/service/boards/${encodeURIComponent(String(boardId))}/subtypes?${listParams(options).toString()}`,
+    );
+  }
+
+  async listServiceTickets(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseServiceTicket[]>(`/service/tickets?${listParams(options).toString()}`);
   }
 
   async getSystemInfo() {

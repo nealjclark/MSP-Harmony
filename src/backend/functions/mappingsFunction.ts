@@ -38,6 +38,17 @@ import {
   listUsageOverrides,
   type CreateUsageOverrideInput,
 } from '../mapping/usageOverridesService';
+import {
+  listLaborMappings,
+  upsertLaborMapping,
+} from '../mapping/laborMappings';
+import {
+  integrationSupportsLaborMapping,
+  type ConnectWiseBoardOption,
+  type ConnectWiseSubTypeOption,
+  type ConnectWiseTypeOption,
+  type UpsertLaborMappingInput,
+} from '../../shared/laborMappings';
 import { NcentralClient, ncentralCredentialsFromSettings } from '../vendor/ncentral/client';
 import { assertNcentralReady } from '../vendor/ncentral/operations';
 import {
@@ -80,6 +91,8 @@ type UsageOverrideBody = CreateUsageOverrideInput & {
 };
 
 type NcentralFilterMappingBody = UpsertNcentralFilterMappingInput;
+
+type LaborMappingBody = UpsertLaborMappingInput;
 
 export async function listMappingsHttp(
   request: HttpRequest,
@@ -927,6 +940,155 @@ export async function upsertNcentralFilterMappingHttp(
   }
 }
 
+export async function listLaborMappingsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId || !integrationSupportsLaborMapping(integrationId)) {
+    return jsonResponse(400, {
+      error: `Labor mapping is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Labor mappings need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId,
+      mappings: await listLaborMappings(repositoryContext.pool, integrationId),
+    });
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load labor mappings.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertLaborMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId || !integrationSupportsLaborMapping(integrationId)) {
+    return jsonResponse(400, {
+      error: `Labor mapping is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as LaborMappingBody;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Labor mapping updates need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId,
+      mapping: await upsertLaborMapping(repositoryContext.pool, integrationId, body),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save labor mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listLaborTicketClassificationsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  try {
+    const settingsProvider = createIntegrationSettingsProvider({
+      loadLocalEnv: true,
+      metadataReader: repositoryContext.repository,
+    });
+    const connectWiseSettings = await settingsProvider.getIntegrationSettings('connectwise');
+    assertConnectWiseReady(connectWiseSettings);
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(connectWiseSettings));
+    const boardIdParam = request.query.get('boardId');
+    const boardId = boardIdParam ? Number(boardIdParam) : null;
+
+    if (boardId != null && Number.isFinite(boardId)) {
+      const [types, subTypes] = await Promise.all([
+        listAllConnectWisePages((page, pageSize) => client.listBoardTypes(boardId, { page, pageSize, orderBy: 'name' })),
+        listAllConnectWisePages((page, pageSize) =>
+          client.listBoardSubTypes(boardId, { page, pageSize, orderBy: 'name' }),
+        ),
+      ]);
+
+      const typeOptions: ConnectWiseTypeOption[] = types
+        .filter((item) => item.inactiveFlag !== true)
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          boardId,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      const subTypeOptions: ConnectWiseSubTypeOption[] = subTypes
+        .filter((item) => item.inactiveFlag !== true)
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          boardId,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      return jsonResponse(200, {
+        boardId,
+        types: typeOptions,
+        subTypes: subTypeOptions,
+      });
+    }
+
+    const boards = await listAllConnectWisePages((page, pageSize) =>
+      client.listBoards({ page, pageSize, orderBy: 'name', conditions: 'inactiveFlag=false' }),
+    );
+    const boardOptions: ConnectWiseBoardOption[] = boards
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    return jsonResponse(200, {
+      boards: boardOptions,
+      types: [] as ConnectWiseTypeOption[],
+      subTypes: [] as ConnectWiseSubTypeOption[],
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to load ConnectWise ticket classifications.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 app.http('listMappings', {
   methods: ['GET'],
   authLevel: 'anonymous',
@@ -1074,6 +1236,27 @@ app.http('upsertNcentralFilterMapping', {
   handler: upsertNcentralFilterMappingHttp,
 });
 
+app.http('listLaborMappings', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/labor-mappings',
+  handler: listLaborMappingsHttp,
+});
+
+app.http('upsertLaborMapping', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/labor-mappings',
+  handler: upsertLaborMappingHttp,
+});
+
+app.http('listLaborTicketClassifications', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'mappings/connectwise/labor-classifications',
+  handler: listLaborTicketClassificationsHttp,
+});
+
 function parseIntegrationId(value: string | undefined): VendorKey | undefined {
   if (!value) {
     return undefined;
@@ -1175,4 +1358,23 @@ function boundedInteger(value: string | null, fallback: number, min: number, max
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(Math.trunc(parsed), max));
+}
+
+async function listAllConnectWisePages<T>(
+  fetchPage: (page: number, pageSize: number) => Promise<T[]>,
+  pageSize = 100,
+) {
+  const items: T[] = [];
+  let page = 1;
+
+  while (page <= 50) {
+    const batch = await fetchPage(page, pageSize);
+    items.push(...batch);
+    if (batch.length < pageSize) {
+      break;
+    }
+    page += 1;
+  }
+
+  return items;
 }

@@ -2232,6 +2232,26 @@ h2 {
   margin-bottom: 0;
 }
 
+.mapping-section-body > .work-surface.labor-mapping-panel {
+  margin-bottom: 0;
+}
+
+.labor-mapping-panel .surface-header p.config-note {
+  margin: 6px 0 0;
+  max-width: 52rem;
+}
+
+.labor-mapping-form select[multiple],
+.ncentral-filter-edit-panel select[multiple] {
+  min-height: 7rem;
+}
+
+.labor-mapping-form label small,
+.ncentral-filter-edit-panel label small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .settings-page {
   display: grid;
   align-content: start;
@@ -4631,6 +4651,17 @@ h2 {
   vector-effect: non-scaling-stroke;
 }
 
+.profitability-labor-line {
+  stroke-dasharray: 7 5;
+  stroke-width: 2.5;
+}
+
+.profitability-labor-axis {
+  fill: #9a6b2f;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .profitability-point {
   stroke: #ffffff;
   stroke-width: 2;
@@ -4712,6 +4743,105 @@ h2 {
 
 .profitability-table tbody tr:hover td {
   background: #fbfdf8;
+}
+
+.profitability-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.profitability-saved-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.profitability-saved-select select {
+  min-width: 180px;
+  max-width: 280px;
+}
+
+.profitability-vendor-picker {
+  margin-bottom: 16px;
+}
+
+.profitability-vendor-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 0 18px 18px;
+}
+
+.profitability-vendor-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.profitability-labor-cell {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+}
+
+.profitability-labor-cell strong {
+  font-weight: 750;
+}
+
+.profitability-labor-cell em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .profitability-print-root,
+  .profitability-print-root * {
+    visibility: visible;
+  }
+
+  .profitability-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 12px;
+  }
+
+  .no-print,
+  .app-sidebar,
+  .topbar,
+  .integrations-live-bar {
+    display: none !important;
+  }
+
+  .profitability-chart {
+    min-width: 0;
+  }
+
+  .profitability-table-scroll {
+    overflow: visible;
+  }
+
+  .profitability-table {
+    min-width: 0;
+  }
+
+  .work-surface {
+    break-inside: avoid;
+    box-shadow: none;
+  }
 }
 
 .vendor-datapoints-view {

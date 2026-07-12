@@ -354,9 +354,9 @@ async function loadUsageSnapshotMonthlyCounts(
        from mapped_snapshots
        where effective_customer_id = $2::uuid
      ),
-     monthly_latest as (
+     monthly_earliest as (
        select date_trunc('month', observed_at) as observed_month,
-              max(observed_at) as latest_observed_at
+              min(observed_at) as earliest_observed_at
        from mapped_snapshots
        cross join latest
        where effective_customer_id = $2::uuid
@@ -365,18 +365,18 @@ async function loadUsageSnapshotMonthlyCounts(
        group by date_trunc('month', observed_at)
      )
      select
-       monthly_latest.observed_month,
+       monthly_earliest.observed_month,
        coalesce(mapped_snapshots.vendor_product_key, mapped_snapshots.product_code) as product_key,
        mapped_snapshots.product_code,
        mapped_snapshots.product_name,
        sum(mapped_snapshots.quantity) as count
      from mapped_snapshots
-     inner join monthly_latest
-       on date_trunc('month', mapped_snapshots.observed_at) = monthly_latest.observed_month
-      and mapped_snapshots.observed_at = monthly_latest.latest_observed_at
+     inner join monthly_earliest
+       on date_trunc('month', mapped_snapshots.observed_at) = monthly_earliest.observed_month
+      and mapped_snapshots.observed_at = monthly_earliest.earliest_observed_at
      where mapped_snapshots.effective_customer_id = $2::uuid
-     group by monthly_latest.observed_month, product_key, mapped_snapshots.product_code, mapped_snapshots.product_name
-     order by monthly_latest.observed_month, mapped_snapshots.product_name, mapped_snapshots.product_code`,
+     group by monthly_earliest.observed_month, product_key, mapped_snapshots.product_code, mapped_snapshots.product_name
+     order by monthly_earliest.observed_month, mapped_snapshots.product_name, mapped_snapshots.product_code`,
     [vendorId, customerId, monthCount],
   );
 
@@ -453,9 +453,9 @@ async function loadMicrosoft365MonthlyLicenseCounts(
        from mapped_snapshots
        where effective_customer_id = $1::uuid
      ),
-     monthly_latest as (
+     monthly_earliest as (
        select date_trunc('month', observed_at) as observed_month,
-              max(observed_at) as latest_observed_at
+              min(observed_at) as earliest_observed_at
        from mapped_snapshots
        cross join latest
        where effective_customer_id = $1::uuid
@@ -464,18 +464,18 @@ async function loadMicrosoft365MonthlyLicenseCounts(
        group by date_trunc('month', observed_at)
      )
      select
-       monthly_latest.observed_month,
+       monthly_earliest.observed_month,
        coalesce(mapped_snapshots.sku_part_number, mapped_snapshots.sku_id, mapped_snapshots.sku_name) as product_key,
        coalesce(mapped_snapshots.sku_part_number, mapped_snapshots.sku_id) as product_code,
        coalesce(mapped_snapshots.sku_name, mapped_snapshots.sku_part_number, mapped_snapshots.sku_id) as product_name,
        sum(coalesce(mapped_snapshots.total_units, mapped_snapshots.assigned_units, mapped_snapshots.enabled_units, 0)) as count
      from mapped_snapshots
-     inner join monthly_latest
-       on date_trunc('month', mapped_snapshots.observed_at) = monthly_latest.observed_month
-      and mapped_snapshots.observed_at = monthly_latest.latest_observed_at
+     inner join monthly_earliest
+       on date_trunc('month', mapped_snapshots.observed_at) = monthly_earliest.observed_month
+      and mapped_snapshots.observed_at = monthly_earliest.earliest_observed_at
      where mapped_snapshots.effective_customer_id = $1::uuid
-     group by monthly_latest.observed_month, product_key, product_code, product_name
-     order by monthly_latest.observed_month, product_name, product_code`,
+     group by monthly_earliest.observed_month, product_key, product_code, product_name
+     order by monthly_earliest.observed_month, product_name, product_code`,
     [customerId, monthCount],
   );
 

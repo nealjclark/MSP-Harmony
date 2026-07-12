@@ -318,6 +318,10 @@ async function run() {
   );
   assertNoCostFields(combinedReport);
   assert.equal(queries.some((query) => query.sql.includes('vendor_account_mappings')), true);
+  assert.equal(
+    queries.some((query) => query.sql.includes('monthly_earliest') && query.sql.includes('min(observed_at)')),
+    true,
+  );
 
   console.log('customer license report tests passed');
 }
