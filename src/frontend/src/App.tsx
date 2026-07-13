@@ -53,9 +53,11 @@ import {
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationDetailOnlySyncEnabled,
+  integrationDoNotSuggestNewAdditions,
   getIntegrationSettingsDefinition,
   integrationSettingsRegistry,
   validateIntegrationRegistry,
+  doNotSuggestNewAdditionsSettingKey,
   type IntegrationCapability,
   type IntegrationDataSourceDefinition,
   type IntegrationDataSourceType,
@@ -79,10 +81,19 @@ import {
   formatLaborFilterSummary,
   integrationSupportsLaborMapping,
   type ConnectWiseBoardOption,
+  type ConnectWiseStatusOption,
   type ConnectWiseSubTypeOption,
   type ConnectWiseTypeOption,
   type LaborMappingRecord,
 } from '../../shared/laborMappings';
+import {
+  formatInvestigationTicketStatusLabel,
+  integrationSupportsInvestigationTicketMapping,
+  INVESTIGATION_TICKET_STATUS_DEFAULT,
+  type InvestigationTicketMappingRecord,
+  type InvestigationTicketRecord,
+  type InvestigationTicketTimeEntry,
+} from '../../shared/investigationTicketMappings';
 import {
   columnMapSatisfiesSourceType,
   columnMappingHeaderOptions,
@@ -139,7 +150,7 @@ type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'api' | 'invoice';
 type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'labor' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -1530,11 +1541,28 @@ type LaborMappingsResponse = {
   mappings: LaborMapping[];
 };
 
+type InvestigationTicketMapping = InvestigationTicketMappingRecord;
+
+type InvestigationTicketMappingResponse = {
+  integrationId: VendorKey;
+  mapping: InvestigationTicketMapping | null;
+};
+
+type InvestigationTicketsResponse = {
+  tickets: InvestigationTicketRecord[];
+};
+
+type InvestigationTicketTimeEntriesResponse = {
+  ticket: InvestigationTicketRecord;
+  timeEntries: InvestigationTicketTimeEntry[];
+};
+
 type LaborClassificationsResponse = {
   boards?: ConnectWiseBoardOption[];
   boardId?: number;
   types: ConnectWiseTypeOption[];
   subTypes: ConnectWiseSubTypeOption[];
+  statuses?: ConnectWiseStatusOption[];
 };
 
 type NcentralFiltersResponse = {
@@ -1809,11 +1837,19 @@ function hasLaborMappingWorkspace(vendorId: VendorKey) {
   return integrationSupportsLaborMapping(vendorId);
 }
 
+function hasInvestigationTicketMappingWorkspace(vendorId: VendorKey) {
+  return integrationSupportsInvestigationTicketMapping(vendorId);
+}
+
 function hasAnyMappingWorkspace(vendorId: VendorKey) {
   if (isVendorDatapointId(vendorId)) {
     return true;
   }
-  return hasMappingWorkspace(vendorId) || hasLaborMappingWorkspace(vendorId);
+  return (
+    hasMappingWorkspace(vendorId) ||
+    hasLaborMappingWorkspace(vendorId) ||
+    hasInvestigationTicketMappingWorkspace(vendorId)
+  );
 }
 
 function isImplementedIntegration(integrationId: IntegrationId) {
@@ -4242,6 +4278,160 @@ async function fetchLaborClassifications(boardId?: number | null) {
   return body as unknown as LaborClassificationsResponse;
 }
 
+async function fetchInvestigationTicketMapping(integrationId: VendorKey) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/investigation-ticket-mapping`,
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Investigation ticket mapping load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvestigationTicketMappingResponse;
+}
+
+async function saveInvestigationTicketMappingRequest(
+  integrationId: VendorKey,
+  payload: {
+    boardId: number;
+    boardName?: string | null;
+    typeId: number;
+    typeName?: string | null;
+    subTypeId?: number | null;
+    subTypeName?: string | null;
+    statusId?: number | null | typeof INVESTIGATION_TICKET_STATUS_DEFAULT;
+    statusName?: string | null;
+    companyOverrideId?: number | null;
+    companyOverrideName?: string | null;
+  },
+) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/investigation-ticket-mapping`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Investigation ticket mapping save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { integrationId: VendorKey; mapping: InvestigationTicketMapping };
+}
+
+async function createInvestigationTicketsRequest(payload: {
+  customerId?: string;
+  customerName: string;
+  agreementId?: string;
+  agreementName?: string;
+  companyId?: number;
+  notes?: string;
+  reconciliationMonth?: string;
+  tickets: Array<{
+    vendorId: VendorKey;
+    vendorName: string;
+    licenses: Array<Record<string, unknown>>;
+  }>;
+}) {
+  const response = await fetch('/api/reconciliation/connectwise/investigation-tickets', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Investigation ticket create failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as {
+    tickets: InvestigationTicketRecord[];
+    failures: Array<{ vendorId: string; error: string }>;
+  };
+}
+
+async function fetchInvestigationTickets(options: {
+  vendorId: VendorKey;
+  customerName?: string;
+  reconciliationMonth?: string;
+}) {
+  const params = new URLSearchParams();
+  params.set('vendorId', options.vendorId);
+  if (options.customerName) {
+    params.set('customerName', options.customerName);
+  }
+  if (options.reconciliationMonth) {
+    params.set('reconciliationMonth', options.reconciliationMonth);
+  }
+  const response = await fetch(`/api/reconciliation/investigation-tickets?${params.toString()}`);
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Investigation ticket list failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvestigationTicketsResponse;
+}
+
+async function fetchInvestigationTicketTimeEntries(ticketId: string) {
+  const response = await fetch(
+    `/api/reconciliation/investigation-tickets/${encodeURIComponent(ticketId)}/time-entries`,
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Ticket time entry load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as InvestigationTicketTimeEntriesResponse;
+}
+
+function currentReconciliationMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+function investigationTicketPresenceKey(customerName: string, vendorId: VendorKey) {
+  return `${customerName}::${vendorId}`;
+}
+
+async function loadInvestigationTicketPresence(vendorIds: VendorKey[]) {
+  const uniqueVendorIds = [...new Set(vendorIds.filter(Boolean))];
+  if (uniqueVendorIds.length === 0) {
+    return {} as Record<string, number>;
+  }
+
+  const month = currentReconciliationMonth();
+  const ticketGroups = await Promise.all(
+    uniqueVendorIds.map(async (vendorId) => {
+      try {
+        const response = await fetchInvestigationTickets({
+          vendorId,
+          reconciliationMonth: month,
+        });
+        return response.tickets;
+      } catch {
+        return [] as InvestigationTicketRecord[];
+      }
+    }),
+  );
+
+  const presence: Record<string, number> = {};
+  for (const tickets of ticketGroups) {
+    for (const ticket of tickets) {
+      if (!ticket.customerName) {
+        continue;
+      }
+      const key = investigationTicketPresenceKey(ticket.customerName, ticket.vendorId);
+      presence[key] = (presence[key] ?? 0) + 1;
+    }
+  }
+  return presence;
+}
+
 async function createReconciliationAdjustmentRequest(
   integrationId: VendorKey,
   payload: CreateReconciliationAdjustmentPayload,
@@ -4937,6 +5127,13 @@ function App() {
   const [ticketClient, setTicketClient] = useState<ClientGroup | null>(null);
   const [ticketIssueIds, setTicketIssueIds] = useState<string[]>([]);
   const [ticketNotes, setTicketNotes] = useState('');
+  const [creatingInvestigationTicket, setCreatingInvestigationTicket] = useState(false);
+  const [investigationTicketsSelection, setInvestigationTicketsSelection] = useState<{
+    customer: string;
+    vendorId: VendorKey;
+    vendor: string;
+  } | null>(null);
+  const [investigationTicketPresence, setInvestigationTicketPresence] = useState<Record<string, number>>({});
   const [selectedIntegration, setSelectedIntegration] = useState<Integration | null>(null);
   const [integrationTab, setIntegrationTab] = useState<IntegrationTab>('api');
   const [integrationSaveMessage, setIntegrationSaveMessage] = useState<string | null>(null);
@@ -4992,6 +5189,8 @@ function App() {
   const [laborMappings, setLaborMappings] = useState<LaborMapping[]>([]);
   const [laborBoards, setLaborBoards] = useState<ConnectWiseBoardOption[]>([]);
   const [laborClassificationMessage, setLaborClassificationMessage] = useState('');
+  const [investigationTicketMapping, setInvestigationTicketMapping] =
+    useState<InvestigationTicketMapping | null>(null);
   const [mappingLoadState, setMappingLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [mappingMessage, setMappingMessage] = useState('Load an integration to review account and product mappings.');
   const [busyMappingAction, setBusyMappingAction] = useState<string | null>(null);
@@ -6035,7 +6234,7 @@ function App() {
           setLaborClassificationMessage(
             error instanceof Error ? error.message : 'Unable to load ConnectWise boards.',
           );
-          return { boards: [] as ConnectWiseBoardOption[], types: [], subTypes: [] };
+          return { boards: [] as ConnectWiseBoardOption[], types: [], subTypes: [], statuses: [] };
         }),
       ]);
       setLaborMappings(mappingsResponse.mappings);
@@ -6047,6 +6246,36 @@ function App() {
       setLaborMappings([]);
       setMappingLoadState('failed');
       setMappingMessage(error instanceof Error ? error.message : 'Unable to load labor mappings.');
+    }
+  };
+
+  const loadInvestigationTicketMappingWorkspace = async (integrationId: VendorKey) => {
+    if (!hasInvestigationTicketMappingWorkspace(integrationId)) {
+      setInvestigationTicketMapping(null);
+      return;
+    }
+
+    try {
+      const [mappingResponse, classifications] = await Promise.all([
+        fetchInvestigationTicketMapping(integrationId),
+        fetchLaborClassifications().catch((error) => {
+          setLaborClassificationMessage(
+            error instanceof Error ? error.message : 'Unable to load ConnectWise boards.',
+          );
+          return { boards: [] as ConnectWiseBoardOption[], types: [], subTypes: [], statuses: [] };
+        }),
+      ]);
+      setInvestigationTicketMapping(mappingResponse.mapping);
+      if ((classifications.boards ?? []).length > 0) {
+        setLaborBoards(classifications.boards ?? []);
+        setLaborClassificationMessage('');
+      } else if (laborBoards.length === 0) {
+        setLaborBoards(classifications.boards ?? []);
+      }
+    } catch (error) {
+      setInvestigationTicketMapping(null);
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to load investigation ticket mapping.');
     }
   };
 
@@ -6070,6 +6299,7 @@ function App() {
       setNcentralFilterMappings([]);
     }
     await loadLaborMappingWorkspace(integrationId);
+    await loadInvestigationTicketMappingWorkspace(integrationId);
     return state;
   };
 
@@ -6114,6 +6344,17 @@ function App() {
               ? `No ${sourceName} discrepancies found in the latest sync.`
               : `No completed ${sourceName} sync is available yet.`,
       );
+      void loadInvestigationTicketPresence([vendorId]).then((presence) => {
+        setInvestigationTicketPresence((current) => {
+          const next = { ...current };
+          for (const key of Object.keys(next)) {
+            if (key.endsWith(`::${vendorId}`)) {
+              delete next[key];
+            }
+          }
+          return { ...next, ...presence };
+        });
+      });
       return run;
     } catch (error) {
       setIssues((currentIssues) => currentIssues.filter((issue) => issue.vendorId !== vendorId));
@@ -6140,6 +6381,7 @@ function App() {
       setIssues([]);
       setReconciliationRunMetaByVendor({});
       setReconciliationProductOptionsByVendor({});
+      setInvestigationTicketPresence({});
       setReconciliationComparisonRequested(false);
       setExpandedClientNames([]);
       setReconciliationLoadState('idle');
@@ -6191,11 +6433,13 @@ function App() {
               ? 'No selected vendor discrepancies found in the latest syncs.'
               : 'No completed sync is available for the selected vendors yet.',
       );
+      void loadInvestigationTicketPresence(uniqueVendorIds).then(setInvestigationTicketPresence);
       return runs;
     } catch (error) {
       setIssues([]);
       setReconciliationRunMetaByVendor({});
       setReconciliationProductOptionsByVendor({});
+      setInvestigationTicketPresence({});
       setExpandedClientNames([]);
       setReconciliationLoadState('failed');
       setReconciliationMessage(error instanceof Error ? error.message : 'Unable to load selected vendor reconciliation.');
@@ -6646,14 +6890,108 @@ function App() {
     );
   };
 
-  const createInvestigationTicket = () => {
-    if (ticketIssueIds.length === 0) return;
-    setIssues((currentIssues) =>
-      currentIssues.map((issue) =>
-        ticketIssueIds.includes(issue.id) ? { ...issue, status: 'blocked', owner: 'Investigation' } : issue,
-      ),
-    );
-    closeTicketModal();
+  const createInvestigationTicket = async () => {
+    if (!ticketClient || ticketIssueIds.length === 0) return;
+
+    const selectedIssues = ticketClient.issues.filter((issue) => ticketIssueIds.includes(issue.id));
+    if (selectedIssues.length === 0) return;
+
+    const companyId = Number(ticketClient.accountId);
+    const hasCompanyId = Number.isFinite(companyId) && companyId > 0;
+
+    const ticketsByVendor = new Map<
+      VendorKey,
+      { vendorId: VendorKey; vendorName: string; licenses: Array<Record<string, unknown>> }
+    >();
+    for (const issue of selectedIssues) {
+      const existing = ticketsByVendor.get(issue.vendorId) ?? {
+        vendorId: issue.vendorId,
+        vendorName: issue.vendor,
+        licenses: [],
+      };
+      existing.licenses.push({
+        sourceLineId: issue.id,
+        productCode: issue.serviceCode,
+        productName: issue.product,
+        vendorProductKey: issue.vendorProductKey,
+        unit: issue.unit,
+        apiCount: issue.sourceCount,
+        linkedCount: validLinkedCount(issue) ?? null,
+        linkedCountDetail: issue.linkedCount
+          ? {
+              quantity: issue.linkedCount.quantity,
+              ruleName: issue.linkedCount.ruleName,
+              sources: issue.linkedCount.sources,
+            }
+          : null,
+        vendorInvoiceCount: validVendorInvoiceCount(issue) ?? null,
+        invoiceNumber: issue.invoiceNumber,
+        invoiceDate: issue.invoiceDate,
+        connectWiseCount: issue.invoiceCount,
+        proposedCount: issue.proposedCount,
+        selectedCountSource: reconciliationCountSource(issue),
+        selectedCount: reconciliationSelectedCount(issue),
+        delta: reconciliationDelta(issue),
+        financialImpact: reconciliationIssueImpact(issue),
+        reason: issue.reason,
+        recommendation: issue.recommendation,
+        status: issue.status,
+        connectWiseAdditionId: issue.connectWiseAdditionId,
+        matchedAgreementAdditions: issue.matchedAgreementAdditions,
+        adjustments: issue.adjustments,
+        audit: issue.audit,
+      });
+      ticketsByVendor.set(issue.vendorId, existing);
+    }
+
+    setCreatingInvestigationTicket(true);
+    try {
+      const result = await createInvestigationTicketsRequest({
+        customerId: ticketClient.customerId,
+        customerName: ticketClient.customer,
+        agreementId: ticketClient.agreementId,
+        agreementName: ticketClient.agreement,
+        companyId: hasCompanyId ? companyId : undefined,
+        notes: ticketNotes,
+        reconciliationMonth: currentReconciliationMonth(),
+        tickets: [...ticketsByVendor.values()],
+      });
+
+      setIssues((currentIssues) =>
+        currentIssues.map((issue) =>
+          ticketIssueIds.includes(issue.id) ? { ...issue, status: 'blocked', owner: 'Investigation' } : issue,
+        ),
+      );
+
+      const createdNumbers = result.tickets.map((ticket) => ticket.connectWiseTicketNumber).join(', ');
+      const failureText =
+        result.failures.length > 0
+          ? ` Some vendors failed: ${result.failures.map((failure) => `${failure.vendorId} (${failure.error})`).join('; ')}`
+          : '';
+      window.alert(
+        result.tickets.length > 0
+          ? `Created investigation ticket${result.tickets.length === 1 ? '' : 's'}: ${createdNumbers}.${failureText}`
+          : `Unable to create investigation tickets.${failureText}`,
+      );
+      if (result.tickets.length > 0) {
+        setInvestigationTicketPresence((current) => {
+          const next = { ...current };
+          for (const ticket of result.tickets) {
+            if (!ticket.customerName) {
+              continue;
+            }
+            const key = investigationTicketPresenceKey(ticket.customerName, ticket.vendorId);
+            next[key] = (next[key] ?? 0) + 1;
+          }
+          return next;
+        });
+      }
+      closeTicketModal();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Unable to create investigation tickets.');
+    } finally {
+      setCreatingInvestigationTicket(false);
+    }
   };
 
   const openIntegrationModal = (integration: Integration) => {
@@ -7151,6 +7489,92 @@ function App() {
     }
   };
 
+  const saveInvestigationTicketMapping = async (payload: {
+    boardId: number;
+    boardName?: string | null;
+    typeId: number;
+    typeName?: string | null;
+    subTypeId?: number | null;
+    subTypeName?: string | null;
+    statusId?: number | null | typeof INVESTIGATION_TICKET_STATUS_DEFAULT;
+    statusName?: string | null;
+    companyOverrideId?: number | null;
+    companyOverrideName?: string | null;
+  }) => {
+    setBusyMappingAction('investigation-ticket-mapping');
+    setMappingMessage('Saving investigation ticket mapping...');
+
+    try {
+      const response = await saveInvestigationTicketMappingRequest(selectedMappingIntegrationId, payload);
+      setInvestigationTicketMapping(response.mapping);
+      setMappingLoadState('ready');
+      setMappingMessage('Investigation ticket mapping saved.');
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to save investigation ticket mapping.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const saveMappingReconciliationOption = async (enabled: boolean) => {
+    const integration = integrations.find((item) => item.id === selectedMappingIntegrationId);
+    if (!integration) {
+      setMappingMessage('Select an integration before changing reconciliation options.');
+      return;
+    }
+
+    setBusyMappingAction('reconciliation-options');
+    setMappingMessage('Saving reconciliation options...');
+
+    try {
+      const nonSecrets: Record<string, string> = {};
+      for (const [key, value] of Object.entries(integration.nonSecrets)) {
+        if (typeof value === 'string') {
+          nonSecrets[key] = value;
+        }
+      }
+      nonSecrets.endpoint = nonSecrets.endpoint ?? integration.endpoint;
+      nonSecrets[doNotSuggestNewAdditionsSettingKey] = enabled ? 'true' : 'false';
+
+      const response = await fetch(`/api/integrations/${encodeURIComponent(integration.id)}/settings`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          integrationId: integration.id,
+          nonSecrets,
+          secrets: {},
+        } satisfies IntegrationSettingsPayload),
+      });
+      const body = await responseJson(response);
+      if (!response.ok) {
+        throw new Error(String(body.error ?? `Settings save failed with HTTP ${response.status}.`));
+      }
+
+      await refreshRuntimeIntegrations();
+      setMappingLoadState('ready');
+      setMappingMessage(
+        enabled
+          ? 'Reconciliation will only track existing agreement additions for this integration.'
+          : 'Reconciliation can suggest new agreement additions again for this integration.',
+      );
+      if (
+        reconciliationComparisonRequested &&
+        selectedReconciliationIntegrationSet.has(selectedMappingIntegrationId) &&
+        reconciliationVendorIds.includes(selectedMappingIntegrationId)
+      ) {
+        await loadVendorReconciliation(selectedMappingIntegrationId);
+      }
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to save reconciliation options.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
   const saveUsageOverride = async (integrationId: VendorKey, payload: CreateUsageOverridePayload) => {
     setBusyMappingAction('override:create');
     try {
@@ -7615,6 +8039,8 @@ function App() {
               }}
               onOpenAgreementAdditions={(client) => void openAgreementAdditionsModal(client)}
               onOpenTicket={openTicketModal}
+              onOpenInvestigationTickets={(selection) => setInvestigationTicketsSelection(selection)}
+              investigationTicketPresence={investigationTicketPresence}
               onLoadVendorData={loadCustomerVendorData}
               busyIntegrationAction={busyIntegrationAction}
               connectWiseLastSync={connectWiseIntegration?.lastSync ?? 'Never'}
@@ -7640,6 +8066,7 @@ function App() {
                 setIssues([]);
                 setReconciliationRunMetaByVendor({});
                 setReconciliationProductOptionsByVendor({});
+                setInvestigationTicketPresence({});
                 setExpandedClientNames([]);
                 setReconciliationComparisonRequested(false);
                 setReconciliationLoadState('idle');
@@ -7768,6 +8195,7 @@ function App() {
               laborBoards={laborBoards}
               laborClassificationMessage={laborClassificationMessage}
               laborMappings={laborMappings}
+              investigationTicketMapping={investigationTicketMapping}
               onAccountApprove={approveAccountCandidate}
               onAccountManualSave={saveManualAccountMapping}
               onApproveSuggested={() => runMappingAction('approve-suggested')}
@@ -7785,6 +8213,8 @@ function App() {
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
               onLaborMappingSave={saveLaborMapping}
+              onInvestigationTicketMappingSave={saveInvestigationTicketMapping}
+              onReconciliationOptionChange={saveMappingReconciliationOption}
               onUsageOverrideCreate={saveUsageOverride}
               onUsageOverrideDeactivate={deactivateUsageOverride}
               selectedIntegrationId={selectedMappingIntegrationId}
@@ -7982,14 +8412,24 @@ function App() {
       {ticketClient && (
         <TicketModal
           client={ticketClient}
+          creating={creatingInvestigationTicket}
           notes={ticketNotes}
           onClose={closeTicketModal}
-          onCreate={createInvestigationTicket}
+          onCreate={() => void createInvestigationTicket()}
           onNotesChange={setTicketNotes}
           onToggleIssue={toggleTicketIssue}
           selectedIssueIds={ticketIssueIds}
         />
       )}
+      {investigationTicketsSelection ? (
+        <InvestigationTicketsModal
+          customer={investigationTicketsSelection.customer}
+          onClose={() => setInvestigationTicketsSelection(null)}
+          reconciliationMonth={currentReconciliationMonth()}
+          vendor={investigationTicketsSelection.vendor}
+          vendorId={investigationTicketsSelection.vendorId}
+        />
+      ) : null}
       {agreementAdditionsSelection && (
         <AgreementAdditionsModal
           additions={agreementAdditions}
@@ -9263,6 +9703,12 @@ function ReconcileView(props: {
   onManualOverride: (issue: ReconcileIssue) => void;
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
+  onOpenInvestigationTickets: (selection: {
+    customer: string;
+    vendorId: VendorKey;
+    vendor: string;
+  }) => void;
+  investigationTicketPresence: Record<string, number>;
   busyIntegrationAction: IntegrationActionKey | null;
   connectWiseLastSync: string;
   integrationActionMessages: Partial<Record<IntegrationId, string>>;
@@ -9305,6 +9751,8 @@ function ReconcileView(props: {
     onManualOverride,
     onOpenAgreementAdditions,
     onOpenTicket,
+    onOpenInvestigationTickets,
+    investigationTicketPresence,
     onCompareReconciliation,
     onReconciliationSourceToggle,
     onSyncIntegration,
@@ -9662,12 +10110,32 @@ function ReconcileView(props: {
                         const showLinkedCountColumn = visibleVendorIssues.some(
                           (issue) => typeof validLinkedCount(issue) === 'number',
                         );
+                        const hasInvestigationTickets =
+                          Boolean(vendorId) &&
+                          (investigationTicketPresence[investigationTicketPresenceKey(client.customer, vendorId as VendorKey)] ??
+                            0) > 0;
 
                         return (
                           <section className="vendor-license-group" key={vendor}>
                             <div className="vendor-license-header">
                               <strong>{vendor}</strong>
                               <div className="vendor-license-header-meta">
+                                {hasInvestigationTickets ? (
+                                  <button
+                                    className="vendor-data-link"
+                                    onClick={() => {
+                                      onOpenInvestigationTickets({
+                                        customer: client.customer,
+                                        vendorId: vendorId as VendorKey,
+                                        vendor,
+                                      });
+                                    }}
+                                    type="button"
+                                  >
+                                    <ListChecks size={14} />
+                                    Tickets
+                                  </button>
+                                ) : null}
                                 <button
                                   className="vendor-data-link"
                                   disabled={!vendorId || !isRegistryIntegrationId(vendorId)}
@@ -10726,6 +11194,7 @@ function MetricCard(props: {
 
 function TicketModal(props: {
   client: ClientGroup;
+  creating: boolean;
   notes: string;
   onClose: () => void;
   onCreate: () => void;
@@ -10733,7 +11202,7 @@ function TicketModal(props: {
   onToggleIssue: (issueId: string) => void;
   selectedIssueIds: string[];
 }) {
-  const { client, notes, onClose, onCreate, onNotesChange, onToggleIssue, selectedIssueIds } = props;
+  const { client, creating, notes, onClose, onCreate, onNotesChange, onToggleIssue, selectedIssueIds } = props;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -10744,7 +11213,7 @@ function TicketModal(props: {
               <ListChecks size={18} />
               Create Investigation Ticket
             </h2>
-            <p>Select licenses to investigate for {client.customer}</p>
+            <p>Select licenses to investigate for {client.customer}. Summary will be Billing Review per integration.</p>
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={20} />
@@ -10756,15 +11225,20 @@ function TicketModal(props: {
             <label className="ticket-license-option" key={issue.id}>
               <input
                 checked={selectedIssueIds.includes(issue.id)}
+                disabled={creating}
                 onChange={() => onToggleIssue(issue.id)}
                 type="checkbox"
               />
               <span>
                 <strong>{issue.product}</strong>
                 <em>
-                  {issue.vendor} / vendor {issue.sourceCount}
-                  {' -> '}
-                  ConnectWise {issue.invoiceCount}
+                  {issue.vendor} / API {issue.sourceCount}
+                  {' / Inv. '}
+                  {typeof validVendorInvoiceCount(issue) === 'number' ? validVendorInvoiceCount(issue) : 'n/a'}
+                  {' / Linked '}
+                  {typeof validLinkedCount(issue) === 'number' ? validLinkedCount(issue) : 'n/a'}
+                  {' -> CW '}
+                  {issue.invoiceCount}
                 </em>
               </span>
             </label>
@@ -10774,6 +11248,7 @@ function TicketModal(props: {
         <label className="ticket-notes">
           <span>Ticket Notes</span>
           <textarea
+            disabled={creating}
             onChange={(event) => onNotesChange(event.target.value)}
             placeholder="Add details for the investigation ticket..."
             value={notes}
@@ -10781,17 +11256,210 @@ function TicketModal(props: {
         </label>
 
         <div className="modal-actions">
-          <button className="button secondary" onClick={onClose} type="button">
+          <button className="button secondary" disabled={creating} onClick={onClose} type="button">
             Cancel
           </button>
           <button
             className="button primary"
-            disabled={selectedIssueIds.length === 0}
+            disabled={creating || selectedIssueIds.length === 0}
             onClick={onCreate}
             type="button"
           >
             <ListChecks size={17} />
-            Create Ticket ({selectedIssueIds.length})
+            {creating ? 'Creating...' : `Create Ticket (${selectedIssueIds.length})`}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function InvestigationTicketsModal(props: {
+  customer: string;
+  onClose: () => void;
+  reconciliationMonth: string;
+  vendor: string;
+  vendorId: VendorKey;
+}) {
+  const { customer, onClose, reconciliationMonth, vendor, vendorId } = props;
+  const [tickets, setTickets] = useState<InvestigationTicketRecord[]>([]);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [message, setMessage] = useState('Loading investigation tickets...');
+  const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
+  const [timeEntriesByTicket, setTimeEntriesByTicket] = useState<
+    Record<string, { state: 'loading' | 'ready' | 'failed'; message: string; entries: InvestigationTicketTimeEntry[] }>
+  >({});
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadState('loading');
+    setMessage('Loading investigation tickets...');
+    void fetchInvestigationTickets({
+      vendorId,
+      customerName: customer,
+      reconciliationMonth,
+    })
+      .then((response) => {
+        if (cancelled) return;
+        setTickets(response.tickets);
+        setLoadState('ready');
+        setMessage(
+          response.tickets.length > 0
+            ? `${response.tickets.length.toLocaleString()} ticket${response.tickets.length === 1 ? '' : 's'} this month.`
+            : 'No investigation tickets for this vendor in the reconciliation month.',
+        );
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setTickets([]);
+        setLoadState('failed');
+        setMessage(error instanceof Error ? error.message : 'Unable to load investigation tickets.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [customer, reconciliationMonth, vendorId]);
+
+  const toggleTicket = async (ticketId: string) => {
+    if (expandedTicketId === ticketId) {
+      setExpandedTicketId(null);
+      return;
+    }
+
+    setExpandedTicketId(ticketId);
+    if (timeEntriesByTicket[ticketId]?.state === 'ready' || timeEntriesByTicket[ticketId]?.state === 'loading') {
+      return;
+    }
+
+    setTimeEntriesByTicket((current) => ({
+      ...current,
+      [ticketId]: { state: 'loading', message: 'Loading time entries...', entries: [] },
+    }));
+
+    try {
+      const response = await fetchInvestigationTicketTimeEntries(ticketId);
+      setTimeEntriesByTicket((current) => ({
+        ...current,
+        [ticketId]: {
+          state: 'ready',
+          message:
+            response.timeEntries.length > 0
+              ? `${response.timeEntries.length.toLocaleString()} time entries`
+              : 'No time entries on this ticket yet.',
+          entries: response.timeEntries,
+        },
+      }));
+    } catch (error) {
+      setTimeEntriesByTicket((current) => ({
+        ...current,
+        [ticketId]: {
+          state: 'failed',
+          message: error instanceof Error ? error.message : 'Unable to load time entries.',
+          entries: [],
+        },
+      }));
+    }
+  };
+
+  const monthLabel = reconciliationMonth.slice(0, 7);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="ticket-modal investigation-tickets-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="investigation-tickets-title"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="investigation-tickets-title">
+              <ListChecks size={18} />
+              {vendor} investigation tickets
+            </h2>
+            <p>
+              {customer} · {monthLabel}
+            </p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <p className="config-note">{message}</p>
+
+        {loadState === 'loading' ? (
+          <div className="empty-state">
+            <ListChecks size={20} />
+            <strong>Loading tickets...</strong>
+          </div>
+        ) : tickets.length === 0 ? (
+          <div className="empty-state">
+            <ListChecks size={20} />
+            <strong>No tickets this month.</strong>
+            <span>Create an investigation ticket from the client Ticket action.</span>
+          </div>
+        ) : (
+          <div className="investigation-ticket-list">
+            {tickets.map((ticket) => {
+              const expanded = expandedTicketId === ticket.id;
+              const timeEntries = timeEntriesByTicket[ticket.id];
+              return (
+                <article className="investigation-ticket-card" key={ticket.id}>
+                  <button
+                    className="investigation-ticket-toggle"
+                    onClick={() => void toggleTicket(ticket.id)}
+                    type="button"
+                  >
+                    <ChevronRight className={expanded ? 'chevron open' : 'chevron'} size={16} />
+                    <span>
+                      <strong>#{ticket.connectWiseTicketNumber}</strong>
+                      <em>{formatDateTime(ticket.createdAt) ?? ticket.createdAt}</em>
+                    </span>
+                    <span>{ticket.products.length.toLocaleString()} products</span>
+                  </button>
+                  <ul className="investigation-ticket-products">
+                    {ticket.products.map((product) => (
+                      <li key={`${ticket.id}:${product.sourceLineId}:${product.productCode}`}>
+                        <strong>{product.productName}</strong>
+                        <em>
+                          {product.productCode}
+                          {product.delta != null ? ` · delta ${product.delta}` : ''}
+                        </em>
+                      </li>
+                    ))}
+                  </ul>
+                  {expanded ? (
+                    <div className="investigation-ticket-time-entries">
+                      <strong>Time entries</strong>
+                      <p className="config-note">{timeEntries?.message ?? 'Loading time entries...'}</p>
+                      {(timeEntries?.entries ?? []).length > 0 ? (
+                        <ul>
+                          {timeEntries.entries.map((entry) => (
+                            <li key={entry.id}>
+                              <strong>{entry.memberName ?? 'Unknown member'}</strong>
+                              <em>
+                                {entry.actualHours != null ? `${entry.actualHours}h` : 'n/a'}
+                                {entry.timeStart ? ` · ${formatDateTime(entry.timeStart) ?? entry.timeStart}` : ''}
+                                {entry.workType ? ` · ${entry.workType}` : ''}
+                              </em>
+                              {entry.notes ? <span>{entry.notes}</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="button secondary" onClick={onClose} type="button">
+            Close
           </button>
         </div>
       </section>
@@ -12602,6 +13270,7 @@ function MappingsView(props: {
   laborBoards: ConnectWiseBoardOption[];
   laborClassificationMessage: string;
   laborMappings: LaborMapping[];
+  investigationTicketMapping: InvestigationTicketMapping | null;
   onAccountApprove: (candidate: AccountMappingCandidate) => void;
   onAccountManualSave: (account: AccountMappingCandidate, customerId: string, agreementId: string) => Promise<boolean>;
   onApproveSuggested: () => void;
@@ -12636,6 +13305,19 @@ function MappingsView(props: {
   onRefresh: () => Promise<MappingStateResponse | null>;
   onNcentralFilterMappingSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
   onLaborMappingSave: (payload: Partial<LaborMapping>) => Promise<void>;
+  onInvestigationTicketMappingSave: (payload: {
+    boardId: number;
+    boardName?: string | null;
+    typeId: number;
+    typeName?: string | null;
+    subTypeId?: number | null;
+    subTypeName?: string | null;
+    statusId?: number | null | typeof INVESTIGATION_TICKET_STATUS_DEFAULT;
+    statusName?: string | null;
+    companyOverrideId?: number | null;
+    companyOverrideName?: string | null;
+  }) => Promise<void>;
+  onReconciliationOptionChange: (doNotSuggestNewAdditions: boolean) => Promise<void>;
   onUsageOverrideCreate: (integrationId: VendorKey, payload: CreateUsageOverridePayload) => Promise<boolean>;
   onUsageOverrideDeactivate: (integrationId: VendorKey, overrideId: string) => Promise<void>;
   selectedIntegrationId: VendorKey;
@@ -12653,6 +13335,7 @@ function MappingsView(props: {
     laborBoards,
     laborClassificationMessage,
     laborMappings,
+    investigationTicketMapping,
     onAccountApprove,
     onAccountManualSave,
     onApproveSuggested,
@@ -12667,6 +13350,8 @@ function MappingsView(props: {
     onRefresh,
     onNcentralFilterMappingSave,
     onLaborMappingSave,
+    onInvestigationTicketMappingSave,
+    onReconciliationOptionChange,
     onUsageOverrideCreate,
     onUsageOverrideDeactivate,
     selectedIntegrationId,
@@ -12736,9 +13421,17 @@ function MappingsView(props: {
   const [overrideTargetProductKey, setOverrideTargetProductKey] = useState('cove-server');
   const [overrideHostname, setOverrideHostname] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
+  const selectedIntegration = integrations.find((integration) => integration.id === selectedIntegrationId);
+  const selectedIntegrationName = selectedIntegration?.name ?? selectedIntegrationId;
+  const doNotSuggestNewAdditions = selectedIntegration
+    ? integrationDoNotSuggestNewAdditions(selectedIntegration.nonSecrets, {
+        optionalNonSecrets: selectedIntegration.optionalNonSecrets,
+      } as IntegrationSettingsDefinition)
+    : false;
   const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
   const isLaborOnlyMappingWorkspace = selectedIntegrationId === 'connectwise';
   const showLaborMappingSection = hasLaborMappingWorkspace(selectedIntegrationId);
+  const showInvestigationTicketMappingSection = hasInvestigationTicketMappingWorkspace(selectedIntegrationId);
   const accountMappings = filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountCandidates = filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
   const accountRows = showMappedAccounts ? [...accountMappings, ...accountCandidates] : accountCandidates;
@@ -12778,8 +13471,6 @@ function MappingsView(props: {
   const customerOptions = mappingState?.customerOptions ?? [];
   const selectedOverrideCustomer = customerOptions.find((option) => option.customerId === overrideCustomerId);
   const overrideAgreementOptions = selectedOverrideCustomer?.agreements ?? [];
-  const selectedIntegrationName =
-    integrations.find((integration) => integration.id === selectedIntegrationId)?.name ?? 'Integration';
   const suggestedAccountCount = accountCandidates.filter(
     (candidate) => candidate.status === 'approved' && candidate.customerId,
   ).length;
@@ -13519,6 +14210,65 @@ function MappingsView(props: {
             mappings={laborMappings}
             onSave={onLaborMappingSave}
           />
+        </MappingSectionDrawer>
+      ) : null}
+
+      {showInvestigationTicketMappingSection ? (
+        <MappingSectionDrawer
+          defaultOpen
+          meta="Board, type, optional subtype, and status for reconcile investigation tickets"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="investigation-tickets"
+          status={investigationTicketMapping ? 'Configured' : 'Required'}
+          statusTone={investigationTicketMapping ? 'ready' : 'warn'}
+          title="Investigation ticket mapping"
+        >
+          <InvestigationTicketMappingPanel
+            boards={laborBoards}
+            busyAction={busyAction}
+            classificationMessage={laborClassificationMessage}
+            customerOptions={customerOptions}
+            mapping={investigationTicketMapping}
+            onSave={onInvestigationTicketMappingSave}
+          />
+        </MappingSectionDrawer>
+      ) : null}
+
+      {!isLaborOnlyMappingWorkspace ? (
+        <MappingSectionDrawer
+          defaultOpen={doNotSuggestNewAdditions || selectedIntegrationId === 'ncentral'}
+          meta="Controls how reconcile suggests agreement changes"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="reconciliation-options"
+          status={doNotSuggestNewAdditions ? 'Existing only' : 'Suggest new'}
+          statusTone={doNotSuggestNewAdditions ? 'warn' : 'ready'}
+          title="Reconciliation options"
+        >
+          <section className="work-surface" aria-label="Reconciliation options">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">Integration</span>
+                <h2>{selectedIntegrationName} reconcile behavior</h2>
+              </div>
+            </div>
+            <label className="config-checkbox">
+              <input
+                checked={doNotSuggestNewAdditions}
+                disabled={busyAction === 'reconciliation-options'}
+                onChange={(event) => void onReconciliationOptionChange(event.target.checked)}
+                type="checkbox"
+              />
+              <span>
+                <strong>Do not suggest New Additions</strong>
+                <small>
+                  Only track customers that already have the mapped product on their agreement. Useful when a small subset
+                  of monitored clients should be billed, such as N-central servers.
+                </small>
+              </span>
+            </label>
+          </section>
         </MappingSectionDrawer>
       ) : null}
 
@@ -15031,6 +15781,7 @@ function NcentralFilterMappingPanel(props: {
   onSave: (payload: Partial<NcentralFilterMapping>) => Promise<void>;
 }) {
   const { busyAction, filters, mappings, onSave } = props;
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [mappingType, setMappingType] = useState<NcentralFilterMapping['mappingType']>('overlay');
   const [filterName, setFilterName] = useState('');
   const [filterId, setFilterId] = useState('');
@@ -15040,6 +15791,21 @@ function NcentralFilterMappingPanel(props: {
   const [priority, setPriority] = useState(100);
   const productMappings = mappings.filter((mapping) => mapping.mappingType === 'product');
   const overlayMappings = mappings.filter((mapping) => mapping.mappingType === 'overlay');
+
+  const resetCreateForm = () => {
+    setMappingType('overlay');
+    setFilterId('');
+    setFilterName('');
+    setDisplayName('');
+    setVendorProductKey('');
+    setTagKey('');
+    setPriority(100);
+  };
+
+  const cancelCreate = () => {
+    resetCreateForm();
+    setShowCreateForm(false);
+  };
 
   const selectFilter = (value: string) => {
     const filter = filters.find((item) => item.filterId === value);
@@ -15062,12 +15828,8 @@ function NcentralFilterMappingPanel(props: {
       status: 'approved',
       active: true,
     });
-    setFilterId('');
-    setFilterName('');
-    setDisplayName('');
-    setVendorProductKey('');
-    setTagKey('');
-    setPriority(100);
+    resetCreateForm();
+    setShowCreateForm(false);
   };
 
   return (
@@ -15077,13 +15839,91 @@ function NcentralFilterMappingPanel(props: {
           <span className="section-kicker">N-central filters</span>
           <h2>{mappings.length.toLocaleString()} billing and overlay filters</h2>
         </div>
-        <span className="status-pill ready">{filters.length.toLocaleString()} discovered</span>
+        <div className="mapping-panel-header-actions">
+          <span className="status-pill ready">{filters.length.toLocaleString()} discovered</span>
+          {showCreateForm ? (
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={cancelCreate} type="button">
+              Cancel
+            </button>
+          ) : (
+            <button className="button primary compact" disabled={Boolean(busyAction)} onClick={() => setShowCreateForm(true)} type="button">
+              <Plus size={16} />
+              Add filter
+            </button>
+          )}
+        </div>
       </div>
+
+      {showCreateForm ? (
+        <div className="mapping-create-form">
+          <label>
+            <span>Type</span>
+            <select onChange={(event) => setMappingType(event.target.value as NcentralFilterMapping['mappingType'])} value={mappingType}>
+              <option value="overlay">Overlay tag</option>
+              <option value="product">Product</option>
+            </select>
+          </label>
+          <label>
+            <span>Discovered filter</span>
+            <select onChange={(event) => selectFilter(event.target.value)} value={filterId}>
+              <option value="">Manual filter name</option>
+              {filters.map((filter) => (
+                <option key={filter.filterId} value={filter.filterId}>
+                  {filter.filterName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Filter name</span>
+            <input onChange={(event) => setFilterName(event.target.value)} placeholder="Exact N-central filter name" value={filterName} />
+          </label>
+          <label>
+            <span>Display name</span>
+            <input onChange={(event) => setDisplayName(event.target.value)} placeholder="Shown in MSP Harmony" value={displayName} />
+          </label>
+          {mappingType === 'product' ? (
+            <label>
+              <span>Product key</span>
+              <input onChange={(event) => setVendorProductKey(event.target.value)} placeholder="ncentral-custom-product" value={vendorProductKey} />
+            </label>
+          ) : (
+            <label>
+              <span>Tag key</span>
+              <input onChange={(event) => setTagKey(event.target.value)} placeholder="custom-tag" value={tagKey} />
+            </label>
+          )}
+          <label>
+            <span>Priority</span>
+            <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
+          </label>
+          <div className="mapping-form-actions">
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={cancelCreate} type="button">
+              Cancel
+            </button>
+            <button
+              className="button primary compact"
+              disabled={
+                Boolean(busyAction) ||
+                !filterName.trim() ||
+                !displayName.trim() ||
+                (mappingType === 'product' ? !vendorProductKey.trim() : !tagKey.trim())
+              }
+              onClick={() => void submitNewMapping()}
+              type="button"
+            >
+              <Plus size={16} />
+              Save filter
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="ncentral-filter-grid">
         <div>
           <h3>Product filters</h3>
           <div className="ncentral-filter-list">
+            {productMappings.length === 0 ? <p className="mapping-empty-hint">No product filters yet.</p> : null}
             {productMappings.map((mapping) => (
               <NcentralFilterMappingRow busyAction={busyAction} filters={filters} key={mapping.id} mapping={mapping} onSave={onSave} />
             ))}
@@ -15093,69 +15933,12 @@ function NcentralFilterMappingPanel(props: {
         <div>
           <h3>Overlay tags</h3>
           <div className="ncentral-filter-list">
+            {overlayMappings.length === 0 ? <p className="mapping-empty-hint">No overlay tags yet.</p> : null}
             {overlayMappings.map((mapping) => (
               <NcentralFilterMappingRow busyAction={busyAction} filters={filters} key={mapping.id} mapping={mapping} onSave={onSave} />
             ))}
           </div>
         </div>
-      </div>
-
-      <div className="ncentral-filter-form">
-        <label>
-          <span>Type</span>
-          <select onChange={(event) => setMappingType(event.target.value as NcentralFilterMapping['mappingType'])} value={mappingType}>
-            <option value="overlay">Overlay tag</option>
-            <option value="product">Product</option>
-          </select>
-        </label>
-        <label>
-          <span>Discovered filter</span>
-          <select onChange={(event) => selectFilter(event.target.value)} value={filterId}>
-            <option value="">Manual filter name</option>
-            {filters.map((filter) => (
-              <option key={filter.filterId} value={filter.filterId}>
-                {filter.filterName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>Filter name</span>
-          <input onChange={(event) => setFilterName(event.target.value)} placeholder="Exact N-central filter name" value={filterName} />
-        </label>
-        <label>
-          <span>Display name</span>
-          <input onChange={(event) => setDisplayName(event.target.value)} placeholder="Shown in MSP Harmony" value={displayName} />
-        </label>
-        {mappingType === 'product' ? (
-          <label>
-            <span>Product key</span>
-            <input onChange={(event) => setVendorProductKey(event.target.value)} placeholder="ncentral-custom-product" value={vendorProductKey} />
-          </label>
-        ) : (
-          <label>
-            <span>Tag key</span>
-            <input onChange={(event) => setTagKey(event.target.value)} placeholder="custom-tag" value={tagKey} />
-          </label>
-        )}
-        <label>
-          <span>Priority</span>
-          <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
-        </label>
-        <button
-          className="button primary compact"
-          disabled={
-            Boolean(busyAction) ||
-            !filterName.trim() ||
-            !displayName.trim() ||
-            (mappingType === 'product' ? !vendorProductKey.trim() : !tagKey.trim())
-          }
-          onClick={() => void submitNewMapping()}
-          type="button"
-        >
-          <Filter size={16} />
-          Add filter
-        </button>
       </div>
     </section>
   );
@@ -15235,7 +16018,7 @@ function NcentralFilterMappingRow(props: {
       </div>
 
       {editing ? (
-        <div className="ncentral-filter-edit-panel">
+        <div className="mapping-create-form mapping-edit-form">
           <label>
             <span>Discovered filter</span>
             <select onChange={(event) => selectFilter(event.target.value)} value={filterId}>
@@ -15270,7 +16053,10 @@ function NcentralFilterMappingRow(props: {
             <span>Priority</span>
             <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
           </label>
-          <div className="ncentral-filter-edit-actions">
+          <div className="mapping-form-actions">
+            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
             <button
               className="button primary compact"
               disabled={
@@ -15284,13 +16070,331 @@ function NcentralFilterMappingRow(props: {
             >
               Save
             </button>
-            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
-              Cancel
-            </button>
           </div>
         </div>
       ) : null}
     </article>
+  );
+}
+
+function InvestigationTicketMappingPanel(props: {
+  boards: ConnectWiseBoardOption[];
+  busyAction: string | null;
+  classificationMessage: string;
+  customerOptions: MappingCustomerOption[];
+  mapping: InvestigationTicketMapping | null;
+  onSave: (payload: {
+    boardId: number;
+    boardName?: string | null;
+    typeId: number;
+    typeName?: string | null;
+    subTypeId?: number | null;
+    subTypeName?: string | null;
+    statusId?: number | null | typeof INVESTIGATION_TICKET_STATUS_DEFAULT;
+    statusName?: string | null;
+    companyOverrideId?: number | null;
+    companyOverrideName?: string | null;
+  }) => Promise<void>;
+}) {
+  const { boards, busyAction, classificationMessage, customerOptions, mapping, onSave } = props;
+  const [editing, setEditing] = useState(false);
+  const [boardId, setBoardId] = useState(mapping ? String(mapping.boardId) : '');
+  const [typeId, setTypeId] = useState(mapping ? String(mapping.typeId) : '');
+  const [subTypeId, setSubTypeId] = useState(mapping?.subTypeId != null ? String(mapping.subTypeId) : '');
+  const [statusId, setStatusId] = useState(
+    mapping?.statusId != null ? String(mapping.statusId) : INVESTIGATION_TICKET_STATUS_DEFAULT,
+  );
+  const [companyOverrideId, setCompanyOverrideId] = useState(
+    mapping?.companyOverrideId != null ? String(mapping.companyOverrideId) : '',
+  );
+  const [types, setTypes] = useState<ConnectWiseTypeOption[]>([]);
+  const [subTypes, setSubTypes] = useState<ConnectWiseSubTypeOption[]>([]);
+  const [statuses, setStatuses] = useState<ConnectWiseStatusOption[]>([]);
+  const [classificationBusy, setClassificationBusy] = useState(false);
+  const [localMessage, setLocalMessage] = useState('');
+
+  const showEditor = editing;
+  const companyOverrideOptions = customerOptions
+    .filter((option) => {
+      const id = Number(option.connectWiseCompanyId);
+      return Number.isFinite(id) && id > 0;
+    })
+    .slice()
+    .sort((left, right) => left.customerName.localeCompare(right.customerName));
+
+  useEffect(() => {
+    setBoardId(mapping ? String(mapping.boardId) : '');
+    setTypeId(mapping ? String(mapping.typeId) : '');
+    setSubTypeId(mapping?.subTypeId != null ? String(mapping.subTypeId) : '');
+    setStatusId(mapping?.statusId != null ? String(mapping.statusId) : INVESTIGATION_TICKET_STATUS_DEFAULT);
+    setCompanyOverrideId(mapping?.companyOverrideId != null ? String(mapping.companyOverrideId) : '');
+    setEditing(false);
+  }, [mapping]);
+
+  useEffect(() => {
+    if (!showEditor || !boardId) {
+      if (!boardId) {
+        setTypes([]);
+        setSubTypes([]);
+        setStatuses([]);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    setClassificationBusy(true);
+    setLocalMessage('');
+    void fetchLaborClassifications(Number(boardId))
+      .then((response) => {
+        if (cancelled) return;
+        setTypes(response.types);
+        setSubTypes(response.subTypes);
+        setStatuses(response.statuses ?? []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setTypes([]);
+        setSubTypes([]);
+        setStatuses([]);
+        setLocalMessage(error instanceof Error ? error.message : 'Unable to load board classifications.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setClassificationBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId, showEditor]);
+
+  const selectedBoard = boards.find((board) => String(board.id) === boardId);
+  const selectedType = types.find((type) => String(type.id) === typeId);
+  const selectedSubType = subTypes.find((subType) => String(subType.id) === subTypeId);
+  const selectedStatus = statuses.find((status) => String(status.id) === statusId);
+  const selectedCompanyOverride = companyOverrideOptions.find(
+    (option) => String(option.connectWiseCompanyId) === companyOverrideId,
+  );
+  const usingDefaultStatus = statusId === INVESTIGATION_TICKET_STATUS_DEFAULT || statusId === '';
+
+  const resetFormFields = () => {
+    setBoardId(mapping ? String(mapping.boardId) : '');
+    setTypeId(mapping ? String(mapping.typeId) : '');
+    setSubTypeId(mapping?.subTypeId != null ? String(mapping.subTypeId) : '');
+    setStatusId(mapping?.statusId != null ? String(mapping.statusId) : INVESTIGATION_TICKET_STATUS_DEFAULT);
+    setCompanyOverrideId(mapping?.companyOverrideId != null ? String(mapping.companyOverrideId) : '');
+    setLocalMessage('');
+  };
+
+  const cancelEdit = () => {
+    resetFormFields();
+    setEditing(false);
+  };
+
+  const saveMapping = async () => {
+    if (!boardId || !typeId) {
+      setLocalMessage('Board and type are required.');
+      return;
+    }
+
+    await onSave({
+      boardId: Number(boardId),
+      boardName: selectedBoard?.name ?? mapping?.boardName ?? null,
+      typeId: Number(typeId),
+      typeName: selectedType?.name ?? mapping?.typeName ?? null,
+      subTypeId: subTypeId ? Number(subTypeId) : null,
+      subTypeName: subTypeId ? selectedSubType?.name ?? mapping?.subTypeName ?? null : null,
+      statusId: usingDefaultStatus ? INVESTIGATION_TICKET_STATUS_DEFAULT : Number(statusId),
+      statusName: usingDefaultStatus ? INVESTIGATION_TICKET_STATUS_DEFAULT : selectedStatus?.name ?? mapping?.statusName ?? null,
+      companyOverrideId: companyOverrideId ? Number(companyOverrideId) : null,
+      companyOverrideName: companyOverrideId
+        ? selectedCompanyOverride?.customerName ?? mapping?.companyOverrideName ?? null
+        : null,
+    });
+    setEditing(false);
+  };
+
+  return (
+    <section className="work-surface ncentral-filter-panel labor-mapping-panel" aria-label="Investigation ticket mapping">
+      <div className="surface-header">
+        <div>
+          <span className="section-kicker">Investigation tickets</span>
+          <h2>{mapping ? 'PSA ticket defaults configured' : 'Configure PSA ticket defaults'}</h2>
+          <p className="config-note">
+            Each vendor needs a ConnectWise board and type. Subtype is optional. Status default leaves status unset so
+            the board assigns its default. Company override opens every ticket under that company while the license
+            company stays in the ticket description.
+          </p>
+        </div>
+        <div className="mapping-panel-header-actions">
+          <span className={`status-pill ${mapping ? 'ready' : 'warn'}`}>
+            {mapping ? 'Configured' : 'Required'}
+          </span>
+          {showEditor ? (
+            <button className="button secondary compact" disabled={busyAction === 'investigation-ticket-mapping'} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
+          ) : (
+            <button className="button primary compact" onClick={() => setEditing(true)} type="button">
+              {mapping ? (
+                <>
+                  <Pencil size={15} />
+                  Edit
+                </>
+              ) : (
+                <>
+                  <Plus size={16} />
+                  Add mapping
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {classificationMessage || localMessage ? (
+        <p className="config-note mapping-panel-message">{classificationMessage || localMessage}</p>
+      ) : null}
+
+      {mapping && !showEditor ? (
+        <article className="ncentral-filter-row">
+          <div className="ncentral-filter-row-main investigation-ticket-mapping-summary">
+            <div>
+              <strong>{mapping.boardName || `Board ${mapping.boardId}`}</strong>
+              <span>
+                {mapping.typeName || `Type ${mapping.typeId}`}
+                {mapping.subTypeId != null ? ` · ${mapping.subTypeName || `Subtype ${mapping.subTypeId}`}` : ''}
+              </span>
+            </div>
+            <dl className="investigation-ticket-mapping-meta">
+              <div>
+                <dt>Status</dt>
+                <dd>{formatInvestigationTicketStatusLabel(mapping)}</dd>
+              </div>
+              <div>
+                <dt>Company</dt>
+                <dd>
+                  {mapping.companyOverrideId != null
+                    ? mapping.companyOverrideName || `Company ${mapping.companyOverrideId}`
+                    : 'License company'}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </article>
+      ) : null}
+
+      {!mapping && !showEditor ? (
+        <div className="empty-state">
+          <ListChecks size={20} />
+          <strong>No investigation ticket mapping yet.</strong>
+          <span>Click Add mapping to choose board, type, and optional subtype, status, and company override.</span>
+        </div>
+      ) : null}
+
+      {showEditor ? (
+        <div className="mapping-create-form">
+          <label>
+            <span>Board</span>
+            <select
+              onChange={(event) => {
+                setBoardId(event.target.value);
+                setTypeId('');
+                setSubTypeId('');
+                setStatusId(INVESTIGATION_TICKET_STATUS_DEFAULT);
+              }}
+              value={boardId}
+            >
+              <option value="">Select board</option>
+              {boards.map((board) => (
+                <option key={board.id} value={board.id}>
+                  {board.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Type</span>
+            <select
+              disabled={!boardId || classificationBusy}
+              onChange={(event) => {
+                setTypeId(event.target.value);
+                setSubTypeId('');
+              }}
+              value={typeId}
+            >
+              <option value="">Select type</option>
+              {types.map((type) => (
+                <option key={type.id} value={type.id}>
+                  {type.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Subtype (optional)</span>
+            <select
+              disabled={!boardId || classificationBusy || !typeId}
+              onChange={(event) => setSubTypeId(event.target.value)}
+              value={subTypeId}
+            >
+              <option value="">None</option>
+              {subTypes.map((subType) => (
+                <option key={subType.id} value={subType.id}>
+                  {subType.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Status</span>
+            <select
+              disabled={!boardId || classificationBusy}
+              onChange={(event) => setStatusId(event.target.value)}
+              value={statusId}
+            >
+              <option value={INVESTIGATION_TICKET_STATUS_DEFAULT}>default (board assigns)</option>
+              {statuses.map((status) => (
+                <option key={status.id} value={status.id}>
+                  {status.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="mapping-form-span-2">
+            <span>Company override (optional)</span>
+            <select onChange={(event) => setCompanyOverrideId(event.target.value)} value={companyOverrideId}>
+              <option value="">Use license company</option>
+              {companyOverrideOptions.map((option) => (
+                <option key={option.customerId} value={option.connectWiseCompanyId}>
+                  {option.customerName}
+                  {option.connectWiseCompanyId ? ` (#${option.connectWiseCompanyId})` : ''}
+                </option>
+              ))}
+            </select>
+            <small>
+              {companyOverrideId
+                ? 'Tickets always open under this company.'
+                : 'Tickets open under the license customer company.'}
+            </small>
+          </label>
+          <div className="mapping-form-actions">
+            <button className="button secondary compact" disabled={busyAction === 'investigation-ticket-mapping'} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
+            <button
+              className="button primary compact"
+              disabled={!boardId || !typeId || classificationBusy || busyAction === 'investigation-ticket-mapping'}
+              onClick={() => void saveMapping()}
+              type="button"
+            >
+              {busyAction === 'investigation-ticket-mapping' ? 'Saving' : mapping ? 'Save changes' : 'Save mapping'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -15302,6 +16406,7 @@ function LaborMappingPanel(props: {
   onSave: (payload: Partial<LaborMapping>) => Promise<void>;
 }) {
   const { boards, busyAction, classificationMessage, mappings, onSave } = props;
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [label, setLabel] = useState('');
   const [boardId, setBoardId] = useState('');
   const [typeIds, setTypeIds] = useState<string[]>([]);
@@ -15315,11 +16420,13 @@ function LaborMappingPanel(props: {
   const selectedBoard = boards.find((board) => String(board.id) === boardId);
 
   useEffect(() => {
-    if (!boardId) {
-      setTypes([]);
-      setSubTypes([]);
-      setTypeIds([]);
-      setSubTypeIds([]);
+    if (!showCreateForm || !boardId) {
+      if (!boardId) {
+        setTypes([]);
+        setSubTypes([]);
+        setTypeIds([]);
+        setSubTypeIds([]);
+      }
       return;
     }
 
@@ -15351,7 +16458,21 @@ function LaborMappingPanel(props: {
     return () => {
       cancelled = true;
     };
-  }, [boardId]);
+  }, [boardId, showCreateForm]);
+
+  const resetCreateForm = () => {
+    setLabel('');
+    setBoardId('');
+    setTypeIds([]);
+    setSubTypeIds([]);
+    setPriority(100);
+    setLocalMessage('');
+  };
+
+  const cancelCreate = () => {
+    resetCreateForm();
+    setShowCreateForm(false);
+  };
 
   const submitNewMapping = async () => {
     const selectedTypes = types.filter((type) => typeIds.includes(String(type.id)));
@@ -15367,11 +16488,8 @@ function LaborMappingPanel(props: {
       priority,
       active: true,
     });
-    setLabel('');
-    setBoardId('');
-    setTypeIds([]);
-    setSubTypeIds([]);
-    setPriority(100);
+    resetCreateForm();
+    setShowCreateForm(false);
   };
 
   return (
@@ -15385,19 +16503,119 @@ function LaborMappingPanel(props: {
             use the label and sum ticket actual hours once per ticket id.
           </p>
         </div>
-        <span className="status-pill ready">{boards.length.toLocaleString()} boards</span>
+        <div className="mapping-panel-header-actions">
+          <span className="status-pill ready">{boards.length.toLocaleString()} boards</span>
+          {showCreateForm ? (
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={cancelCreate} type="button">
+              Cancel
+            </button>
+          ) : (
+            <button className="button primary compact" disabled={Boolean(busyAction)} onClick={() => setShowCreateForm(true)} type="button">
+              <Plus size={16} />
+              Add labor mapping
+            </button>
+          )}
+        </div>
       </div>
 
       {classificationMessage || localMessage ? (
-        <p className="config-note">{classificationMessage || localMessage}</p>
+        <p className="config-note mapping-panel-message">{classificationMessage || localMessage}</p>
+      ) : null}
+
+      {showCreateForm ? (
+        <div className="mapping-create-form">
+          <label>
+            <span>Report label</span>
+            <input
+              onChange={(event) => setLabel(event.target.value)}
+              placeholder="Datto BCDR labor"
+              value={label}
+            />
+          </label>
+          <label>
+            <span>Board</span>
+            <select
+              onChange={(event) => {
+                setBoardId(event.target.value);
+                setTypeIds([]);
+                setSubTypeIds([]);
+              }}
+              value={boardId}
+            >
+              <option value="">Any board</option>
+              {boards.map((board) => (
+                <option key={board.id} value={board.id}>
+                  {board.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Types (multi-select)</span>
+            <select
+              disabled={!boardId || classificationBusy}
+              multiple
+              onChange={(event) => {
+                setTypeIds(selectedOptionValues(event.currentTarget));
+                setSubTypeIds([]);
+              }}
+              size={Math.min(6, Math.max(3, types.length || 3))}
+              value={typeIds}
+            >
+              {types.map((type) => (
+                <option key={type.id} value={type.id}>
+                  {type.name}
+                </option>
+              ))}
+            </select>
+            <small>{typeIds.length === 0 ? 'Any type' : `${typeIds.length} selected`}</small>
+          </label>
+          <label>
+            <span>Subtypes (multi-select)</span>
+            <select
+              disabled={!boardId || classificationBusy || typeIds.length === 0}
+              multiple
+              onChange={(event) => setSubTypeIds(selectedOptionValues(event.currentTarget))}
+              size={Math.min(6, Math.max(3, subTypes.length || 3))}
+              value={subTypeIds}
+            >
+              {subTypes.map((subType) => (
+                <option key={subType.id} value={subType.id}>
+                  {subType.name}
+                </option>
+              ))}
+            </select>
+            <small>
+              {typeIds.length === 0 ? 'Select types first, or leave Any' : subTypeIds.length === 0 ? 'Any subtype' : `${subTypeIds.length} selected`}
+            </small>
+          </label>
+          <label>
+            <span>Priority</span>
+            <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
+          </label>
+          <div className="mapping-form-actions">
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={cancelCreate} type="button">
+              Cancel
+            </button>
+            <button
+              className="button primary compact"
+              disabled={Boolean(busyAction) || !label.trim()}
+              onClick={() => void submitNewMapping()}
+              type="button"
+            >
+              <Plus size={16} />
+              Save labor mapping
+            </button>
+          </div>
+        </div>
       ) : null}
 
       <div className="ncentral-filter-list labor-mapping-list">
-        {mappings.length === 0 ? (
+        {mappings.length === 0 && !showCreateForm ? (
           <div className="empty-state">
             <Filter size={20} />
             <strong>No labor mappings yet.</strong>
-            <span>Add a report label and optional board / type / subtype filter.</span>
+            <span>Click Add labor mapping to create a report label and optional board / type / subtype filter.</span>
           </div>
         ) : null}
         {mappings.map((mapping) => (
@@ -15409,87 +16627,6 @@ function LaborMappingPanel(props: {
             onSave={onSave}
           />
         ))}
-      </div>
-
-      <div className="ncentral-filter-form labor-mapping-form">
-        <label>
-          <span>Report label</span>
-          <input
-            onChange={(event) => setLabel(event.target.value)}
-            placeholder="Datto BCDR labor"
-            value={label}
-          />
-        </label>
-        <label>
-          <span>Board</span>
-          <select
-            onChange={(event) => {
-              setBoardId(event.target.value);
-              setTypeIds([]);
-              setSubTypeIds([]);
-            }}
-            value={boardId}
-          >
-            <option value="">Any board</option>
-            {boards.map((board) => (
-              <option key={board.id} value={board.id}>
-                {board.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>Types (multi-select)</span>
-          <select
-            disabled={!boardId || classificationBusy}
-            multiple
-            onChange={(event) => {
-              setTypeIds(selectedOptionValues(event.currentTarget));
-              setSubTypeIds([]);
-            }}
-            size={Math.min(6, Math.max(3, types.length || 3))}
-            value={typeIds}
-          >
-            {types.map((type) => (
-              <option key={type.id} value={type.id}>
-                {type.name}
-              </option>
-            ))}
-          </select>
-          <small>{typeIds.length === 0 ? 'Any type' : `${typeIds.length} selected`}</small>
-        </label>
-        <label>
-          <span>Subtypes (multi-select)</span>
-          <select
-            disabled={!boardId || classificationBusy || typeIds.length === 0}
-            multiple
-            onChange={(event) => setSubTypeIds(selectedOptionValues(event.currentTarget))}
-            size={Math.min(6, Math.max(3, subTypes.length || 3))}
-            value={subTypeIds}
-          >
-            {subTypes.map((subType) => (
-              <option key={subType.id} value={subType.id}>
-                {subType.name}
-              </option>
-            ))}
-          </select>
-          <small>
-            {typeIds.length === 0 ? 'Select types first, or leave Any' : subTypeIds.length === 0 ? 'Any subtype' : `${subTypeIds.length} selected`}
-          </small>
-        </label>
-        <label>
-          <span>Priority</span>
-          <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
-        </label>
-        <button
-          className="button primary compact"
-          disabled={Boolean(busyAction) || !label.trim()}
-          onClick={() => void submitNewMapping()}
-          type="button"
-        >
-          <Filter size={16} />
-          Add labor mapping
-        </button>
       </div>
     </section>
   );
@@ -15603,7 +16740,7 @@ function LaborMappingRow(props: {
       </div>
 
       {editing ? (
-        <div className="ncentral-filter-edit-panel">
+        <div className="mapping-create-form mapping-edit-form">
           <label>
             <span>Report label</span>
             <input onChange={(event) => setLabel(event.target.value)} value={label} />
@@ -15665,7 +16802,10 @@ function LaborMappingRow(props: {
             <span>Priority</span>
             <input onChange={(event) => setPriority(Number(event.target.value))} type="number" value={priority} />
           </label>
-          <div className="ncentral-filter-edit-actions">
+          <div className="mapping-form-actions">
+            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
+              Cancel
+            </button>
             <button
               className="button primary compact"
               disabled={busyAction === actionKey || !label.trim()}
@@ -15673,9 +16813,6 @@ function LaborMappingRow(props: {
               type="button"
             >
               Save
-            </button>
-            <button className="button secondary compact" disabled={busyAction === actionKey} onClick={cancelEdit} type="button">
-              Cancel
             </button>
           </div>
         </div>

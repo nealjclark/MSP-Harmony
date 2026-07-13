@@ -11,10 +11,18 @@ import {
   deactivateReconciliationAdjustment,
   type CreateReconciliationAdjustmentInput,
 } from '../api/reconciliationAdjustments';
+import {
+  createInvestigationTickets,
+  getInvestigationTicketById,
+  listInvestigationTickets,
+  mapConnectWiseTimeEntries,
+  type InvestigationTicketLicenseInput,
+} from '../api/investigationTickets';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
 import { deactivateAdditionPin, upsertManualAdditionPin } from '../mapping/additionPinService';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
+import { assertConnectWiseReady } from '../connectwise/operations';
 import { requireRole } from './auth';
 import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
 
@@ -31,6 +39,21 @@ type ReconciliationAdjustmentBody = CreateReconciliationAdjustmentInput & {
 type AgreementAdditionUpdatesBody = {
   updates?: ReconciliationAgreementAdditionUpdateInput[];
   discardedUpdates?: ReconciliationAgreementAdditionUpdateInput[];
+};
+
+type InvestigationTicketsCreateBody = {
+  customerId?: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  companyId?: number | string;
+  notes?: string;
+  reconciliationMonth?: string;
+  tickets?: Array<{
+    vendorId?: VendorKey;
+    vendorName?: string;
+    licenses?: InvestigationTicketLicenseInput[];
+  }>;
 };
 
 export async function runVendorReconciliationHttp(
@@ -425,6 +448,184 @@ app.http('deactivateReconciliationAdditionPin', {
   handler: deactivateReconciliationAdditionPinHttp,
 });
 
+export async function createInvestigationTicketsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const body = (await request.json().catch(() => ({}))) as InvestigationTicketsCreateBody;
+  const customerName = body.customerName?.trim();
+  const companyIdRaw = body.companyId == null || body.companyId === '' ? null : Number(body.companyId);
+  const companyId =
+    companyIdRaw != null && Number.isFinite(companyIdRaw) && companyIdRaw > 0 ? companyIdRaw : undefined;
+  if (!customerName) {
+    return jsonResponse(400, { error: 'customerName is required to create investigation tickets.' });
+  }
+  if (!Array.isArray(body.tickets) || body.tickets.length === 0) {
+    return jsonResponse(400, { error: 'Select at least one license to investigate.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Investigation tickets need PostgreSQL settings before they can be created.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const settingsProvider = createIntegrationSettingsProvider({
+      loadLocalEnv: true,
+      metadataReader: repositoryContext.repository,
+    });
+    const connectWiseSettings = await settingsProvider.getIntegrationSettings('connectwise');
+    assertConnectWiseReady(connectWiseSettings);
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(connectWiseSettings));
+    const result = await createInvestigationTickets(repositoryContext.pool, {
+      actor: auth.principal.name,
+      customerId: body.customerId,
+      customerName,
+      agreementId: body.agreementId,
+      agreementName: body.agreementName,
+      companyId,
+      notes: body.notes,
+      reconciliationMonth: body.reconciliationMonth,
+      tickets: body.tickets
+        .filter((ticket): ticket is { vendorId: VendorKey; vendorName: string; licenses: InvestigationTicketLicenseInput[] } =>
+          Boolean(ticket.vendorId && ticket.vendorName && Array.isArray(ticket.licenses) && ticket.licenses.length > 0),
+        )
+        .map((ticket) => ({
+          vendorId: ticket.vendorId,
+          vendorName: ticket.vendorName,
+          licenses: ticket.licenses,
+        })),
+      createServiceTicket: (payload) => client.createServiceTicket(payload),
+    });
+
+    return jsonResponse(200, result);
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to create investigation tickets.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listInvestigationTicketsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const vendorId = parseReconciliationVendorId(request.query.get('vendorId') ?? undefined);
+  if (!vendorId) {
+    return jsonResponse(400, { error: 'vendorId query parameter is required.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Investigation tickets need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const tickets = await listInvestigationTickets(repositoryContext.pool, {
+      vendorId,
+      customerName: request.query.get('customerName') ?? undefined,
+      reconciliationMonth: request.query.get('reconciliationMonth') ?? undefined,
+    });
+    return jsonResponse(200, { tickets });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to load investigation tickets.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listInvestigationTicketTimeEntriesHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const ticketId = request.params.ticketId?.trim();
+  if (!ticketId || !isUuid(ticketId)) {
+    return jsonResponse(400, { error: 'A valid investigation ticket id is required.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Investigation tickets need PostgreSQL settings before they can load time entries.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const ticket = await getInvestigationTicketById(repositoryContext.pool, ticketId);
+    if (!ticket) {
+      return jsonResponse(404, { error: 'Investigation ticket not found.' });
+    }
+
+    const settingsProvider = createIntegrationSettingsProvider({
+      loadLocalEnv: true,
+      metadataReader: repositoryContext.repository,
+    });
+    const connectWiseSettings = await settingsProvider.getIntegrationSettings('connectwise');
+    assertConnectWiseReady(connectWiseSettings);
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(connectWiseSettings));
+    const entries = await listAllConnectWisePages((page, pageSize) =>
+      client.listTimeEntries({
+        page,
+        pageSize,
+        orderBy: 'timeStart desc',
+        conditions: `chargeToType="ServiceTicket" and chargeToId=${ticket.connectWiseTicketId}`,
+      }),
+    );
+
+    return jsonResponse(200, {
+      ticket,
+      timeEntries: mapConnectWiseTimeEntries(entries),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to load ticket time entries.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+app.http('createInvestigationTickets', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/connectwise/investigation-tickets',
+  handler: createInvestigationTicketsHttp,
+});
+
+app.http('listInvestigationTickets', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/investigation-tickets',
+  handler: listInvestigationTicketsHttp,
+});
+
+app.http('listInvestigationTicketTimeEntries', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/investigation-tickets/{ticketId}/time-entries',
+  handler: listInvestigationTicketTimeEntriesHttp,
+});
+
 function parseReconciliationVendorId(value: string | undefined): VendorKey | undefined {
   return value && isVendorKey(value) ? value : undefined;
 }
@@ -435,4 +636,21 @@ function parseIntegrationId(value: string | undefined): IntegrationId | undefine
 
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function listAllConnectWisePages<T>(
+  loadPage: (page: number, pageSize: number) => Promise<T[]>,
+  pageSize = 100,
+) {
+  const items: T[] = [];
+  let page = 1;
+  while (true) {
+    const batch = await loadPage(page, pageSize);
+    items.push(...batch);
+    if (batch.length < pageSize) {
+      break;
+    }
+    page += 1;
+  }
+  return items;
 }

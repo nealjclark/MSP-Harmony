@@ -90,9 +90,11 @@ assert.equal(alternateProductServer?.agreementQuantity, 2);
 
 const storageAddOn = matchedResult.lines.find((line) => line.productCode === 'COVE-SERVER-STORAGE-ADDON');
 assert.equal(storageAddOn?.status, 'needs-review');
+assert.equal(storageAddOn?.sourceQuantity, 2);
 assert.equal(storageAddOn?.proposedQuantity, 2);
 assert.equal(storageAddOn?.delta, 1);
 assert.equal(storageAddOn?.financialImpact.amount, 75);
+assert.equal(storageAddOn?.evidence.find((item) => item.label === 'Measured usage')?.value, 3200);
 
 const pooledNoOverage = reconcileVendor({
   vendorId: 'cove',

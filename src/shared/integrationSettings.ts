@@ -31,6 +31,7 @@ export type PsaAgreementReconcileMode = 'merge-multiple-products' | 'separate-mu
 
 export const detailOnlySyncSettingKey = 'detailOnlySync';
 export const psaAgreementReconcileModeSettingKey = 'psaAgreementReconcileMode';
+export const doNotSuggestNewAdditionsSettingKey = 'doNotSuggestNewAdditions';
 
 export type IntegrationSecretDefinition = {
   key: string;
@@ -192,7 +193,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     endpoint: 'https://ncentral.example.com',
     requiredSecrets: [secret('apiToken', 'API Token', 'mspharmony-ncentral-api-token', 'NCENTRAL_API_TOKEN')],
     requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'NCENTRAL_ENDPOINT', 'https://ncentral.example.com')],
-    optionalNonSecrets: mappingIntegrationOptions('NCENTRAL'),
+    optionalNonSecrets: mappingIntegrationOptions('NCENTRAL', 'false', 'separate-multiple-products'),
     scopes: ['device-filters.read', 'devices.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -568,6 +569,17 @@ export function integrationPsaAgreementReconcileMode(
   return configuredValue === 'separate-multiple-products' ? 'separate-multiple-products' : 'merge-multiple-products';
 }
 
+export function integrationDoNotSuggestNewAdditions(
+  nonSecrets: Record<string, string | undefined> = {},
+  definition?: IntegrationSettingsDefinition,
+): boolean {
+  const configuredValue =
+    nonSecrets[doNotSuggestNewAdditionsSettingKey] ??
+    definition?.optionalNonSecrets?.find((setting) => setting.key === doNotSuggestNewAdditionsSettingKey)?.defaultValue;
+
+  return booleanSettingEnabled(configuredValue);
+}
+
 export function integrationSupportsPsaAgreementReconcileOptions(definition: IntegrationSettingsDefinition) {
   return definition.capabilities.includes('mapping');
 }
@@ -671,29 +683,58 @@ function detailOnlySyncOption(envVar: string, defaultValue = 'false') {
   );
 }
 
-function psaAgreementReconcileModeOption(envVar: string) {
+function psaAgreementReconcileModeOption(
+  envVar: string,
+  defaultValue: PsaAgreementReconcileMode = 'merge-multiple-products',
+) {
   return optionalNonSecret(
     psaAgreementReconcileModeSettingKey,
     'Agreement reconcile mode',
     envVar,
-    'merge-multiple-products',
+    defaultValue,
     'select',
-    'Choose how multiple ConnectWise additions with the same product are reconciled.',
+    'Choose how multiple ConnectWise additions with the same product are reconciled. Separate mode names lines after the matched agreement addition and avoids double-counting one addition across overlapping mapped products.',
     'PSA Agreement Reconcile options',
     [
-      { value: 'merge-multiple-products', label: 'Merge multiple products (default)' },
+      {
+        value: 'merge-multiple-products',
+        label:
+          defaultValue === 'merge-multiple-products'
+            ? 'Merge multiple products (default)'
+            : 'Merge multiple products',
+      },
       {
         value: 'separate-multiple-products',
-        label: 'Separate multiple products',
+        label:
+          defaultValue === 'separate-multiple-products'
+            ? 'Separate multiple products (default)'
+            : 'Separate multiple products',
       },
     ],
   );
 }
 
-function mappingIntegrationOptions(envVarPrefix: string, detailOnlyDefault = 'false') {
+function doNotSuggestNewAdditionsOption(envVar: string) {
+  return optionalNonSecret(
+    doNotSuggestNewAdditionsSettingKey,
+    'Do not suggest New Additions',
+    envVar,
+    'false',
+    'checkbox',
+    'Only reconcile products that already exist on the agreement. Skip create-addition suggestions for customers without that product.',
+    'PSA Agreement Reconcile options',
+  );
+}
+
+function mappingIntegrationOptions(
+  envVarPrefix: string,
+  detailOnlyDefault = 'false',
+  reconcileModeDefault: PsaAgreementReconcileMode = 'merge-multiple-products',
+) {
   return [
     detailOnlySyncOption(`${envVarPrefix}_DETAIL_ONLY_SYNC`, detailOnlyDefault),
-    psaAgreementReconcileModeOption(`${envVarPrefix}_PSA_AGREEMENT_RECONCILE_MODE`),
+    psaAgreementReconcileModeOption(`${envVarPrefix}_PSA_AGREEMENT_RECONCILE_MODE`, reconcileModeDefault),
+    doNotSuggestNewAdditionsOption(`${envVarPrefix}_DO_NOT_SUGGEST_NEW_ADDITIONS`),
   ];
 }
 

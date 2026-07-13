@@ -17,7 +17,7 @@ assert.equal(serverBase?.proposedQuantity, 2);
 
 const serverStorageAddOn = result.lines.find((line) => line.productCode === 'COVE-SERVER-STORAGE-ADDON');
 assert.equal(serverStorageAddOn?.status, 'needs-review');
-assert.equal(serverStorageAddOn?.sourceQuantity, 3200);
+assert.equal(serverStorageAddOn?.sourceQuantity, 2);
 assert.equal(serverStorageAddOn?.proposedQuantity, 2);
 assert.equal(serverStorageAddOn?.agreementQuantity, 1);
 assert.equal(serverStorageAddOn?.delta, 1);
@@ -388,6 +388,198 @@ assert.equal(
   0,
 );
 
+const apsPensionNcentralRules = buildNcentralRuleSet({
+  'ncentral-physical-server': {
+    vendorProductKey: 'ncentral-physical-server',
+    productCode: 'Server Mgmt&Automation',
+    productName: 'Server Mgmt&Automation',
+    targetProductCodes: [
+      'Server Mgmt&Automation',
+      'Managed Server',
+      'BMB Preferred Server Care',
+    ],
+  },
+  'ncentral-virtual-server': {
+    vendorProductKey: 'ncentral-virtual-server',
+    productCode: 'Server Management & Automation Solution',
+    productName: 'Server Management & Automation Solution',
+    targetProductCodes: [
+      'Server Management & Automation Solution',
+      'Server Mgmt&Automation',
+      'Managed Server',
+      'BMB Preferred Server Care',
+    ],
+  },
+}).rules;
+
+const apsPensionMergeResult = reconcileVendorUsage({
+  vendorId: 'ncentral',
+  reconcileMode: 'merge-multiple-products',
+  rules: apsPensionNcentralRules,
+  snapshots: [
+    ncentralServerSnapshot('aps-physical', 'ncentral-physical-server', 'physical-server'),
+    ncentralServerSnapshot('aps-virtual', 'ncentral-virtual-server', 'virtual-server'),
+  ],
+  agreementAdditions: [
+    {
+      id: 'aps-preferred-care',
+      connectWiseAdditionId: '9001',
+      clientId: 'aps-pension',
+      agreementId: 'aps-agreement',
+      productCode: 'BMB Preferred Server Care',
+      productName: 'BMB Preferred Server Care',
+      quantity: 1,
+    },
+  ],
+});
+assert.equal(apsPensionMergeResult.lines.filter((line) => line.lineType === 'base-count').length, 2);
+assert.ok(apsPensionMergeResult.lines.some((line) => line.productName === 'Server Mgmt&Automation'));
+assert.ok(
+  apsPensionMergeResult.lines.some((line) => line.productName === 'Server Management & Automation Solution'),
+);
+
+const apsPensionSeparateResult = reconcileVendorUsage({
+  vendorId: 'ncentral',
+  reconcileMode: 'separate-multiple-products',
+  rules: apsPensionNcentralRules,
+  snapshots: [
+    ncentralServerSnapshot('aps-physical', 'ncentral-physical-server', 'physical-server'),
+    ncentralServerSnapshot('aps-virtual', 'ncentral-virtual-server', 'virtual-server'),
+  ],
+  agreementAdditions: [
+    {
+      id: 'aps-preferred-care',
+      connectWiseAdditionId: '9001',
+      clientId: 'aps-pension',
+      agreementId: 'aps-agreement',
+      productCode: 'BMB Preferred Server Care',
+      productName: 'BMB Preferred Server Care',
+      quantity: 1,
+    },
+  ],
+});
+assert.equal(apsPensionSeparateResult.lines.filter((line) => line.lineType === 'base-count').length, 1);
+assert.equal(apsPensionSeparateResult.lines[0]?.productCode, 'BMB Preferred Server Care');
+assert.equal(apsPensionSeparateResult.lines[0]?.productName, 'BMB Preferred Server Care');
+assert.equal(apsPensionSeparateResult.lines[0]?.sourceQuantity, 2);
+assert.equal(apsPensionSeparateResult.lines[0]?.agreementQuantity, 1);
+assert.equal(apsPensionSeparateResult.lines[0]?.connectWiseAdditionId, '9001');
+assert.ok(apsPensionSeparateResult.lines[0]?.id.includes('merged-base'));
+
+const advantageGroupNcentralRules = buildNcentralRuleSet({
+  'ncentral-physical-server': {
+    vendorProductKey: 'ncentral-physical-server',
+    productCode: 'Server Mgmt&Automation',
+    productName: 'Server Mgmt&Automation',
+    targetProductCodes: ['Server Mgmt&Automation', 'Managed Server', 'BMB Preferred Server Care'],
+  },
+  'ncentral-virtual-server': {
+    vendorProductKey: 'ncentral-virtual-server',
+    productCode: 'Server Management & Automation Solution',
+    productName: 'Server Management & Automation Solution',
+    targetProductCodes: [
+      'Server Management & Automation Solution',
+      'Server Mgmt&Automation',
+      'Managed Server',
+      'BMB Preferred Server Care',
+    ],
+  },
+  'ncentral-workstation': {
+    vendorProductKey: 'ncentral-workstation',
+    productCode: 'Managed Workstation',
+    productName: 'Managed Workstation',
+    targetProductCodes: ['Managed Workstation', 'Managed Endpoint Protection'],
+  },
+}).rules;
+
+const advantageGroupSnapshots = [
+  ncentralServerSnapshot('ag-physical', 'ncentral-physical-server', 'physical-server'),
+  ncentralServerSnapshot('ag-physical-2', 'ncentral-physical-server', 'physical-server'),
+  ncentralServerSnapshot('ag-physical-3', 'ncentral-physical-server', 'physical-server'),
+  ncentralServerSnapshot('ag-virtual', 'ncentral-virtual-server', 'virtual-server'),
+  ncentralServerSnapshot('ag-virtual-2', 'ncentral-virtual-server', 'virtual-server'),
+  ncentralServerSnapshot('ag-virtual-3', 'ncentral-virtual-server', 'virtual-server'),
+  ncentralServerSnapshot('ag-virtual-4', 'ncentral-virtual-server', 'virtual-server'),
+  ncentralServerSnapshot('ag-virtual-5', 'ncentral-virtual-server', 'virtual-server'),
+  ...Array.from({ length: 52 }, (_, index) => ({
+    ...ncentralSnapshot(`ag-ws-${index + 1}`),
+    clientId: 'advantage-group',
+    agreementId: 'advantage-server-monitoring',
+  })),
+].map((snapshot) => ({
+  ...snapshot,
+  clientId: 'advantage-group',
+  agreementId: 'advantage-server-monitoring',
+}));
+
+const advantageGroupResult = reconcileVendorUsage({
+  vendorId: 'ncentral',
+  reconcileMode: 'separate-multiple-products',
+  rules: advantageGroupNcentralRules.map((rule) => ({
+    ...rule,
+    requiresExistingAgreementProduct: rule.vendorProductKey === 'ncentral-workstation',
+  })),
+  snapshots: advantageGroupSnapshots,
+  agreementAdditions: [
+    {
+      id: 'ag-managed-server',
+      connectWiseAdditionId: '9100',
+      clientId: 'advantage-group',
+      agreementId: 'advantage-server-monitoring',
+      productCode: 'Managed Server',
+      productName: 'Managed Server',
+      quantity: 1,
+    },
+  ],
+});
+
+const advantageServerLine = advantageGroupResult.lines.find((line) => line.productCode === 'Managed Server');
+assert.equal(advantageGroupResult.lines.filter((line) => line.lineType === 'base-count').length, 1);
+assert.equal(advantageServerLine?.productName, 'Managed Server');
+assert.equal(advantageServerLine?.sourceQuantity, 8);
+assert.equal(advantageServerLine?.agreementQuantity, 1);
+assert.equal(
+  advantageGroupResult.lines.some((line) => line.productCode === 'Managed Workstation' || line.sourceQuantity === 60),
+  false,
+);
+
+const advantageGroupSuggestNewResult = reconcileVendorUsage({
+  vendorId: 'ncentral',
+  reconcileMode: 'separate-multiple-products',
+  rules: advantageGroupNcentralRules,
+  snapshots: [
+    {
+      ...ncentralServerSnapshot('ag2-physical', 'ncentral-physical-server', 'physical-server'),
+      clientId: 'advantage-group',
+      agreementId: 'advantage-server-monitoring',
+    },
+    ...Array.from({ length: 52 }, (_, index) => ({
+      ...ncentralSnapshot(`ag2-ws-${index + 1}`),
+      clientId: 'advantage-group',
+      agreementId: 'advantage-server-monitoring',
+    })),
+  ],
+  agreementAdditions: [
+    {
+      id: 'ag2-managed-server',
+      connectWiseAdditionId: '9101',
+      clientId: 'advantage-group',
+      agreementId: 'advantage-server-monitoring',
+      productCode: 'Managed Server',
+      productName: 'Managed Server',
+      quantity: 1,
+    },
+  ],
+});
+
+const advantageSuggestServer = advantageGroupSuggestNewResult.lines.find((line) => line.productCode === 'Managed Server');
+const advantageSuggestWorkstation = advantageGroupSuggestNewResult.lines.find(
+  (line) => line.productCode === 'Managed Workstation',
+);
+assert.equal(advantageSuggestServer?.sourceQuantity, 1);
+assert.equal(advantageSuggestWorkstation?.sourceQuantity, 52);
+assert.equal(advantageSuggestWorkstation?.writeAction, 'create-addition');
+
 console.log('backend reconciliation tests passed');
 
 function ncentralSnapshot(id: string): UsageSnapshot {
@@ -403,6 +595,27 @@ function ncentralSnapshot(id: string): UsageSnapshot {
     observedAt: '2026-06-17T12:00:00.000Z',
     dimensions: {
       ncentralProductType: 'workstation',
+    },
+  };
+}
+
+function ncentralServerSnapshot(
+  id: string,
+  vendorProductKey: 'ncentral-physical-server' | 'ncentral-virtual-server',
+  productType: 'physical-server' | 'virtual-server',
+): UsageSnapshot {
+  return {
+    id,
+    vendorId: 'ncentral',
+    clientId: 'aps-pension',
+    agreementId: 'aps-agreement',
+    vendorProductKey,
+    productCode: vendorProductKey,
+    productName: vendorProductKey,
+    quantity: 1,
+    observedAt: '2026-06-17T12:00:00.000Z',
+    dimensions: {
+      ncentralProductType: productType,
     },
   };
 }

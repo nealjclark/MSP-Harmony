@@ -233,6 +233,19 @@ export type ConnectWiseBoardSubType = {
   [key: string]: unknown;
 };
 
+export type ConnectWiseBoardStatus = {
+  id: number;
+  name: string;
+  board?: {
+    id?: number;
+    name?: string;
+  };
+  inactiveFlag?: boolean;
+  defaultFlag?: boolean;
+  closedStatus?: boolean;
+  [key: string]: unknown;
+};
+
 export type ConnectWiseServiceTicket = {
   id: number;
   summary?: string;
@@ -251,11 +264,52 @@ export type ConnectWiseServiceTicket = {
     id?: number;
     name?: string;
   };
+  status?: {
+    id?: number;
+    name?: string;
+  };
   company?: {
     id?: number;
     name?: string;
     identifier?: string;
   };
+  initialDescription?: string;
+  [key: string]: unknown;
+};
+
+export type ConnectWiseCreateServiceTicketRequest = {
+  summary: string;
+  board: { id: number };
+  company: { id: number };
+  type: { id: number };
+  subType?: { id: number };
+  status?: { id: number };
+  initialDescription?: string;
+};
+
+export type ConnectWiseTimeEntry = {
+  id: number;
+  chargeToId?: number;
+  chargeToType?: string;
+  member?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  notes?: string;
+  timeStart?: string;
+  timeEnd?: string;
+  actualHours?: number;
+  billableOption?: string;
+  workType?: {
+    id?: number;
+    name?: string;
+  };
+  workRole?: {
+    id?: number;
+    name?: string;
+  };
+  dateEntered?: string;
   [key: string]: unknown;
 };
 
@@ -397,8 +451,31 @@ export class ConnectWiseClient {
     );
   }
 
+  async listBoardStatuses(boardId: number | string, options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseBoardStatus[]>(
+      `/service/boards/${encodeURIComponent(String(boardId))}/statuses?${listParams(options).toString()}`,
+    );
+  }
+
   async listServiceTickets(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseServiceTicket[]>(`/service/tickets?${listParams(options).toString()}`);
+  }
+
+  async createServiceTicket(payload: ConnectWiseCreateServiceTicketRequest) {
+    return this.request<ConnectWiseServiceTicket>('/service/tickets', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getServiceTicket(ticketId: number | string) {
+    return this.request<ConnectWiseServiceTicket>(
+      `/service/tickets/${encodeURIComponent(String(ticketId))}`,
+    );
+  }
+
+  async listTimeEntries(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseTimeEntry[]>(`/time/entries?${listParams(options).toString()}`);
   }
 
   async getSystemInfo() {

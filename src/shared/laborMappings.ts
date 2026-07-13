@@ -73,6 +73,12 @@ export type ConnectWiseSubTypeOption = {
   boardId: number;
 };
 
+export type ConnectWiseStatusOption = {
+  id: number;
+  name: string;
+  boardId: number;
+};
+
 export function integrationSupportsLaborMapping(vendorId: string): vendorId is VendorKey {
   if (isVendorDatapointId(vendorId)) {
     return true;

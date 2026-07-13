@@ -13,7 +13,7 @@ import type {
   VendorRuleSet,
 } from '../shared/types';
 import type { ReconciliationAdjustment } from './reconciliationAdjustments';
-import { getIntegrationSettingsDefinition, integrationPsaAgreementReconcileMode, type IntegrationId } from '../../shared/integrationSettings';
+import { getIntegrationSettingsDefinition, integrationDoNotSuggestNewAdditions, integrationPsaAgreementReconcileMode, type IntegrationId } from '../../shared/integrationSettings';
 import { isVendorDatapointId, isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
 import { getVendorRuleSet } from './reconciliation';
 import { loadAdditionPins, upsertAdditionPins } from '../mapping/additionPinService';
@@ -248,17 +248,24 @@ export async function reconcileVendorFromDatabase(
 ): Promise<DatabaseReconciliationResult> {
   const syncRunId = options.syncRunId ?? (await loadLatestSyncRunId(database, vendorId));
   const ruleSet = await loadRuleSet(database, vendorId);
+  const doNotSuggestNewAdditions = await loadDoNotSuggestNewAdditions(database, vendorId);
+  const rules = doNotSuggestNewAdditions
+    ? ruleSet.rules.map((rule) => ({
+        ...rule,
+        requiresExistingAgreementProduct: true,
+      }))
+    : ruleSet.rules;
   const linkedContext = await loadLinkedCountContext(
     database,
     vendorId as IntegrationId,
-    ruleSet,
+    { ...ruleSet, rules },
     await listProductLinkRules(database, vendorId as IntegrationId),
   );
 
   if (!syncRunId && linkedContext.anchorSnapshots.length === 0) {
     const emptyResult = reconcileVendorUsage({
       vendorId,
-      rules: ruleSet.rules,
+      rules,
       snapshots: [],
       agreementAdditions: [],
     });
@@ -279,7 +286,7 @@ export async function reconcileVendorFromDatabase(
   const overriddenSnapshots = applyUsageOverrides(
     loadedSnapshots,
     await loadUsageOverrides(database, vendorId, loadedSnapshots),
-    ruleSet,
+    { ...ruleSet, rules },
   );
   const agreementAdditions = await loadAgreementAdditions(database, [
     ...overriddenSnapshots,
@@ -305,7 +312,7 @@ export async function reconcileVendorFromDatabase(
   ];
   const result = reconcileVendorUsage({
     vendorId,
-    rules: ruleSet.rules,
+    rules,
     snapshots,
     agreementAdditions,
     reconcileMode,
@@ -315,12 +322,15 @@ export async function reconcileVendorFromDatabase(
     await upsertAdditionPins(database, result.pinAssignments);
   }
   const linkedLines = applyLinkedCountsToLines(result.lines, linkedContext.countsByLineKey);
-  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, linkedLines);
+  const visibleLines = doNotSuggestNewAdditions
+    ? linkedLines.filter((line) => line.writeAction !== 'create-addition')
+    : linkedLines;
+  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, visibleLines);
 
   return {
     ...result,
-    totals: totalsForLines(linkedLines),
-    lines: await withLineDetails(database, linkedLines, snapshots, agreementAdditions, ruleSet, invoiceState.quantities),
+    totals: totalsForLines(visibleLines),
+    lines: await withLineDetails(database, visibleLines, snapshots, agreementAdditions, { ...ruleSet, rules }, invoiceState.quantities),
     syncRunId,
     snapshotCount: snapshots.length,
     agreementAdditionCount: agreementAdditions.length,
@@ -1449,18 +1459,32 @@ function integrationDisplayName(integrationId: VendorKey) {
 }
 
 async function loadVendorReconcileMode(database: Queryable, vendorId: string) {
+  const nonSecrets = await loadVendorNonSecrets(database, vendorId);
+
+  return integrationPsaAgreementReconcileMode(
+    nonSecrets,
+    getIntegrationSettingsDefinition(vendorId as IntegrationId),
+  );
+}
+
+async function loadDoNotSuggestNewAdditions(database: Queryable, vendorId: string) {
+  const nonSecrets = await loadVendorNonSecrets(database, vendorId);
+
+  return integrationDoNotSuggestNewAdditions(
+    nonSecrets,
+    getIntegrationSettingsDefinition(vendorId as IntegrationId),
+  );
+}
+
+async function loadVendorNonSecrets(database: Queryable, vendorId: string) {
   const result = await database.query<{ non_secret_settings: unknown }>(
     `select non_secret_settings
        from integration_settings
       where integration_id = $1`,
     [vendorId],
   );
-  const nonSecrets = recordFromJson(result.rows[0]?.non_secret_settings) as Record<string, string | undefined>;
 
-  return integrationPsaAgreementReconcileMode(
-    nonSecrets,
-    getIntegrationSettingsDefinition(vendorId as IntegrationId),
-  );
+  return recordFromJson(result.rows[0]?.non_secret_settings) as Record<string, string | undefined>;
 }
 
 async function withLineDetails(

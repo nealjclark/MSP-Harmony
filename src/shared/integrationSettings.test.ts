@@ -4,10 +4,12 @@ import {
   getIntegrationDataSource,
   integrationDetailOnlySyncEnabled,
   integrationDataSourceRequiresCustomerMapping,
+  integrationDoNotSuggestNewAdditions,
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationIdsWithCapability,
   integrationPsaAgreementReconcileMode,
+  doNotSuggestNewAdditionsSettingKey,
   psaAgreementReconcileModeSettingKey,
   validateIntegrationRegistry,
   validateIntegrationSettings,
@@ -212,6 +214,14 @@ assert.equal(microsoft365.optionalNonSecrets?.some((setting) => setting.key === 
 assert.equal(
   integrationPsaAgreementReconcileMode({ psaAgreementReconcileMode: 'separate-multiple-products' }, microsoft365),
   'separate-multiple-products',
+);
+assert.equal(microsoft365.optionalNonSecrets?.some((setting) => setting.key === doNotSuggestNewAdditionsSettingKey), true);
+assert.equal(integrationDoNotSuggestNewAdditions({}, microsoft365), false);
+assert.equal(integrationDoNotSuggestNewAdditions({ doNotSuggestNewAdditions: 'true' }, microsoft365), true);
+assert.equal(integrationPsaAgreementReconcileMode({}, ncentral), 'separate-multiple-products');
+assert.equal(
+  integrationPsaAgreementReconcileMode({ psaAgreementReconcileMode: 'merge-multiple-products' }, ncentral),
+  'merge-multiple-products',
 );
 
 console.log('integration settings tests passed');

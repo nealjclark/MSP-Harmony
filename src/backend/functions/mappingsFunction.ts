@@ -43,12 +43,21 @@ import {
   upsertLaborMapping,
 } from '../mapping/laborMappings';
 import {
+  getInvestigationTicketMapping,
+  upsertInvestigationTicketMapping,
+} from '../mapping/investigationTicketMappings';
+import {
   integrationSupportsLaborMapping,
   type ConnectWiseBoardOption,
+  type ConnectWiseStatusOption,
   type ConnectWiseSubTypeOption,
   type ConnectWiseTypeOption,
   type UpsertLaborMappingInput,
 } from '../../shared/laborMappings';
+import {
+  integrationSupportsInvestigationTicketMapping,
+  type UpsertInvestigationTicketMappingInput,
+} from '../../shared/investigationTicketMappings';
 import { NcentralClient, ncentralCredentialsFromSettings } from '../vendor/ncentral/client';
 import { assertNcentralReady } from '../vendor/ncentral/operations';
 import {
@@ -93,6 +102,8 @@ type UsageOverrideBody = CreateUsageOverrideInput & {
 type NcentralFilterMappingBody = UpsertNcentralFilterMappingInput;
 
 type LaborMappingBody = UpsertLaborMappingInput;
+
+type InvestigationTicketMappingBody = UpsertInvestigationTicketMappingInput;
 
 export async function listMappingsHttp(
   request: HttpRequest,
@@ -1033,10 +1044,13 @@ export async function listLaborTicketClassificationsHttp(
     const boardId = boardIdParam ? Number(boardIdParam) : null;
 
     if (boardId != null && Number.isFinite(boardId)) {
-      const [types, subTypes] = await Promise.all([
+      const [types, subTypes, statuses] = await Promise.all([
         listAllConnectWisePages((page, pageSize) => client.listBoardTypes(boardId, { page, pageSize, orderBy: 'name' })),
         listAllConnectWisePages((page, pageSize) =>
           client.listBoardSubTypes(boardId, { page, pageSize, orderBy: 'name' }),
+        ),
+        listAllConnectWisePages((page, pageSize) =>
+          client.listBoardStatuses(boardId, { page, pageSize, orderBy: 'name' }),
         ),
       ]);
 
@@ -1058,10 +1072,20 @@ export async function listLaborTicketClassificationsHttp(
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
+      const statusOptions: ConnectWiseStatusOption[] = statuses
+        .filter((item) => item.inactiveFlag !== true)
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          boardId,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+
       return jsonResponse(200, {
         boardId,
         types: typeOptions,
         subTypes: subTypeOptions,
+        statuses: statusOptions,
       });
     }
 
@@ -1079,10 +1103,84 @@ export async function listLaborTicketClassificationsHttp(
       boards: boardOptions,
       types: [] as ConnectWiseTypeOption[],
       subTypes: [] as ConnectWiseSubTypeOption[],
+      statuses: [] as ConnectWiseStatusOption[],
     });
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to load ConnectWise ticket classifications.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function getInvestigationTicketMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId || !integrationSupportsInvestigationTicketMapping(integrationId)) {
+    return jsonResponse(400, {
+      error: `Investigation ticket mapping is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Investigation ticket mappings need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId,
+      mapping: await getInvestigationTicketMapping(repositoryContext.pool, integrationId),
+    });
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load investigation ticket mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertInvestigationTicketMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  if (!integrationId || !integrationSupportsInvestigationTicketMapping(integrationId)) {
+    return jsonResponse(400, {
+      error: `Investigation ticket mapping is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
+    });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as InvestigationTicketMappingBody;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Investigation ticket mapping updates need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      integrationId,
+      mapping: await upsertInvestigationTicketMapping(repositoryContext.pool, integrationId, body),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save investigation ticket mapping.',
     });
   } finally {
     await repositoryContext.close();
@@ -1255,6 +1353,20 @@ app.http('listLaborTicketClassifications', {
   authLevel: 'anonymous',
   route: 'mappings/connectwise/labor-classifications',
   handler: listLaborTicketClassificationsHttp,
+});
+
+app.http('getInvestigationTicketMapping', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/investigation-ticket-mapping',
+  handler: getInvestigationTicketMappingHttp,
+});
+
+app.http('upsertInvestigationTicketMapping', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/investigation-ticket-mapping',
+  handler: upsertInvestigationTicketMappingHttp,
 });
 
 function parseIntegrationId(value: string | undefined): VendorKey | undefined {

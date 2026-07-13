@@ -98,17 +98,48 @@ function reconcileAgreement(input: {
   }
 
   const agreementAdditions = additionsForAgreement(input.request.agreementAdditions, input.agreementKey);
-  const matchedAdditions = uniqueAdditions(
-    activeRules.flatMap((rule) => findAdditions(agreementAdditions, clientId, agreementId, targetProductCodes(rule))),
-  );
   const snapshotsByRule = new Map(
     activeContexts.map((context) => [context.rule.id, context.snapshotsByAgreement.get(input.agreementKey) ?? []] as const),
   );
 
-  // Single CW addition for this catalog family: merge all vendor counts into one line.
+  // Keep unrelated mapped products apart (e.g. N-central servers vs workstations) even when
+  // they share an agreement. Only rules with overlapping target codes form a merge family.
+  return partitionRulesBySharedTargets(activeRules).flatMap((familyRules) =>
+    reconcileRuleFamily({
+      request: input.request,
+      agreementKey: input.agreementKey,
+      clientId,
+      agreementId,
+      familyRules,
+      agreementAdditions,
+      snapshotsByRule,
+      pins: input.pins,
+      pinAssignments: input.pinAssignments,
+    }),
+  );
+}
+
+function reconcileRuleFamily(input: {
+  request: ReconcileVendorUsageRequest;
+  agreementKey: string;
+  clientId: string;
+  agreementId: string;
+  familyRules: QuantityRule[];
+  agreementAdditions: AgreementAddition[];
+  snapshotsByRule: Map<string, UsageSnapshot[]>;
+  pins: VendorProductAdditionPin[];
+  pinAssignments: VendorProductAdditionPinAssignment[];
+}) {
+  const matchedAdditions = uniqueAdditions(
+    input.familyRules.flatMap((rule) =>
+      findAdditions(input.agreementAdditions, input.clientId, input.agreementId, targetProductCodes(rule)),
+    ),
+  );
+
+  // Single CW addition for this catalog family: merge related vendor counts into one line.
   if (matchedAdditions.length <= 1) {
-    const mergedSnapshots = activeRules.flatMap((rule) => snapshotsByRule.get(rule.id) ?? []);
-    const primaryRule = pickPrimaryMergedRule(activeRules, snapshotsByRule);
+    const mergedSnapshots = input.familyRules.flatMap((rule) => input.snapshotsByRule.get(rule.id) ?? []);
+    const primaryRule = pickPrimaryMergedRule(input.familyRules, input.snapshotsByRule);
     if (primaryRule.requiresExistingAgreementProduct && matchedAdditions.length === 0) {
       return [];
     }
@@ -118,8 +149,8 @@ function reconcileAgreement(input: {
         request: input.request,
         rule: primaryRule,
         agreementKey: input.agreementKey,
-        clientId,
-        agreementId,
+        clientId: input.clientId,
+        agreementId: input.agreementId,
         snapshots: mergedSnapshots,
         matchedAdditions,
         assignedAddition: matchedAdditions[0],
@@ -133,12 +164,12 @@ function reconcileAgreement(input: {
   const claimedAdditionIds = new Set<string>();
   const assignments = assignRulesToAdditions({
     request: input.request,
-    rules: activeRules,
-    snapshotsByRule,
+    rules: input.familyRules,
+    snapshotsByRule: input.snapshotsByRule,
     additions: matchedAdditions,
     pins: input.pins,
-    clientId,
-    agreementId,
+    clientId: input.clientId,
+    agreementId: input.agreementId,
     pinAssignments: input.pinAssignments,
     claimedAdditionIds,
   });
@@ -149,8 +180,8 @@ function reconcileAgreement(input: {
         request: input.request,
         rule: assignment.rule,
         agreementKey: input.agreementKey,
-        clientId,
-        agreementId,
+        clientId: input.clientId,
+        agreementId: input.agreementId,
         snapshots: assignment.snapshots,
         matchedAdditions: assignment.addition ? [assignment.addition] : matchedAdditions,
         assignedAddition: assignment.addition,
@@ -166,15 +197,64 @@ function reconcileAgreement(input: {
       buildLeftoverAdditionLine({
         request: input.request,
         agreementKey: input.agreementKey,
-        clientId,
-        agreementId,
+        clientId: input.clientId,
+        agreementId: input.agreementId,
         addition,
-        fallbackRule: pickRuleForLeftoverAddition(activeRules, addition) ?? activeRules[0],
+        fallbackRule: pickRuleForLeftoverAddition(input.familyRules, addition) ?? input.familyRules[0],
       }),
     )
     .filter((line): line is ReconciliationLine => Boolean(line));
 
   return [...assignedLines, ...leftoverLines];
+}
+
+function partitionRulesBySharedTargets(rules: QuantityRule[]): QuantityRule[][] {
+  if (rules.length <= 1) {
+    return rules.map((rule) => [rule]);
+  }
+
+  const parent = new Map<string, string>();
+  for (const rule of rules) {
+    parent.set(rule.id, rule.id);
+  }
+
+  const find = (ruleId: string): string => {
+    const current = parent.get(ruleId) ?? ruleId;
+    if (current === ruleId) {
+      return ruleId;
+    }
+    const root = find(current);
+    parent.set(ruleId, root);
+    return root;
+  };
+
+  const unite = (leftId: string, rightId: string) => {
+    const leftRoot = find(leftId);
+    const rightRoot = find(rightId);
+    if (leftRoot !== rightRoot) {
+      parent.set(rightRoot, leftRoot);
+    }
+  };
+
+  for (let leftIndex = 0; leftIndex < rules.length; leftIndex += 1) {
+    const leftCodes = new Set(targetProductCodes(rules[leftIndex]).map(normalizeProductCode));
+    for (let rightIndex = leftIndex + 1; rightIndex < rules.length; rightIndex += 1) {
+      const overlaps = targetProductCodes(rules[rightIndex]).some((code) => leftCodes.has(normalizeProductCode(code)));
+      if (overlaps) {
+        unite(rules[leftIndex].id, rules[rightIndex].id);
+      }
+    }
+  }
+
+  const families = new Map<string, QuantityRule[]>();
+  for (const rule of rules) {
+    const root = find(rule.id);
+    const family = families.get(root) ?? [];
+    family.push(rule);
+    families.set(root, family);
+  }
+
+  return [...families.values()];
 }
 
 function uniqueAdditions(additions: AgreementAddition[]) {

@@ -871,3 +871,85 @@ UPDATE communication_settings
 SET send_as_mailbox = invoice_from_email
 WHERE id = 'default'
   AND (send_as_mailbox IS NULL OR btrim(send_as_mailbox) = '');
+
+CREATE TABLE IF NOT EXISTS vendor_investigation_ticket_mappings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL UNIQUE,
+  board_id integer NOT NULL,
+  board_name text,
+  type_id integer NOT NULL,
+  type_name text,
+  subtype_id integer,
+  subtype_name text,
+  status_id integer,
+  status_name text,
+  company_override_id integer,
+  company_override_name text,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE vendor_investigation_ticket_mappings
+  ADD COLUMN IF NOT EXISTS company_override_id integer;
+ALTER TABLE vendor_investigation_ticket_mappings
+  ADD COLUMN IF NOT EXISTS company_override_name text;
+
+CREATE INDEX IF NOT EXISTS idx_vendor_investigation_ticket_mappings_vendor
+  ON vendor_investigation_ticket_mappings(vendor_id);
+
+CREATE TABLE IF NOT EXISTS vendor_investigation_tickets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  connectwise_ticket_id bigint NOT NULL,
+  connectwise_ticket_number text NOT NULL,
+  vendor_id text NOT NULL,
+  vendor_name text,
+  customer_id uuid,
+  customer_name text,
+  agreement_id uuid,
+  agreement_name text,
+  company_id integer,
+  summary text NOT NULL,
+  notes text,
+  initial_description text,
+  board_id integer,
+  type_id integer,
+  subtype_id integer,
+  status_id integer,
+  reconciliation_month date NOT NULL,
+  created_by text,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_investigation_tickets_vendor_month
+  ON vendor_investigation_tickets(vendor_id, reconciliation_month, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_investigation_tickets_customer_vendor_month
+  ON vendor_investigation_tickets(customer_name, vendor_id, reconciliation_month);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_investigation_tickets_cw_ticket
+  ON vendor_investigation_tickets(connectwise_ticket_id);
+
+CREATE TABLE IF NOT EXISTS vendor_investigation_ticket_products (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  investigation_ticket_id uuid NOT NULL REFERENCES vendor_investigation_tickets(id) ON DELETE CASCADE,
+  source_line_id text,
+  product_code text,
+  product_name text,
+  vendor_product_key text,
+  api_count numeric(18, 4),
+  linked_count numeric(18, 4),
+  invoice_count numeric(18, 4),
+  connectwise_count numeric(18, 4),
+  proposed_count numeric(18, 4),
+  selected_count_source text,
+  delta numeric(18, 4),
+  financial_impact numeric(18, 4),
+  unit text,
+  discrepancy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_investigation_ticket_products_ticket
+  ON vendor_investigation_ticket_products(investigation_ticket_id);

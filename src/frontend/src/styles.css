@@ -872,6 +872,75 @@ h2 {
   text-decoration: underline;
 }
 
+.investigation-tickets-modal {
+  max-width: 760px;
+}
+
+.investigation-ticket-list {
+  display: grid;
+  gap: 12px;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+}
+
+.investigation-ticket-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.investigation-ticket-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.investigation-ticket-toggle span {
+  display: grid;
+  gap: 2px;
+}
+
+.investigation-ticket-toggle em,
+.investigation-ticket-products em,
+.investigation-ticket-time-entries em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 0.84rem;
+}
+
+.investigation-ticket-products,
+.investigation-ticket-time-entries ul {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.investigation-ticket-products li,
+.investigation-ticket-time-entries li {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f7f8f6;
+}
+
+.investigation-ticket-time-entries {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .license-table {
   display: grid;
   min-width: 0;
@@ -2241,15 +2310,134 @@ h2 {
   max-width: 52rem;
 }
 
-.labor-mapping-form select[multiple],
-.ncentral-filter-edit-panel select[multiple] {
-  min-height: 7rem;
+.mapping-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
-.labor-mapping-form label small,
-.ncentral-filter-edit-panel label small {
+.mapping-panel-message {
+  margin: 0 18px 12px;
+}
+
+.mapping-empty-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.labor-mapping-list {
+  padding: 0 18px 18px;
+}
+
+.mapping-create-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  margin: 0 18px 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7faf7;
+}
+
+.mapping-create-form.mapping-edit-form {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  padding: 12px 0 0;
+}
+
+.mapping-create-form label {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+}
+
+.mapping-create-form label.mapping-form-span-2 {
+  grid-column: 1 / -1;
+}
+
+.mapping-create-form label span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.mapping-create-form label small {
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.mapping-create-form input,
+.mapping-create-form select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid #cad5cb;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #ffffff;
+}
+
+.mapping-create-form select[multiple] {
+  min-height: 7rem;
+  padding: 6px;
+}
+
+.mapping-form-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.investigation-ticket-mapping-summary {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+}
+
+.investigation-ticket-mapping-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.investigation-ticket-mapping-meta div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.investigation-ticket-mapping-meta dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.investigation-ticket-mapping-meta dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.ncentral-filter-panel > .ncentral-filter-row,
+.labor-mapping-panel > .ncentral-filter-row,
+.labor-mapping-panel > .empty-state {
+  margin: 0 18px 18px;
 }
 
 .settings-page {
@@ -2603,75 +2791,6 @@ h2 {
   display: flex;
   gap: 6px;
   justify-content: flex-end;
-}
-
-.ncentral-filter-edit-panel {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.ncentral-filter-edit-panel label {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-
-.ncentral-filter-edit-panel label span {
-  color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.ncentral-filter-edit-panel input,
-.ncentral-filter-edit-panel select {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #cad5cb;
-  border-radius: 8px;
-  padding: 8px 9px;
-  background: #ffffff;
-}
-
-.ncentral-filter-edit-actions {
-  display: flex;
-  align-items: end;
-  gap: 8px;
-}
-
-.ncentral-filter-form {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
-  gap: 12px;
-  align-items: end;
-  padding: 16px 18px 18px;
-  border-top: 1px solid var(--line);
-}
-
-.ncentral-filter-form label {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.ncentral-filter-form label span {
-  color: var(--muted);
-  font-size: 0.75rem;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.ncentral-filter-form input,
-.ncentral-filter-form select {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #cad5cb;
-  border-radius: 8px;
-  padding: 9px 10px;
-  background: #ffffff;
 }
 
 .mapping-review-list {
@@ -7083,7 +7202,9 @@ h2 {
   .invoice-column-map-grid,
   .product-bundle-form,
   .linked-count-form,
-  .usage-override-form {
+  .usage-override-form,
+  .mapping-create-form,
+  .ncentral-filter-grid {
     grid-template-columns: 1fr;
   }
 

@@ -197,7 +197,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     }
 
     if (rule.allowance?.kind === 'included' && rule.addOn) {
-      const sourceQuantity = sumMetric(snapshots, rule.addOn.metric);
+      const measuredUsage = sumMetric(snapshots, rule.addOn.metric);
       const proposedAddOnQuantity = calculateAddOnQuantity(snapshots, rule.allowance.metric, rule.allowance.includedQuantity, rule.allowance.scope, rule.addOn.incrementQuantity, rule.addOn.roundOverage);
       const addOnAdditions = findAdditions(relevantAdditions, clientId, agreementId, targetProductCodes(rule.addOn));
       const agreementQuantity = sumAdditions(addOnAdditions);
@@ -217,7 +217,9 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
         productName: rule.addOn.productName,
         lineType: 'usage-add-on',
         ruleId: rule.id,
-        sourceQuantity,
+        // API/source count is billable add-on units (+1 per incrementQuantity of measured usage over allowance),
+        // not the raw measured metric (e.g. total GB for Cove 1 TB storage add-ons).
+        sourceQuantity: proposedAddOnQuantity,
         agreementQuantity,
         proposedQuantity: proposedAddOnQuantity,
         delta,
@@ -234,7 +236,7 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
           { label: 'Included quantity', value: rule.allowance.includedQuantity },
           { label: 'Allowance scope', value: rule.allowance.scope },
           { label: 'Matched agreement additions', value: addOnAdditions.length },
-          { label: 'Measured usage', value: sourceQuantity },
+          { label: 'Measured usage', value: measuredUsage },
           ...(unitPrice ? [{ label: 'Unit price', value: unitPrice.amount }] : []),
         ],
       });

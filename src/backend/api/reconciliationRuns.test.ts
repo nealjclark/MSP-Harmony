@@ -94,6 +94,59 @@ async function run() {
     true,
   );
 
+  const doNotSuggestDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from integration_settings')) {
+        return {
+          rows: [
+            {
+              non_secret_settings: {
+                doNotSuggestNewAdditions: 'true',
+              },
+            },
+          ] as T[],
+        };
+      }
+
+      // loadAgreementAdditions also selects connectwise_addition_id; prefer the reconcile-shaped rows.
+      if (sql.includes('from agreement_additions') && sql.includes('customer_id = any')) {
+        return {
+          rows: [
+            {
+              id: 'addition-server',
+              customer_id: '11111111-1111-1111-1111-111111111111',
+              agreement_id: '22222222-2222-2222-2222-222222222222',
+              connectwise_addition_id: 'cw-addition-1',
+              product_code: 'COVE-SERVER',
+              product_name: 'Cove Server Backup',
+              quantity: '1',
+              unit_price: '120',
+              addition_status: 'Active',
+              updated_at: new Date('2026-06-15T12:00:00Z'),
+              raw_payload: {},
+            },
+          ] as T[],
+        };
+      }
+
+      return database.query<T>(sql, values);
+    },
+  };
+  const suppressedCreateResult = await reconcileVendorFromDatabase(doNotSuggestDatabase, 'cove', { syncRunId });
+  assert.equal(
+    suppressedCreateResult.lines.some((line) => line.writeAction === 'create-addition'),
+    false,
+  );
+  assert.equal(
+    suppressedCreateResult.lines.find((line) => line.productCode === 'COVE-SERVER-STORAGE-ADDON'),
+    undefined,
+  );
+  const suppressedServerLine = suppressedCreateResult.lines.find(
+    (line) => line.productCode === 'COVE-SERVER' && line.lineType === 'base-count',
+  );
+  assert.equal(suppressedServerLine?.agreementQuantity, 1);
+  assert.equal(suppressedServerLine?.writeAction, undefined);
+
   const activeAdditions = await listActiveAgreementAdditions(database, '22222222-2222-2222-2222-222222222222');
   assert.equal(activeAdditions[0]?.connectWiseAdditionId, 'cw-addition-1');
   assert.equal(activeAdditions[0]?.unitPrice?.amount, 120.5);
