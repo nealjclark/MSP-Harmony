@@ -20,6 +20,7 @@ export type IntegrationOperationalStatus = {
 
 export type IntegrationOperationalStatusReader = {
   loadOperationalStatus: (integrationId: IntegrationId) => Promise<IntegrationOperationalStatus | undefined>;
+  loadOperationalStatuses?: (integrationIds: IntegrationId[]) => Promise<Map<IntegrationId, IntegrationOperationalStatus>>;
 };
 
 export function listIntegrations(states: IntegrationSettingsState[] = []) {
@@ -58,17 +59,27 @@ export async function listRuntimeIntegrations(
     loadSecrets: false,
   });
   const settings = await provider.listIntegrationSettings();
+  const operationalStatusesById = await options.operationalStatusReader?.loadOperationalStatuses?.(
+    settings.map((setting) => setting.definition.integrationId),
+  );
 
-  return Promise.all(
-    settings.map(async (setting) => ({
+  const integrations = [];
+
+  for (const setting of settings) {
+    const integrationId = setting.definition.integrationId;
+    integrations.push({
       ...setting.definition,
       nonSecrets: setting.nonSecrets,
       validation: setting.validation,
       secretSource: setting.secretSource,
       keyVaultUrl: setting.keyVaultUrl,
-      operationalStatus: await options.operationalStatusReader?.loadOperationalStatus(setting.definition.integrationId),
-    })),
-  );
+      operationalStatus:
+        operationalStatusesById?.get(integrationId) ??
+        (operationalStatusesById ? undefined : await options.operationalStatusReader?.loadOperationalStatus(integrationId)),
+    });
+  }
+
+  return integrations;
 }
 
 export async function getRuntimeIntegration(

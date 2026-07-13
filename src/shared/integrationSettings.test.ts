@@ -171,9 +171,15 @@ assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
 
 const huntress = getIntegrationSettingsDefinition('huntress');
 assert.ok(huntress);
-assert.equal(huntress.authMode, 'none');
+assert.equal(huntress.authMode, 'basic');
+assert.equal(integrationHasCapability('huntress', 'live-api'), true);
 assert.equal(integrationHasCapability('huntress', 'invoice-import'), true);
-assert.equal(getIntegrationDataSource('huntress', 'customer-product-breakdown')?.label, 'Customer products');
+assert.equal(getIntegrationDataSource('huntress', 'customer-product-breakdown')?.label, 'Organization product usage');
+assert.deepEqual(
+  huntress.requiredSecrets.map((secret) => secret.keyVaultSecretName),
+  ['mspharmony-huntress-api-key', 'mspharmony-huntress-api-secret'],
+);
+assert.equal(huntress.optionalNonSecrets?.find((setting) => setting.key === 'productClasses')?.defaultValue, 'itdr');
 assert.equal(integrationDataSourceRequiresCustomerMapping('reseller-product-total'), false);
 
 const datto = getIntegrationSettingsDefinition('datto');

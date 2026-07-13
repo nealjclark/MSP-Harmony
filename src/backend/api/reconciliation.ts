@@ -6,6 +6,7 @@ import { microsoft365RuleSet } from '../vendor/microsoft365/rules';
 import { ncentralRuleSet } from '../vendor/ncentral/rules';
 import { appRiverRuleSet } from '../vendor/appriver/rules';
 import { sentinelOneRuleSet } from '../vendor/sentinelone/rules';
+import { huntressRuleSet } from '../vendor/huntress/rules';
 
 const vendorRuleSets: Record<string, VendorRuleSet> = {
   [coveRuleSet.vendorId]: coveRuleSet,
@@ -14,6 +15,7 @@ const vendorRuleSets: Record<string, VendorRuleSet> = {
   [microsoft365RuleSet.vendorId]: microsoft365RuleSet,
   [appRiverRuleSet.vendorId]: appRiverRuleSet,
   [sentinelOneRuleSet.vendorId]: sentinelOneRuleSet,
+  [huntressRuleSet.vendorId]: huntressRuleSet,
 };
 
 export function listVendorRuleSets() {

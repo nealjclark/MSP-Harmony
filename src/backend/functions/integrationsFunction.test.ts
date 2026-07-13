@@ -33,6 +33,10 @@ const envKeys = [
   'OPENTEXT_APPRIVER_REFRESH_TOKEN_CACHE_PATH',
   'SENTINELONE_ENDPOINT',
   'SENTINELONE_API_TOKEN',
+  'HUNTRESS_ENDPOINT',
+  'HUNTRESS_API_KEY',
+  'HUNTRESS_API_SECRET',
+  'HUNTRESS_PRODUCT_CLASSES',
 ] as const;
 
 async function run() {
@@ -91,6 +95,23 @@ async function run() {
       /SentinelOne API token expired on 2025-09-18T18:40:01.000Z/,
     );
     process.env.SENTINELONE_API_TOKEN = '';
+
+    const huntressTestResponse = await testIntegrationHttp(
+      {
+        params: { integrationId: 'huntress' },
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.notEqual(huntressTestResponse.status, 501);
+    assert.match(
+      String((huntressTestResponse.jsonBody as { error?: string }).error),
+      /Huntress settings|Huntress test failed|Huntress API request failed|Huntress endpoint is not configured/i,
+    );
+    assert.doesNotMatch(
+      String((huntressTestResponse.jsonBody as { error?: string }).error),
+      /not implemented/i,
+    );
 
     const coveTestResponse = await testIntegrationHttp(
       {

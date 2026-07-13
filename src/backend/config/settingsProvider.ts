@@ -32,6 +32,7 @@ export type IntegrationSettingsMetadata = {
 
 export type IntegrationSettingsMetadataReader = {
   loadMetadata: (integrationId: IntegrationId) => Promise<IntegrationSettingsMetadata | undefined>;
+  loadAllMetadata?: (integrationIds: IntegrationId[]) => Promise<Map<IntegrationId, IntegrationSettingsMetadata>>;
 };
 
 export type SecretReader = {
@@ -82,11 +83,30 @@ export function createIntegrationSettingsProvider(options: IntegrationSettingsPr
       return loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader, loadSecrets);
     },
     async listIntegrationSettings() {
-      return Promise.all(
-        listIntegrationSettingsDefinitions().map((definition) =>
-          loadIntegrationRuntimeSettings(definition, secretReader, env, keyVaultUrl, options.metadataReader, loadSecrets),
-        ),
+      const definitions = listIntegrationSettingsDefinitions();
+      const metadataById = await options.metadataReader?.loadAllMetadata?.(
+        definitions.map((definition) => definition.integrationId),
       );
+      const settings: IntegrationRuntimeSettings[] = [];
+
+      for (const definition of definitions) {
+        settings.push(
+          await loadIntegrationRuntimeSettings(
+            definition,
+            secretReader,
+            env,
+            keyVaultUrl,
+            metadataById
+              ? {
+                  loadMetadata: async () => metadataById.get(definition.integrationId),
+                }
+              : options.metadataReader,
+            loadSecrets,
+          ),
+        );
+      }
+
+      return settings;
     },
   };
 }

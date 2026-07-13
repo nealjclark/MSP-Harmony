@@ -378,6 +378,7 @@ type RawSyncDataset = 'users' | 'licenses';
 type DattoSyncTarget = 'datto-saas' | 'datto-saas-bcdr';
 type IntegrationSyncTarget = RawSyncDataset | DattoSyncTarget;
 type DattoMappingDataset = 'saas' | 'bcdr';
+type HuntressMappingDataset = 'edr' | 'itdr' | 'sat' | 'siem' | 'ispm' | 'siem-extended-retention';
 
 type RawSyncRow = Record<string, string | number | boolean | null>;
 
@@ -4709,6 +4710,13 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId, target?: In
     };
   }
 
+  if (integrationId === 'huntress') {
+    return {
+      pageSize: 500,
+      maxPages: 100,
+    };
+  }
+
   return {
     pageSize: 100,
     maxPages: 50,
@@ -4776,6 +4784,13 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
     const siteCount = numberField(body, 'siteCount')?.toLocaleString() ?? '0';
     const accountCount = numberField(body, 'accountCount')?.toLocaleString() ?? '0';
     return `Connection OK. SentinelOne returned ${accountCount} accounts and ${siteCount} sites.`;
+  }
+
+  if (integrationId === 'huntress') {
+    const organizationCount = numberField(body, 'organizationCount')?.toLocaleString() ?? '0';
+    const agentCount = numberField(body, 'agentCount')?.toLocaleString() ?? '0';
+    const productClasses = Array.isArray(body.productClasses) ? body.productClasses.join(', ') : 'itdr';
+    return `Connection OK. Huntress returned ${organizationCount} organizations and ${agentCount} agents. Product classes: ${productClasses}.`;
   }
 
   return 'Connection OK.';
@@ -13395,6 +13410,7 @@ function MappingsView(props: {
   const [showMappedProducts, setShowMappedProducts] = useState(false);
   const [mappingSectionOpen, setMappingSectionOpen] = useState<Partial<Record<MappingSectionId, boolean>>>({});
   const [dattoMappingDataset, setDattoMappingDataset] = useState<DattoMappingDataset>('saas');
+  const [huntressMappingDataset, setHuntressMappingDataset] = useState<HuntressMappingDataset>('itdr');
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [manualCustomerId, setManualCustomerId] = useState('');
   const [manualAgreementId, setManualAgreementId] = useState('');
@@ -13462,18 +13478,25 @@ function MappingsView(props: {
       } as IntegrationSettingsDefinition)
     : false;
   const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
+  const isHuntressMappingWorkspace = selectedIntegrationId === 'huntress';
   const isLaborOnlyMappingWorkspace = selectedIntegrationId === 'connectwise';
   const showLaborMappingSection = hasLaborMappingWorkspace(selectedIntegrationId);
   const showInvestigationTicketMappingSection = hasInvestigationTicketMappingWorkspace(selectedIntegrationId);
-  const accountMappings = filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
-  const accountCandidates = filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined);
+  const accountMappings = filterHuntressAccountRows(
+    filterDattoAccountRows(mappingState?.accountMappings ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+    isHuntressMappingWorkspace ? huntressMappingDataset : undefined,
+  );
+  const accountCandidates = filterHuntressAccountRows(
+    filterDattoAccountRows(mappingState?.accountCandidates ?? [], isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+    isHuntressMappingWorkspace ? huntressMappingDataset : undefined,
+  );
   const accountRows = showMappedAccounts ? [...accountMappings, ...accountCandidates] : accountCandidates;
-  const productMappings = (mappingState?.productMappings ?? []).filter((row) =>
-    dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
-  );
-  const productCandidates = (mappingState?.productCandidates ?? []).filter((row) =>
-    dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
-  );
+  const productMappings = (mappingState?.productMappings ?? [])
+    .filter((row) => dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined))
+    .filter((row) => huntressProductMatchesDataset(row.vendorProductKey, isHuntressMappingWorkspace ? huntressMappingDataset : undefined));
+  const productCandidates = (mappingState?.productCandidates ?? [])
+    .filter((row) => dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined))
+    .filter((row) => huntressProductMatchesDataset(row.vendorProductKey, isHuntressMappingWorkspace ? huntressMappingDataset : undefined));
   const allProductRows = [...productMappings, ...productCandidates];
   const visibleProductRows = showMappedProducts ? allProductRows : productCandidates;
   const allProductGroups = useMemo(() => buildProductGroups(allProductRows), [allProductRows]);
@@ -13482,9 +13505,13 @@ function MappingsView(props: {
   const productSelectionDefaults = useMemo(() => buildProductSelectionDefaults(productGroups), [productGroups]);
   const productBundles = (mappingState?.productBundles ?? []).filter((bundle) =>
     dattoBundleMatchesDataset(bundle, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  ).filter((bundle) =>
+    huntressBundleMatchesDataset(bundle, isHuntressMappingWorkspace ? huntressMappingDataset : undefined),
   );
   const productLinkRules = (mappingState?.productLinkRules ?? []).filter((rule) =>
     dattoProductMatchesDataset(rule.sourceVendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined),
+  ).filter((rule) =>
+    huntressProductMatchesDataset(rule.sourceVendorProductKey, isHuntressMappingWorkspace ? huntressMappingDataset : undefined),
   );
   const bundleProductOptions = useMemo(
     () =>
@@ -13507,8 +13534,12 @@ function MappingsView(props: {
   const suggestedAccountCount = accountCandidates.filter(
     (candidate) => candidate.status === 'approved' && candidate.customerId,
   ).length;
-  const canBulkApproveSuggested = !isDattoMappingWorkspace && suggestedAccountCount > 0;
-  const selectedDatasetLabel = isDattoMappingWorkspace ? dattoMappingDatasetLabel(dattoMappingDataset) : selectedIntegrationName;
+  const canBulkApproveSuggested = !isDattoMappingWorkspace && !isHuntressMappingWorkspace && suggestedAccountCount > 0;
+  const selectedDatasetLabel = isDattoMappingWorkspace
+    ? dattoMappingDatasetLabel(dattoMappingDataset)
+    : isHuntressMappingWorkspace
+      ? huntressMappingDatasetLabel(huntressMappingDataset)
+      : selectedIntegrationName;
   const approvedAccountMappingCount = accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length;
   const approvedProductMappingCount = productMappings.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length;
   const activeLinkRuleCount = productLinkRules.filter((rule) => rule.active).length;
@@ -14320,6 +14351,27 @@ function MappingsView(props: {
                 type="button"
               >
                 <span>{dattoMappingDatasetLabel(dataset)}</span>
+                <strong>{counts.accounts.toLocaleString()} accounts</strong>
+                <em>{counts.products.toLocaleString()} products</em>
+              </button>
+            );
+          })}
+        </section>
+      ) : null}
+
+      {isHuntressMappingWorkspace ? (
+        <section className="mapping-dataset-tabs huntress-dataset-tabs" aria-label="Huntress product class">
+          {huntressMappingDatasets.map((dataset) => {
+            const counts = huntressDatasetCounts(mappingState, dataset);
+            return (
+              <button
+                aria-selected={huntressMappingDataset === dataset}
+                className={huntressMappingDataset === dataset ? 'active' : ''}
+                key={dataset}
+                onClick={() => setHuntressMappingDataset(dataset)}
+                type="button"
+              >
+                <span>{huntressMappingDatasetLabel(dataset)}</span>
                 <strong>{counts.accounts.toLocaleString()} accounts</strong>
                 <em>{counts.products.toLocaleString()} products</em>
               </button>
@@ -16927,6 +16979,83 @@ function dattoDatasetCounts(mappingState: MappingStateResponse | null, dataset: 
     accounts: accountIds.size,
     products: productKeys.size,
   };
+}
+
+const huntressMappingDatasets: HuntressMappingDataset[] = [
+  'itdr',
+  'edr',
+  'sat',
+  'siem',
+  'ispm',
+  'siem-extended-retention',
+];
+
+function huntressMappingDatasetLabel(dataset: HuntressMappingDataset) {
+  if (dataset === 'edr') return 'EDR';
+  if (dataset === 'itdr') return 'ITDR';
+  if (dataset === 'sat') return 'SAT';
+  if (dataset === 'siem') return 'SIEM';
+  if (dataset === 'ispm') return 'ISPM';
+  return 'SIEM Retention';
+}
+
+function filterHuntressAccountRows<T extends AccountMappingCandidate>(rows: T[], dataset?: HuntressMappingDataset) {
+  if (!dataset) {
+    return rows;
+  }
+
+  return rows.filter((row) => huntressAccountMatchesDataset(row, dataset));
+}
+
+function huntressAccountMatchesDataset(row: AccountMappingCandidate, dataset: HuntressMappingDataset) {
+  const accountId = row.externalAccountId.toLowerCase();
+  const productKey = huntressVendorProductKeyForDataset(dataset);
+
+  return accountId.includes(`|${productKey}`) || accountId.endsWith(productKey);
+}
+
+function huntressProductMatchesDataset(vendorProductKey: string, dataset?: HuntressMappingDataset) {
+  if (!dataset) {
+    return true;
+  }
+
+  return vendorProductKey.toLowerCase() === huntressVendorProductKeyForDataset(dataset);
+}
+
+function huntressBundleMatchesDataset(bundle: ProductBundle, dataset?: HuntressMappingDataset) {
+  if (!dataset) {
+    return true;
+  }
+
+  return bundle.components.length > 0 && bundle.components.every((component) => huntressProductMatchesDataset(component.vendorProductKey, dataset));
+}
+
+function huntressDatasetCounts(mappingState: MappingStateResponse | null, dataset: HuntressMappingDataset) {
+  const accountIds = new Set(
+    [
+      ...(mappingState?.accountMappings ?? []),
+      ...(mappingState?.accountCandidates ?? []),
+    ]
+      .filter((row) => huntressAccountMatchesDataset(row, dataset))
+      .map((row) => row.externalAccountId),
+  );
+  const productKeys = new Set(
+    [
+      ...(mappingState?.productMappings ?? []),
+      ...(mappingState?.productCandidates ?? []),
+    ]
+      .filter((row) => huntressProductMatchesDataset(row.vendorProductKey, dataset))
+      .map((row) => row.vendorProductKey),
+  );
+
+  return {
+    accounts: accountIds.size,
+    products: productKeys.size,
+  };
+}
+
+function huntressVendorProductKeyForDataset(dataset: HuntressMappingDataset) {
+  return `huntress-${dataset}`;
 }
 
 type ProductMappingGroup = {

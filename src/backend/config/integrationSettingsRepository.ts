@@ -135,6 +135,34 @@ export class PostgresIntegrationSettingsRepository
     };
   }
 
+  async loadAllMetadata(integrationIds: IntegrationId[]): Promise<Map<IntegrationId, IntegrationSettingsMetadata>> {
+    if (integrationIds.length === 0) {
+      return new Map();
+    }
+
+    const result = await this.database.query<IntegrationSettingsRow & { integration_id: IntegrationId }>(
+      `select integration_id, endpoint, non_secret_settings, required_key_vault_secrets, last_tested_at, last_test_result
+       from integration_settings
+       where integration_id = any($1::text[])`,
+      [integrationIds],
+    );
+
+    return new Map(
+      result.rows.map((row) => [
+        row.integration_id,
+        {
+          nonSecrets: cleanRecord({
+            endpoint: row.endpoint ?? undefined,
+            ...recordFromJson(row.non_secret_settings),
+          }),
+          availableKeyVaultSecrets: stringArrayFromJson(row.required_key_vault_secrets),
+          lastTestedAt: isoDate(row.last_tested_at),
+          lastTestResult: row.last_test_result ?? undefined,
+        },
+      ]),
+    );
+  }
+
   async saveTestResult(input: SaveIntegrationTestResultInput) {
     const nonSecrets = cleanRecord({
       endpoint: input.endpoint,
@@ -210,6 +238,51 @@ export class PostgresIntegrationSettingsRepository
     };
   }
 
+  async loadOperationalStatuses(integrationIds: IntegrationId[]): Promise<Map<IntegrationId, IntegrationOperationalStatus>> {
+    if (integrationIds.length === 0) {
+      return new Map();
+    }
+
+    const latestSyncRuns = await this.database.query<SyncRunSummaryRow & { integration_id: IntegrationId }>(
+      `select distinct on (integration_id)
+         integration_id,
+         started_at,
+         completed_at,
+         status,
+         records_read,
+         records_written,
+         error_message
+       from sync_runs
+       where integration_id = any($1::text[])
+       order by integration_id, started_at desc`,
+      [integrationIds],
+    );
+    const syncRunsById = new Map(latestSyncRuns.rows.map((row) => [row.integration_id, row]));
+    const storedCountsById = await this.loadStoredRecordCounts(integrationIds);
+    const statuses = new Map<IntegrationId, IntegrationOperationalStatus>();
+
+    for (const integrationId of integrationIds) {
+      const latestSyncRun = syncRunsById.get(integrationId);
+      const storedRecordCount = storedCountsById.get(integrationId);
+
+      if (!latestSyncRun && typeof storedRecordCount === 'undefined') {
+        continue;
+      }
+
+      statuses.set(integrationId, {
+        lastSyncAt: isoDate(latestSyncRun?.started_at ?? null),
+        lastSyncCompletedAt: isoDate(latestSyncRun?.completed_at ?? null),
+        lastSyncStatus: latestSyncRun?.status,
+        lastSyncRecordsRead: latestSyncRun?.records_read,
+        lastSyncRecordsWritten: latestSyncRun?.records_written,
+        lastSyncError: latestSyncRun?.error_message ?? undefined,
+        storedRecordCount,
+      });
+    }
+
+    return statuses;
+  }
+
   private async loadStoredRecordCount(integrationId: IntegrationId) {
     const result =
       integrationId === 'connectwise'
@@ -244,6 +317,32 @@ export class PostgresIntegrationSettingsRepository
     const count = result.rows[0]?.count;
 
     return typeof count === 'number' ? count : Number.parseInt(count ?? '0', 10);
+  }
+
+  private async loadStoredRecordCounts(integrationIds: IntegrationId[]) {
+    const counts = new Map<IntegrationId, number>();
+
+    if (integrationIds.includes('connectwise')) {
+      const result = await this.database.query<CountRow>('select count(*) as count from agreement_additions');
+      counts.set('connectwise', normalizeCount(result.rows[0]?.count));
+    }
+
+    const vendorIds = integrationIds.filter((integrationId) => integrationId !== 'connectwise');
+    if (vendorIds.length > 0) {
+      const result = await this.database.query<CountRow & { vendor_id: IntegrationId }>(
+        `select vendor_id, count(*) as count
+         from vendor_usage_snapshots
+         where vendor_id = any($1::text[])
+         group by vendor_id`,
+        [vendorIds],
+      );
+
+      for (const row of result.rows) {
+        counts.set(row.vendor_id, normalizeCount(row.count));
+      }
+    }
+
+    return counts;
   }
 }
 
@@ -281,4 +380,8 @@ function isoDate(value: Date | string | null) {
   }
 
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function normalizeCount(count: string | number | undefined) {
+  return typeof count === 'number' ? count : Number.parseInt(count ?? '0', 10);
 }

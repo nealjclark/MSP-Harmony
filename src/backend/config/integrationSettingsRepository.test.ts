@@ -10,6 +10,7 @@ const repository = new PostgresIntegrationSettingsRepository({
       return {
         rows: [
           {
+            integration_id: 'connectwise',
             started_at: new Date('2026-06-13T10:00:00.000Z'),
             completed_at: new Date('2026-06-13T10:01:00.000Z'),
             status: 'complete',
@@ -28,6 +29,12 @@ const repository = new PostgresIntegrationSettingsRepository({
     }
 
     if (sql.includes('from vendor_usage_snapshots')) {
+      if (sql.includes('group by vendor_id')) {
+        return {
+          rows: [{ vendor_id: 'cove', count: '34' } as T],
+        };
+      }
+
       return {
         rows: [{ count: '34' } as T],
       };
@@ -37,6 +44,7 @@ const repository = new PostgresIntegrationSettingsRepository({
       return {
         rows: [
           {
+            integration_id: 'connectwise',
             endpoint: 'https://api-na.myconnectwise.net',
             non_secret_settings: {
               companyId: 'bmb',
@@ -82,6 +90,13 @@ async function run() {
   ]);
   assert.equal(metadata?.lastTestedAt, '2026-06-13T11:00:00.000Z');
   assert.equal(metadata?.lastTestResult, 'success');
+
+  const metadataById = await repository.loadAllMetadata(['connectwise', 'cove']);
+  assert.equal(metadataById.get('connectwise')?.nonSecrets.companyId, 'bmb');
+
+  const statusesById = await repository.loadOperationalStatuses(['connectwise', 'cove']);
+  assert.equal(statusesById.get('connectwise')?.storedRecordCount, 12);
+  assert.equal(statusesById.get('cove')?.storedRecordCount, 34);
 
   console.log('integration settings repository tests passed');
 }

@@ -23,6 +23,7 @@ import { loadNcentralRuleSet } from '../vendor/ncentral/operations';
 import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
 import { loadSentinelOneRuleSet } from '../vendor/sentinelone/operations';
+import { loadHuntressRuleSet } from '../vendor/huntress/operations';
 import {
   listProductBundles,
   listProductLinkRules,
@@ -420,6 +421,10 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
 
   if (vendorId === 'sentinelone') {
     return loadSentinelOneRuleSet(database);
+  }
+
+  if (vendorId === 'huntress') {
+    return loadHuntressRuleSet(database);
   }
 
   const ruleSet = getVendorRuleSet(vendorId);
@@ -1627,6 +1632,15 @@ const deviceDimensionKeys = [
   'appRiverBundleKey',
   'appRiverBundleName',
   'subscriptionSource',
+  'huntressProductClass',
+  'huntressProductClassLabel',
+  'huntressOrganizationId',
+  'huntressOrganizationName',
+  'huntressAccountId',
+  'huntressAccountName',
+  'huntressInvoiceId',
+  'billingPeriodStart',
+  'billingPeriodEnd',
 ] as const;
 
 function compactDeviceDimensions(dimensions: DimensionMap): DimensionMap {
@@ -1638,6 +1652,7 @@ function compactDeviceDimensions(dimensions: DimensionMap): DimensionMap {
     if (
       deviceDimensionKeys.includes(key as (typeof deviceDimensionKeys)[number]) ||
       key.startsWith('appRiver') ||
+      key.startsWith('huntress') ||
       key.startsWith('linkedCount')
     ) {
       compact[key] = value;
