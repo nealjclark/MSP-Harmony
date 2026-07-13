@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readAuthPrincipal, requireRole } from './auth';
 
 const originalAllowHeaderRoleAuth = process.env.ALLOW_HEADER_ROLE_AUTH;
+const originalWebsiteSiteName = process.env.WEBSITE_SITE_NAME;
+const originalFunctionsExtensionVersion = process.env.FUNCTIONS_EXTENSION_VERSION;
 
 async function run() {
   const anonymous = await requireRole({ headers: new Headers() } as never, 'Analyst');
@@ -18,8 +20,13 @@ async function run() {
   assert.equal((await requireRole(analystRequest, 'Analyst')).response?.status, 403);
 
   process.env.ALLOW_HEADER_ROLE_AUTH = 'true';
+  delete process.env.FUNCTIONS_EXTENSION_VERSION;
   assert.equal((await requireRole(analystRequest, 'Analyst')).principal?.name, 'analyst@example.com');
   assert.equal((await requireRole(analystRequest, 'Admin')).response?.status, 403);
+
+  process.env.WEBSITE_SITE_NAME = 'func-mspharmony-flex';
+  assert.equal((await requireRole(analystRequest, 'Analyst')).response?.status, 403);
+  delete process.env.WEBSITE_SITE_NAME;
 
   const principalPayload = Buffer.from(
     JSON.stringify({
@@ -46,6 +53,8 @@ run().catch((error: unknown) => {
   process.exitCode = 1;
 }).finally(() => {
   restoreEnv('ALLOW_HEADER_ROLE_AUTH', originalAllowHeaderRoleAuth);
+  restoreEnv('WEBSITE_SITE_NAME', originalWebsiteSiteName);
+  restoreEnv('FUNCTIONS_EXTENSION_VERSION', originalFunctionsExtensionVersion);
 });
 
 function restoreEnv(key: string, value: string | undefined) {

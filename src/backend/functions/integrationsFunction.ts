@@ -5,7 +5,7 @@ import { listRuntimeIntegrations } from '../api/integrations';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseApiError } from '../connectwise/client';
 import { syncConnectWiseAgreementReport, testConnectWiseConnection } from '../connectwise/operations';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 import { CoveApiError } from '../vendor/cove/client';
 import { syncCoveUsageSnapshots, testCoveConnection } from '../vendor/cove/operations';
 import { DattoApiError } from '../vendor/datto/client';
@@ -104,6 +104,9 @@ export async function testIntegrationHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
@@ -252,6 +255,9 @@ export async function syncIntegrationHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = request.params.integrationId as IntegrationId | undefined;
 
   if (
@@ -276,7 +282,9 @@ export async function syncIntegrationHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as SyncBody;
+  const bodyResult = await readJsonBody<SyncBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
 
   try {
     if (body.dataset && body.dataset !== 'users' && body.dataset !== 'licenses') {

@@ -24,7 +24,7 @@ import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { assertConnectWiseReady } from '../connectwise/operations';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -63,6 +63,9 @@ export async function runVendorReconciliationHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const vendorId = parseReconciliationVendorId(request.params.vendorId);
   if (!vendorId) {
     return jsonResponse(400, {
@@ -78,7 +81,9 @@ export async function runVendorReconciliationHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as ReconciliationBody;
+  const bodyResult = await readJsonBody<ReconciliationBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
 
   try {
     const result = await reconcileVendorFromDatabase(repositoryContext.pool, vendorId, {
@@ -153,6 +158,9 @@ export async function applyAgreementAdditionUpdatesHttp(
   const auth = await requireRole(request, 'Approver');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool || !repositoryContext.repository) {
     return jsonResponse(400, {
@@ -161,7 +169,9 @@ export async function applyAgreementAdditionUpdatesHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as AgreementAdditionUpdatesBody;
+  const bodyResult = await readJsonBody<AgreementAdditionUpdatesBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const updates = Array.isArray(body.updates) ? body.updates : [];
   const discardedUpdates = Array.isArray(body.discardedUpdates) ? body.discardedUpdates : [];
 
@@ -223,6 +233,9 @@ export async function createReconciliationAdjustmentHttp(
   const auth = await requireRole(request, 'Approver');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return jsonResponse(400, {
@@ -238,7 +251,11 @@ export async function createReconciliationAdjustmentHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as ReconciliationAdjustmentBody;
+  const bodyResult = await readJsonBody<ReconciliationAdjustmentBody>(request, {
+    fallback: {} as ReconciliationAdjustmentBody,
+  });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
 
   try {
     return jsonResponse(200, {
@@ -270,6 +287,9 @@ export async function deactivateReconciliationAdjustmentHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Approver');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   const adjustmentId = request.params.adjustmentId;
@@ -336,6 +356,9 @@ export async function upsertReconciliationAdditionPinHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const vendorId = parseReconciliationVendorId(request.params.vendorId);
   if (!vendorId) {
     return jsonResponse(400, {
@@ -343,7 +366,9 @@ export async function upsertReconciliationAdditionPinHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as AdditionPinBody;
+  const bodyResult = await readJsonBody<AdditionPinBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (
     !body.customerId ||
     !isUuid(body.customerId) ||
@@ -396,6 +421,9 @@ export async function deactivateReconciliationAdditionPinHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const vendorId = parseReconciliationVendorId(request.params.vendorId);
   if (!vendorId) {
     return jsonResponse(400, {
@@ -403,7 +431,9 @@ export async function deactivateReconciliationAdditionPinHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as AdditionPinBody;
+  const bodyResult = await readJsonBody<AdditionPinBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body.agreementId || !isUuid(body.agreementId) || !body.vendorProductKey?.trim()) {
     return jsonResponse(400, {
       error: 'Addition pin removal requires agreementId and vendorProductKey.',
@@ -455,7 +485,12 @@ export async function createInvestigationTicketsHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as InvestigationTicketsCreateBody;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<InvestigationTicketsCreateBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const customerName = body.customerName?.trim();
   const companyIdRaw = body.companyId == null || body.companyId === '' ? null : Number(body.companyId);
   const companyId =

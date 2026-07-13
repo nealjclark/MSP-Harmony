@@ -16,7 +16,7 @@ import {
   supportedInvoiceVendorIds,
 } from '../invoices/appriverInvoiceImports';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -37,7 +37,12 @@ export async function importDetectedInvoiceHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as InvoiceImportBody;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<InvoiceImportBody>(request, { limit: 'import', fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const fileName = typeof body.fileName === 'string' && body.fileName.trim() ? body.fileName.trim() : undefined;
   const content = typeof body.content === 'string' ? body.content : undefined;
   const importMode = parseInvoiceImportMode(body.importMode);
@@ -91,6 +96,9 @@ export async function importAppRiverInvoiceHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   if (request.params.vendorId !== 'opentext-appriver') {
     return jsonResponse(400, {
       error: `Invoice import is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
@@ -98,7 +106,9 @@ export async function importAppRiverInvoiceHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as InvoiceImportBody;
+  const bodyResult = await readJsonBody<InvoiceImportBody>(request, { limit: 'import', fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const fileName = typeof body.fileName === 'string' && body.fileName.trim() ? body.fileName.trim() : undefined;
   const content = typeof body.content === 'string' ? body.content : undefined;
   const importMode = parseInvoiceImportMode(body.importMode);
@@ -144,12 +154,17 @@ export async function importMappedInvoiceTableHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const vendorId = parseRegistryIntegrationId(request.params.vendorId);
   if (!vendorId || !integrationSupportsRegistryInvoiceImport(vendorId)) {
     return unsupportedInvoiceVendorResponse(request.params.vendorId);
   }
 
-  const body = (await request.json().catch(() => ({}))) as InvoiceImportBody;
+  const bodyResult = await readJsonBody<InvoiceImportBody>(request, { limit: 'import', fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const fileName = typeof body.fileName === 'string' && body.fileName.trim() ? body.fileName.trim() : undefined;
   const content = typeof body.content === 'string' ? body.content : undefined;
   const importMode = parseInvoiceImportMode(body.importMode);
@@ -278,6 +293,9 @@ export async function refreshInvoiceImportMappingsHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;
   if (!vendorId || !vendorSupportsInvoiceImport(vendorId)) {
@@ -317,6 +335,9 @@ export async function deleteInvoiceImportHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const vendorId = parseIntegrationId(request.params.vendorId);
   const importId = request.params.importId;

@@ -303,7 +303,8 @@ function bootstrapRoleFor(value: string | undefined): AppRole | undefined {
 }
 
 function allowsHeaderRoleAuthFallback() {
-  return ['1', 'true', 'yes'].includes((process.env.ALLOW_HEADER_ROLE_AUTH ?? '').trim().toLowerCase());
+  const enabled = ['1', 'true', 'yes'].includes((process.env.ALLOW_HEADER_ROLE_AUTH ?? '').trim().toLowerCase());
+  return enabled && !isRunningInAzure();
 }
 
 function bootstrapUpsertDisabled() {
@@ -313,6 +314,10 @@ function bootstrapUpsertDisabled() {
 function normalizeEmail(value: string | undefined) {
   const trimmed = value?.trim().toLowerCase();
   return trimmed && trimmed.includes('@') ? trimmed : undefined;
+}
+
+function isRunningInAzure() {
+  return Boolean(process.env.WEBSITE_SITE_NAME);
 }
 
 function isMissingAppUsersTable(error: unknown) {

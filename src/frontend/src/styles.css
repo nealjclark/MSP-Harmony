@@ -3762,6 +3762,32 @@ h2 {
   min-width: 260px;
 }
 
+.raw-payload-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.raw-payload-toggle input {
+  inline-size: 16px;
+  block-size: 16px;
+  accent-color: var(--teal);
+}
+
+.raw-payload-warning {
+  align-self: center;
+  color: var(--coral);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .report-surface {
   overflow: hidden;
 }

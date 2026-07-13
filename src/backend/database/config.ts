@@ -1,6 +1,7 @@
 import type { PoolConfig } from 'pg';
 
 export type DatabaseEnvironment = Record<string, string | undefined>;
+export type DatabaseAuthMode = 'password' | 'entra';
 
 export type DatabaseSettings = {
   connectionString?: string;
@@ -9,6 +10,7 @@ export type DatabaseSettings = {
   database?: string;
   user?: string;
   password?: string;
+  authMode: DatabaseAuthMode;
   ssl: boolean;
   missing: string[];
 };
@@ -19,9 +21,17 @@ export function getDatabaseSettings(env: DatabaseEnvironment = process.env): Dat
   const database = clean(env.DATABASE_NAME);
   const user = clean(env.DATABASE_USER);
   const password = clean(env.DATABASE_PASSWORD);
+  const authMode = env.DATABASE_AUTH_MODE?.trim().toLowerCase() === 'entra' ? 'entra' : 'password';
   const ssl = env.DATABASE_SSL ? env.DATABASE_SSL.toLowerCase() !== 'false' : true;
   const port = Number.parseInt(env.DATABASE_PORT ?? '5432', 10);
-  const missing = connectionString ? [] : requiredMissing({ DATABASE_HOST: host, DATABASE_NAME: database, DATABASE_USER: user, DATABASE_PASSWORD: password });
+  const missing = connectionString
+    ? []
+    : requiredMissing({
+        DATABASE_HOST: host,
+        DATABASE_NAME: database,
+        DATABASE_USER: user,
+        ...(authMode === 'password' ? { DATABASE_PASSWORD: password } : {}),
+      });
 
   return {
     connectionString,
@@ -30,6 +40,7 @@ export function getDatabaseSettings(env: DatabaseEnvironment = process.env): Dat
     database,
     user,
     password,
+    authMode,
     ssl,
     missing,
   };
@@ -70,6 +81,7 @@ export function describeDatabaseSettings(settings: DatabaseSettings = getDatabas
     port: settings.connectionString ? undefined : settings.port,
     database: settings.connectionString ? undefined : settings.database,
     user: settings.connectionString ? undefined : settings.user,
+    authMode: settings.authMode,
     ssl: settings.ssl,
     missing: settings.missing,
   };

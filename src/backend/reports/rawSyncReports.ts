@@ -27,6 +27,7 @@ export type RawSyncDetailsOptions = {
   dataset?: RawSyncDataset;
   customerId?: string;
   includeSensitive?: boolean;
+  includeRawPayload?: boolean;
 };
 
 type SyncRunRow = {
@@ -465,7 +466,7 @@ export async function getRawSyncDetails(
     return getDattoRawSyncDetails(database, syncRunId, options);
   }
 
-  return getGenericRawSyncDetails(database, integrationId, syncRunId);
+  return getGenericRawSyncDetails(database, integrationId, syncRunId, options);
 }
 
 async function getMicrosoft365UserRawSyncDetails(
@@ -533,6 +534,7 @@ async function getMicrosoft365UserRawSyncDetails(
   const rows = detailResult.rows.map((row) =>
     mapMicrosoft365SnapshotRow(row, {
       includeSensitive: options.includeSensitive === true,
+      includeRawPayload: options.includeRawPayload === true,
     }),
   );
 
@@ -633,6 +635,7 @@ async function getMicrosoft365LicenseRawSyncDetails(
   const rows = detailResult.rows.map((row) =>
     mapMicrosoft365LicenseSnapshotRow(row, {
       includeSensitive: options.includeSensitive === true,
+      includeRawPayload: options.includeRawPayload === true,
     }),
   );
 
@@ -653,10 +656,11 @@ async function getMicrosoft365LicenseRawSyncDetails(
 
 function mapMicrosoft365SnapshotRow(
   row: Microsoft365SnapshotRow,
-  options: { includeSensitive?: boolean } = {},
+  options: { includeSensitive?: boolean; includeRawPayload?: boolean } = {},
 ): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
   const includeSensitive = options.includeSensitive === true;
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -678,15 +682,16 @@ function mapMicrosoft365SnapshotRow(
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: includeSensitive ? compactJson(row.raw_payload) : null,
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
 function mapMicrosoft365LicenseSnapshotRow(
   row: Microsoft365SubscriptionSnapshotRow,
-  options: { includeSensitive?: boolean } = {},
+  options: { includeSensitive?: boolean; includeRawPayload?: boolean } = {},
 ): RawSyncDetail {
   const includeSensitive = options.includeSensitive === true;
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -717,7 +722,7 @@ function mapMicrosoft365LicenseSnapshotRow(
     BillingTerm: row.billing_term,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: includeSensitive ? compactJson(row.raw_payload) : null,
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
@@ -783,7 +788,11 @@ async function getAppRiverRawSyncDetails(
        mapped_snapshots.dimensions->>'subscriptionKey'`,
     [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapAppRiverSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapAppRiverSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
 
   return {
     integrationId: 'opentext-appriver',
@@ -799,8 +808,12 @@ async function getAppRiverRawSyncDetails(
   };
 }
 
-function mapAppRiverSnapshotRow(row: AppRiverSnapshotRow): RawSyncDetail {
+function mapAppRiverSnapshotRow(
+  row: AppRiverSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -825,7 +838,7 @@ function mapAppRiverSnapshotRow(row: AppRiverSnapshotRow): RawSyncDetail {
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
@@ -892,7 +905,11 @@ async function getDattoRawSyncDetails(
        mapped_snapshots.dimensions->>'domain'`,
     [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapDattoSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapDattoSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
 
   return {
     integrationId: 'datto',
@@ -908,8 +925,12 @@ async function getDattoRawSyncDetails(
   };
 }
 
-function mapDattoSnapshotRow(row: DattoSnapshotRow): RawSyncDetail {
+function mapDattoSnapshotRow(
+  row: DattoSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -943,7 +964,7 @@ function mapDattoSnapshotRow(row: DattoSnapshotRow): RawSyncDetail {
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
@@ -1009,7 +1030,11 @@ async function getNcentralRawSyncDetails(
        mapped_snapshots.dimensions->>'hostname'`,
     [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapNcentralSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapNcentralSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
 
   return {
     integrationId: 'ncentral',
@@ -1025,8 +1050,12 @@ async function getNcentralRawSyncDetails(
   };
 }
 
-function mapNcentralSnapshotRow(row: NcentralSnapshotRow): RawSyncDetail {
+function mapNcentralSnapshotRow(
+  row: NcentralSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -1048,7 +1077,7 @@ function mapNcentralSnapshotRow(row: NcentralSnapshotRow): RawSyncDetail {
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
@@ -1060,6 +1089,7 @@ async function getGenericRawSyncDetails(
   database: Queryable,
   integrationId: IntegrationId,
   syncRunId: string,
+  options: RawSyncDetailsOptions = {},
 ): Promise<RawSyncDetails | undefined> {
   const syncRunResult = await database.query<SyncRunRow>(
     `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
@@ -1119,7 +1149,11 @@ async function getGenericRawSyncDetails(
               mapped_snapshots.product_name`,
     [syncRunId, integrationId],
   );
-  const rows = detailResult.rows.map(mapGenericSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapGenericSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
 
   return {
     integrationId,
@@ -1135,9 +1169,13 @@ async function getGenericRawSyncDetails(
   };
 }
 
-function mapGenericSnapshotRow(row: GenericSnapshotRow): RawSyncDetail {
+function mapGenericSnapshotRow(
+  row: GenericSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
   const rawPayload = recordFromJson(row.raw_payload);
+  const includeRawPayload = options.includeRawPayload === true;
   const rawString = (key: string) => stringValue(rawPayload[key]);
   const dimensionString = (key: string) => stringValue(dimensions[key]) ?? rawString(key);
 
@@ -1167,7 +1205,7 @@ function mapGenericSnapshotRow(row: GenericSnapshotRow): RawSyncDetail {
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 
@@ -1232,7 +1270,11 @@ async function getCoveRawSyncDetails(
        mapped_snapshots.dimensions->>'hostname'`,
     [syncRunId, options.customerId ?? null],
   );
-  const rows = detailResult.rows.map(mapCoveSnapshotRow);
+  const rows = detailResult.rows.map((row) =>
+    mapCoveSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
 
   return {
     integrationId: 'cove',
@@ -1248,8 +1290,12 @@ async function getCoveRawSyncDetails(
   };
 }
 
-function mapCoveSnapshotRow(row: CoveSnapshotRow): RawSyncDetail {
+function mapCoveSnapshotRow(
+  row: CoveSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
+  const includeRawPayload = options.includeRawPayload === true;
 
   return {
     CustomerId: row.customer_id,
@@ -1274,7 +1320,7 @@ function mapCoveSnapshotRow(row: CoveSnapshotRow): RawSyncDetail {
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,
-    RawPayload: compactJson(row.raw_payload),
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
 }
 

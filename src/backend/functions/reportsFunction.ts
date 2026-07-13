@@ -24,8 +24,15 @@ import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connec
 import { assertConnectWiseReady } from '../connectwise/operations';
 import { listClosedTicketsInRange, syncClosedTicketsForRange } from '../connectwise/ticketSync';
 import { listAllActiveLaborMappings } from '../mapping/laborMappings';
+import type { Queryable } from '../reports/agreementReports';
 import { hasMinimumRole, requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import {
+  createOptionalPostgresSettingsRepository,
+  jsonResponse,
+  readJsonBody,
+  requireMutatingRequestOrigin,
+  serverErrorResponse,
+} from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -152,7 +159,7 @@ export async function listRawSyncRunsHttp(
 
 export async function getRawSyncDetailsHttp(
   request: HttpRequest,
-  _context: InvocationContext,
+  context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
@@ -161,6 +168,7 @@ export async function getRawSyncDetailsHttp(
   const dataset = request.query.get('dataset') ?? undefined;
   const customerId = request.query.get('customerId') ?? undefined;
   const includeSensitive = booleanQueryValue(request.query.get('includeSensitive') ?? request.query.get('includePii'));
+  const includeRawPayload = booleanQueryValue(request.query.get('includeRawPayload'));
   const syncRunId = request.params.syncRunId;
 
   if (!isRawSyncIntegrationId(integrationId)) {
@@ -204,6 +212,7 @@ export async function getRawSyncDetailsHttp(
           dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
           customerId,
           includeSensitive: integrationId === 'microsoft-365' ? includeSensitive : undefined,
+          includeRawPayload,
         })
       : undefined;
 
@@ -213,11 +222,22 @@ export async function getRawSyncDetailsHttp(
       });
     }
 
+    if (includeRawPayload) {
+      await recordRawPayloadAccess(repositoryContext.pool, {
+        actor: auth.principal.email ?? auth.principal.name,
+        integrationId,
+        dataset: integrationId === 'microsoft-365' ? dataset === 'licenses' ? 'licenses' : 'users' : undefined,
+        syncRunId: details.syncRun.id,
+        customerId,
+        rowCount: details.summary.rowCount,
+      }).catch((error: unknown) => {
+        context.error('Unable to record raw payload access audit event.', error);
+      });
+    }
+
     return jsonResponse(200, details);
   } catch (error) {
-    return jsonResponse(500, {
-      error: error instanceof Error ? error.message : 'Unable to load raw sync details.',
-    });
+    return serverErrorResponse(context, error, 'Unable to load raw sync details.');
   } finally {
     await repositoryContext.close();
   }
@@ -327,11 +347,16 @@ export async function saveProductProfitabilityReportHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as {
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<{
     name?: string;
     vendorIds?: string[];
     report?: ProductProfitabilityReport;
-  };
+  }>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
 
   const name = typeof body.name === 'string' ? body.name.trim() : '';
   if (!name) {
@@ -373,6 +398,33 @@ export async function saveProductProfitabilityReportHttp(
   } finally {
     await repositoryContext.close();
   }
+}
+
+export async function recordRawPayloadAccess(
+  database: Queryable,
+  event: {
+    actor: string;
+    integrationId: string;
+    dataset?: string;
+    syncRunId: string;
+    customerId?: string;
+    rowCount: number;
+  },
+) {
+  await database.query(
+    `insert into audit_events (actor, event_type, entity_type, entity_id, payload)
+     values ($1, 'reports.raw-sync.raw-payload.viewed', 'sync_run', $2, $3::jsonb)`,
+    [
+      event.actor,
+      event.syncRunId,
+      JSON.stringify({
+        integrationId: event.integrationId,
+        dataset: event.dataset,
+        customerId: event.customerId,
+        rowCount: event.rowCount,
+      }),
+    ],
+  );
 }
 
 async function buildLiveProductProfitabilityReport(

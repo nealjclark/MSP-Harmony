@@ -3427,7 +3427,7 @@ async function fetchRawSyncDetails(
   integrationId: VendorKey,
   syncRunId: string,
   dataset?: RawSyncDataset,
-  options: { customerId?: string } = {},
+  options: { customerId?: string; includeRawPayload?: boolean } = {},
 ) {
   const params = new URLSearchParams({
     integrationId,
@@ -3437,6 +3437,9 @@ async function fetchRawSyncDetails(
   }
   if (options.customerId) {
     params.set('customerId', options.customerId);
+  }
+  if (options.includeRawPayload) {
+    params.set('includeRawPayload', 'true');
   }
 
   const response = await fetch(`/api/reports/raw-sync-runs/${encodeURIComponent(syncRunId)}/details?${params.toString()}`);
@@ -5158,6 +5161,7 @@ function App() {
   const [rawSyncLoadState, setRawSyncLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [rawSyncMessage, setRawSyncMessage] = useState('Select an integration to view saved raw sync rows.');
   const [rawSyncColumnFilters, setRawSyncColumnFilters] = useState<Record<string, string>>({});
+  const [includeRawSyncRawPayload, setIncludeRawSyncRawPayload] = useState(false);
   const [productProfitabilityReport, setProductProfitabilityReport] =
     useState<ProductProfitabilityReportResponse | null>(null);
   const [productProfitabilityLoadState, setProductProfitabilityLoadState] =
@@ -5434,14 +5438,19 @@ function App() {
     }
   };
 
-  const loadRawSyncDetails = async (integrationId: IntegrationId, syncRunId: string, dataset: RawSyncDataset = 'users') => {
+  const loadRawSyncDetails = async (
+    integrationId: IntegrationId,
+    syncRunId: string,
+    dataset: RawSyncDataset = 'users',
+    includeRawPayload = includeRawSyncRawPayload,
+  ) => {
     setRawSyncLoadState('loading');
     setRawSyncMessage('Loading raw sync details...');
     setRawSyncDetails(null);
     setRawSyncColumnFilters({});
 
     try {
-      const details = await fetchRawSyncDetails(integrationId, syncRunId, dataset);
+      const details = await fetchRawSyncDetails(integrationId, syncRunId, dataset, { includeRawPayload });
       setRawSyncDetails(details);
       setRawSyncLoadState('ready');
       setRawSyncMessage(`Loaded ${details.summary.rowCount.toLocaleString()} raw sync rows.`);
@@ -5488,7 +5497,9 @@ function App() {
         return;
       }
 
-      const details = await fetchRawSyncDetails(selectedRawSyncIntegrationId, selectedSyncRunId, selectedRawSyncDataset);
+      const details = await fetchRawSyncDetails(selectedRawSyncIntegrationId, selectedSyncRunId, selectedRawSyncDataset, {
+        includeRawPayload: includeRawSyncRawPayload,
+      });
       setRawSyncDetails(details);
       setRawSyncColumnFilters({});
       setRawSyncLoadState('ready');
@@ -6503,8 +6514,20 @@ function App() {
       return;
     }
 
-    void loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
-  }, [reportSection, selectedRawSyncDataset, selectedRawSyncIntegrationId, selectedRawSyncRunId, view]);
+    void loadRawSyncDetails(
+      selectedRawSyncIntegrationId,
+      selectedRawSyncRunId,
+      selectedRawSyncDataset,
+      includeRawSyncRawPayload,
+    );
+  }, [
+    includeRawSyncRawPayload,
+    reportSection,
+    selectedRawSyncDataset,
+    selectedRawSyncIntegrationId,
+    selectedRawSyncRunId,
+    view,
+  ]);
 
   useEffect(() => {
     if (view !== 'discrepancies') {
@@ -7218,7 +7241,12 @@ function App() {
       setMappingMessage(summary);
       await loadMappings(selectedMappingIntegrationId);
       if (selectedRawSyncIntegrationId === selectedMappingIntegrationId && selectedRawSyncRunId) {
-        await loadRawSyncDetails(selectedRawSyncIntegrationId, selectedRawSyncRunId, selectedRawSyncDataset);
+        await loadRawSyncDetails(
+          selectedRawSyncIntegrationId,
+          selectedRawSyncRunId,
+          selectedRawSyncDataset,
+          includeRawSyncRawPayload,
+        );
       }
     } catch (error) {
       setMappingLoadState('failed');
@@ -7562,6 +7590,7 @@ function App() {
       );
       if (
         reconciliationComparisonRequested &&
+        isRegistryIntegrationId(selectedMappingIntegrationId) &&
         selectedReconciliationIntegrationSet.has(selectedMappingIntegrationId) &&
         reconciliationVendorIds.includes(selectedMappingIntegrationId)
       ) {
@@ -8226,6 +8255,7 @@ function App() {
             <ReportsView
               columnFilters={rawSyncColumnFilters}
               details={rawSyncDetails}
+              includeRawPayload={includeRawSyncRawPayload}
               integrations={rawSyncReportIntegrations}
               loadMessage={rawSyncMessage}
               loadState={rawSyncLoadState}
@@ -8245,6 +8275,7 @@ function App() {
               onIntegrationChange={(integrationId) => {
                 setSelectedRawSyncIntegrationId(integrationId);
                 setSelectedRawSyncDataset('users');
+                setIncludeRawSyncRawPayload(false);
                 setRawSyncRuns([]);
                 setSelectedRawSyncRunId('');
                 setRawSyncDetails(null);
@@ -8253,10 +8284,12 @@ function App() {
               }}
               onDatasetChange={(dataset) => {
                 setSelectedRawSyncDataset(dataset);
+                setIncludeRawSyncRawPayload(false);
                 setRawSyncDetails(null);
                 setRawSyncColumnFilters({});
                 setRawSyncMessage(selectedRawSyncRunId ? 'Loading raw sync details...' : 'Select a sync date to load raw rows.');
               }}
+              onIncludeRawPayloadChange={setIncludeRawSyncRawPayload}
               onRefresh={refreshRawSyncReport}
               onSyncRunChange={setSelectedRawSyncRunId}
               runs={rawSyncRuns}
@@ -14221,7 +14254,7 @@ function MappingsView(props: {
           openState={mappingSectionOpen}
           sectionId="investigation-tickets"
           status={investigationTicketMapping ? 'Configured' : 'Required'}
-          statusTone={investigationTicketMapping ? 'ready' : 'warn'}
+          statusTone={investigationTicketMapping ? 'ready' : 'needs-review'}
           title="Investigation ticket mapping"
         >
           <InvestigationTicketMappingPanel
@@ -14243,7 +14276,7 @@ function MappingsView(props: {
           openState={mappingSectionOpen}
           sectionId="reconciliation-options"
           status={doNotSuggestNewAdditions ? 'Existing only' : 'Suggest new'}
-          statusTone={doNotSuggestNewAdditions ? 'warn' : 'ready'}
+          statusTone={doNotSuggestNewAdditions ? 'needs-review' : 'ready'}
           title="Reconciliation options"
         >
           <section className="work-surface" aria-label="Reconciliation options">
@@ -18465,11 +18498,13 @@ function ProductProfitabilityReportView(props: {
 function ReportsView(props: {
   columnFilters: Record<string, string>;
   details: RawSyncDetailsResponse | null;
+  includeRawPayload: boolean;
   integrations: Integration[];
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   onColumnFilterChange: (column: string, value: string) => void;
   onDatasetChange: (dataset: RawSyncDataset) => void;
+  onIncludeRawPayloadChange: (includeRawPayload: boolean) => void;
   onIntegrationChange: (integrationId: IntegrationId | '') => void;
   onRefresh: () => Promise<void>;
   onSyncRunChange: (syncRunId: string) => void;
@@ -18481,11 +18516,13 @@ function ReportsView(props: {
   const {
     columnFilters,
     details,
+    includeRawPayload,
     integrations,
     loadMessage,
     loadState,
     onColumnFilterChange,
     onDatasetChange,
+    onIncludeRawPayloadChange,
     onIntegrationChange,
     onRefresh,
     onSyncRunChange,
@@ -18713,6 +18750,19 @@ function ReportsView(props: {
             ))}
           </select>
         </label>
+
+        <label className="raw-payload-toggle">
+          <input
+            checked={includeRawPayload}
+            disabled={!selectedIntegrationId || !selectedSyncRunId || loadState === 'loading'}
+            onChange={(event) => onIncludeRawPayloadChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Include RawPayload</span>
+        </label>
+        {includeRawPayload ? (
+          <span className="raw-payload-warning">Raw vendor JSON access is audited.</span>
+        ) : null}
       </section>
 
       <section className="metric-grid report-metrics" aria-label="Raw sync report summary">

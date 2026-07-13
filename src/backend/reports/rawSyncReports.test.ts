@@ -429,6 +429,7 @@ async function run() {
   assert.equal(details?.rows[0]?.Customer, 'Mapped Client');
   assert.equal(details?.rows[0]?.SelectedStorageGB, 1135);
   assert.equal(details?.rows[0]?.Mapped, true);
+  assert.equal(details?.rows[0]?.RawPayload, null);
   assert.equal(details?.rows[1]?.Customer, null);
   assert.equal(details?.rows[1]?.CoveCustomer, 'Unmapped Cove Client');
   assert.equal(details?.rows[1]?.Mapped, false);
@@ -437,6 +438,11 @@ async function run() {
 
   assert.equal(isRawSyncIntegrationId('pax8'), true);
   assert.equal(isRawSyncIntegrationId('unknown'), false);
+
+  const coveRawDetails = await getRawSyncDetails(database, 'cove', 'cove-sync-1', {
+    includeRawPayload: true,
+  });
+  assert.equal(coveRawDetails?.rows[0]?.RawPayload, JSON.stringify({ AccountId: 9001 }));
 
   const genericRuns = await listRawSyncRuns(database, 'sentinelone');
   assert.equal(genericRuns[0]?.id, 'sentinel-sync-1');
@@ -460,10 +466,13 @@ async function run() {
   });
   assert.equal(sensitiveMicrosoftDetails?.rows[0]?.UserPrincipalName, 'licensed.user@mapped.example');
   assert.equal(sensitiveMicrosoftDetails?.rows[0]?.DisplayName, 'Licensed User');
-  assert.equal(
-    sensitiveMicrosoftDetails?.rows[0]?.RawPayload,
-    JSON.stringify({ productSku: { skuPartNumber: 'SPB' } }),
-  );
+  assert.equal(sensitiveMicrosoftDetails?.rows[0]?.RawPayload, null);
+
+  const rawMicrosoftDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1', {
+    includeRawPayload: true,
+  });
+  assert.equal(rawMicrosoftDetails?.rows[0]?.UserPrincipalName, '[redacted]');
+  assert.equal(rawMicrosoftDetails?.rows[0]?.RawPayload, JSON.stringify({ productSku: { skuPartNumber: 'SPB' } }));
 
   const microsoftLicenseDetails = await getRawSyncDetails(database, 'microsoft-365', 'microsoft-365-sync-1', {
     dataset: 'licenses',
@@ -491,6 +500,7 @@ async function run() {
   assert.equal(appRiverDetails?.rows[0]?.ProductKey, 'Microsoft 365 Business Premium|Annual|Monthly');
   assert.equal(appRiverDetails?.rows[0]?.Quantity, 3);
   assert.equal(appRiverDetails?.rows[0]?.AssignedLicenses, 1);
+  assert.equal(appRiverDetails?.rows[0]?.RawPayload, null);
   assert.equal(appRiverDetails?.rows[1]?.Mapped, false);
   assert.equal(appRiverDetails?.rows[1]?.AppRiverCustomer, 'Unmapped Client');
 
@@ -517,6 +527,7 @@ async function run() {
   assert.equal(dattoDetails?.rows[1]?.ProductType, 'Office365');
   assert.equal(dattoDetails?.rows[1]?.RetentionType, 'TBR');
   assert.equal(dattoDetails?.rows[1]?.Quantity, 42);
+  assert.equal(dattoDetails?.rows[1]?.RawPayload, null);
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');
@@ -527,6 +538,7 @@ async function run() {
   assert.equal(genericDetails?.rows[0]?.SourceType, 'device-count');
   assert.equal(genericDetails?.rows[0]?.DeviceCategory, 'Device Count - Virtual Server');
   assert.equal(genericDetails?.rows[0]?.Quantity, 3);
+  assert.equal(genericDetails?.rows[0]?.RawPayload, null);
 
   console.log('raw sync report tests passed');
 }

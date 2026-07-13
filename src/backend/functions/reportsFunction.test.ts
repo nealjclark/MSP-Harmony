@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   getCustomerLicenseReportHttp,
   listCustomerLicenseReportCustomersHttp,
+  recordRawPayloadAccess,
 } from './reportsFunction';
 
 const originalAllowHeaderRoleAuth = process.env.ALLOW_HEADER_ROLE_AUTH;
@@ -67,6 +68,33 @@ async function run() {
   );
   assert.equal(missingDatabaseResponse.status, 400);
   assert.ok(Array.isArray((missingDatabaseResponse.jsonBody as { missingDatabaseSettings?: string[] }).missingDatabaseSettings));
+
+  const auditQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  await recordRawPayloadAccess(
+    {
+      async query<T = unknown>(sql: string, values?: unknown[]) {
+        auditQueries.push({ sql, values });
+        return { rows: [] as T[] };
+      },
+    },
+    {
+      actor: 'analyst@example.com',
+      integrationId: 'cove',
+      syncRunId: '11111111-1111-4111-8111-111111111111',
+      customerId: '22222222-2222-4222-8222-222222222222',
+      rowCount: 2,
+    },
+  );
+  assert.match(auditQueries[0]?.sql ?? '', /insert into audit_events/);
+  assert.deepEqual(auditQueries[0]?.values?.slice(0, 2), [
+    'analyst@example.com',
+    '11111111-1111-4111-8111-111111111111',
+  ]);
+  assert.deepEqual(JSON.parse(String(auditQueries[0]?.values?.[2])), {
+    integrationId: 'cove',
+    customerId: '22222222-2222-4222-8222-222222222222',
+    rowCount: 2,
+  });
 
   console.log('reports function tests passed');
 }

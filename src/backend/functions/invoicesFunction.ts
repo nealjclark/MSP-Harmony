@@ -11,7 +11,7 @@ import {
   type InvoiceNoticeType,
 } from '../invoices/connectwiseInvoices';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -61,7 +61,12 @@ export async function stubInvoiceNotificationHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as InvoiceNotificationBody;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<InvoiceNotificationBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const invoiceId = stringValue(body.invoiceId);
   const invoiceIds = Array.isArray(body.invoiceIds) ? body.invoiceIds.flatMap((value) => stringValue(value) ?? []) : [];
   const companyKey = stringValue(body.companyKey);
@@ -148,7 +153,12 @@ export async function previewMonthlyInvoiceHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as MonthlyPreviewBody;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<MonthlyPreviewBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const agreementId = stringValue(body.agreementId);
 
   if (!agreementId) {

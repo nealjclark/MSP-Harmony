@@ -23,6 +23,16 @@ If both schema and backend changed, run migration first, then `backend:build`. M
 
 See [`docs/database.md`](docs/database.md) for connection settings and Azure notes.
 
+## Local development ports
+
+To avoid conflicts with other local apps, use these preferred ports when starting MSP Harmony services:
+
+- Frontend Vite dev server: `5173` primary, `5174` fallback.
+- Backend Azure Functions host: `7071` primary, `7072` fallback.
+- Static Web Apps CLI, when used for local SWA emulation: `4280`.
+
+The Vite proxy in `src/frontend/vite.config.ts` looks for the Functions host on `http://127.0.0.1:7071` first, then `http://127.0.0.1:7072`. If a preferred port is already occupied by another MSP Harmony process, use the listed fallback before choosing another port. Do not stop unrelated local apps unless the user asks.
+
 ## Frontend layout
 
 - Main scroll container: `.content` (`overflow: auto` inside `.app-main`). **Prefer whole-page scroll** unless the user explicitly asks for a nested table scroller.

@@ -15,6 +15,7 @@ const discrete = getDatabaseSettings({
 assert.deepEqual(discrete.missing, []);
 assert.equal(discrete.port, 5432);
 assert.equal(discrete.ssl, true);
+assert.equal(discrete.authMode, 'password');
 
 const poolConfig = toPoolConfig(discrete);
 assert.equal(poolConfig.host, 'msp-harmony.postgres.database.azure.com');
@@ -29,6 +30,16 @@ assert.deepEqual(urlSettings.missing, []);
 assert.equal(urlSettings.ssl, false);
 assert.equal(toPoolConfig(urlSettings).connectionString, 'postgres://user:password@example.postgres.database.azure.com:5432/mspharmony');
 assert.equal(describeDatabaseSettings(urlSettings).host, 'example.postgres.database.azure.com:5432');
+
+const entra = getDatabaseSettings({
+  DATABASE_HOST: 'msp-harmony.postgres.database.azure.com',
+  DATABASE_NAME: 'mspharmony',
+  DATABASE_USER: 'func-mspharmony-flex',
+  DATABASE_AUTH_MODE: 'entra',
+});
+assert.deepEqual(entra.missing, []);
+assert.equal(entra.authMode, 'entra');
+assert.equal(describeDatabaseSettings(entra).authMode, 'entra');
 
 assert.equal(checksumSql('select 1;').length, 64);
 

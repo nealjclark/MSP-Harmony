@@ -5,7 +5,7 @@ import { updateIntegrationSettingsFromInterface } from '../api/integrationSettin
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import type { IntegrationSettingsRole } from '../config/settingsUpdater';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -22,6 +22,9 @@ export async function updateIntegrationSettingsHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = request.params.integrationId as IntegrationId | undefined;
   const keyVaultUrl = process.env.KEY_VAULT_URL;
 
@@ -37,7 +40,9 @@ export async function updateIntegrationSettingsHttp(
     });
   }
 
-  const body = (await request.json().catch(() => undefined)) as IntegrationSettingsBody | undefined;
+  const bodyResult = await readJsonBody<IntegrationSettingsBody | undefined>(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body) {
     return jsonResponse(400, {
       error: 'Request body must be valid JSON.',

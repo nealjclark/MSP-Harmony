@@ -5,6 +5,14 @@ import { getDatabaseSettings, toPoolConfig, type DatabaseEnvironment, type Datab
 
 let sharedPool: Pool | undefined;
 let sharedPoolPromise: Promise<Pool> | undefined;
+let cachedEntraPassword:
+  | {
+      token: string;
+      expiresOnTimestamp: number;
+    }
+  | undefined;
+
+const postgresEntraScope = 'https://ossrdbms-aad.database.windows.net/.default';
 
 export function isKeyVaultAppSettingReference(value: string | undefined) {
   return Boolean(value?.trim().startsWith('@Microsoft.KeyVault'));
@@ -39,6 +47,15 @@ export async function createResolvedDatabasePool(env: DatabaseEnvironment = proc
     throw new Error(`Missing database settings: ${settings.missing.join(', ')}`);
   }
 
+  if (settings.authMode === 'entra') {
+    const config = toPoolConfig({
+      ...settings,
+      password: undefined,
+    });
+    config.password = () => getPostgresEntraPassword();
+    return new Pool(config);
+  }
+
   const resolvedSettings: DatabaseSettings = {
     ...settings,
     password: await resolveDatabasePassword(settings, env),
@@ -64,4 +81,23 @@ export async function getSharedDatabasePool(env: DatabaseEnvironment = process.e
   }
 
   return sharedPoolPromise;
+}
+
+async function getPostgresEntraPassword() {
+  const now = Date.now();
+  if (cachedEntraPassword && cachedEntraPassword.expiresOnTimestamp - now > 5 * 60 * 1000) {
+    return cachedEntraPassword.token;
+  }
+
+  const credential = new DefaultAzureCredential();
+  const token = await credential.getToken(postgresEntraScope);
+  if (!token?.token) {
+    throw new Error('Unable to acquire an Entra access token for PostgreSQL.');
+  }
+
+  cachedEntraPassword = {
+    token: token.token,
+    expiresOnTimestamp: token.expiresOnTimestamp,
+  };
+  return cachedEntraPassword.token;
 }

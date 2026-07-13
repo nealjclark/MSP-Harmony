@@ -1,13 +1,13 @@
 import { config as loadDotEnv } from 'dotenv';
-import { Pool } from 'pg';
-import { describeDatabaseSettings, getDatabaseSettings, requireDatabaseSettings, toPoolConfig } from './config';
+import { describeDatabaseSettings, getDatabaseSettings } from './config';
+import { createResolvedDatabasePool } from './pool';
 
 loadDotEnv({ override: false });
 
 async function run() {
   const settings = getDatabaseSettings();
   console.log('Database settings:', describeDatabaseSettings(settings));
-  const pool = new Pool(toPoolConfig(requireDatabaseSettings(settings)));
+  const pool = await createResolvedDatabasePool();
 
   try {
     const connection = await pool.query<{

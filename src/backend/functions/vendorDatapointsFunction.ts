@@ -3,7 +3,7 @@ import { config as loadDotEnv } from 'dotenv';
 import { getIntegrationSettingsDefinition, type IntegrationDataSourceType, type IntegrationId } from '../../shared/integrationSettings';
 import type { InvoiceTableColumnMap, ManualImportSyncMode, VendorDatapointImportMode } from '../../shared/vendorDatapoints';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 import {
   createVendorDatapoint,
   getVendorDatapoint,
@@ -72,7 +72,12 @@ export async function createVendorDatapointHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
-  const body = (await request.json().catch(() => ({}))) as CreateVendorDatapointBody;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<CreateVendorDatapointBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body.displayName?.trim() || !body.sourceType) {
     return jsonResponse(400, {
       error: 'Vendor datapoint requires displayName and sourceType.',
@@ -116,6 +121,9 @@ export async function getVendorDatapointHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const datapointId = request.params.datapointId;
   if (!datapointId) {
     return jsonResponse(400, { error: 'Vendor datapoint id is required.' });
@@ -157,7 +165,9 @@ export async function updateVendorDatapointHttp(
     return jsonResponse(400, { error: 'Vendor datapoint id is required.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as UpdateVendorDatapointBody;
+  const bodyResult = await readJsonBody<UpdateVendorDatapointBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -204,12 +214,17 @@ export async function importVendorDatapointHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const datapointId = request.params.datapointId;
   if (!datapointId) {
     return jsonResponse(400, { error: 'Vendor datapoint id is required.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as ImportVendorDatapointBody;
+  const bodyResult = await readJsonBody<ImportVendorDatapointBody>(request, { limit: 'import', fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body.fileName?.trim() || typeof body.content !== 'string') {
     return jsonResponse(400, {
       error: 'Vendor datapoint import requires fileName and file content.',

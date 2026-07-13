@@ -15,9 +15,11 @@ async function run() {
   assert.equal(runs[0]?.integrationName, 'Cove Data Protection');
 
   const events = await listAuditEvents(database, { limit: 10 });
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.equal(events[0]?.eventType, 'reconciliation.connectwise.item.written');
   assert.match(events[0]?.summary.subtitle ?? '', /Qty 10/);
+  assert.equal(events[2]?.eventLabel, 'Raw payload viewed');
+  assert.equal(events[2]?.summary.subtitle, 'Raw payload viewed for 2 rows');
 
   const event = await getAuditEvent(database, '22222222-2222-4222-8222-222222222222');
   assert.equal(event?.summary.title, 'Managed M365');
@@ -162,6 +164,18 @@ function createMockDatabase() {
               entity_id: '33333333-3333-4333-8333-333333333333',
               occurred_at: '2026-07-07T13:00:00.000Z',
               payload: { updateCount: 1, discardedCount: 0 },
+            },
+            {
+              id: '66666666-6666-4666-8666-666666666666',
+              actor: 'analyst@example.com',
+              event_type: 'reports.raw-sync.raw-payload.viewed',
+              entity_type: 'sync_run',
+              entity_id: '11111111-1111-4111-8111-111111111111',
+              occurred_at: '2026-07-07T12:30:00.000Z',
+              payload: {
+                integrationId: 'cove',
+                rowCount: 2,
+              },
             },
           ] as T[],
         };

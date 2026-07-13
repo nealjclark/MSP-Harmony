@@ -9,7 +9,7 @@ import {
 import { sendGraphEmail } from '../email/graphEmailSender';
 import { isValidEmail } from '../../shared/communicationSettings';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -42,12 +42,17 @@ export async function updateCommunicationSettingsHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
   }
 
-  const body = await request.json().catch(() => undefined);
+  const bodyResult = await readJsonBody<unknown>(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body || typeof body !== 'object') {
     return jsonResponse(400, {
       error: 'Request body must be valid JSON.',
@@ -85,12 +90,17 @@ export async function testCommunicationSettingsHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return missingDatabaseResponse(repositoryContext.missingDatabaseSettings);
   }
 
-  const body = await request.json().catch(() => undefined);
+  const bodyResult = await readJsonBody<unknown>(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!body || typeof body !== 'object') {
     return jsonResponse(400, {
       error: 'Request body must be valid JSON.',

@@ -66,7 +66,7 @@ import {
   type UpsertNcentralFilterMappingInput,
 } from '../vendor/ncentral/filterMappings';
 import { requireRole } from './auth';
-import { createOptionalPostgresSettingsRepository, jsonResponse } from './runtime';
+import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
 
@@ -112,6 +112,9 @@ export async function listMappingsHttp(
   const auth = await requireRole(request, 'Analyst');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -142,6 +145,9 @@ export async function automapMappingsHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
@@ -178,6 +184,9 @@ export async function updateAccountMappingHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const externalAccountId = decodedRouteParam(request.params.externalAccountId);
   if (!integrationId) {
@@ -187,7 +196,9 @@ export async function updateAccountMappingHttp(
     return jsonResponse(400, { error: 'Account mapping update requires externalAccountId.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as AccountMappingBody;
+  const bodyResult = await readJsonBody<AccountMappingBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!isMappingStatus(body.status)) {
     return jsonResponse(400, { error: 'Account mapping update requires a valid status.' });
   }
@@ -230,6 +241,9 @@ export async function updateProductMappingHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const vendorProductKey = decodedRouteParam(request.params.vendorProductKey);
   if (!integrationId) {
@@ -239,7 +253,9 @@ export async function updateProductMappingHttp(
     return jsonResponse(400, { error: 'Product mapping update requires vendorProductKey.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as ProductMappingBody;
+  const bodyResult = await readJsonBody<ProductMappingBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   if (!isMappingStatus(body.status)) {
     return jsonResponse(400, { error: 'Product mapping update requires a valid status.' });
   }
@@ -319,12 +335,17 @@ export async function upsertProductBundleHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const body = (await request.json().catch(() => ({}))) as ProductBundleBody;
+  const bodyResult = await readJsonBody<ProductBundleBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -360,6 +381,9 @@ export async function deactivateProductBundleHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   const bundleKey = decodedRouteParam(request.params.bundleKey);
@@ -401,12 +425,17 @@ export async function upsertProductLinkRuleHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const body = (await request.json().catch(() => ({}))) as ProductLinkRuleBody;
+  const bodyResult = await readJsonBody<ProductLinkRuleBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -442,6 +471,9 @@ export async function deactivateProductLinkRuleHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   const ruleId = decodedRouteParam(request.params.ruleId);
@@ -483,6 +515,9 @@ export async function activateProductLinkRuleHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   const ruleId = decodedRouteParam(request.params.ruleId);
   if (!integrationId) {
@@ -522,6 +557,9 @@ export async function deleteProductLinkRuleHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   const ruleId = decodedRouteParam(request.params.ruleId);
@@ -567,10 +605,12 @@ export async function testProductLinkRuleHttp(
     return jsonResponse(400, { error: 'Linked count rule test requires ruleId.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as {
+  const bodyResult = await readJsonBody<{
     customerId?: string;
     agreementId?: string;
-  };
+  }>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -665,6 +705,9 @@ export async function applyMappingsHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
@@ -695,6 +738,9 @@ export async function approveSuggestedMappingsHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
@@ -766,12 +812,17 @@ export async function createUsageOverrideHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId) {
     return unsupportedVendorResponse(request.params.vendorId);
   }
 
-  const body = (await request.json().catch(() => ({}))) as UsageOverrideBody;
+  const bodyResult = await readJsonBody<UsageOverrideBody>(request, { fallback: {} as UsageOverrideBody });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -809,6 +860,9 @@ export async function deactivateUsageOverrideHttp(
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
 
   const integrationId = parseIntegrationId(request.params.vendorId);
   const overrideId = decodedRouteParam(request.params.overrideId);
@@ -923,12 +977,17 @@ export async function upsertNcentralFilterMappingHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (integrationId !== 'ncentral') {
     return jsonResponse(400, { error: 'Filter mappings are only available for N-central.' });
   }
 
-  const body = (await request.json().catch(() => ({}))) as NcentralFilterMappingBody;
+  const bodyResult = await readJsonBody<NcentralFilterMappingBody>(request, { fallback: {} as NcentralFilterMappingBody });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -994,6 +1053,9 @@ export async function upsertLaborMappingHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId || !integrationSupportsLaborMapping(integrationId)) {
     return jsonResponse(400, {
@@ -1001,7 +1063,9 @@ export async function upsertLaborMappingHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as LaborMappingBody;
+  const bodyResult = await readJsonBody<LaborMappingBody>(request, { fallback: {} as LaborMappingBody });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {
@@ -1157,6 +1221,9 @@ export async function upsertInvestigationTicketMappingHttp(
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
 
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
   const integrationId = parseIntegrationId(request.params.vendorId);
   if (!integrationId || !integrationSupportsInvestigationTicketMapping(integrationId)) {
     return jsonResponse(400, {
@@ -1164,7 +1231,11 @@ export async function upsertInvestigationTicketMappingHttp(
     });
   }
 
-  const body = (await request.json().catch(() => ({}))) as InvestigationTicketMappingBody;
+  const bodyResult = await readJsonBody<InvestigationTicketMappingBody>(request, {
+    fallback: {} as InvestigationTicketMappingBody,
+  });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   if (!repositoryContext.pool) {
     return jsonResponse(400, {

@@ -366,6 +366,14 @@ function summarizeAuditEvent(
         status: 'ready',
       };
     }
+    case 'reports.raw-sync.raw-payload.viewed': {
+      const definition = getIntegrationSettingsDefinition(String(payload.integrationId) as never);
+      return {
+        title: definition?.displayName ?? stringValue(payload.integrationId) ?? 'Raw sync payload',
+        subtitle: `Raw payload viewed for ${numberValue(payload.rowCount) ?? 0} rows`,
+        status: 'ready',
+      };
+    }
     case 'connectwise.invoice.notice.stubbed':
     case 'connectwise.invoice.notice.sent':
     case 'connectwise.invoice.notice.test-sent':
@@ -423,6 +431,8 @@ function auditEventLabel(eventType: string) {
       return 'Update failed';
     case 'integration.settings.updated':
       return 'Integration settings updated';
+    case 'reports.raw-sync.raw-payload.viewed':
+      return 'Raw payload viewed';
     case 'connectwise.invoice.notice.stubbed':
       return 'Invoice notice recorded';
     case 'connectwise.invoice.notice.sent':
