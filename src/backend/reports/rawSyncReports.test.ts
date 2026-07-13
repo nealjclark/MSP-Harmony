@@ -25,13 +25,18 @@ async function run() {
       }
 
       if (sql.includes('from sync_runs') && sql.includes('where integration_id = $1')) {
-        assert.ok(values?.[0] === 'sentinelone' || values?.[0] === 'microsoft-365');
+        assert.ok(values?.[0] === 'sentinelone' || values?.[0] === 'microsoft-365' || values?.[0] === 'huntress');
         assert.equal(values?.[1], 25);
 
         return {
           rows: [
             {
-              id: values?.[0] === 'sentinelone' ? 'sentinel-sync-1' : `${values?.[0]}-sync-1`,
+              id:
+                values?.[0] === 'sentinelone'
+                  ? 'sentinel-sync-1'
+                  : values?.[0] === 'huntress'
+                    ? 'huntress-sync-1'
+                    : `${values?.[0]}-sync-1`,
               started_at: new Date('2026-06-15T13:00:00Z'),
               completed_at: new Date('2026-06-15T13:01:00Z'),
               status: 'complete',
@@ -124,6 +129,23 @@ async function run() {
               records_written: 2,
               error_message: null,
               metadata: { entity: 'usage-snapshots', bcdrAgentsRead: 1, saasSeatQuantityRead: 42 },
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from sync_runs') && sql.includes("integration_id = 'huntress'") && sql.includes('where id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'huntress-sync-1',
+              started_at: new Date('2026-06-15T17:00:00Z'),
+              completed_at: new Date('2026-06-15T17:01:00Z'),
+              status: 'complete',
+              records_read: 17,
+              records_written: 2,
+              error_message: null,
+              metadata: { entity: 'usage-snapshots', usageSource: 'organization-summary', productClasses: ['itdr'] },
             },
           ] as T[],
         };
@@ -337,6 +359,62 @@ async function run() {
         };
       }
 
+      if (sql.includes('from vendor_usage_snapshots') && sql.includes("vendor_usage_snapshots.vendor_id = 'huntress'")) {
+        return {
+          rows: [
+            {
+              customer_name: 'Mapped Client',
+              agreement_name: 'Managed Services',
+              external_account_id: '101|huntress-itdr',
+              vendor_product_key: 'huntress-itdr',
+              product_code: 'HUNTRESS-ITDR',
+              product_name: 'Huntress Managed ITDR',
+              quantity: '12',
+              observed_at: new Date('2026-06-15T17:01:00Z'),
+              dimensions: {
+                source: 'organization-summary',
+                customerName: 'Mapped Huntress Org',
+                huntressProductClass: 'itdr',
+                huntressProductClassLabel: 'ITDR',
+                huntressOrganizationId: '101',
+                huntressOrganizationName: 'Mapped Huntress Org',
+                huntressOrganizationKey: 'mapped-huntress',
+                huntressAccountId: '7',
+                billableIdentityCount: 12,
+                agentsCount: 8,
+                logsSourcesCount: 1,
+                satLearnerCount: 0,
+                quantitySource: 'billable_identity_count',
+              },
+              raw_payload: { organization: { id: 101, name: 'Mapped Huntress Org' } },
+            },
+            {
+              customer_name: null,
+              agreement_name: null,
+              external_account_id: '202|huntress-itdr',
+              vendor_product_key: 'huntress-itdr',
+              product_code: 'HUNTRESS-ITDR',
+              product_name: 'Huntress Managed ITDR',
+              quantity: '5',
+              observed_at: new Date('2026-06-15T17:01:00Z'),
+              dimensions: {
+                source: 'organization-summary',
+                customerName: 'Unmapped Huntress Org',
+                huntressProductClass: 'itdr',
+                huntressProductClassLabel: 'ITDR',
+                huntressOrganizationId: '202',
+                huntressOrganizationName: 'Unmapped Huntress Org',
+                huntressOrganizationKey: 'unmapped-huntress',
+                huntressAccountId: '7',
+                billableIdentityCount: 5,
+                quantitySource: 'billable_identity_count',
+              },
+              raw_payload: { organization: { id: 202, name: 'Unmapped Huntress Org' } },
+            },
+          ] as T[],
+        };
+      }
+
       if (sql.includes('vendor_usage_snapshots.vendor_id = $2')) {
         assert.deepEqual(values, ['sentinel-sync-1', 'sentinelone']);
         return {
@@ -528,6 +606,30 @@ async function run() {
   assert.equal(dattoDetails?.rows[1]?.RetentionType, 'TBR');
   assert.equal(dattoDetails?.rows[1]?.Quantity, 42);
   assert.equal(dattoDetails?.rows[1]?.RawPayload, null);
+
+  const huntressRuns = await listRawSyncRuns(database, 'huntress');
+  assert.equal(huntressRuns[0]?.id, 'huntress-sync-1');
+
+  const huntressDetails = await getRawSyncDetails(database, 'huntress', 'huntress-sync-1');
+  assert.equal(huntressDetails?.integrationId, 'huntress');
+  assert.equal(huntressDetails?.summary.rowCount, 2);
+  assert.equal(huntressDetails?.summary.companyCount, 2);
+  assert.equal(huntressDetails?.summary.productCount, 1);
+  assert.equal(huntressDetails?.columns.includes('HuntressOrganization'), true);
+  assert.equal(huntressDetails?.rows[0]?.HuntressOrganization, 'Mapped Huntress Org');
+  assert.equal(huntressDetails?.rows[0]?.HuntressOrganizationId, '101');
+  assert.equal(huntressDetails?.rows[0]?.ProductClass, 'ITDR');
+  assert.equal(huntressDetails?.rows[0]?.QuantitySource, 'billable_identity_count');
+  assert.equal(huntressDetails?.rows[0]?.BillableIdentities, 12);
+  assert.equal(huntressDetails?.rows[0]?.Mapped, true);
+  assert.equal(huntressDetails?.rows[1]?.Mapped, false);
+  assert.equal(huntressDetails?.rows[1]?.HuntressOrganization, 'Unmapped Huntress Org');
+  assert.equal(huntressDetails?.rows[1]?.RawPayload, null);
+
+  const rawHuntressDetails = await getRawSyncDetails(database, 'huntress', 'huntress-sync-1', {
+    includeRawPayload: true,
+  });
+  assert.equal(rawHuntressDetails?.rows[0]?.RawPayload, JSON.stringify({ organization: { id: 101, name: 'Mapped Huntress Org' } }));
 
   const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
   assert.equal(genericDetails?.integrationId, 'sentinelone');

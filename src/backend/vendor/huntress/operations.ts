@@ -460,7 +460,7 @@ async function tryListResellerInvoices(
       invoices: await client.listResellerInvoices(options),
     };
   } catch (error) {
-    if (error instanceof HuntressApiError && (error.status === 403 || error.status === 404)) {
+    if (isUnavailableResellerScopeError(error)) {
       return { available: false, invoices: [] };
     }
 
@@ -476,12 +476,24 @@ async function tryListOrganizationUsageLineItems(
   try {
     return await client.listResellerOrganizationUsageLineItems(invoiceId, options);
   } catch (error) {
-    if (error instanceof HuntressApiError && (error.status === 403 || error.status === 404)) {
+    if (isUnavailableResellerScopeError(error)) {
       return [];
     }
 
     throw error;
   }
+}
+
+function isUnavailableResellerScopeError(error: unknown) {
+  if (!(error instanceof HuntressApiError)) {
+    return false;
+  }
+
+  if (error.status === 403 || error.status === 404) {
+    return true;
+  }
+
+  return error.status === 400 && /multi-account api credentials|reseller/i.test(error.message);
 }
 
 async function loadHuntressAccountMappings(database: Queryable) {

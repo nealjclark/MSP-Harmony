@@ -188,6 +188,21 @@ async function run() {
   assert.equal(testResult.resellerInvoiceCount, 1);
   assert.deepEqual(testResult.productClasses, ['itdr']);
 
+  const accountScopedTestResult = await testHuntressConnection({
+    provider,
+    now: '2026-07-13T12:01:00.000Z',
+    client: {
+      ...client,
+      async listResellerInvoices() {
+        throw new HuntressApiError('This endpoint is only available to multi-account API credentials.', 400);
+      },
+    },
+  });
+
+  assert.equal(accountScopedTestResult.organizationCount, 1);
+  assert.equal(accountScopedTestResult.agentCount, 1);
+  assert.equal(accountScopedTestResult.resellerInvoiceCount, undefined);
+
   const syncResult = await syncHuntressUsageSnapshots({
     pool: database,
     provider,
@@ -219,7 +234,7 @@ async function run() {
     client: {
       ...client,
       async listResellerInvoices() {
-        throw new HuntressApiError('Forbidden', 403);
+        throw new HuntressApiError('This endpoint is only available to multi-account API credentials.', 400);
       },
     },
   });

@@ -106,7 +106,7 @@ async function run() {
     assert.notEqual(huntressTestResponse.status, 501);
     assert.match(
       String((huntressTestResponse.jsonBody as { error?: string }).error),
-      /Huntress settings|Huntress test failed|Huntress API request failed|Huntress endpoint is not configured/i,
+      /Huntress settings|Huntress test failed|Huntress API request failed|Huntress endpoint is not configured|Missing Huntress setting/i,
     );
     assert.doesNotMatch(
       String((huntressTestResponse.jsonBody as { error?: string }).error),

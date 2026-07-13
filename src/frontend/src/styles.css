@@ -2695,6 +2695,10 @@ h2 {
   box-shadow: inset 0 0 0 1px rgba(13, 143, 128, 0.16);
 }
 
+.huntress-dataset-tabs button {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .mapping-dataset-tabs span,
 .mapping-dataset-tabs strong,
 .mapping-dataset-tabs em {

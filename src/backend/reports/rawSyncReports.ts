@@ -148,6 +148,20 @@ type DattoSnapshotRow = {
   raw_payload: unknown;
 };
 
+type HuntressSnapshotRow = {
+  customer_id: string | null;
+  customer_name: string | null;
+  agreement_name: string | null;
+  external_account_id: string | null;
+  vendor_product_key: string | null;
+  product_code: string | null;
+  product_name: string | null;
+  quantity: string | number;
+  observed_at: Date | string;
+  dimensions: unknown;
+  raw_payload: unknown;
+};
+
 type GenericSnapshotRow = {
   customer_id: string | null;
   customer_name: string | null;
@@ -321,6 +335,33 @@ export const dattoRawSyncColumns = [
   'RawPayload',
 ] as const;
 
+export const huntressRawSyncColumns = [
+  'Customer',
+  'Agreement',
+  'HuntressOrganization',
+  'HuntressOrganizationId',
+  'HuntressOrganizationKey',
+  'HuntressAccountId',
+  'HuntressAccountName',
+  'ProductClass',
+  'ProductKey',
+  'ProductCode',
+  'ProductName',
+  'Quantity',
+  'QuantitySource',
+  'BillableIdentities',
+  'AgentsCount',
+  'LogSourcesCount',
+  'SatLearnerCount',
+  'BillingPeriodStart',
+  'BillingPeriodEnd',
+  'HuntressInvoiceId',
+  'ExternalAccountId',
+  'Mapped',
+  'ObservedAt',
+  'RawPayload',
+] as const;
+
 export const genericRawSyncColumns = [
   'Customer',
   'Agreement',
@@ -464,6 +505,10 @@ export async function getRawSyncDetails(
 
   if (integrationId === 'datto') {
     return getDattoRawSyncDetails(database, syncRunId, options);
+  }
+
+  if (integrationId === 'huntress') {
+    return getHuntressRawSyncDetails(database, syncRunId, options);
   }
 
   return getGenericRawSyncDetails(database, integrationId, syncRunId, options);
@@ -968,6 +1013,123 @@ function mapDattoSnapshotRow(
   };
 }
 
+async function getHuntressRawSyncDetails(
+  database: Queryable,
+  syncRunId: string,
+  options: RawSyncDetailsOptions = {},
+): Promise<RawSyncDetails | undefined> {
+  const syncRunResult = await database.query<SyncRunRow>(
+    `select id, started_at, completed_at, status, records_read, records_written, error_message, metadata
+     from sync_runs
+     where id = $1
+       and integration_id = 'huntress'
+       and metadata->>'entity' = 'usage-snapshots'
+     limit 1`,
+    [syncRunId],
+  );
+  const syncRunRow = syncRunResult.rows[0];
+
+  if (!syncRunRow) {
+    return undefined;
+  }
+
+  const detailResult = await database.query<HuntressSnapshotRow>(
+    `with mapped_snapshots as (
+       select
+         vendor_usage_snapshots.*,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
+           else vendor_usage_snapshots.customer_id
+         end as effective_customer_id,
+         case
+           when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
+           else vendor_usage_snapshots.agreement_id
+         end as effective_agreement_id
+       from vendor_usage_snapshots
+       left join vendor_account_mappings
+         on vendor_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
+        and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+        and vendor_account_mappings.active = true
+        and vendor_account_mappings.mapping_status = 'approved'
+       where vendor_usage_snapshots.sync_run_id = $1
+         and vendor_usage_snapshots.vendor_id = 'huntress'
+     )
+     select
+       mapped_snapshots.effective_customer_id as customer_id,
+       customers.name as customer_name,
+       agreements.name as agreement_name,
+       mapped_snapshots.external_account_id,
+       mapped_snapshots.vendor_product_key,
+       mapped_snapshots.product_code,
+       mapped_snapshots.product_name,
+       mapped_snapshots.quantity,
+       mapped_snapshots.observed_at,
+       mapped_snapshots.dimensions,
+       mapped_snapshots.raw_payload
+     from mapped_snapshots
+     left join customers on customers.id = mapped_snapshots.effective_customer_id
+     left join agreements on agreements.id = mapped_snapshots.effective_agreement_id
+     where ($2::uuid is null or mapped_snapshots.effective_customer_id = $2::uuid)
+     order by coalesce(customers.name, mapped_snapshots.dimensions->>'huntressOrganizationName', mapped_snapshots.dimensions->>'customerName', mapped_snapshots.external_account_id),
+       mapped_snapshots.vendor_product_key`,
+    [syncRunId, options.customerId ?? null],
+  );
+  const rows = detailResult.rows.map((row) =>
+    mapHuntressSnapshotRow(row, {
+      includeRawPayload: options.includeRawPayload === true,
+    }),
+  );
+
+  return {
+    integrationId: 'huntress',
+    syncRun: mapSyncRun(syncRunRow),
+    columns: huntressRawSyncColumns,
+    rows,
+    summary: {
+      rowCount: rows.length,
+      companyCount: uniqueCount(rows, 'Customer') + uniqueUnmappedHuntressOrganizationCount(rows),
+      agreementCount: uniqueCount(rows, 'Agreement'),
+      productCount: uniqueCount(rows, 'ProductKey'),
+    },
+  };
+}
+
+function mapHuntressSnapshotRow(
+  row: HuntressSnapshotRow,
+  options: { includeRawPayload?: boolean } = {},
+): RawSyncDetail {
+  const dimensions = recordFromJson(row.dimensions);
+  const includeRawPayload = options.includeRawPayload === true;
+
+  return {
+    CustomerId: row.customer_id,
+    Customer: row.customer_name,
+    Agreement: row.agreement_name,
+    HuntressOrganization: stringValue(dimensions.huntressOrganizationName) ?? stringValue(dimensions.customerName),
+    HuntressOrganizationId: primitiveValue(dimensions.huntressOrganizationId),
+    HuntressOrganizationKey: stringValue(dimensions.huntressOrganizationKey),
+    HuntressAccountId: primitiveValue(dimensions.huntressAccountId),
+    HuntressAccountName: stringValue(dimensions.huntressAccountName),
+    ProductClass: stringValue(dimensions.huntressProductClassLabel) ?? stringValue(dimensions.huntressProductClass),
+    ProductKey: row.vendor_product_key,
+    ProductCode: row.product_code,
+    ProductName: row.product_name,
+    Quantity: numberValue(row.quantity) ?? 0,
+    QuantitySource: stringValue(dimensions.quantitySource),
+    BillableIdentities: numberValue(dimensions.billableIdentityCount) ?? null,
+    AgentsCount: numberValue(dimensions.agentsCount) ?? null,
+    LogSourcesCount: numberValue(dimensions.logsSourcesCount) ?? null,
+    SatLearnerCount: numberValue(dimensions.satLearnerCount) ?? null,
+    BillingPeriodStart: stringValue(dimensions.billingPeriodStart),
+    BillingPeriodEnd: stringValue(dimensions.billingPeriodEnd),
+    HuntressInvoiceId: primitiveValue(dimensions.huntressInvoiceId),
+    ExternalAccountId: row.external_account_id,
+    Mapped: Boolean(row.customer_name && row.agreement_name),
+    ObservedAt: isoDate(row.observed_at) ?? null,
+    RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
+  };
+}
+
 async function getNcentralRawSyncDetails(
   database: Queryable,
   syncRunId: string,
@@ -1462,6 +1624,15 @@ function uniqueUnmappedDattoAccountCount(rows: RawSyncDetail[]) {
     rows
       .filter((row) => !row.Customer)
       .map((row) => row.SaaSCustomerId ?? row.DattoCustomer ?? row.SaaSDomain ?? row.ExternalAccountId)
+      .filter((value) => value !== null && value !== undefined && value !== ''),
+  ).size;
+}
+
+function uniqueUnmappedHuntressOrganizationCount(rows: RawSyncDetail[]) {
+  return new Set(
+    rows
+      .filter((row) => !row.Customer)
+      .map((row) => row.HuntressOrganizationId ?? row.HuntressOrganization ?? row.ExternalAccountId)
       .filter((value) => value !== null && value !== undefined && value !== ''),
   ).size;
 }

@@ -13531,10 +13531,10 @@ function MappingsView(props: {
   const customerOptions = mappingState?.customerOptions ?? [];
   const selectedOverrideCustomer = customerOptions.find((option) => option.customerId === overrideCustomerId);
   const overrideAgreementOptions = selectedOverrideCustomer?.agreements ?? [];
-  const suggestedAccountCount = accountCandidates.filter(
+  const suggestedCustomerMappingCount = (mappingState?.accountCandidates ?? []).filter(
     (candidate) => candidate.status === 'approved' && candidate.customerId,
   ).length;
-  const canBulkApproveSuggested = !isDattoMappingWorkspace && !isHuntressMappingWorkspace && suggestedAccountCount > 0;
+  const canBulkApproveSuggested = suggestedCustomerMappingCount > 0;
   const selectedDatasetLabel = isDattoMappingWorkspace
     ? dattoMappingDatasetLabel(dattoMappingDataset)
     : isHuntressMappingWorkspace
@@ -14227,32 +14227,10 @@ function MappingsView(props: {
             Refresh
           </button>
           {!isLaborOnlyMappingWorkspace ? (
-            <>
-              <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
-                <Zap size={16} />
-                {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
-              </button>
-              <button
-                className="button primary compact"
-                disabled={Boolean(busyAction) || !canBulkApproveSuggested}
-                onClick={onApproveSuggested}
-                title={
-                  isDattoMappingWorkspace
-                    ? 'Approve Datto SaaS and BCDR mappings individually from their dataset table.'
-                    : suggestedAccountCount === 0
-                      ? 'No suggested customer mappings are ready to approve.'
-                      : 'Approve all suggested customer mappings.'
-                }
-                type="button"
-              >
-                <Link2 size={16} />
-                {busyAction === 'approve-suggested'
-                  ? 'Approving'
-                  : isDattoMappingWorkspace
-                    ? 'Approve rows individually'
-                    : `Approve suggested (${suggestedAccountCount})`}
-              </button>
-            </>
+            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
+              <Zap size={16} />
+              {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
+            </button>
           ) : null}
         </div>
       </div>
@@ -14372,8 +14350,9 @@ function MappingsView(props: {
                 type="button"
               >
                 <span>{huntressMappingDatasetLabel(dataset)}</span>
-                <strong>{counts.accounts.toLocaleString()} accounts</strong>
-                <em>{counts.products.toLocaleString()} products</em>
+                {counts.unmappedAccounts > 0 ? (
+                  <strong>{formatUnmappedAccountCount(counts.unmappedAccounts)}</strong>
+                ) : null}
               </button>
             );
           })}
@@ -14427,14 +14406,32 @@ function MappingsView(props: {
                   : `${accountCandidates.length.toLocaleString()} unmapped ${selectedDatasetLabel} accounts`}
               </h2>
             </div>
-            <label className="switch-control compact-switch">
-              <input
-                checked={showMappedAccounts}
-                onChange={(event) => setShowMappedAccounts(event.target.checked)}
-                type="checkbox"
-              />
-              Show mapped customers
-            </label>
+            <div className="surface-header-actions">
+              <button
+                className="button primary compact"
+                disabled={Boolean(busyAction) || !canBulkApproveSuggested}
+                onClick={onApproveSuggested}
+                title={
+                  suggestedCustomerMappingCount === 0
+                    ? 'No suggested customer mappings are ready to approve.'
+                    : 'Approve all suggested customer mappings for this integration.'
+                }
+                type="button"
+              >
+                <Link2 size={16} />
+                {busyAction === 'approve-suggested'
+                  ? 'Approving'
+                  : `Approve all customer mappings (${suggestedCustomerMappingCount.toLocaleString()})`}
+              </button>
+              <label className="switch-control compact-switch">
+                <input
+                  checked={showMappedAccounts}
+                  onChange={(event) => setShowMappedAccounts(event.target.checked)}
+                  type="checkbox"
+                />
+                Show mapped customers
+              </label>
+            </div>
           </div>
 
           <div className="mapping-review-list">
@@ -17031,31 +17028,23 @@ function huntressBundleMatchesDataset(bundle: ProductBundle, dataset?: HuntressM
 }
 
 function huntressDatasetCounts(mappingState: MappingStateResponse | null, dataset: HuntressMappingDataset) {
-  const accountIds = new Set(
-    [
-      ...(mappingState?.accountMappings ?? []),
-      ...(mappingState?.accountCandidates ?? []),
-    ]
+  const unmappedAccountIds = new Set(
+    (mappingState?.accountCandidates ?? [])
       .filter((row) => huntressAccountMatchesDataset(row, dataset))
       .map((row) => row.externalAccountId),
   );
-  const productKeys = new Set(
-    [
-      ...(mappingState?.productMappings ?? []),
-      ...(mappingState?.productCandidates ?? []),
-    ]
-      .filter((row) => huntressProductMatchesDataset(row.vendorProductKey, dataset))
-      .map((row) => row.vendorProductKey),
-  );
 
   return {
-    accounts: accountIds.size,
-    products: productKeys.size,
+    unmappedAccounts: unmappedAccountIds.size,
   };
 }
 
 function huntressVendorProductKeyForDataset(dataset: HuntressMappingDataset) {
   return `huntress-${dataset}`;
+}
+
+function formatUnmappedAccountCount(count: number) {
+  return `${count.toLocaleString()} unmapped account${count === 1 ? '' : 's'}`;
 }
 
 type ProductMappingGroup = {
