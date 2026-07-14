@@ -16008,7 +16008,7 @@ function MappingsView(props: {
               </select>
             </label>
 
-            <div className="product-bundle-target">
+            <div className="product-bundle-target cross-bundle-product-section">
               <label>
                 <span>ConnectWise bundle product</span>
                 <div className="product-catalog-search-row">
@@ -16054,7 +16054,7 @@ function MappingsView(props: {
               </div>
             </div>
 
-            <div className="product-bundle-target linked-count-source">
+            <div className="product-bundle-target linked-count-source cross-bundle-source-section">
               <div className="linked-filter-grid">
                 <label>
                   <span>Source name</span>
@@ -16176,7 +16176,7 @@ function MappingsView(props: {
               </div>
             </div>
 
-            <div className="product-bundle-target linked-count-source">
+            <div className="product-bundle-target linked-count-source cross-bundle-addon-section">
               <div className="linked-filter-grid">
                 <label>
                   <span>Add-on source</span>
@@ -16210,7 +16210,7 @@ function MappingsView(props: {
               </div>
               <div className="product-bundle-list compact-list">
                 {crossBundleAddOns.map((addOn) => (
-                  <article className="product-bundle-row linked-count-row" key={addOn.addOnKey}>
+                  <article className="product-bundle-row linked-count-row cross-bundle-addon-row" key={addOn.addOnKey}>
                     <div>
                       <strong>{addOn.connectwiseProductName}</strong>
                       <span>{addOn.connectwiseProductCode}</span>
@@ -16234,7 +16234,7 @@ function MappingsView(props: {
               </div>
             </div>
 
-            <div className="product-bundle-actions">
+            <div className="product-bundle-actions cross-bundle-save-actions">
               <button
                 className="button primary compact"
                 disabled={
@@ -16262,7 +16262,7 @@ function MappingsView(props: {
               </div>
             ) : null}
             {crossVendorBundles.map((bundle) => (
-              <article className="product-bundle-row" key={bundle.bundleKey}>
+              <article className="product-bundle-row cross-bundle-saved-row" key={bundle.bundleKey}>
                 <div>
                   <strong>{bundle.bundleName}</strong>
                   <span>{bundle.bundleKey}</span>
