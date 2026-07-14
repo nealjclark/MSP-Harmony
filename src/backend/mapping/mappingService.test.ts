@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import {
   approveSuggestedAccountMappings,
   buildAccountMappingCandidates,
+  deactivateCrossVendorProductBundle,
   deleteProductLinkRule,
   deactivateProductLinkRule,
   generateProductMappingCandidates,
+  listCrossVendorProductBundles,
   listProductLinkRules,
   listProductMappingCustomers,
   listMappingState,
@@ -17,6 +19,7 @@ import {
   updateAccountMapping,
   updateProductMapping,
   upsertProductLinkRule,
+  upsertCrossVendorProductBundle,
   upsertProductBundle,
   type ConnectWiseCustomerCandidate,
   type Queryable,
@@ -388,6 +391,139 @@ async function run() {
   const bundleInsertQuery = bundleQueries.find((query) => query.sql.includes('insert into vendor_product_bundles'));
   assert.equal(bundleInsertQuery?.values?.[8], true);
   assert.equal(bundleInsertQuery?.values?.[9], 'reviewer@example.com');
+
+  const crossBundleQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const crossBundleRows: unknown[] = [];
+  const crossBundleCatalog = new Map<string, { name: string; price: string | null }>([
+    ['BMB-MANAGED-ENDPOINT-O365', { name: 'BMB Managed Endpoint + O365', price: '29.5' }],
+    ['S1-ENDPOINT-ADDON', { name: 'SentinelOne Endpoint Add-on', price: '6.25' }],
+  ]);
+  const crossBundleDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      crossBundleQueries.push({ sql, values });
+      if (sql.includes('from products') && sql.includes('agreement_additions.product_code')) {
+        const code = String(values?.[0] ?? '');
+        const catalogProduct = crossBundleCatalog.get(code);
+        return {
+          rows: catalogProduct
+            ? [
+                {
+                  connectwise_product_code: code,
+                  connectwise_product_name: catalogProduct.name,
+                  unit_price: catalogProduct.price,
+                },
+              ]
+            : [],
+        } as { rows: T[] };
+      }
+
+      if (sql.includes('insert into cross_vendor_product_bundles')) {
+        const row = {
+          id: 'cross-bundle-1',
+          bundle_key: values?.[0],
+          bundle_name: values?.[1],
+          connectwise_product_code: values?.[2],
+          connectwise_product_name: values?.[3],
+          unit_price: values?.[4],
+          count_strategy: values?.[5],
+          default_driver_source_key: values?.[6],
+          sources: JSON.parse(String(values?.[7])),
+          add_ons: JSON.parse(String(values?.[8])),
+          mapping_status: 'approved',
+          active: values?.[9],
+          reviewed_by: values?.[10],
+          reviewed_at: '2026-07-14T12:00:00.000Z',
+          created_at: '2026-07-14T12:00:00.000Z',
+          updated_at: '2026-07-14T12:00:00.000Z',
+        };
+        crossBundleRows.splice(0, crossBundleRows.length, row);
+        return { rows: [row] as T[] };
+      }
+
+      if (sql.includes('from cross_vendor_product_bundles')) {
+        return { rows: crossBundleRows as T[] };
+      }
+
+      if (sql.includes('update cross_vendor_product_bundles')) {
+        const row = crossBundleRows[0];
+        if (typeof row === 'object' && row !== null && 'active' in row) {
+          row.active = false;
+        }
+        return { rows: [] as T[] };
+      }
+
+      return { rows: [] as T[] };
+    },
+  };
+  const crossBundle = await upsertCrossVendorProductBundle(crossBundleDatabase, {
+    bundleKey: 'Managed Endpoint + O365',
+    bundleName: 'Managed Endpoint + O365',
+    countStrategy: 'specific-driver',
+    defaultDriverSourceKey: 'Licensed Users',
+    reviewedBy: 'reviewer@example.com',
+    targetProduct: {
+      connectwiseProductCode: 'BMB-MANAGED-ENDPOINT-O365',
+      connectwiseProductName: 'BMB Managed Endpoint + O365',
+    },
+    sources: [
+      {
+        sourceKey: 'Licensed Users',
+        sourceName: 'Licensed Users',
+        source: {
+          sourceType: 'filtered-dataset',
+          vendorId: 'microsoft-365',
+          dataset: 'users',
+          aggregation: { type: 'row-count' },
+          filter: {
+            nodeType: 'condition',
+            field: 'assignedLicenses',
+            operator: 'is-not-empty',
+          },
+        },
+      },
+      {
+        sourceKey: 'S1 Devices',
+        sourceName: 'SentinelOne devices',
+        source: {
+          sourceType: 'vendor-product',
+          vendorId: 'sentinelone',
+          vendorProductKey: 'device:workstation',
+          vendorProductName: 'SentinelOne Workstation',
+        },
+      },
+    ],
+    addOns: [
+      {
+        addOnKey: 'S1 Device Overage',
+        sourceKey: 'S1 Devices',
+        connectwiseProductCode: 'S1-ENDPOINT-ADDON',
+        connectwiseProductName: 'SentinelOne Endpoint Add-on',
+        includedPerBaseQuantity: 1,
+      },
+    ],
+  });
+  assert.equal(crossBundle.bundleKey, 'managed-endpoint-o365');
+  assert.equal(crossBundle.defaultDriverSourceKey, 'licensed-users');
+  assert.equal(crossBundle.target.connectwiseProductName, 'BMB Managed Endpoint + O365');
+  assert.equal(crossBundle.sources.length, 2);
+  assert.equal(crossBundle.sources.some((source) => source.source.sourceType === 'filtered-dataset'), true);
+  assert.equal(crossBundle.addOns[0]?.sourceKey, 's1-devices');
+  assert.equal(crossBundle.addOns[0]?.connectwiseProductCode, 'S1-ENDPOINT-ADDON');
+
+  const listedCrossBundles = await listCrossVendorProductBundles(crossBundleDatabase);
+  assert.equal(listedCrossBundles[0]?.bundleKey, 'managed-endpoint-o365');
+  assert.equal(listedCrossBundles[0]?.addOns[0]?.unitPrice, 6.25);
+
+  const deactivatedCrossBundle = await deactivateCrossVendorProductBundle(crossBundleDatabase, 'managed-endpoint-o365', {
+    reviewedBy: 'reviewer@example.com',
+  });
+  assert.equal(deactivatedCrossBundle.active, false);
+  assert.equal(
+    crossBundleQueries.some(
+      (query) => query.sql.includes('update cross_vendor_product_bundles') && query.values?.[0] === 'managed-endpoint-o365',
+    ),
+    true,
+  );
 
   const linkRuleQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const linkRuleRows: unknown[] = [];

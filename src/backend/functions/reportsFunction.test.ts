@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  generateChangeReportHttp,
   getCustomerLicenseReportHttp,
   listCustomerLicenseReportCustomersHttp,
   recordRawPayloadAccess,
@@ -61,6 +62,30 @@ async function run() {
   );
   assert.equal(forbiddenCombinedMicrosoftDetailsResponse.status, 403);
 
+  const emptyChangeReportResponse = await generateChangeReportHttp(
+    requestWithJson({}, analystHeaders),
+    {} as never,
+  );
+  assert.equal(emptyChangeReportResponse.status, 400);
+
+  const unsupportedChangeReportModeResponse = await generateChangeReportHttp(
+    requestWithJson(
+      {
+        comparisons: [
+          {
+            vendorId: 'cove',
+            mode: 'microsoft365-license-counts',
+            startSyncRunId: 'start',
+            endSyncRunId: 'end',
+          },
+        ],
+      },
+      analystHeaders,
+    ),
+    {} as never,
+  );
+  assert.equal(unsupportedChangeReportModeResponse.status, 400);
+
   clearDatabaseEnv();
   const missingDatabaseResponse = await listCustomerLicenseReportCustomersHttp(
     request({}, analystHeaders),
@@ -113,6 +138,14 @@ function request(query: Record<string, string>, headers: Headers) {
   return {
     headers,
     query: new URLSearchParams(query),
+  } as never;
+}
+
+function requestWithJson(body: unknown, headers: Headers) {
+  return {
+    headers,
+    query: new URLSearchParams(),
+    json: async () => body,
   } as never;
 }
 

@@ -1,4 +1,4 @@
-import { LoaderCircle, LogOut, ShieldCheck } from 'lucide-react';
+import { LoaderCircle, LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 type AppRole = 'Admin' | 'Approver' | 'Analyst';
@@ -52,9 +52,21 @@ async function fetchIdentityEmail() {
   return payload.clientPrincipal?.userDetails;
 }
 
-function redirectToLogin() {
+function loginHref(selectAccount = false) {
   const redirectUri = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  window.location.assign(`/.auth/login/aad?post_login_redirect_uri=${encodeURIComponent(redirectUri || '/')}`);
+  const searchParams = new URLSearchParams({
+    post_login_redirect_uri: redirectUri || '/',
+  });
+
+  if (selectAccount) {
+    searchParams.set('prompt', 'select_account');
+  }
+
+  return `/.auth/login/aad?${searchParams.toString()}`;
+}
+
+function redirectToLogin() {
+  window.location.assign(loginHref(true));
 }
 
 type AccessGateProps = {
@@ -138,7 +150,22 @@ export default function AccessGate({ children }: AccessGateProps) {
   }
 
   const displayEmail = session?.user?.email ?? identityEmail;
-  const displayName = session?.user?.name ?? displayEmail ?? 'Signed-in user';
+  const statusTitle =
+    phase === 'checking'
+      ? 'Signing you in...'
+      : phase === 'pending'
+        ? 'Access pending'
+        : phase === 'database-unavailable'
+          ? 'Sign-in paused'
+          : 'Sign in to continue';
+  const statusBody =
+    phase === 'checking'
+      ? undefined
+      : phase === 'pending'
+        ? 'This email is signed in, but it does not have access to MSP Harmony yet.'
+        : phase === 'database-unavailable'
+          ? 'We could not finish signing you in. Try again in a moment.'
+          : 'Choose your Microsoft account to continue.';
 
   return (
     <div className="access-gate">
@@ -154,45 +181,17 @@ export default function AccessGate({ children }: AccessGateProps) {
         <div className={`access-gate-status access-gate-status-${phase}`}>
           {phase === 'checking' ? <LoaderCircle className="access-gate-spinner" size={28} /> : <ShieldCheck size={28} />}
           <div>
-            <strong>
-              {phase === 'checking'
-                ? 'Checking Microsoft sign-in'
-                : phase === 'pending'
-                  ? 'Waiting for application role'
-                  : phase === 'database-unavailable'
-                    ? 'Access verification unavailable'
-                    : 'Sign-in required'}
-            </strong>
-            <p>
-              {phase === 'checking'
-                ? 'Verifying your identity and PostgreSQL application role before opening the workspace.'
-                : phase === 'pending'
-                  ? (session?.message ??
-                    'Your Microsoft account is authenticated. An administrator must assign an active MSP Harmony role before you can continue.')
-                  : phase === 'database-unavailable'
-                    ? (session?.error ??
-                      'The application could not reach PostgreSQL to confirm your role. Try again in a moment.')
-                    : 'Sign in with your organization account to continue.'}
-            </p>
+            <strong>{statusTitle}</strong>
+            {statusBody ? <p>{statusBody}</p> : null}
           </div>
         </div>
 
-        <dl className="access-gate-details">
-          <div>
-            <dt>Signed in as</dt>
-            <dd>{displayName}</dd>
+        {displayEmail ? (
+          <div className="access-gate-account">
+            <span>Signed in as</span>
+            <strong>{displayEmail}</strong>
           </div>
-          {displayEmail ? (
-            <div>
-              <dt>Email</dt>
-              <dd>{displayEmail}</dd>
-            </div>
-          ) : null}
-          <div>
-            <dt>Application roles</dt>
-            <dd>{session?.roles?.length ? session.roles.join(', ') : 'Not assigned yet'}</dd>
-          </div>
-        </dl>
+        ) : null}
 
         <div className="access-gate-actions">
           {(phase === 'pending' || phase === 'database-unavailable') && (
@@ -200,6 +199,12 @@ export default function AccessGate({ children }: AccessGateProps) {
               Check again
             </button>
           )}
+          {isProductionHost() ? (
+            <a className="button primary access-gate-login" href={loginHref(true)}>
+              <LogIn size={16} />
+              Use another account
+            </a>
+          ) : null}
           {isProductionHost() ? (
             <a className="button ghost access-gate-logout" href="/.auth/logout">
               <LogOut size={16} />

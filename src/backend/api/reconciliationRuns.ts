@@ -14,7 +14,7 @@ import type {
 } from '../shared/types';
 import type { ReconciliationAdjustment } from './reconciliationAdjustments';
 import { getIntegrationSettingsDefinition, integrationDoNotSuggestNewAdditions, integrationPsaAgreementReconcileMode, type IntegrationId } from '../../shared/integrationSettings';
-import { isVendorDatapointId, isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
+import { crossVendorBundlesVendorId, isVendorDatapointId, isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
 import { getVendorRuleSet } from './reconciliation';
 import { loadAdditionPins, upsertAdditionPins } from '../mapping/additionPinService';
 import { loadCoveRuleSet, type Queryable } from '../vendor/cove/operations';
@@ -26,7 +26,10 @@ import { loadSentinelOneRuleSet } from '../vendor/sentinelone/operations';
 import { loadHuntressRuleSet } from '../vendor/huntress/operations';
 import {
   listProductBundles,
+  listCrossVendorProductBundles,
   listProductLinkRules,
+  type CrossVendorProductBundle,
+  type CrossVendorBundleSource,
   type ProductBundle,
   type ProductLinkRuleAggregation,
   type ProductLinkRuleFilterNode,
@@ -44,6 +47,7 @@ import {
   sqlLatestReconcilableSyncRunIdExpression,
 } from '../shared/reconcilableSyncRuns';
 import { billableUnitForVendorProductKey } from '../shared/vendorProductUnits';
+import { normalizeProductCode } from '../shared/reconciliationProductMatching';
 
 export type ReconcileVendorFromDatabaseOptions = {
   syncRunId?: string;
@@ -247,6 +251,10 @@ export async function reconcileVendorFromDatabase(
   vendorId: string,
   options: ReconcileVendorFromDatabaseOptions = {},
 ): Promise<DatabaseReconciliationResult> {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return reconcileCrossVendorBundlesFromDatabase(database);
+  }
+
   const syncRunId = options.syncRunId ?? (await loadLatestSyncRunId(database, vendorId));
   const ruleSet = await loadRuleSet(database, vendorId);
   const doNotSuggestNewAdditions = await loadDoNotSuggestNewAdditions(database, vendorId);
@@ -289,13 +297,14 @@ export async function reconcileVendorFromDatabase(
     await loadUsageOverrides(database, vendorId, loadedSnapshots),
     { ...ruleSet, rules },
   );
+  const billableSnapshots = await suppressCrossVendorBundleCoveredSnapshots(database, vendorId, overriddenSnapshots);
   const agreementAdditions = await loadAgreementAdditions(database, [
-    ...overriddenSnapshots,
+    ...billableSnapshots,
     ...linkedContext.anchorSnapshots,
   ]);
   const agreementIds = [
     ...new Set(
-      [...overriddenSnapshots, ...linkedContext.anchorSnapshots].map((snapshot) => snapshot.agreementId),
+      [...billableSnapshots, ...linkedContext.anchorSnapshots].map((snapshot) => snapshot.agreementId),
     ),
   ];
   const reconcileMode = await loadVendorReconcileMode(database, vendorId);
@@ -305,7 +314,7 @@ export async function reconcileVendorFromDatabase(
       : [];
   const snapshots = [
     ...applyProductBundles(
-      overriddenSnapshots,
+      billableSnapshots,
       await listProductBundles(database, vendorId as IntegrationId),
       agreementAdditions,
     ),
@@ -369,6 +378,487 @@ export async function listActiveAgreementAdditions(
   );
 
   return result.rows.map(mapActiveAgreementAdditionRow);
+}
+
+export async function reconcileCrossVendorBundlesFromDatabase(
+  database: Queryable,
+): Promise<DatabaseReconciliationResult> {
+  const bundles = (await listCrossVendorProductBundles(database)).filter(
+    (bundle) => bundle.active && bundle.status === 'approved' && bundle.sources.length > 0,
+  );
+  const generatedAt = new Date().toISOString();
+  if (bundles.length === 0) {
+    return {
+      vendorId: crossVendorBundlesVendorId,
+      generatedAt,
+      lines: [],
+      totals: {
+        matched: 0,
+        needsReview: 0,
+        notBillable: 0,
+        unmapped: 0,
+        financialImpact: { amount: 0, currency: 'USD' },
+      },
+      snapshotCount: 0,
+      agreementAdditionCount: 0,
+      productOptions: [],
+    };
+  }
+
+  const bundleProductCodes = [
+    ...new Set(
+      bundles.flatMap((bundle) => [
+        bundle.target.connectwiseProductCode,
+        ...bundle.addOns.map((addOn) => addOn.connectwiseProductCode),
+      ]),
+    ),
+  ];
+  const agreementAdditions = await loadAgreementAdditionsForProductCodes(database, bundleProductCodes);
+  const rules: QuantityRule[] = [];
+  const snapshots: UsageSnapshot[] = [];
+
+  for (const bundle of bundles) {
+    const baseVendorProductKey = crossVendorBundleBaseProductKey(bundle.bundleKey);
+    rules.push({
+      id: `${baseVendorProductKey}-count`,
+      vendorId: crossVendorBundlesVendorId,
+      vendorProductKey: baseVendorProductKey,
+      productCode: bundle.target.connectwiseProductCode,
+      productName: bundle.target.connectwiseProductName,
+      sourceMetric: 'snapshot-count',
+      billableUnit: 'license',
+      unitPrice: moneyFromNumber(bundle.target.unitPrice),
+      notes: `${bundle.bundleName} base count uses the configured cross-vendor bundle strategy.`,
+    });
+
+    for (const addOn of bundle.addOns) {
+      const addOnVendorProductKey = crossVendorBundleAddOnProductKey(bundle.bundleKey, addOn.addOnKey);
+      rules.push({
+        id: `${addOnVendorProductKey}-count`,
+        vendorId: crossVendorBundlesVendorId,
+        vendorProductKey: addOnVendorProductKey,
+        productCode: addOn.connectwiseProductCode,
+        productName: addOn.connectwiseProductName,
+        sourceMetric: 'snapshot-count',
+        billableUnit: 'license',
+        unitPrice: moneyFromNumber(addOn.unitPrice),
+        notes: `${addOn.connectwiseProductName} is the overage add-on for ${bundle.bundleName}.`,
+      });
+    }
+
+    const eligibleScopes = bundleEligibleScopes(bundle, agreementAdditions);
+    if (eligibleScopes.length === 0) {
+      continue;
+    }
+
+    const sourceTotals = await loadCrossVendorBundleSourceTotals(database, bundle.sources);
+    for (const scope of eligibleScopes) {
+      const sourceCounts = sourceCountsForScope(bundle.sources, sourceTotals, scope.scopeKey);
+      const baseSelection = selectCrossVendorBundleBaseQuantity(bundle, sourceCounts);
+      const observedAt = latestSourceObservedAt(sourceCounts) ?? new Date(0).toISOString();
+
+      snapshots.push({
+        id: `cross-bundle:${bundle.bundleKey}:${scope.scopeKey}:base`,
+        vendorId: crossVendorBundlesVendorId,
+        clientId: scope.customerId,
+        agreementId: scope.agreementId,
+        vendorProductKey: baseVendorProductKey,
+        productCode: bundle.target.connectwiseProductCode,
+        productName: bundle.target.connectwiseProductName,
+        quantity: baseSelection.quantity,
+        observedAt,
+        dimensions: {
+          crossVendorBundle: true,
+          crossVendorBundleKey: bundle.bundleKey,
+          crossVendorBundleName: bundle.bundleName,
+          crossVendorBundleLineType: 'base',
+          crossVendorBundleCountStrategy: bundle.countStrategy,
+          crossVendorBundleDriverSourceKey: baseSelection.driverSourceKey,
+          crossVendorBundleDriverSourceName: baseSelection.driverSourceName,
+          crossVendorBundleSourceCounts: crossVendorSourceCountSummary(sourceCounts),
+        },
+      });
+
+      for (const addOn of bundle.addOns) {
+        const addOnSourceCount = sourceCounts.get(addOn.sourceKey)?.quantity ?? 0;
+        const includedQuantity = baseSelection.quantity * addOn.includedPerBaseQuantity;
+        const overageQuantity = Math.max(0, addOnSourceCount - includedQuantity);
+        const hasExistingAddOn = agreementAdditions.some(
+          (addition) =>
+            addition.clientId === scope.customerId &&
+            addition.agreementId === scope.agreementId &&
+            normalizeProductCode(addition.productCode) === normalizeProductCode(addOn.connectwiseProductCode),
+        );
+        if (overageQuantity === 0 && !hasExistingAddOn) {
+          continue;
+        }
+
+        snapshots.push({
+          id: `cross-bundle:${bundle.bundleKey}:${scope.scopeKey}:addon:${addOn.addOnKey}`,
+          vendorId: crossVendorBundlesVendorId,
+          clientId: scope.customerId,
+          agreementId: scope.agreementId,
+          vendorProductKey: crossVendorBundleAddOnProductKey(bundle.bundleKey, addOn.addOnKey),
+          productCode: addOn.connectwiseProductCode,
+          productName: addOn.connectwiseProductName,
+          quantity: overageQuantity,
+          observedAt,
+          dimensions: {
+            crossVendorBundle: true,
+            crossVendorBundleKey: bundle.bundleKey,
+            crossVendorBundleName: bundle.bundleName,
+            crossVendorBundleLineType: 'add-on',
+            crossVendorBundleSourceKey: addOn.sourceKey,
+            crossVendorBundleSourceCount: addOnSourceCount,
+            crossVendorBundleIncludedQuantity: includedQuantity,
+            crossVendorBundleIncludedPerBaseQuantity: addOn.includedPerBaseQuantity,
+            crossVendorBundleBaseQuantity: baseSelection.quantity,
+          },
+        });
+      }
+    }
+  }
+
+  const ruleSet: VendorRuleSet = {
+    vendorId: crossVendorBundlesVendorId,
+    vendorName: 'Cross-vendor bundles',
+    rules,
+  };
+  const result = reconcileVendorUsage({
+    vendorId: crossVendorBundlesVendorId,
+    rules,
+    snapshots,
+    agreementAdditions,
+  });
+  const lines = decorateCrossVendorBundleLines(result.lines, snapshots);
+
+  return {
+    ...result,
+    totals: totalsForLines(lines),
+    lines: await withLineDetails(database, lines, snapshots, agreementAdditions, ruleSet, new Map()),
+    snapshotCount: snapshots.length,
+    agreementAdditionCount: agreementAdditions.length,
+    productOptions: productOptionsForRuleSet(ruleSet),
+  };
+}
+
+type CrossVendorBundleScope = {
+  scopeKey: string;
+  customerId: string;
+  agreementId: string;
+};
+
+type CrossVendorSourceScopeTotal = {
+  sourceKey: string;
+  sourceName: string;
+  customerId: string;
+  agreementId: string;
+  quantity: number;
+  observedAt?: string;
+  sources: ReconciliationLinkedCountSource[];
+};
+
+async function suppressCrossVendorBundleCoveredSnapshots(
+  database: Queryable,
+  vendorId: string,
+  snapshots: UsageSnapshot[],
+): Promise<UsageSnapshot[]> {
+  if (snapshots.length === 0 || !isVendorKey(vendorId)) {
+    return snapshots;
+  }
+
+  const bundles = (await listCrossVendorProductBundles(database)).filter(
+    (bundle) => bundle.active && bundle.status === 'approved',
+  );
+  const relevantBundles = bundles.flatMap((bundle) => {
+    const vendorProductKeys = bundle.sources.flatMap((source) =>
+      source.source.sourceType === 'vendor-product' && source.source.vendorId === vendorId
+        ? [canonicalVendorProductKey(source.source.vendorProductKey)]
+        : [],
+    );
+    return vendorProductKeys.length > 0
+      ? [
+          {
+            bundle,
+            vendorProductKeys: new Set(vendorProductKeys.map((key) => key.trim().toLowerCase())),
+          },
+        ]
+      : [];
+  });
+  if (relevantBundles.length === 0) {
+    return snapshots;
+  }
+
+  const baseProductCodes = [...new Set(relevantBundles.map(({ bundle }) => bundle.target.connectwiseProductCode))];
+  const baseAdditions = await loadAgreementAdditionsForProductCodes(database, baseProductCodes);
+  const coveredScopesByProductCode = new Map<string, Set<string>>();
+  for (const addition of baseAdditions) {
+    const productCode = normalizeProductCode(addition.productCode);
+    const scopes = coveredScopesByProductCode.get(productCode) ?? new Set<string>();
+    scopes.add(`${addition.clientId}|${addition.agreementId}`);
+    coveredScopesByProductCode.set(productCode, scopes);
+  }
+
+  return snapshots.filter((snapshot) => {
+    const vendorProductKey = snapshot.vendorProductKey
+      ? canonicalVendorProductKey(snapshot.vendorProductKey).trim().toLowerCase()
+      : undefined;
+    if (!vendorProductKey) {
+      return true;
+    }
+
+    return !relevantBundles.some(({ bundle, vendorProductKeys }) => {
+      if (!vendorProductKeys.has(vendorProductKey)) {
+        return false;
+      }
+
+      return coveredScopesByProductCode
+        .get(normalizeProductCode(bundle.target.connectwiseProductCode))
+        ?.has(`${snapshot.clientId}|${snapshot.agreementId}`) ?? false;
+    });
+  });
+}
+
+function bundleEligibleScopes(
+  bundle: CrossVendorProductBundle,
+  agreementAdditions: LoadedAgreementAddition[],
+): CrossVendorBundleScope[] {
+  const scopes = new Map<string, CrossVendorBundleScope>();
+  for (const addition of agreementAdditions) {
+    if (normalizeProductCode(addition.productCode) !== normalizeProductCode(bundle.target.connectwiseProductCode)) {
+      continue;
+    }
+
+    const scopeKey = `${addition.clientId}|${addition.agreementId}`;
+    scopes.set(scopeKey, {
+      scopeKey,
+      customerId: addition.clientId,
+      agreementId: addition.agreementId,
+    });
+  }
+
+  return [...scopes.values()].sort(
+    (left, right) => left.customerId.localeCompare(right.customerId) || left.agreementId.localeCompare(right.agreementId),
+  );
+}
+
+async function loadCrossVendorBundleSourceTotals(
+  database: Queryable,
+  sources: CrossVendorBundleSource[],
+): Promise<Map<string, Map<string, CrossVendorSourceScopeTotal>>> {
+  const totalsBySource = new Map<string, Map<string, CrossVendorSourceScopeTotal>>();
+
+  for (const source of sources) {
+    const totalsByScope = new Map<string, CrossVendorSourceScopeTotal>();
+    const dedupedQuantities = new Map<string, Map<string, number>>();
+    const linkedTotals = await loadLinkedSourceTotals(database, source.source);
+    for (const linkedTotal of linkedTotals) {
+      const scopeKey = `${linkedTotal.customerId}|${linkedTotal.agreementId}`;
+      const total =
+        totalsByScope.get(scopeKey) ?? {
+          sourceKey: source.sourceKey,
+          sourceName: source.sourceName,
+          customerId: linkedTotal.customerId,
+          agreementId: linkedTotal.agreementId,
+          quantity: 0,
+          observedAt: linkedTotal.observedAt,
+          sources: [],
+        };
+      const sourceSummary = total.sources.find((candidate) => candidate.label === linkedTotal.source.label);
+      if (sourceSummary) {
+        sourceSummary.quantity += linkedTotal.source.quantity;
+        sourceSummary.rowCount += linkedTotal.source.rowCount;
+      } else {
+        total.sources.push({ ...linkedTotal.source });
+      }
+
+      const dedupeKey = 'dedupeKey' in linkedTotal ? linkedTotal.dedupeKey : undefined;
+      if (dedupeKey) {
+        const sourceDedupe = dedupedQuantities.get(scopeKey) ?? new Map<string, number>();
+        const previousQuantity = sourceDedupe.get(dedupeKey) ?? 0;
+        if (linkedTotal.quantity > previousQuantity) {
+          total.quantity += linkedTotal.quantity - previousQuantity;
+          sourceDedupe.set(dedupeKey, linkedTotal.quantity);
+        }
+        dedupedQuantities.set(scopeKey, sourceDedupe);
+      } else {
+        total.quantity += linkedTotal.quantity;
+      }
+      if (linkedTotal.observedAt && (!total.observedAt || linkedTotal.observedAt > total.observedAt)) {
+        total.observedAt = linkedTotal.observedAt;
+      }
+      totalsByScope.set(scopeKey, total);
+    }
+
+    totalsBySource.set(source.sourceKey, totalsByScope);
+  }
+
+  return totalsBySource;
+}
+
+function sourceCountsForScope(
+  sources: CrossVendorBundleSource[],
+  sourceTotals: Map<string, Map<string, CrossVendorSourceScopeTotal>>,
+  scopeKey: string,
+) {
+  const counts = new Map<string, CrossVendorSourceScopeTotal>();
+  const [customerId, agreementId] = scopeKey.split('|');
+  for (const source of sources) {
+    counts.set(
+      source.sourceKey,
+      sourceTotals.get(source.sourceKey)?.get(scopeKey) ?? {
+        sourceKey: source.sourceKey,
+        sourceName: source.sourceName,
+        customerId,
+        agreementId,
+        quantity: 0,
+        sources: [],
+      },
+    );
+  }
+
+  return counts;
+}
+
+function selectCrossVendorBundleBaseQuantity(
+  bundle: CrossVendorProductBundle,
+  sourceCounts: Map<string, CrossVendorSourceScopeTotal>,
+) {
+  const counts = [...sourceCounts.values()];
+  if (bundle.countStrategy === 'highest-component') {
+    const selected = [...counts].sort((left, right) => right.quantity - left.quantity)[0];
+    return {
+      quantity: selected?.quantity ?? 0,
+      driverSourceKey: selected?.sourceKey,
+      driverSourceName: selected?.sourceName,
+    };
+  }
+
+  if (bundle.countStrategy === 'lowest-component') {
+    const selected = [...counts].sort((left, right) => left.quantity - right.quantity)[0];
+    return {
+      quantity: selected?.quantity ?? 0,
+      driverSourceKey: selected?.sourceKey,
+      driverSourceName: selected?.sourceName,
+    };
+  }
+
+  const selected = bundle.defaultDriverSourceKey ? sourceCounts.get(bundle.defaultDriverSourceKey) : undefined;
+  return {
+    quantity: selected?.quantity ?? 0,
+    driverSourceKey: selected?.sourceKey ?? bundle.defaultDriverSourceKey,
+    driverSourceName: selected?.sourceName,
+  };
+}
+
+function latestSourceObservedAt(sourceCounts: Map<string, CrossVendorSourceScopeTotal>) {
+  const observedAtValues = [...sourceCounts.values()]
+    .map((source) => source.observedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+  return observedAtValues[observedAtValues.length - 1];
+}
+
+function crossVendorSourceCountSummary(sourceCounts: Map<string, CrossVendorSourceScopeTotal>) {
+  return [...sourceCounts.values()]
+    .map((source) => `${source.sourceName}:${source.quantity}`)
+    .sort()
+    .join('; ');
+}
+
+function decorateCrossVendorBundleLines(lines: ReconciliationLine[], snapshots: UsageSnapshot[]) {
+  const snapshotsByRuleScope = new Map<string, UsageSnapshot[]>();
+  for (const snapshot of snapshots) {
+    const key = `${snapshot.clientId}|${snapshot.agreementId}|${snapshot.productCode}`;
+    snapshotsByRuleScope.set(key, [...(snapshotsByRuleScope.get(key) ?? []), snapshot]);
+  }
+
+  return lines.map((line) => {
+    const lineSnapshots = snapshotsByRuleScope.get(`${line.clientId}|${line.agreementId}|${line.productCode}`) ?? [];
+    const firstSnapshot = lineSnapshots[0];
+    if (!firstSnapshot?.dimensions.crossVendorBundle) {
+      return line;
+    }
+
+    const extraEvidence = [
+      optionalEvidence('Bundle', firstSnapshot.dimensions.crossVendorBundleName),
+      optionalEvidence('Bundle strategy', firstSnapshot.dimensions.crossVendorBundleCountStrategy),
+      optionalEvidence('Driver source', firstSnapshot.dimensions.crossVendorBundleDriverSourceName),
+      optionalEvidence('Source counts', firstSnapshot.dimensions.crossVendorBundleSourceCounts),
+      optionalEvidence('Source count', firstSnapshot.dimensions.crossVendorBundleSourceCount),
+      optionalEvidence('Included quantity', firstSnapshot.dimensions.crossVendorBundleIncludedQuantity),
+      optionalEvidence('Included per base', firstSnapshot.dimensions.crossVendorBundleIncludedPerBaseQuantity),
+    ].filter((entry): entry is { label: string; value: string | number } => Boolean(entry));
+
+    return {
+      ...line,
+      reason:
+        firstSnapshot.dimensions.crossVendorBundleLineType === 'add-on'
+          ? `${line.productName} overage is calculated inside the cross-vendor bundle.`
+          : `${line.productName} base count is calculated from the cross-vendor bundle strategy.`,
+      evidence: [...line.evidence, ...extraEvidence],
+    };
+  });
+}
+
+function optionalEvidence(label: string, value: DimensionValue) {
+  return typeof value === 'string' || typeof value === 'number' ? { label, value } : undefined;
+}
+
+function crossVendorBundleBaseProductKey(bundleKey: string) {
+  return `bundle:${bundleKey}:base`;
+}
+
+function crossVendorBundleAddOnProductKey(bundleKey: string, addOnKey: string) {
+  return `bundle:${bundleKey}:addon:${addOnKey}`;
+}
+
+function moneyFromNumber(value: number | undefined): MoneyAmount | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? {
+        amount: value,
+        currency: 'USD',
+      }
+    : undefined;
+}
+
+async function loadAgreementAdditionsForProductCodes(
+  database: Queryable,
+  productCodes: string[],
+): Promise<LoadedAgreementAddition[]> {
+  const normalizedProductCodes = [...new Set(productCodes.map(normalizeProductCode).filter(Boolean))];
+  if (normalizedProductCodes.length === 0) {
+    return [];
+  }
+
+  const result = await database.query<AdditionRow>(
+    `select
+       agreement_additions.id,
+       agreement_additions.customer_id,
+       agreement_additions.agreement_id,
+       agreements.name as source_agreement_name,
+       agreements.connectwise_agreement_id as source_connectwise_agreement_id,
+       agreement_additions.connectwise_addition_id,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       agreement_additions.quantity,
+       agreement_additions.unit_price,
+       agreement_additions.addition_status,
+       agreement_additions.updated_at,
+       agreement_additions.raw_payload
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where lower(agreement_additions.product_code) = any($1::text[])
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'`,
+    [normalizedProductCodes],
+  );
+
+  return result.rows.map(mapAdditionRow);
 }
 
 function totalsForLines(lines: ReconciliationLine[]) {
@@ -1456,11 +1946,15 @@ function canonicalVendorProductKey(value: string) {
 }
 
 function integrationDisplayName(integrationId: VendorKey) {
+  if (integrationId === crossVendorBundlesVendorId) {
+    return 'Cross-vendor bundles';
+  }
+
   if (isVendorDatapointId(integrationId)) {
     return integrationId.slice('datapoint:'.length);
   }
 
-  return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
+  return getIntegrationSettingsDefinition(integrationId as IntegrationId)?.displayName ?? integrationId;
 }
 
 async function loadVendorReconcileMode(database: Queryable, vendorId: string) {
@@ -1653,7 +2147,8 @@ function compactDeviceDimensions(dimensions: DimensionMap): DimensionMap {
       deviceDimensionKeys.includes(key as (typeof deviceDimensionKeys)[number]) ||
       key.startsWith('appRiver') ||
       key.startsWith('huntress') ||
-      key.startsWith('linkedCount')
+      key.startsWith('linkedCount') ||
+      key.startsWith('crossVendorBundle')
     ) {
       compact[key] = value;
     }

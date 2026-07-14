@@ -69,6 +69,7 @@ import {
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
 import {
+  crossVendorBundlesVendorId,
   isVendorDatapointId,
   type CreateVendorDatapointInput,
   type InvoiceTableColumnMap as SharedInvoiceTableColumnMap,
@@ -148,9 +149,9 @@ type IssueStatus =
   | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationTab = 'api' | 'invoice';
-type ReportSection = 'raw-sync' | 'product-profitability' | 'customer-license';
+type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -401,6 +402,85 @@ type RawSyncRunsResponse = {
   integrationId: IntegrationId;
   dataset?: RawSyncDataset;
   runs: RawSyncRun[];
+};
+
+type ChangeReportMode = 'counts' | 'users' | 'devices' | 'microsoft365-license-counts';
+
+type ChangeReportBuilderRow = {
+  id: string;
+  vendorId: IntegrationId | '';
+  mode: ChangeReportMode;
+  startSyncRunId: string;
+  endSyncRunId: string;
+};
+
+type ChangeReportItem = {
+  id: string;
+  identity: string;
+  displayName: string;
+  observedAt?: string;
+  details: Record<string, string | number | boolean | null>;
+};
+
+type ChangeReportChangeType = 'added' | 'removed' | 'increased' | 'decreased' | 'changed';
+
+type ChangeReportRow = {
+  id: string;
+  changeType: ChangeReportChangeType;
+  customer: {
+    customerId?: string;
+    connectWiseCompanyId?: string;
+    customerName: string;
+    externalAccountId?: string;
+  };
+  agreement?: {
+    agreementId?: string;
+    agreementName?: string;
+  };
+  productKey: string;
+  productCode?: string;
+  productName: string;
+  startCount: number;
+  endCount: number;
+  delta: number;
+  addedItems: ChangeReportItem[];
+  removedItems: ChangeReportItem[];
+};
+
+type ChangeReportSummary = {
+  comparisonCount: number;
+  changedRowCount: number;
+  addedCount: number;
+  removedCount: number;
+  increasedCount: number;
+  decreasedCount: number;
+  changedCount: number;
+  startTotal: number;
+  endTotal: number;
+  netQuantityDelta: number;
+  detailAddedCount: number;
+  detailRemovedCount: number;
+};
+
+type ChangeReportComparison = {
+  id: string;
+  vendorId: IntegrationId;
+  vendorName: string;
+  mode: ChangeReportMode;
+  modeLabel: string;
+  status: 'ready' | 'unavailable';
+  message?: string;
+  startSyncRun: RawSyncRun;
+  endSyncRun: RawSyncRun;
+  summary: ChangeReportSummary;
+  rows: ChangeReportRow[];
+};
+
+type ChangeReportResponse = {
+  reportType: 'change-report';
+  generatedAt: string;
+  summary: ChangeReportSummary;
+  comparisons: ChangeReportComparison[];
 };
 
 type ProductProfitabilityMonth = {
@@ -1270,7 +1350,7 @@ type AgreementAdditionUpdateResponse = {
 };
 
 type ReconciliationRunResponse = {
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   generatedAt: string;
   syncRunId?: string;
   snapshotCount?: number;
@@ -1420,6 +1500,40 @@ type ProductLinkRule = {
   sourceVendorProductKey: string;
   ruleName: string;
   sources: ProductLinkRuleSource[];
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type CrossVendorBundleCountStrategy = 'specific-driver' | 'highest-component' | 'lowest-component';
+
+type CrossVendorBundleSource = {
+  sourceKey: string;
+  sourceName: string;
+  source: ProductLinkRuleSource;
+};
+
+type CrossVendorBundleAddOn = {
+  addOnKey: string;
+  sourceKey: string;
+  connectwiseProductCode: string;
+  connectwiseProductName: string;
+  unitPrice?: number;
+  includedPerBaseQuantity: number;
+};
+
+type CrossVendorProductBundle = {
+  id: string;
+  bundleKey: string;
+  bundleName: string;
+  target: ProductMappingTarget;
+  countStrategy: CrossVendorBundleCountStrategy;
+  defaultDriverSourceKey?: string;
+  sources: CrossVendorBundleSource[];
+  addOns: CrossVendorBundleAddOn[];
   status: MappingStatus;
   active: boolean;
   reviewedBy?: string;
@@ -1803,6 +1917,12 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
     description: 'Inspect saved raw sync rows by integration and sync date',
   },
   {
+    id: 'change-report',
+    label: 'Change Report',
+    enabled: true,
+    description: 'Compare start and end product snapshots across one or more vendors',
+  },
+  {
     id: 'product-profitability',
     label: 'Product Profitability',
     enabled: true,
@@ -1821,6 +1941,12 @@ const reconciliationVendorIds: IntegrationId[] = integrationSettingsRegistry
   .map((integration) => integration.integrationId);
 const customerLicenseVendorIds: CustomerLicenseReportVendorId[] = ['all', 'microsoft-365', 'cove', 'ncentral', 'opentext-appriver'];
 const noAgreementSyncValue = '__no_agreement_sync__';
+const changeReportModeOptions: Array<{ id: ChangeReportMode; label: string }> = [
+  { id: 'counts', label: 'Counts' },
+  { id: 'users', label: 'Email users' },
+  { id: 'devices', label: 'Devices' },
+  { id: 'microsoft365-license-counts', label: 'M365 license counts' },
+];
 
 const integrationSettingsStates: IntegrationSettingsState[] = [];
 
@@ -1843,6 +1969,10 @@ function hasInvestigationTicketMappingWorkspace(vendorId: VendorKey) {
 }
 
 function hasAnyMappingWorkspace(vendorId: VendorKey) {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return false;
+  }
+
   if (isVendorDatapointId(vendorId)) {
     return true;
   }
@@ -2207,7 +2337,19 @@ function integrationName(integrationId: IntegrationId) {
   return integrationSettingsRegistry.find((integration) => integration.integrationId === integrationId)?.displayName ?? integrationId;
 }
 
+function reconciliationSourceName(vendorId: VendorKey) {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return 'Cross-vendor bundles';
+  }
+
+  return isRegistryIntegrationId(vendorId) ? integrationName(vendorId) : vendorId;
+}
+
 function vendorDisplayName(vendorId: VendorKey, datapoints: VendorDatapointRecord[] = []) {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return 'Cross-vendor bundles';
+  }
+
   const datapoint = datapoints.find((item) => item.vendorId === vendorId);
   if (datapoint) {
     return datapoint.displayName;
@@ -2218,6 +2360,64 @@ function vendorDisplayName(vendorId: VendorKey, datapoints: VendorDatapointRecor
   }
 
   return integrationName(vendorId);
+}
+
+function expandCrossVendorBundleSelection(
+  selectedIds: VendorKey[],
+  bundles: CrossVendorProductBundle[],
+  availableIds: Set<VendorKey>,
+) {
+  const expanded = new Set(selectedIds);
+  const activeBundles = bundles.filter((bundle) => bundle.active);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const bundle of activeBundles) {
+      const relatedVendorIds = crossVendorBundleSourceVendorIds(bundle).filter((vendorId) => availableIds.has(vendorId));
+      const selectedRelated = relatedVendorIds.some((vendorId) => expanded.has(vendorId));
+      if (!selectedRelated && !expanded.has(crossVendorBundlesVendorId)) {
+        continue;
+      }
+
+      for (const vendorId of [crossVendorBundlesVendorId, ...relatedVendorIds]) {
+        if (availableIds.has(vendorId) && !expanded.has(vendorId)) {
+          expanded.add(vendorId);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return [...expanded];
+}
+
+function crossVendorBundleSourceVendorIds(bundle: CrossVendorProductBundle): VendorKey[] {
+  return [
+    ...new Set(
+      bundle.sources.flatMap((source) =>
+        source.source.sourceType === 'vendor-product' || source.source.sourceType === 'filtered-dataset'
+          ? [source.source.vendorId]
+          : [],
+      ),
+    ),
+  ];
+}
+
+function upsertCrossVendorBundle(
+  bundles: CrossVendorProductBundle[],
+  bundle: CrossVendorProductBundle,
+) {
+  const nextBundles = bundles.some((existing) => existing.bundleKey === bundle.bundleKey)
+    ? bundles.map((existing) => (existing.bundleKey === bundle.bundleKey ? bundle : existing))
+    : [...bundles, bundle];
+
+  return nextBundles.sort(
+    (left, right) =>
+      Number(right.active) - Number(left.active) ||
+      left.bundleName.localeCompare(right.bundleName) ||
+      left.bundleKey.localeCompare(right.bundleKey),
+  );
 }
 
 function datapointMappingVendorId(datapoint: VendorDatapointRecord): VendorKey {
@@ -2233,11 +2433,52 @@ function hasMappingWorkspaceForVendor(vendorId: VendorKey) {
 }
 
 function isRegistryIntegrationId(vendorId: VendorKey): vendorId is IntegrationId {
-  return !isVendorDatapointId(vendorId);
+  return vendorId !== crossVendorBundlesVendorId && !isVendorDatapointId(vendorId);
 }
 
 function customerLicenseVendorName(vendorId: CustomerLicenseReportVendorId) {
   return vendorId === 'all' ? 'All licenses' : integrationName(vendorId);
+}
+
+let nextChangeReportRowId = 0;
+
+function createChangeReportBuilderRow(): ChangeReportBuilderRow {
+  nextChangeReportRowId += 1;
+  return {
+    id: `change-report-row-${Date.now()}-${nextChangeReportRowId}`,
+    vendorId: '',
+    mode: 'counts',
+    startSyncRunId: '',
+    endSyncRunId: '',
+  };
+}
+
+function changeReportModesForVendor(vendorId: IntegrationId | '') {
+  if (vendorId === 'microsoft-365') {
+    return changeReportModeOptions;
+  }
+
+  return changeReportModeOptions.filter((option) => option.id !== 'microsoft365-license-counts');
+}
+
+function changeReportModeLabel(mode: ChangeReportMode) {
+  return changeReportModeOptions.find((option) => option.id === mode)?.label ?? mode;
+}
+
+function changeReportDatasetForMode(vendorId: IntegrationId, mode: ChangeReportMode): RawSyncDataset | undefined {
+  if (vendorId !== 'microsoft-365') {
+    return undefined;
+  }
+
+  return mode === 'microsoft365-license-counts' ? 'licenses' : 'users';
+}
+
+function changeReportRunCacheKey(vendorId: IntegrationId, mode: ChangeReportMode) {
+  return `${vendorId}:${changeReportDatasetForMode(vendorId, mode) ?? 'usage'}`;
+}
+
+function isCompleteChangeReportBuilderRow(row: ChangeReportBuilderRow) {
+  return Boolean(row.vendorId && row.startSyncRunId && row.endSyncRunId);
 }
 
 const customerLicenseServicePalette = [
@@ -3453,6 +3694,28 @@ async function fetchRawSyncDetails(
   return body as unknown as RawSyncDetailsResponse;
 }
 
+async function fetchChangeReport(comparisons: Array<{
+  vendorId: IntegrationId;
+  mode: ChangeReportMode;
+  startSyncRunId: string;
+  endSyncRunId: string;
+}>) {
+  const response = await fetch('/api/reports/change-report', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ comparisons }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Change report failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as ChangeReportResponse;
+}
+
 async function fetchProductProfitabilityReport() {
   const response = await fetch('/api/reports/product-profitability');
   const body = await responseJson(response);
@@ -3860,6 +4123,17 @@ async function fetchMappingState(integrationId: VendorKey) {
   return body as unknown as MappingStateResponse;
 }
 
+async function fetchCrossVendorBundles() {
+  const response = await fetch('/api/cross-vendor-bundles');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Cross-vendor bundle load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { bundles: CrossVendorProductBundle[] };
+}
+
 async function fetchProductMappingCustomers(integrationId: VendorKey, vendorProductKey: string) {
   const response = await fetch(
     `/api/mappings/${encodeURIComponent(integrationId)}/products/${encodeURIComponent(vendorProductKey)}/customers`,
@@ -4024,6 +4298,51 @@ async function deactivateProductBundleRequest(integrationId: VendorKey, bundleKe
   if (!response.ok) {
     throw new Error(String(body.error ?? `Product bundle deactivation failed with HTTP ${response.status}.`));
   }
+}
+
+async function saveCrossVendorBundleRequest(
+  bundleKey: string,
+  payload: {
+    bundleName: string;
+    targetProduct: ProductMappingTarget;
+    countStrategy: CrossVendorBundleCountStrategy;
+    defaultDriverSourceKey?: string;
+    sources: CrossVendorBundleSource[];
+    addOns: CrossVendorBundleAddOn[];
+    active?: boolean;
+  },
+) {
+  const response = await fetch(`/api/cross-vendor-bundles/${encodeURIComponent(bundleKey)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Cross-vendor bundle save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { bundle: CrossVendorProductBundle };
+}
+
+async function deactivateCrossVendorBundleRequest(bundleKey: string) {
+  const response = await fetch(`/api/cross-vendor-bundles/${encodeURIComponent(bundleKey)}/deactivate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Cross-vendor bundle deactivation failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { bundle: { bundleKey: string; active: false } };
 }
 
 async function saveProductLinkRuleRequest(
@@ -4892,7 +5211,7 @@ function numberField(record: Record<string, unknown>, key: string) {
 }
 
 function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[] {
-  const sourceName = integrationName(run.vendorId);
+  const sourceName = reconciliationSourceName(run.vendorId);
   return run.lines.map((line) => {
     const customer = line.customerName ?? `Customer ${shortId(line.clientId)}`;
     const agreement = line.agreementName ?? `Agreement ${shortId(line.agreementId)}`;
@@ -5177,6 +5496,13 @@ function App() {
   const [rawSyncMessage, setRawSyncMessage] = useState('Select an integration to view saved raw sync rows.');
   const [rawSyncColumnFilters, setRawSyncColumnFilters] = useState<Record<string, string>>({});
   const [includeRawSyncRawPayload, setIncludeRawSyncRawPayload] = useState(false);
+  const [changeReportRows, setChangeReportRows] = useState<ChangeReportBuilderRow[]>(() => [createChangeReportBuilderRow()]);
+  const [changeReportRunsByKey, setChangeReportRunsByKey] = useState<Record<string, RawSyncRun[]>>({});
+  const [changeReportRunLoadStateByKey, setChangeReportRunLoadStateByKey] =
+    useState<Record<string, 'idle' | 'loading' | 'ready' | 'failed'>>({});
+  const [changeReport, setChangeReport] = useState<ChangeReportResponse | null>(null);
+  const [changeReportLoadState, setChangeReportLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [changeReportMessage, setChangeReportMessage] = useState('Add one or more vendor snapshot comparisons, then generate the report.');
   const [productProfitabilityReport, setProductProfitabilityReport] =
     useState<ProductProfitabilityReportResponse | null>(null);
   const [productProfitabilityLoadState, setProductProfitabilityLoadState] =
@@ -5202,6 +5528,8 @@ function App() {
   const [customerLicenseMessage, setCustomerLicenseMessage] = useState('Load customers, then generate a customer license report.');
   const [selectedMappingIntegrationId, setSelectedMappingIntegrationId] = useState<VendorKey>(() => initialMappingIntegrationId());
   const [mappingState, setMappingState] = useState<MappingStateResponse | null>(null);
+  const [crossVendorBundles, setCrossVendorBundles] = useState<CrossVendorProductBundle[]>([]);
+  const [crossVendorBundleMessage, setCrossVendorBundleMessage] = useState('Load cross-vendor bundle rules.');
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
   const [ncentralFilters, setNcentralFilters] = useState<NcentralFilter[]>([]);
   const [ncentralFilterMappings, setNcentralFilterMappings] = useState<NcentralFilterMapping[]>([]);
@@ -5522,6 +5850,146 @@ function App() {
     } catch (error) {
       setRawSyncLoadState('failed');
       setRawSyncMessage(error instanceof Error ? error.message : 'Unable to refresh raw sync status.');
+    }
+  };
+
+  const loadChangeReportRunsForRow = async (rowId: string, vendorId: IntegrationId, mode: ChangeReportMode) => {
+    const cacheKey = changeReportRunCacheKey(vendorId, mode);
+    const cachedRuns = changeReportRunsByKey[cacheKey];
+    if (cachedRuns) {
+      setDefaultChangeReportRunSelection(rowId, vendorId, mode, cachedRuns);
+      return cachedRuns;
+    }
+
+    if (changeReportRunLoadStateByKey[cacheKey] === 'loading') {
+      return [];
+    }
+
+    setChangeReportRunLoadStateByKey((current) => ({ ...current, [cacheKey]: 'loading' }));
+    setChangeReportMessage(`Loading snapshots for ${integrationName(vendorId)}...`);
+
+    try {
+      const response = await fetchRawSyncRuns(vendorId, changeReportDatasetForMode(vendorId, mode));
+      setChangeReportRunsByKey((current) => ({ ...current, [cacheKey]: response.runs }));
+      setChangeReportRunLoadStateByKey((current) => ({ ...current, [cacheKey]: 'ready' }));
+      setDefaultChangeReportRunSelection(rowId, vendorId, mode, response.runs);
+      setChangeReportMessage(
+        response.runs.length >= 2
+          ? `Loaded ${response.runs.length.toLocaleString()} snapshots for ${integrationName(vendorId)}.`
+          : response.runs.length === 1
+            ? `Only one snapshot is available for ${integrationName(vendorId)}.`
+            : `No snapshots found for ${integrationName(vendorId)} yet.`,
+      );
+      return response.runs;
+    } catch (error) {
+      setChangeReportRunsByKey((current) => ({ ...current, [cacheKey]: [] }));
+      setChangeReportRunLoadStateByKey((current) => ({ ...current, [cacheKey]: 'failed' }));
+      setChangeReportMessage(error instanceof Error ? error.message : 'Unable to load change report snapshots.');
+      return [];
+    }
+  };
+
+  const setDefaultChangeReportRunSelection = (
+    rowId: string,
+    vendorId: IntegrationId,
+    mode: ChangeReportMode,
+    runs: RawSyncRun[],
+  ) => {
+    setChangeReportRows((currentRows) =>
+      currentRows.map((row) => {
+        if (row.id !== rowId || row.vendorId !== vendorId || row.mode !== mode) {
+          return row;
+        }
+
+        const defaultEndSyncRunId = runs[0]?.id ?? '';
+        const defaultStartSyncRunId = runs[1]?.id ?? runs[0]?.id ?? '';
+        return {
+          ...row,
+          startSyncRunId: row.startSyncRunId || defaultStartSyncRunId,
+          endSyncRunId: row.endSyncRunId || defaultEndSyncRunId,
+        };
+      }),
+    );
+  };
+
+  const updateChangeReportRow = (rowId: string, updates: Partial<ChangeReportBuilderRow>) => {
+    setChangeReport(null);
+    setChangeReportRows((currentRows) =>
+      currentRows.map((row) => (row.id === rowId ? { ...row, ...updates } : row)),
+    );
+  };
+
+  const updateChangeReportVendor = (rowId: string, vendorId: IntegrationId | '') => {
+    const mode: ChangeReportMode = 'counts';
+    const cachedRuns = vendorId ? changeReportRunsByKey[changeReportRunCacheKey(vendorId, mode)] : undefined;
+    updateChangeReportRow(rowId, {
+      vendorId,
+      mode,
+      startSyncRunId: cachedRuns?.[1]?.id ?? cachedRuns?.[0]?.id ?? '',
+      endSyncRunId: cachedRuns?.[0]?.id ?? '',
+    });
+    if (vendorId) {
+      void loadChangeReportRunsForRow(rowId, vendorId, mode);
+    }
+  };
+
+  const updateChangeReportMode = (row: ChangeReportBuilderRow, mode: ChangeReportMode) => {
+    const cachedRuns = row.vendorId ? changeReportRunsByKey[changeReportRunCacheKey(row.vendorId, mode)] : undefined;
+    updateChangeReportRow(row.id, {
+      mode,
+      startSyncRunId: cachedRuns?.[1]?.id ?? cachedRuns?.[0]?.id ?? '',
+      endSyncRunId: cachedRuns?.[0]?.id ?? '',
+    });
+    if (row.vendorId) {
+      void loadChangeReportRunsForRow(row.id, row.vendorId, mode);
+    }
+  };
+
+  const addChangeReportRow = () => {
+    setChangeReportRows((currentRows) => [...currentRows, createChangeReportBuilderRow()]);
+    setChangeReport(null);
+    setChangeReportMessage('Select the vendor, mode, start snapshot, and end snapshot for the new row.');
+  };
+
+  const removeChangeReportRow = (rowId: string) => {
+    setChangeReportRows((currentRows) =>
+      currentRows.length <= 1 ? currentRows : currentRows.filter((row) => row.id !== rowId),
+    );
+    setChangeReport(null);
+  };
+
+  const generateChangeReport = async () => {
+    const completedRows = changeReportRows.filter(isCompleteChangeReportBuilderRow);
+    if (completedRows.length === 0) {
+      setChangeReportLoadState('idle');
+      setChangeReportMessage('Complete at least one comparison row before generating the report.');
+      return;
+    }
+
+    setChangeReportLoadState('loading');
+    setChangeReportMessage('Comparing selected snapshots...');
+    setChangeReport(null);
+
+    try {
+      const report = await fetchChangeReport(
+        completedRows.map((row) => ({
+          vendorId: row.vendorId as IntegrationId,
+          mode: row.mode,
+          startSyncRunId: row.startSyncRunId,
+          endSyncRunId: row.endSyncRunId,
+        })),
+      );
+      setChangeReport(report);
+      setChangeReportLoadState('ready');
+      setChangeReportMessage(
+        report.summary.changedRowCount > 0
+          ? `Generated ${report.summary.changedRowCount.toLocaleString()} changed product groups across ${report.summary.comparisonCount.toLocaleString()} comparison${report.summary.comparisonCount === 1 ? '' : 's'}.`
+          : 'Generated the report. No changes were found for the selected snapshots.',
+      );
+    } catch (error) {
+      setChangeReport(null);
+      setChangeReportLoadState('failed');
+      setChangeReportMessage(error instanceof Error ? error.message : 'Unable to generate change report.');
     }
   };
 
@@ -6216,6 +6684,21 @@ function App() {
     }
   };
 
+  const loadCrossVendorBundles = async () => {
+    try {
+      const response = await fetchCrossVendorBundles();
+      setCrossVendorBundles(response.bundles);
+      setCrossVendorBundleMessage(
+        `Loaded ${response.bundles.length.toLocaleString()} cross-vendor bundle${response.bundles.length === 1 ? '' : 's'}.`,
+      );
+      return response.bundles;
+    } catch (error) {
+      setCrossVendorBundles([]);
+      setCrossVendorBundleMessage(error instanceof Error ? error.message : 'Unable to load cross-vendor bundles.');
+      return [];
+    }
+  };
+
   const loadUsageOverrides = async (integrationId: VendorKey) => {
     try {
       const response = await fetchUsageOverrides(integrationId);
@@ -6481,6 +6964,7 @@ function App() {
         return;
       }
     });
+    void loadCrossVendorBundles();
 
     return () => {
       cancelled = true;
@@ -6636,8 +7120,19 @@ function App() {
             lastRefreshedLabel: formatDateTime(datapoint.lastImportedAt) ?? 'Never',
             canSync: false,
           })),
+        ...(crossVendorBundles.some((bundle) => bundle.active)
+          ? [
+              {
+                id: crossVendorBundlesVendorId,
+                name: 'Cross-vendor bundles',
+                sourceKind: 'import' as const,
+                lastRefreshedLabel: 'Uses latest sources',
+                canSync: false,
+              },
+            ]
+          : []),
       ].sort((left, right) => left.name.localeCompare(right.name)),
-    [enabledReconciliationIntegrations, vendorDatapoints],
+    [crossVendorBundles, enabledReconciliationIntegrations, vendorDatapoints],
   );
   const invoiceImportIntegrations = useMemo(
     () =>
@@ -6661,6 +7156,13 @@ function App() {
         : availableIntegrations,
     );
   }, [integrations, selectedRawSyncIntegrationId]);
+  const changeReportIntegrations = useMemo(
+    () =>
+      sortIntegrationsForDisplay(
+        integrations.filter((integration) => integration.id !== 'connectwise' && hasAvailableRawSyncReport(integration)),
+      ),
+    [integrations],
+  );
   const pendingCount = issues.filter((issue) => isProcessedReconciliationIssue(issue) && isReviewableIssue(issue)).length;
   const selectedReconciliationIntegration = integrations.find((integration) => integration.id === selectedReconciliationIntegrationId);
   const connectWiseIntegration = integrations.find((integration) => integration.id === 'connectwise');
@@ -7417,6 +7919,55 @@ function App() {
     }
   };
 
+  const saveCrossVendorBundle = async (
+    bundleKey: string,
+    payload: {
+      bundleName: string;
+      targetProduct: ProductMappingTarget;
+      countStrategy: CrossVendorBundleCountStrategy;
+      defaultDriverSourceKey?: string;
+      sources: CrossVendorBundleSource[];
+      addOns: CrossVendorBundleAddOn[];
+      active?: boolean;
+    },
+  ) => {
+    const actionKey = `cross-bundle:${bundleKey || 'new'}`;
+    setBusyMappingAction(actionKey);
+    try {
+      const response = await saveCrossVendorBundleRequest(bundleKey, payload);
+      setCrossVendorBundles((current) => upsertCrossVendorBundle(current, response.bundle));
+      setCrossVendorBundleMessage(`Saved cross-vendor bundle ${response.bundle.bundleName}.`);
+      if (reconciliationComparisonRequested && selectedReconciliationIntegrationSet.has(crossVendorBundlesVendorId)) {
+        await loadVendorReconciliation(crossVendorBundlesVendorId);
+      }
+      return true;
+    } catch (error) {
+      setCrossVendorBundleMessage(error instanceof Error ? error.message : 'Cross-vendor bundle save failed.');
+      return false;
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const deactivateCrossVendorBundle = async (bundleKey: string) => {
+    const actionKey = `cross-bundle:${bundleKey}`;
+    setBusyMappingAction(actionKey);
+    try {
+      await deactivateCrossVendorBundleRequest(bundleKey);
+      setCrossVendorBundles((current) =>
+        current.map((bundle) => (bundle.bundleKey === bundleKey ? { ...bundle, active: false } : bundle)),
+      );
+      setCrossVendorBundleMessage('Cross-vendor bundle disabled.');
+      if (reconciliationComparisonRequested && selectedReconciliationIntegrationSet.has(crossVendorBundlesVendorId)) {
+        await loadVendorReconciliation(crossVendorBundlesVendorId);
+      }
+    } catch (error) {
+      setCrossVendorBundleMessage(error instanceof Error ? error.message : 'Cross-vendor bundle deactivation failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
   const saveProductLinkRule = async (
     integrationId: VendorKey,
     payload: {
@@ -8102,9 +8653,14 @@ function App() {
                 void syncIntegration(integrationId);
               }}
               onReconciliationSourceToggle={(integrationId) => {
-                const nextSelectedIds = selectedReconciliationIntegrationIds.includes(integrationId)
+                const baseSelectedIds = selectedReconciliationIntegrationIds.includes(integrationId)
                   ? selectedReconciliationIntegrationIds.filter((selectedId) => selectedId !== integrationId)
                   : [...selectedReconciliationIntegrationIds, integrationId];
+                const nextSelectedIds = expandCrossVendorBundleSelection(
+                  baseSelectedIds,
+                  crossVendorBundles,
+                  new Set(enabledReconciliationVendors.map((vendor) => vendor.id)),
+                );
                 setSelectedReconciliationIntegrationIds(nextSelectedIds);
                 setVendorFilter('All');
                 setIssues([]);
@@ -8230,6 +8786,8 @@ function App() {
           {view === 'mappings' && (
             <MappingsView
               busyAction={busyMappingAction}
+              crossVendorBundleMessage={crossVendorBundleMessage}
+              crossVendorBundles={crossVendorBundles}
               integrations={integrations}
               loadMessage={mappingMessage}
               loadState={mappingLoadState}
@@ -8244,6 +8802,9 @@ function App() {
               onAccountManualSave={saveManualAccountMapping}
               onApproveSuggested={() => runMappingAction('approve-suggested')}
               onAutomap={() => runMappingAction('automap')}
+              onCrossVendorBundleDeactivate={deactivateCrossVendorBundle}
+              onCrossVendorBundleSave={saveCrossVendorBundle}
+              onCrossVendorBundlesRefresh={loadCrossVendorBundles}
               onIntegrationChange={(integrationId) => {
                 selectMappingIntegration(integrationId);
                 updateRouteForView('mappings', integrationId);
@@ -8311,6 +8872,23 @@ function App() {
               selectedDataset={selectedRawSyncDataset}
               selectedIntegrationId={selectedRawSyncIntegrationId}
               selectedSyncRunId={selectedRawSyncRunId}
+            />
+          )}
+          {view === 'reports' && reportSection === 'change-report' && (
+            <ChangeReportView
+              integrations={changeReportIntegrations}
+              loadMessage={changeReportMessage}
+              loadState={changeReportLoadState}
+              onAddRow={addChangeReportRow}
+              onGenerate={generateChangeReport}
+              onModeChange={updateChangeReportMode}
+              onRemoveRow={removeChangeReportRow}
+              onRunChange={updateChangeReportRow}
+              onVendorChange={updateChangeReportVendor}
+              report={changeReport}
+              rows={changeReportRows}
+              runLoadStates={changeReportRunLoadStateByKey}
+              runsByKey={changeReportRunsByKey}
             />
           )}
           {view === 'reports' && reportSection === 'product-profitability' && (
@@ -13309,6 +13887,8 @@ function MappingSectionDrawer(props: {
 
 function MappingsView(props: {
   busyAction: string | null;
+  crossVendorBundleMessage: string;
+  crossVendorBundles: CrossVendorProductBundle[];
   integrations: Integration[];
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
@@ -13323,6 +13903,19 @@ function MappingsView(props: {
   onAccountManualSave: (account: AccountMappingCandidate, customerId: string, agreementId: string) => Promise<boolean>;
   onApproveSuggested: () => void;
   onAutomap: () => void;
+  onCrossVendorBundleDeactivate: (bundleKey: string) => Promise<void>;
+  onCrossVendorBundleSave: (
+    bundleKey: string,
+    payload: {
+      bundleName: string;
+      targetProduct: ProductMappingTarget;
+      countStrategy: CrossVendorBundleCountStrategy;
+      defaultDriverSourceKey?: string;
+      sources: CrossVendorBundleSource[];
+      addOns: CrossVendorBundleAddOn[];
+    },
+  ) => Promise<boolean>;
+  onCrossVendorBundlesRefresh: () => Promise<CrossVendorProductBundle[]>;
   onIntegrationChange: (integrationId: VendorKey) => void;
   onProductTargetsSave: (
     integrationId: VendorKey,
@@ -13374,6 +13967,8 @@ function MappingsView(props: {
 }) {
   const {
     busyAction,
+    crossVendorBundleMessage,
+    crossVendorBundles,
     integrations,
     loadMessage,
     loadState,
@@ -13388,6 +13983,9 @@ function MappingsView(props: {
     onAccountManualSave,
     onApproveSuggested,
     onAutomap,
+    onCrossVendorBundleDeactivate,
+    onCrossVendorBundleSave,
+    onCrossVendorBundlesRefresh,
     onIntegrationChange,
     onProductTargetsSave,
     onProductBundleDeactivate,
@@ -13433,6 +14031,34 @@ function MappingsView(props: {
   const [bundleCatalogResults, setBundleCatalogResults] = useState<ProductCatalogTarget[]>([]);
   const [bundleCatalogMessage, setBundleCatalogMessage] = useState('');
   const [bundleCatalogLoading, setBundleCatalogLoading] = useState(false);
+  const [editingCrossBundleKey, setEditingCrossBundleKey] = useState<string | null>(null);
+  const [crossBundleKey, setCrossBundleKey] = useState('');
+  const [crossBundleName, setCrossBundleName] = useState('');
+  const [crossBundleStrategy, setCrossBundleStrategy] = useState<CrossVendorBundleCountStrategy>('specific-driver');
+  const [crossBundleDriverSourceKey, setCrossBundleDriverSourceKey] = useState('');
+  const [crossBundleSources, setCrossBundleSources] = useState<CrossVendorBundleSource[]>([]);
+  const [crossBundleAddOns, setCrossBundleAddOns] = useState<CrossVendorBundleAddOn[]>([]);
+  const [crossBundleTarget, setCrossBundleTarget] = useState<ProductMappingTarget | null>(null);
+  const [crossBundleCatalogQuery, setCrossBundleCatalogQuery] = useState('');
+  const [crossBundleCatalogResults, setCrossBundleCatalogResults] = useState<ProductCatalogTarget[]>([]);
+  const [crossBundleCatalogLoading, setCrossBundleCatalogLoading] = useState(false);
+  const [crossBundleCatalogMessage, setCrossBundleCatalogMessage] = useState('');
+  const [crossSourceName, setCrossSourceName] = useState('');
+  const [crossSourceType, setCrossSourceType] = useState<ProductLinkRuleSource['sourceType']>('vendor-product');
+  const [crossSourceVendorId, setCrossSourceVendorId] = useState<IntegrationId>('microsoft-365');
+  const [crossSourceVendorProductKey, setCrossSourceVendorProductKey] = useState('');
+  const [crossSourceVendorProductName, setCrossSourceVendorProductName] = useState('');
+  const [crossSourceProductCode, setCrossSourceProductCode] = useState('');
+  const [crossSourceProductName, setCrossSourceProductName] = useState('');
+  const [crossSourceDataset, setCrossSourceDataset] = useState<RawSyncDataset>('licenses');
+  const [crossSourceFilterField, setCrossSourceFilterField] = useState('SkuPartNumber');
+  const [crossSourceFilterValue, setCrossSourceFilterValue] = useState('');
+  const [crossSourceAggregationType, setCrossSourceAggregationType] = useState<ProductLinkRuleAggregation['type']>('row-count');
+  const [crossSourceAggregationColumn, setCrossSourceAggregationColumn] = useState('AssignedUnits');
+  const [crossAddOnSourceKey, setCrossAddOnSourceKey] = useState('');
+  const [crossAddOnProductCode, setCrossAddOnProductCode] = useState('');
+  const [crossAddOnProductName, setCrossAddOnProductName] = useState('');
+  const [crossAddOnIncludedPerBase, setCrossAddOnIncludedPerBase] = useState('1');
   const [editingLinkRuleId, setEditingLinkRuleId] = useState<string | null>(null);
   const [linkTargetProductKey, setLinkTargetProductKey] = useState('');
   const [linkRuleName, setLinkRuleName] = useState('');
@@ -13544,9 +14170,14 @@ function MappingsView(props: {
   const approvedProductMappingCount = productMappings.filter((row) => isSavedProductMapping(row) && row.status === 'approved' && row.active).length;
   const activeLinkRuleCount = productLinkRules.filter((rule) => rule.active).length;
   const activeBundleCount = productBundles.filter((bundle) => bundle.active).length;
+  const activeCrossBundleCount = crossVendorBundles.filter((bundle) => bundle.active).length;
   const bundleActionKey = editingBundleKey ? `bundle:${editingBundleKey}` : 'bundle:new';
+  const crossBundleActionKey = editingCrossBundleKey ? `cross-bundle:${editingCrossBundleKey}` : `cross-bundle:${crossBundleKey || 'new'}`;
   const bundleTargetOptions = dedupeProductTargets(
     bundleTarget ? [bundleTarget, ...bundleCatalogResults] : bundleCatalogResults,
+  );
+  const crossBundleTargetOptions = dedupeProductTargets(
+    crossBundleTarget ? [crossBundleTarget, ...crossBundleCatalogResults] : crossBundleCatalogResults,
   );
   const linkSourceIntegrationOptions = useMemo(
     () =>
@@ -13629,6 +14260,36 @@ function MappingsView(props: {
     setBundleCatalogLoading(false);
   };
 
+  const resetCrossBundleForm = () => {
+    setEditingCrossBundleKey(null);
+    setCrossBundleKey('');
+    setCrossBundleName('');
+    setCrossBundleStrategy('specific-driver');
+    setCrossBundleDriverSourceKey('');
+    setCrossBundleSources([]);
+    setCrossBundleAddOns([]);
+    setCrossBundleTarget(null);
+    setCrossBundleCatalogQuery('');
+    setCrossBundleCatalogResults([]);
+    setCrossBundleCatalogLoading(false);
+    setCrossBundleCatalogMessage('');
+    setCrossSourceName('');
+    setCrossSourceType('vendor-product');
+    setCrossSourceVendorProductKey('');
+    setCrossSourceVendorProductName('');
+    setCrossSourceProductCode('');
+    setCrossSourceProductName('');
+    setCrossSourceDataset('licenses');
+    setCrossSourceFilterField('SkuPartNumber');
+    setCrossSourceFilterValue('');
+    setCrossSourceAggregationType('row-count');
+    setCrossSourceAggregationColumn('AssignedUnits');
+    setCrossAddOnSourceKey('');
+    setCrossAddOnProductCode('');
+    setCrossAddOnProductName('');
+    setCrossAddOnIncludedPerBase('1');
+  };
+
   useEffect(() => {
     setProductTargetSelections({});
     setProductTargetOverrides({});
@@ -13647,6 +14308,7 @@ function MappingsView(props: {
     setLinkTestLoadState('idle');
     setLinkTestMessage('');
     resetBundleForm();
+    resetCrossBundleForm();
     resetLinkRuleForm();
   }, [dattoMappingDataset, mappingState?.vendorId, mappingState?.summary.productMappings, mappingState?.summary.productCandidates]);
 
@@ -13916,6 +14578,139 @@ function MappingsView(props: {
     setBundleCatalogMessage('');
   };
 
+  const editCrossBundle = (bundle: CrossVendorProductBundle) => {
+    setEditingCrossBundleKey(bundle.bundleKey);
+    setCrossBundleKey(bundle.bundleKey);
+    setCrossBundleName(bundle.bundleName);
+    setCrossBundleStrategy(bundle.countStrategy);
+    setCrossBundleDriverSourceKey(bundle.defaultDriverSourceKey ?? bundle.sources[0]?.sourceKey ?? '');
+    setCrossBundleSources(bundle.sources);
+    setCrossBundleAddOns(bundle.addOns);
+    setCrossBundleTarget(bundle.target);
+    setCrossBundleCatalogQuery(bundle.target.connectwiseProductCode);
+    setCrossBundleCatalogResults([]);
+    setCrossBundleCatalogMessage('');
+    setCrossAddOnSourceKey(bundle.sources[0]?.sourceKey ?? '');
+  };
+
+  const removeCrossBundleSource = (sourceKey: string) => {
+    setCrossBundleSources((current) => current.filter((source) => source.sourceKey !== sourceKey));
+    setCrossBundleAddOns((current) => current.filter((addOn) => addOn.sourceKey !== sourceKey));
+    setCrossBundleDriverSourceKey((current) => (current === sourceKey ? '' : current));
+  };
+
+  const addCrossBundleSource = () => {
+    const sourceName = crossSourceName.trim();
+    if (!sourceName) {
+      setCrossBundleCatalogMessage('Source name is required.');
+      return;
+    }
+
+    let source: ProductLinkRuleSource | undefined;
+    if (crossSourceType === 'vendor-product') {
+      if (!crossSourceVendorProductKey.trim()) {
+        setCrossBundleCatalogMessage('Vendor product key is required.');
+        return;
+      }
+      source = {
+        sourceType: 'vendor-product',
+        vendorId: crossSourceVendorId,
+        vendorProductKey: crossSourceVendorProductKey.trim(),
+        vendorProductName: crossSourceVendorProductName.trim() || crossSourceVendorProductKey.trim(),
+      };
+    } else if (crossSourceType === 'connectwise-addition') {
+      if (!crossSourceProductCode.trim()) {
+        setCrossBundleCatalogMessage('ConnectWise product code is required.');
+        return;
+      }
+      source = {
+        sourceType: 'connectwise-addition',
+        productCode: crossSourceProductCode.trim(),
+        productName: crossSourceProductName.trim() || crossSourceProductCode.trim(),
+      };
+    } else {
+      if (!crossSourceFilterField.trim()) {
+        setCrossBundleCatalogMessage('Dataset filter field is required.');
+        return;
+      }
+      source = {
+        sourceType: 'filtered-dataset',
+        vendorId: crossSourceVendorId,
+        dataset: crossSourceVendorId === 'microsoft-365' ? crossSourceDataset : undefined,
+        label: sourceName,
+        filter: {
+          nodeType: 'group',
+          operator: 'and',
+          children: [
+            {
+              nodeType: 'condition',
+              field: crossSourceFilterField.trim(),
+              operator: crossSourceFilterValue.trim() ? 'contains' : 'is-not-empty',
+              value: crossSourceFilterValue.trim() || undefined,
+            },
+          ],
+        },
+        aggregation:
+          crossSourceAggregationType === 'column-sum'
+            ? { type: 'column-sum', column: crossSourceAggregationColumn.trim() || 'AssignedUnits' }
+            : { type: 'row-count' },
+      };
+    }
+
+    const sourceKey = safeDomId(sourceName).replace(/_/g, '-');
+    const nextSource: CrossVendorBundleSource = {
+      sourceKey,
+      sourceName,
+      source,
+    };
+    setCrossBundleSources((current) => [
+      ...current.filter((candidate) => candidate.sourceKey !== sourceKey),
+      nextSource,
+    ]);
+    setCrossBundleDriverSourceKey((current) => current || sourceKey);
+    setCrossAddOnSourceKey((current) => current || sourceKey);
+    setCrossSourceName('');
+    setCrossSourceVendorProductKey('');
+    setCrossSourceVendorProductName('');
+    setCrossSourceProductCode('');
+    setCrossSourceProductName('');
+    setCrossSourceFilterValue('');
+    setCrossBundleCatalogMessage('');
+  };
+
+  const addCrossBundleAddOn = () => {
+    const includedPerBaseQuantity = Number(crossAddOnIncludedPerBase);
+    if (!crossAddOnSourceKey || !crossBundleSources.some((source) => source.sourceKey === crossAddOnSourceKey)) {
+      setCrossBundleCatalogMessage('Choose an add-on source.');
+      return;
+    }
+    if (!crossAddOnProductCode.trim()) {
+      setCrossBundleCatalogMessage('Add-on product code is required.');
+      return;
+    }
+    if (!Number.isFinite(includedPerBaseQuantity) || includedPerBaseQuantity < 0) {
+      setCrossBundleCatalogMessage('Included quantity must be zero or greater.');
+      return;
+    }
+
+    const addOnKey = safeDomId(`${crossAddOnSourceKey}-${crossAddOnProductCode}`).replace(/_/g, '-');
+    const nextAddOn: CrossVendorBundleAddOn = {
+      addOnKey,
+      sourceKey: crossAddOnSourceKey,
+      connectwiseProductCode: crossAddOnProductCode.trim(),
+      connectwiseProductName: crossAddOnProductName.trim() || crossAddOnProductCode.trim(),
+      includedPerBaseQuantity,
+    };
+    setCrossBundleAddOns((current) => [
+      ...current.filter((addOn) => addOn.addOnKey !== addOnKey),
+      nextAddOn,
+    ]);
+    setCrossAddOnProductCode('');
+    setCrossAddOnProductName('');
+    setCrossAddOnIncludedPerBase('1');
+    setCrossBundleCatalogMessage('');
+  };
+
   const loadLinkSourceProducts = async (integrationId = linkSourceVendorId) => {
     if (!integrationId) {
       setLinkSourceMessage('Choose a source vendor.');
@@ -14118,6 +14913,65 @@ function MappingsView(props: {
       setBundleCatalogMessage(error instanceof Error ? error.message : 'Product catalog search failed.');
     } finally {
       setBundleCatalogLoading(false);
+    }
+  };
+
+  const runCrossBundleCatalogSearch = async () => {
+    const query = crossBundleCatalogQuery.trim();
+    if (!query) {
+      setCrossBundleCatalogMessage('Enter a product code or name to search ConnectWise.');
+      return;
+    }
+
+    setCrossBundleCatalogLoading(true);
+    setCrossBundleCatalogMessage('');
+    try {
+      const response = await searchProductCatalog(selectedIntegrationId, query);
+      setCrossBundleCatalogResults(response.targets);
+      setCrossBundleCatalogMessage(
+        response.warning ?? `${response.targets.length} catalog item${response.targets.length === 1 ? '' : 's'} found.`,
+      );
+    } catch (error) {
+      setCrossBundleCatalogResults([]);
+      setCrossBundleCatalogMessage(error instanceof Error ? error.message : 'Product catalog search failed.');
+    } finally {
+      setCrossBundleCatalogLoading(false);
+    }
+  };
+
+  const saveCrossBundle = async () => {
+    const bundleKey = (editingCrossBundleKey ?? crossBundleKey).trim();
+    if (!bundleKey) {
+      setCrossBundleCatalogMessage('Bundle key is required.');
+      return;
+    }
+    if (!crossBundleName.trim()) {
+      setCrossBundleCatalogMessage('Bundle name is required.');
+      return;
+    }
+    if (!crossBundleTarget) {
+      setCrossBundleCatalogMessage('Choose a ConnectWise bundle product.');
+      return;
+    }
+    if (crossBundleSources.length === 0) {
+      setCrossBundleCatalogMessage('Add at least one count source.');
+      return;
+    }
+    if (crossBundleStrategy === 'specific-driver' && !crossBundleDriverSourceKey) {
+      setCrossBundleCatalogMessage('Choose a default driver source.');
+      return;
+    }
+
+    const saved = await onCrossVendorBundleSave(bundleKey, {
+      bundleName: crossBundleName.trim(),
+      targetProduct: crossBundleTarget,
+      countStrategy: crossBundleStrategy,
+      defaultDriverSourceKey: crossBundleDriverSourceKey || undefined,
+      sources: crossBundleSources,
+      addOns: crossBundleAddOns,
+    });
+    if (saved) {
+      resetCrossBundleForm();
     }
   };
 
@@ -15079,6 +15933,369 @@ function MappingsView(props: {
           ))}
         </div>
       </section>
+      </MappingSectionDrawer>
+
+      <MappingSectionDrawer
+        defaultOpen={false}
+        meta={`${crossVendorBundles.length.toLocaleString()} saved cross-vendor bundles`}
+        onOpenChange={setMappingSection}
+        openState={mappingSectionOpen}
+        sectionId="cross-vendor-bundles"
+        status={`${activeCrossBundleCount.toLocaleString()} active`}
+        title="Cross-vendor bundles"
+      >
+        <section className="work-surface product-bundle-surface cross-vendor-bundle-surface" aria-label="Cross-vendor bundles">
+          <div className="surface-header">
+            <div>
+              <span className="section-kicker">Cross-vendor bundles</span>
+              <h2>{activeCrossBundleCount.toLocaleString()} active cross-vendor bundles</h2>
+            </div>
+            <div className="product-bundle-row-actions">
+              {editingCrossBundleKey ? (
+                <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={resetCrossBundleForm} type="button">
+                  Cancel edit
+                </button>
+              ) : null}
+              <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={() => void onCrossVendorBundlesRefresh()} type="button">
+                <RefreshCcw size={14} />
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          <div className="product-bundle-form cross-vendor-bundle-form">
+            <label>
+              <span>Bundle key</span>
+              <input
+                disabled={Boolean(editingCrossBundleKey)}
+                onChange={(event) => setCrossBundleKey(event.target.value)}
+                placeholder="managed-endpoint-o365"
+                value={crossBundleKey}
+              />
+            </label>
+            <label>
+              <span>{editingCrossBundleKey ? 'Editing bundle' : 'Bundle name'}</span>
+              <input
+                onChange={(event) => setCrossBundleName(event.target.value)}
+                placeholder="Managed Endpoint + O365 Monitoring"
+                value={crossBundleName}
+              />
+            </label>
+            <label>
+              <span>Count strategy</span>
+              <select
+                onChange={(event) => setCrossBundleStrategy(event.target.value as CrossVendorBundleCountStrategy)}
+                value={crossBundleStrategy}
+              >
+                <option value="specific-driver">Specific driver</option>
+                <option value="highest-component">Highest component</option>
+                <option value="lowest-component">Lowest component</option>
+              </select>
+            </label>
+            <label>
+              <span>Default driver</span>
+              <select
+                disabled={crossBundleStrategy !== 'specific-driver'}
+                onChange={(event) => setCrossBundleDriverSourceKey(event.target.value)}
+                value={crossBundleDriverSourceKey}
+              >
+                <option value="">Select source</option>
+                {crossBundleSources.map((source) => (
+                  <option key={source.sourceKey} value={source.sourceKey}>
+                    {source.sourceName}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="product-bundle-target">
+              <label>
+                <span>ConnectWise bundle product</span>
+                <div className="product-catalog-search-row">
+                  <input
+                    onChange={(event) => setCrossBundleCatalogQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void runCrossBundleCatalogSearch();
+                      }
+                    }}
+                    placeholder="Bundle product code or name"
+                    value={crossBundleCatalogQuery}
+                  />
+                  <button
+                    className="button secondary compact"
+                    disabled={crossBundleCatalogLoading}
+                    onClick={() => void runCrossBundleCatalogSearch()}
+                    type="button"
+                  >
+                    <Search size={14} />
+                    {crossBundleCatalogLoading ? 'Searching' : 'Search'}
+                  </button>
+                </div>
+              </label>
+              {crossBundleCatalogMessage || crossVendorBundleMessage ? (
+                <span className="product-catalog-message">{crossBundleCatalogMessage || crossVendorBundleMessage}</span>
+              ) : null}
+              <div className="product-bundle-target-list">
+                {crossBundleTargetOptions.map((target) => (
+                  <label className="product-target-option" key={target.connectwiseProductCode}>
+                    <input
+                      checked={crossBundleTarget?.connectwiseProductCode === target.connectwiseProductCode}
+                      onChange={() => setCrossBundleTarget(target)}
+                      type="radio"
+                    />
+                    <span>
+                      <strong>{target.connectwiseProductName}</strong>
+                      <em>{target.connectwiseProductCode}</em>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="product-bundle-target linked-count-source">
+              <div className="linked-filter-grid">
+                <label>
+                  <span>Source name</span>
+                  <input onChange={(event) => setCrossSourceName(event.target.value)} placeholder="M365 licensed users" value={crossSourceName} />
+                </label>
+                <label>
+                  <span>Source type</span>
+                  <select onChange={(event) => setCrossSourceType(event.target.value as ProductLinkRuleSource['sourceType'])} value={crossSourceType}>
+                    <option value="vendor-product">Vendor product</option>
+                    <option value="filtered-dataset">Vendor dataset</option>
+                    <option value="connectwise-addition">ConnectWise addition</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Source vendor</span>
+                  <select
+                    disabled={crossSourceType === 'connectwise-addition'}
+                    onChange={(event) => setCrossSourceVendorId(event.target.value as IntegrationId)}
+                    value={crossSourceVendorId}
+                  >
+                    {integrations
+                      .filter((integration) => integration.id !== 'connectwise' && integrationHasCapability(integration.id, 'mapping'))
+                      .map((integration) => (
+                        <option key={integration.id} value={integration.id}>
+                          {integration.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                {crossSourceType === 'vendor-product' ? (
+                  <>
+                    <label>
+                      <span>Vendor product key</span>
+                      <input onChange={(event) => setCrossSourceVendorProductKey(event.target.value)} value={crossSourceVendorProductKey} />
+                    </label>
+                    <label>
+                      <span>Vendor product name</span>
+                      <input onChange={(event) => setCrossSourceVendorProductName(event.target.value)} value={crossSourceVendorProductName} />
+                    </label>
+                  </>
+                ) : crossSourceType === 'connectwise-addition' ? (
+                  <>
+                    <label>
+                      <span>CW product code</span>
+                      <input onChange={(event) => setCrossSourceProductCode(event.target.value)} value={crossSourceProductCode} />
+                    </label>
+                    <label>
+                      <span>CW product name</span>
+                      <input onChange={(event) => setCrossSourceProductName(event.target.value)} value={crossSourceProductName} />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      <span>Dataset</span>
+                      <select
+                        disabled={crossSourceVendorId !== 'microsoft-365'}
+                        onChange={(event) => setCrossSourceDataset(event.target.value as RawSyncDataset)}
+                        value={crossSourceVendorId === 'microsoft-365' ? crossSourceDataset : 'users'}
+                      >
+                        <option value="licenses">Licenses</option>
+                        <option value="users">Users</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Filter field</span>
+                      <input onChange={(event) => setCrossSourceFilterField(event.target.value)} value={crossSourceFilterField} />
+                    </label>
+                    <label>
+                      <span>Filter value</span>
+                      <input onChange={(event) => setCrossSourceFilterValue(event.target.value)} value={crossSourceFilterValue} />
+                    </label>
+                    <label>
+                      <span>Aggregation</span>
+                      <select
+                        onChange={(event) => setCrossSourceAggregationType(event.target.value as ProductLinkRuleAggregation['type'])}
+                        value={crossSourceAggregationType}
+                      >
+                        <option value="row-count">Row count</option>
+                        <option value="column-sum">Column sum</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Sum column</span>
+                      <input
+                        disabled={crossSourceAggregationType !== 'column-sum'}
+                        onChange={(event) => setCrossSourceAggregationColumn(event.target.value)}
+                        value={crossSourceAggregationColumn}
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              <div className="product-bundle-actions">
+                <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={addCrossBundleSource} type="button">
+                  <Plus size={15} />
+                  Add source
+                </button>
+              </div>
+              <div className="product-bundle-target-list">
+                {crossBundleSources.length === 0 ? <span className="product-target-empty">No sources added.</span> : null}
+                {crossBundleSources.map((source) => (
+                  <label className="product-bundle-component-option" key={source.sourceKey}>
+                    <input
+                      checked={crossBundleDriverSourceKey === source.sourceKey}
+                      disabled={crossBundleStrategy !== 'specific-driver'}
+                      onChange={() => setCrossBundleDriverSourceKey(source.sourceKey)}
+                      type="radio"
+                    />
+                    <span>
+                      <strong>{source.sourceName}</strong>
+                      <em>{productLinkRuleSourceLabel(source.source)}</em>
+                    </span>
+                    <button className="icon-button subtle" onClick={() => removeCrossBundleSource(source.sourceKey)} title="Remove source" type="button">
+                      <X size={14} />
+                    </button>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="product-bundle-target linked-count-source">
+              <div className="linked-filter-grid">
+                <label>
+                  <span>Add-on source</span>
+                  <select onChange={(event) => setCrossAddOnSourceKey(event.target.value)} value={crossAddOnSourceKey}>
+                    <option value="">Select source</option>
+                    {crossBundleSources.map((source) => (
+                      <option key={source.sourceKey} value={source.sourceKey}>
+                        {source.sourceName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Add-on product code</span>
+                  <input onChange={(event) => setCrossAddOnProductCode(event.target.value)} value={crossAddOnProductCode} />
+                </label>
+                <label>
+                  <span>Add-on product name</span>
+                  <input onChange={(event) => setCrossAddOnProductName(event.target.value)} value={crossAddOnProductName} />
+                </label>
+                <label>
+                  <span>Included per base</span>
+                  <input min="0" onChange={(event) => setCrossAddOnIncludedPerBase(event.target.value)} step="1" type="number" value={crossAddOnIncludedPerBase} />
+                </label>
+              </div>
+              <div className="product-bundle-actions">
+                <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={addCrossBundleAddOn} type="button">
+                  <Plus size={15} />
+                  Add add-on
+                </button>
+              </div>
+              <div className="product-bundle-list compact-list">
+                {crossBundleAddOns.map((addOn) => (
+                  <article className="product-bundle-row linked-count-row" key={addOn.addOnKey}>
+                    <div>
+                      <strong>{addOn.connectwiseProductName}</strong>
+                      <span>{addOn.connectwiseProductCode}</span>
+                    </div>
+                    <ArrowRight size={16} />
+                    <div>
+                      <strong>{crossBundleSources.find((source) => source.sourceKey === addOn.sourceKey)?.sourceName ?? addOn.sourceKey}</strong>
+                      <span>{addOn.includedPerBaseQuantity.toLocaleString()} included per base</span>
+                    </div>
+                    <button
+                      className="button secondary compact"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => setCrossBundleAddOns((current) => current.filter((candidate) => candidate.addOnKey !== addOn.addOnKey))}
+                      type="button"
+                    >
+                      <X size={15} />
+                      Remove
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </div>
+
+            <div className="product-bundle-actions">
+              <button
+                className="button primary compact"
+                disabled={
+                  Boolean(busyAction) ||
+                  !(editingCrossBundleKey ?? crossBundleKey).trim() ||
+                  !crossBundleName.trim() ||
+                  !crossBundleTarget ||
+                  crossBundleSources.length === 0 ||
+                  (crossBundleStrategy === 'specific-driver' && !crossBundleDriverSourceKey)
+                }
+                onClick={() => void saveCrossBundle()}
+                type="button"
+              >
+                <Package size={16} />
+                {busyAction === crossBundleActionKey ? 'Saving' : editingCrossBundleKey ? 'Update bundle' : 'Save bundle'}
+              </button>
+            </div>
+          </div>
+
+          <div className="product-bundle-list">
+            {crossVendorBundles.length === 0 ? (
+              <div className="empty-state">
+                <Package size={20} />
+                <strong>No cross-vendor bundles saved.</strong>
+              </div>
+            ) : null}
+            {crossVendorBundles.map((bundle) => (
+              <article className="product-bundle-row" key={bundle.bundleKey}>
+                <div>
+                  <strong>{bundle.bundleName}</strong>
+                  <span>{bundle.bundleKey}</span>
+                </div>
+                <ArrowRight size={16} />
+                <div>
+                  <strong>{bundle.target.connectwiseProductName}</strong>
+                  <span>{bundle.target.connectwiseProductCode}</span>
+                </div>
+                <span className={`status-pill ${bundle.active ? 'approved' : 'blocked'}`}>
+                  {bundle.active ? 'Active' : 'Disabled'}
+                </span>
+                <span>{bundle.countStrategy.replace(/-/g, ' ')}</span>
+                <span>{bundle.sources.length.toLocaleString()} source{bundle.sources.length === 1 ? '' : 's'}</span>
+                <span>{bundle.addOns.length.toLocaleString()} add-on{bundle.addOns.length === 1 ? '' : 's'}</span>
+                <div className="product-bundle-row-actions">
+                  <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={() => editCrossBundle(bundle)} type="button">
+                    <Pencil size={15} />
+                    Edit
+                  </button>
+                  <button
+                    className="button secondary compact"
+                    disabled={!bundle.active || busyAction === `cross-bundle:${bundle.bundleKey}`}
+                    onClick={() => void onCrossVendorBundleDeactivate(bundle.bundleKey)}
+                    type="button"
+                  >
+                    Disable
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
       </MappingSectionDrawer>
 
       {selectedIntegrationId === 'opentext-appriver' ? (
@@ -17752,6 +18969,355 @@ function IntegrationModal(props: {
       </section>
     </div>
   );
+}
+
+function ChangeReportView(props: {
+  integrations: Integration[];
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onAddRow: () => void;
+  onGenerate: () => Promise<void>;
+  onModeChange: (row: ChangeReportBuilderRow, mode: ChangeReportMode) => void;
+  onRemoveRow: (rowId: string) => void;
+  onRunChange: (rowId: string, updates: Partial<ChangeReportBuilderRow>) => void;
+  onVendorChange: (rowId: string, vendorId: IntegrationId | '') => void;
+  report: ChangeReportResponse | null;
+  rows: ChangeReportBuilderRow[];
+  runLoadStates: Record<string, 'idle' | 'loading' | 'ready' | 'failed'>;
+  runsByKey: Record<string, RawSyncRun[]>;
+}) {
+  const {
+    integrations,
+    loadMessage,
+    loadState,
+    onAddRow,
+    onGenerate,
+    onModeChange,
+    onRemoveRow,
+    onRunChange,
+    onVendorChange,
+    report,
+    rows,
+    runLoadStates,
+    runsByKey,
+  } = props;
+  const completeRowCount = rows.filter(isCompleteChangeReportBuilderRow).length;
+  const generatedAt = formatDateTime(report?.generatedAt);
+  const runOptionsForRow = (row: ChangeReportBuilderRow) =>
+    row.vendorId ? runsByKey[changeReportRunCacheKey(row.vendorId, row.mode)] ?? [] : [];
+  const runLoadStateForRow = (row: ChangeReportBuilderRow) =>
+    row.vendorId ? runLoadStates[changeReportRunCacheKey(row.vendorId, row.mode)] ?? 'idle' : 'idle';
+
+  return (
+    <section className="reports-page change-report-page" aria-label="Change report">
+      <div className="integrations-live-bar report-reminder">
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : loadState === 'idle' ? 'idle' : 'ready'}`} />
+          <strong>{loadState === 'failed' ? 'Report issue' : loadState === 'loading' ? 'Generating' : 'Change report'}</strong>
+          <span>{loadMessage}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>{completeRowCount.toLocaleString()} ready comparison{completeRowCount === 1 ? '' : 's'}</span>
+          <button
+            className="button primary compact"
+            disabled={loadState === 'loading' || completeRowCount === 0}
+            onClick={() => void onGenerate()}
+            type="button"
+          >
+            <RefreshCcw size={16} />
+            {loadState === 'loading' ? 'Generating' : 'Generate report'}
+          </button>
+        </div>
+      </div>
+
+      <section className="work-surface report-surface change-report-builder">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">Snapshot comparisons</span>
+            <h2>Vendor, mode, start snapshot, end snapshot</h2>
+          </div>
+          <button className="button secondary compact" onClick={onAddRow} type="button">
+            <Plus size={16} />
+            Add row
+          </button>
+        </div>
+
+        <div className="change-report-builder-list">
+          {rows.map((row, index) => {
+            const runOptions = runOptionsForRow(row);
+            const rowLoadState = runLoadStateForRow(row);
+            const modeOptions = changeReportModesForVendor(row.vendorId);
+
+            return (
+              <div className="change-report-builder-row" key={row.id}>
+                <span className="change-report-row-index">{index + 1}</span>
+                <label className="config-field change-report-select">
+                  <span>Vendor</span>
+                  <select
+                    disabled={integrations.length === 0 || loadState === 'loading'}
+                    onChange={(event) => onVendorChange(row.id, event.target.value as IntegrationId | '')}
+                    value={row.vendorId}
+                  >
+                    <option value="">{integrations.length === 0 ? 'No vendors available' : 'Select vendor'}</option>
+                    {integrations.map((integration) => (
+                      <option key={integration.id} value={integration.id}>
+                        {integration.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="config-field change-report-select compact">
+                  <span>Mode</span>
+                  <select
+                    disabled={!row.vendorId || loadState === 'loading'}
+                    onChange={(event) => onModeChange(row, event.target.value as ChangeReportMode)}
+                    value={row.mode}
+                  >
+                    {modeOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="config-field change-report-select">
+                  <span>Start snapshot</span>
+                  <select
+                    disabled={!row.vendorId || runOptions.length === 0 || rowLoadState === 'loading' || loadState === 'loading'}
+                    onChange={(event) => onRunChange(row.id, { startSyncRunId: event.target.value })}
+                    value={row.startSyncRunId}
+                  >
+                    <option value="">
+                      {!row.vendorId
+                        ? 'Select vendor first'
+                        : rowLoadState === 'loading'
+                          ? 'Loading snapshots'
+                          : runOptions.length === 0
+                            ? 'No snapshots found'
+                            : 'Select start'}
+                    </option>
+                    {runOptions.map((run) => (
+                      <option key={run.id} value={run.id}>
+                        {formatReportRunLabel(run)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <ArrowRight className="change-report-row-arrow" size={18} aria-hidden="true" />
+
+                <label className="config-field change-report-select">
+                  <span>End snapshot</span>
+                  <select
+                    disabled={!row.vendorId || runOptions.length === 0 || rowLoadState === 'loading' || loadState === 'loading'}
+                    onChange={(event) => onRunChange(row.id, { endSyncRunId: event.target.value })}
+                    value={row.endSyncRunId}
+                  >
+                    <option value="">
+                      {!row.vendorId
+                        ? 'Select vendor first'
+                        : rowLoadState === 'loading'
+                          ? 'Loading snapshots'
+                          : runOptions.length === 0
+                            ? 'No snapshots found'
+                            : 'Select end'}
+                    </option>
+                    {runOptions.map((run) => (
+                      <option key={run.id} value={run.id}>
+                        {formatReportRunLabel(run)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <button
+                  className="icon-button change-report-remove-row"
+                  disabled={rows.length <= 1 || loadState === 'loading'}
+                  onClick={() => onRemoveRow(row.id)}
+                  title="Remove comparison row"
+                  type="button"
+                >
+                  <Trash2 size={17} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="metric-grid report-metrics" aria-label="Change report summary">
+        <MetricCard icon={Activity} label="Changed groups" tone="warn" value={formatCount(report?.summary.changedRowCount ?? 0)} />
+        <MetricCard icon={Plus} label="Added / increased" tone="ready" value={`${formatCount((report?.summary.addedCount ?? 0) + (report?.summary.increasedCount ?? 0))}`} />
+        <MetricCard icon={Trash2} label="Removed / decreased" tone="money" value={`${formatCount((report?.summary.removedCount ?? 0) + (report?.summary.decreasedCount ?? 0))}`} />
+        <MetricCard icon={Users} label="User/device adds" tone="approved" value={`${formatCount(report?.summary.detailAddedCount ?? 0)} / ${formatCount(report?.summary.detailRemovedCount ?? 0)}`} />
+      </section>
+
+      <section className="work-surface report-surface change-report-results">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">{generatedAt ? `Generated ${generatedAt}` : 'No generated report'}</span>
+            <h2>Snapshot changes</h2>
+          </div>
+          <span className="status-pill approved">{formatChangeCount(report?.summary.netQuantityDelta ?? 0, true)} net</span>
+        </div>
+
+        {!report ? (
+          <div className="empty-state report-empty">
+            <FileSpreadsheet size={20} />
+            <strong>No change report generated.</strong>
+            <span>Complete one or more comparison rows and generate the report.</span>
+          </div>
+        ) : report.comparisons.length === 0 ? (
+          <div className="empty-state report-empty">
+            <Database size={20} />
+            <strong>No comparisons returned.</strong>
+          </div>
+        ) : (
+          <div className="change-report-comparison-list">
+            {report.comparisons.map((comparison) => (
+              <section className="change-report-comparison" key={comparison.id}>
+                <div className="change-report-comparison-header">
+                  <div>
+                    <span className="section-kicker">
+                      {formatDateTime(comparison.startSyncRun.completedAt ?? comparison.startSyncRun.startedAt) ?? 'Start'} to{' '}
+                      {formatDateTime(comparison.endSyncRun.completedAt ?? comparison.endSyncRun.startedAt) ?? 'End'}
+                    </span>
+                    <h3>{comparison.vendorName} / {comparison.modeLabel}</h3>
+                  </div>
+                  <div className="change-report-comparison-meta">
+                    <span className={`status-pill ${comparison.status === 'ready' ? 'approved' : 'blocked'}`}>
+                      {comparison.status === 'ready' ? 'Ready' : 'Unavailable'}
+                    </span>
+                    <span>{formatCount(comparison.summary.changedRowCount)} changed</span>
+                    <span>{formatChangeCount(comparison.summary.netQuantityDelta, true)} net</span>
+                  </div>
+                </div>
+
+                {comparison.message ? <p className="config-note">{comparison.message}</p> : null}
+
+                {comparison.rows.length === 0 ? (
+                  <div className="empty-state report-empty compact">
+                    <BadgeCheck size={18} />
+                    <strong>No changed rows for this comparison.</strong>
+                  </div>
+                ) : (
+                  <div className="change-report-table-scroll">
+                    <table className="change-report-table">
+                      <thead>
+                        <tr>
+                          <th>Customer</th>
+                          <th>Product</th>
+                          <th>Start</th>
+                          <th>End</th>
+                          <th>Delta</th>
+                          <th>Change</th>
+                          <th>Added</th>
+                          <th>Removed</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {comparison.rows.map((row) => (
+                          <tr key={row.id}>
+                            <td>
+                              <strong>{row.customer.customerName}</strong>
+                              <span>{row.agreement?.agreementName ?? row.customer.externalAccountId ?? row.customer.connectWiseCompanyId ?? ''}</span>
+                            </td>
+                            <td>
+                              <strong>{row.productName}</strong>
+                              <span>{row.productCode ?? row.productKey}</span>
+                            </td>
+                            <td>{formatChangeCount(row.startCount)}</td>
+                            <td>{formatChangeCount(row.endCount)}</td>
+                            <td className={row.delta > 0 ? 'positive-delta' : row.delta < 0 ? 'negative-delta' : ''}>
+                              {formatChangeCount(row.delta, true)}
+                            </td>
+                            <td>
+                              <span className={`status-pill ${changeReportStatusClass(row.changeType)}`}>
+                                {changeReportStatusLabel(row.changeType)}
+                              </span>
+                            </td>
+                            <td>
+                              <ChangeReportItemList items={row.addedItems} emptyLabel="-" />
+                            </td>
+                            <td>
+                              <ChangeReportItemList items={row.removedItems} emptyLabel="-" />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function ChangeReportItemList(props: { items: ChangeReportItem[]; emptyLabel: string }) {
+  const { items, emptyLabel } = props;
+  if (items.length === 0) {
+    return <span className="muted-cell">{emptyLabel}</span>;
+  }
+
+  const visibleItems = items.slice(0, 4);
+  const remainingCount = items.length - visibleItems.length;
+
+  return (
+    <div className="change-report-item-list">
+      {visibleItems.map((item) => (
+        <span className="change-report-item" key={`${item.id}:${item.identity}`} title={changeReportItemTitle(item)}>
+          {item.displayName}
+        </span>
+      ))}
+      {remainingCount > 0 ? <span className="change-report-item more">+{remainingCount.toLocaleString()}</span> : null}
+    </div>
+  );
+}
+
+function changeReportItemTitle(item: ChangeReportItem) {
+  const details = Object.entries(item.details)
+    .map(([key, value]) => `${key}: ${formatChangeReportDetail(value)}`)
+    .join(' / ');
+  return details || item.identity;
+}
+
+function formatChangeReportDetail(value: string | number | boolean | null | undefined) {
+  if (value === null || typeof value === 'undefined') return '';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') return formatChangeCount(value);
+  return value;
+}
+
+function formatChangeCount(value: number, signed = false) {
+  const formatted = Math.abs(value).toLocaleString(undefined, {
+    maximumFractionDigits: Number.isInteger(value) ? 0 : 4,
+  });
+  if (!signed || value === 0) {
+    return formatted;
+  }
+
+  return `${value > 0 ? '+' : '-'}${formatted}`;
+}
+
+function changeReportStatusLabel(status: ChangeReportChangeType) {
+  if (status === 'added') return 'Added';
+  if (status === 'removed') return 'Removed';
+  if (status === 'increased') return 'Increased';
+  if (status === 'decreased') return 'Decreased';
+  return 'Changed';
+}
+
+function changeReportStatusClass(status: ChangeReportChangeType) {
+  if (status === 'added' || status === 'increased') return 'approved';
+  if (status === 'removed') return 'blocked';
+  if (status === 'decreased') return 'needs-review';
+  return 'ready';
 }
 
 function CustomerLicenseReportView(props: {

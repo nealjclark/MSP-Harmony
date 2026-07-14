@@ -3,6 +3,11 @@ import { config as loadDotEnv } from 'dotenv';
 import { listIntegrationSettingsDefinitions } from '../../shared/integrationSettings';
 import { getAgreementReportDetails, listAgreementReportSyncRuns } from '../reports/agreementReports';
 import {
+  getChangeReport,
+  isChangeReportMode,
+  type ChangeReportComparisonInput,
+} from '../reports/changeReports';
+import {
   getCustomerLicenseReport,
   isCustomerLicenseReportVendorId,
   listCustomerLicenseReportCustomers,
@@ -266,6 +271,95 @@ export async function getProductProfitabilityReportHttp(
   } catch (error) {
     return jsonResponse(500, {
       error: error instanceof Error ? error.message : 'Unable to load product profitability report.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function generateChangeReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const bodyResult = await readJsonBody<{
+    comparisons?: Array<{
+      vendorId?: string;
+      mode?: string;
+      startSyncRunId?: string;
+      endSyncRunId?: string;
+    }>;
+  }>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+
+  const bodyComparisons = Array.isArray(bodyResult.body.comparisons) ? bodyResult.body.comparisons : [];
+  if (bodyComparisons.length === 0) {
+    return jsonResponse(400, {
+      error: 'Change report requires at least one completed comparison row.',
+    });
+  }
+
+  if (bodyComparisons.length > 12) {
+    return jsonResponse(400, {
+      error: 'Change report supports up to 12 comparison rows at a time.',
+    });
+  }
+
+  const comparisons: ChangeReportComparisonInput[] = [];
+  for (const [index, comparison] of bodyComparisons.entries()) {
+    const vendorId = comparison.vendorId;
+    if (!isRawSyncIntegrationId(vendorId) || vendorId === 'connectwise') {
+      return jsonResponse(400, {
+        error: `Change report row ${index + 1} requires a supported vendor integration.`,
+      });
+    }
+
+    const mode = comparison.mode ?? 'counts';
+    if (!isChangeReportMode(mode)) {
+      return jsonResponse(400, {
+        error: `Change report row ${index + 1} has an unsupported comparison mode.`,
+        supportedModes: ['counts', 'users', 'devices', 'microsoft365-license-counts'],
+      });
+    }
+
+    if (mode === 'microsoft365-license-counts' && vendorId !== 'microsoft-365') {
+      return jsonResponse(400, {
+        error: 'M365 license counts can only be selected for the Microsoft 365 integration.',
+      });
+    }
+
+    const startSyncRunId = typeof comparison.startSyncRunId === 'string' ? comparison.startSyncRunId.trim() : '';
+    const endSyncRunId = typeof comparison.endSyncRunId === 'string' ? comparison.endSyncRunId.trim() : '';
+    if (!startSyncRunId || !endSyncRunId) {
+      return jsonResponse(400, {
+        error: `Change report row ${index + 1} requires both a start snapshot and an end snapshot.`,
+      });
+    }
+
+    comparisons.push({
+      vendorId,
+      mode,
+      startSyncRunId,
+      endSyncRunId,
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Change reporting needs PostgreSQL settings before it can compare snapshots.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, await getChangeReport(repositoryContext.pool, comparisons));
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to generate change report.',
     });
   } finally {
     await repositoryContext.close();
@@ -705,6 +799,13 @@ app.http('getProductProfitabilityReport', {
   authLevel: 'anonymous',
   route: 'reports/product-profitability',
   handler: getProductProfitabilityReportHttp,
+});
+
+app.http('generateChangeReport', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reports/change-report',
+  handler: generateChangeReportHttp,
 });
 
 app.http('listSavedProductProfitabilityReports', {

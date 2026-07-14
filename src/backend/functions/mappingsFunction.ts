@@ -12,9 +12,11 @@ import { assertConnectWiseReady } from '../connectwise/operations';
 import {
   applyApprovedMappings,
   approveSuggestedAccountMappings,
+  deactivateCrossVendorProductBundle,
   deleteProductLinkRule,
   deactivateProductLinkRule,
   deactivateProductBundle,
+  listCrossVendorProductBundles,
   listProductMappingCustomers,
   listMappingState,
   runAccountAutomap,
@@ -23,11 +25,15 @@ import {
   testProductLinkRule,
   updateAccountMapping,
   updateProductMapping,
+  upsertCrossVendorProductBundle,
   upsertProductLinkRule,
   upsertProductBundle,
   upsertConnectWiseCatalogProducts,
   type ProductCatalogSearchResult,
   type ProductBundleComponent,
+  type CrossVendorBundleAddOn,
+  type CrossVendorBundleCountStrategy,
+  type CrossVendorBundleSource,
   type UpsertProductLinkRuleInput,
   type MappingStatus,
   type ProductMappingTarget,
@@ -90,6 +96,17 @@ type ProductBundleBody = {
   components?: ProductBundleComponent[];
   targetProduct?: ProductMappingTarget;
   reviewedBy?: string;
+  active?: boolean;
+};
+
+type CrossVendorBundleBody = {
+  bundleKey?: string;
+  bundleName?: string;
+  targetProduct?: ProductMappingTarget;
+  countStrategy?: CrossVendorBundleCountStrategy;
+  defaultDriverSourceKey?: string;
+  sources?: CrossVendorBundleSource[];
+  addOns?: CrossVendorBundleAddOn[];
   active?: boolean;
 };
 
@@ -412,6 +429,122 @@ export async function deactivateProductBundleHttp(
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to deactivate product bundle mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listCrossVendorBundlesHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Cross-vendor bundles need PostgreSQL settings before they can load.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      bundles: await listCrossVendorProductBundles(repositoryContext.pool),
+    });
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load cross-vendor bundles.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertCrossVendorBundleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bundleKey = decodedRouteParam(request.params.bundleKey);
+  if (!bundleKey) {
+    return jsonResponse(400, { error: 'Cross-vendor bundle save requires bundleKey.' });
+  }
+
+  const bodyResult = await readJsonBody<CrossVendorBundleBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Cross-vendor bundle save needs PostgreSQL settings before it can save bundles.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      bundle: await upsertCrossVendorProductBundle(repositoryContext.pool, {
+        bundleKey,
+        bundleName: body.bundleName,
+        targetProduct: body.targetProduct,
+        countStrategy: body.countStrategy,
+        defaultDriverSourceKey: body.defaultDriverSourceKey,
+        sources: body.sources,
+        addOns: body.addOns,
+        active: body.active,
+        reviewedBy: auth.principal.name,
+      }),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save cross-vendor bundle.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deactivateCrossVendorBundleHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bundleKey = decodedRouteParam(request.params.bundleKey);
+  if (!bundleKey) {
+    return jsonResponse(400, { error: 'Cross-vendor bundle deactivation requires bundleKey.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Cross-vendor bundle deactivation needs PostgreSQL settings before it can save bundles.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      bundle: await deactivateCrossVendorProductBundle(repositoryContext.pool, bundleKey, {
+        reviewedBy: auth.principal.name,
+      }),
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to deactivate cross-vendor bundle.',
     });
   } finally {
     await repositoryContext.close();
@@ -1305,6 +1438,27 @@ app.http('deactivateProductBundle', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/bundles/{bundleKey}/deactivate',
   handler: deactivateProductBundleHttp,
+});
+
+app.http('listCrossVendorBundles', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'cross-vendor-bundles',
+  handler: listCrossVendorBundlesHttp,
+});
+
+app.http('upsertCrossVendorBundle', {
+  methods: ['PUT'],
+  authLevel: 'anonymous',
+  route: 'cross-vendor-bundles/{bundleKey}',
+  handler: upsertCrossVendorBundleHttp,
+});
+
+app.http('deactivateCrossVendorBundle', {
+  methods: ['DELETE', 'POST'],
+  authLevel: 'anonymous',
+  route: 'cross-vendor-bundles/{bundleKey}/deactivate',
+  handler: deactivateCrossVendorBundleHttp,
 });
 
 app.http('upsertProductLinkRule', {

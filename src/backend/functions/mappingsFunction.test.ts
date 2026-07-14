@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { automapMappingsHttp, listMappingsHttp, updateAccountMappingHttp } from './mappingsFunction';
+import {
+  automapMappingsHttp,
+  deactivateCrossVendorBundleHttp,
+  listCrossVendorBundlesHttp,
+  listMappingsHttp,
+  updateAccountMappingHttp,
+  upsertCrossVendorBundleHttp,
+} from './mappingsFunction';
 
 const envKeys = [
   'BOOTSTRAP_ADMIN_EMAILS',
@@ -13,6 +20,11 @@ const envKeys = [
 const adminHeaders = new Headers({
   'x-ms-client-principal-name': 'admin@example.com',
   'x-ms-client-principal-role': 'Admin',
+});
+const adminMutationHeaders = new Headers({
+  'x-ms-client-principal-name': 'admin@example.com',
+  'x-ms-client-principal-role': 'Admin',
+  origin: 'http://localhost:4280',
 });
 
 async function run() {
@@ -58,6 +70,50 @@ async function run() {
       { log() {} } as never,
     );
     assert.equal(invalidStatusResponse.status, 400);
+
+    const missingCrossVendorListDatabaseResponse = await listCrossVendorBundlesHttp(
+      {
+        method: 'GET',
+        url: 'http://localhost:4280/api/cross-vendor-bundles',
+        params: {},
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(missingCrossVendorListDatabaseResponse.status, 400);
+    assert.match(String((missingCrossVendorListDatabaseResponse.jsonBody as { error?: string }).error), /Cross-vendor bundles/);
+
+    const missingCrossVendorSaveDatabaseResponse = await upsertCrossVendorBundleHttp(
+      {
+        method: 'PUT',
+        url: 'http://localhost:4280/api/cross-vendor-bundles/managed-endpoint-o365',
+        params: { bundleKey: 'managed-endpoint-o365' },
+        headers: adminMutationHeaders,
+        async json() {
+          return {
+            bundleName: 'Managed Endpoint + O365',
+          };
+        },
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(missingCrossVendorSaveDatabaseResponse.status, 400);
+    assert.match(String((missingCrossVendorSaveDatabaseResponse.jsonBody as { error?: string }).error), /Cross-vendor bundle save/);
+
+    const missingCrossVendorDeactivateDatabaseResponse = await deactivateCrossVendorBundleHttp(
+      {
+        method: 'DELETE',
+        url: 'http://localhost:4280/api/cross-vendor-bundles/managed-endpoint-o365/deactivate',
+        params: { bundleKey: 'managed-endpoint-o365' },
+        headers: adminMutationHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(missingCrossVendorDeactivateDatabaseResponse.status, 400);
+    assert.match(
+      String((missingCrossVendorDeactivateDatabaseResponse.jsonBody as { error?: string }).error),
+      /Cross-vendor bundle deactivation/,
+    );
   } finally {
     for (const key of envKeys) {
       const originalValue = originalEnv[key];

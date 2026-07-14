@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from './reconciliationRuns';
 import type { Queryable } from '../vendor/cove/operations';
+import { crossVendorBundlesVendorId } from '../../shared/vendorDatapoints';
 
 const syncRunId = '00000000-0000-0000-0000-000000000001';
 const queries: Array<{ sql: string; values?: unknown[] }> = [];
@@ -304,6 +305,51 @@ async function run() {
     'N-Able-PC',
     'server line must keep N-Able SRV linked count, not the shared-CW-code workstation rule',
   );
+
+  const crossVendorBundleResult = await reconcileVendorFromDatabase(crossVendorBundleDatabase, crossVendorBundlesVendorId);
+  const crossVendorBundleBaseLine = crossVendorBundleResult.lines.find(
+    (line) => line.productCode === 'BMB-MANAGED-ENDPOINT-O365',
+  );
+  assert.equal(crossVendorBundleBaseLine?.sourceQuantity, 8);
+  assert.equal(crossVendorBundleBaseLine?.agreementQuantity, 6);
+  assert.equal(crossVendorBundleBaseLine?.delta, 2);
+  assert.equal(crossVendorBundleBaseLine?.status, 'needs-review');
+  assert.equal(
+    crossVendorBundleBaseLine?.evidence.some(
+      (entry) => entry.label === 'Bundle strategy' && entry.value === 'specific-driver',
+    ),
+    true,
+  );
+  assert.equal(
+    crossVendorBundleBaseLine?.evidence.some(
+      (entry) => entry.label === 'Driver source' && entry.value === 'Microsoft 365 licensed users',
+    ),
+    true,
+  );
+  const crossVendorBundleAddOnLine = crossVendorBundleResult.lines.find((line) => line.productCode === 'S1-ENDPOINT-ADDON');
+  assert.equal(crossVendorBundleAddOnLine?.sourceQuantity, 2);
+  assert.equal(crossVendorBundleAddOnLine?.agreementQuantity, 1);
+  assert.equal(crossVendorBundleAddOnLine?.delta, 1);
+  assert.equal(crossVendorBundleAddOnLine?.status, 'needs-review');
+  assert.equal(crossVendorBundleResult.snapshotCount, 2);
+
+  const suppressedSentinelOneResult = await reconcileVendorFromDatabase(crossVendorBundleDatabase, 'sentinelone', { syncRunId });
+  assert.equal(
+    suppressedSentinelOneResult.lines.some(
+      (line) =>
+        line.clientId === '11111111-1111-1111-1111-111111111111' &&
+        line.productCode === 'S1-ENDPOINT-ADDON',
+    ),
+    false,
+  );
+  const unbundledSentinelOneLine = suppressedSentinelOneResult.lines.find(
+    (line) =>
+      line.clientId === '33333333-3333-3333-3333-333333333333' &&
+      line.productCode === 'S1-ENDPOINT-ADDON',
+  );
+  assert.equal(unbundledSentinelOneLine?.sourceQuantity, 3);
+  assert.equal(unbundledSentinelOneLine?.agreementQuantity, 2);
+  assert.equal(unbundledSentinelOneLine?.delta, 1);
 
   console.log('database reconciliation tests passed');
 }
@@ -1159,6 +1205,260 @@ const huntressLinkedConnectWiseDatabase: Queryable = {
           },
         ] as T[],
       };
+    }
+
+    return { rows: [] as T[] };
+  },
+};
+
+const crossVendorBundleDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from cross_vendor_product_bundles')) {
+      return {
+        rows: [
+          {
+            id: 'cross-bundle-1',
+            bundle_key: 'managed-endpoint-o365',
+            bundle_name: 'Managed Endpoint + O365',
+            connectwise_product_code: 'BMB-MANAGED-ENDPOINT-O365',
+            connectwise_product_name: 'BMB Managed Endpoint + O365',
+            unit_price: '29.5',
+            count_strategy: 'specific-driver',
+            default_driver_source_key: 'licensed-users',
+            sources: [
+              {
+                sourceKey: 'licensed-users',
+                sourceName: 'Microsoft 365 licensed users',
+                source: {
+                  sourceType: 'filtered-dataset',
+                  vendorId: 'microsoft-365',
+                  dataset: 'users',
+                  aggregation: { type: 'row-count' },
+                  filter: {
+                    nodeType: 'condition',
+                    field: 'assignedLicenses',
+                    operator: 'is-not-empty',
+                  },
+                },
+              },
+              {
+                sourceKey: 'sentinelone-devices',
+                sourceName: 'SentinelOne protected devices',
+                source: {
+                  sourceType: 'vendor-product',
+                  vendorId: 'sentinelone',
+                  vendorProductKey: 'device:workstation',
+                  vendorProductName: 'SentinelOne Workstation',
+                },
+              },
+            ],
+            add_ons: [
+              {
+                addOnKey: 'sentinelone-overage',
+                sourceKey: 'sentinelone-devices',
+                connectwiseProductCode: 'S1-ENDPOINT-ADDON',
+                connectwiseProductName: 'SentinelOne Endpoint Add-on',
+                unitPrice: 6.25,
+                includedPerBaseQuantity: 1,
+              },
+            ],
+            mapping_status: 'approved',
+            active: true,
+            reviewed_by: 'reviewer@example.com',
+            reviewed_at: '2026-07-14T12:00:00Z',
+            created_at: '2026-07-14T12:00:00Z',
+            updated_at: '2026-07-14T12:00:00Z',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('where lower(agreement_additions.product_code) = any($1::text[])')) {
+      const productCodes = new Set((values?.[0] as string[] | undefined) ?? []);
+      const rows = [
+        {
+          id: 'addition-bundle-base',
+          customer_id: '11111111-1111-1111-1111-111111111111',
+          agreement_id: '22222222-2222-2222-2222-222222222222',
+          source_agreement_name: 'Bundled Legal Monthly Services',
+          source_connectwise_agreement_id: '8800',
+          connectwise_addition_id: 'cw-bundle-base',
+          product_code: 'BMB-MANAGED-ENDPOINT-O365',
+          product_name: 'BMB Managed Endpoint + O365',
+          quantity: '6',
+          unit_price: '29.5',
+          addition_status: 'Active',
+          updated_at: new Date('2026-07-14T12:00:00Z'),
+          raw_payload: {},
+        },
+        {
+          id: 'addition-bundle-addon',
+          customer_id: '11111111-1111-1111-1111-111111111111',
+          agreement_id: '22222222-2222-2222-2222-222222222222',
+          source_agreement_name: 'Bundled Legal Monthly Services',
+          source_connectwise_agreement_id: '8800',
+          connectwise_addition_id: 'cw-bundle-addon',
+          product_code: 'S1-ENDPOINT-ADDON',
+          product_name: 'SentinelOne Endpoint Add-on',
+          quantity: '1',
+          unit_price: '6.25',
+          addition_status: 'Active',
+          updated_at: new Date('2026-07-14T12:00:00Z'),
+          raw_payload: {},
+        },
+      ].filter((row) => productCodes.has(row.product_code.toLowerCase()));
+      return { rows: rows as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'microsoft-365') {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            dedupe_key: 'm365-user-count',
+            quantity: '8',
+            row_count: '8',
+            observed_at: new Date('2026-07-14T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from deduped_rows') && values?.[0] === 'sentinelone' && values?.[1] === 'device:workstation') {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            dedupe_key: 'bundled-sentinelone',
+            quantity: '10',
+            row_count: '10',
+            observed_at: new Date('2026-07-14T12:00:00Z'),
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('select distinct on (vendor_product_key)') && sql.includes("where vendor_id = 'sentinelone'")) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'device:workstation',
+            product_code: 'S1-ENDPOINT-ADDON',
+            product_name: 'SentinelOne Endpoint Add-on',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_mappings') && sql.includes("where vendor_id = 'sentinelone'")) {
+      return {
+        rows: [
+          {
+            vendor_product_key: 'device:workstation',
+            target_index: 0,
+            connectwise_product_code: 'S1-ENDPOINT-ADDON',
+            connectwise_product_name: 'SentinelOne Endpoint Add-on',
+            unit_price: '6.25',
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_usage_snapshots') && values?.[0] === 'sentinelone') {
+      return {
+        rows: [
+          {
+            id: 'bundled-sentinelone-snapshot',
+            vendor_id: 'sentinelone',
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            external_account_id: 'bundled-sentinelone',
+            vendor_product_key: 'device:workstation',
+            product_code: 'S1-ENDPOINT-ADDON',
+            product_name: 'SentinelOne Endpoint Add-on',
+            quantity: '10',
+            observed_at: new Date('2026-07-14T12:00:00Z'),
+            dimensions: {},
+          },
+          {
+            id: 'unbundled-sentinelone-snapshot',
+            vendor_id: 'sentinelone',
+            customer_id: '33333333-3333-3333-3333-333333333333',
+            agreement_id: '44444444-4444-4444-4444-444444444444',
+            external_account_id: 'unbundled-sentinelone',
+            vendor_product_key: 'device:workstation',
+            product_code: 'S1-ENDPOINT-ADDON',
+            product_name: 'SentinelOne Endpoint Add-on',
+            quantity: '3',
+            observed_at: new Date('2026-07-14T12:00:00Z'),
+            dimensions: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from vendor_product_link_rules') || sql.includes('from vendor_product_bundles')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from vendor_usage_overrides') || sql.includes('from integration_settings')) {
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('from agreement_additions') && sql.includes('agreement_additions.customer_id = any($1::uuid[])')) {
+      return {
+        rows: [
+          {
+            id: 'addition-unbundled-sentinelone',
+            customer_id: '33333333-3333-3333-3333-333333333333',
+            agreement_id: '44444444-4444-4444-4444-444444444444',
+            source_agreement_name: 'Unbundled Legal Monthly Services',
+            source_connectwise_agreement_id: '9900',
+            connectwise_addition_id: 'cw-unbundled-sentinelone',
+            product_code: 'S1-ENDPOINT-ADDON',
+            product_name: 'SentinelOne Endpoint Add-on',
+            quantity: '2',
+            unit_price: '6.25',
+            addition_status: 'Active',
+            updated_at: new Date('2026-07-14T12:00:00Z'),
+            raw_payload: {},
+          },
+        ] as T[],
+      };
+    }
+
+    if (sql.includes('from agreements') && sql.includes('inner join customers')) {
+      return {
+        rows: [
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            customer_name: 'Bundled Legal',
+            connectwise_company_id: 'BUNDLED',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            agreement_name: 'Bundled Legal Monthly Services',
+            connectwise_agreement_id: '8800',
+          },
+          {
+            customer_id: '33333333-3333-3333-3333-333333333333',
+            customer_name: 'Unbundled Legal',
+            connectwise_company_id: 'UNBUNDLED',
+            agreement_id: '44444444-4444-4444-4444-444444444444',
+            agreement_name: 'Unbundled Legal Monthly Services',
+            connectwise_agreement_id: '9900',
+          },
+        ] as T[],
+      };
+    }
+
+    if (
+      sql.includes('from invoice_imports') ||
+      sql.includes('from invoice_line_items') ||
+      sql.includes('from vendor_product_addition_pins') ||
+      sql.includes('insert into vendor_product_addition_pins')
+    ) {
+      return { rows: [] as T[] };
     }
 
     return { rows: [] as T[] };

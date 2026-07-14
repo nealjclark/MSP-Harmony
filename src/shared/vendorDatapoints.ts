@@ -1,7 +1,9 @@
 import { getIntegrationSettingsDefinition, integrationHasCapability, type IntegrationId } from './integrationSettings';
 
 export type VendorDatapointId = `datapoint:${string}`;
-export type VendorKey = IntegrationId | VendorDatapointId;
+export const crossVendorBundlesVendorId = 'cross-vendor-bundles' as const;
+export type CrossVendorBundlesVendorId = typeof crossVendorBundlesVendorId;
+export type VendorKey = IntegrationId | VendorDatapointId | CrossVendorBundlesVendorId;
 
 export type ManualImportSyncMode = 'info-only' | 'full-vendor-sync';
 export type VendorDatapointImportMode = 'merge' | 'overwrite';
@@ -93,10 +95,14 @@ export function vendorDatapointUuidFromVendorId(vendorId: string): string | unde
 }
 
 export function isVendorKey(value: string): value is VendorKey {
-  return Boolean(getIntegrationSettingsDefinition(value as IntegrationId)) || isVendorDatapointId(value);
+  return value === crossVendorBundlesVendorId || Boolean(getIntegrationSettingsDefinition(value as IntegrationId)) || isVendorDatapointId(value);
 }
 
 export function vendorSupportsMapping(vendorId: string) {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return false;
+  }
+
   if (isVendorDatapointId(vendorId)) {
     return true;
   }
@@ -105,6 +111,10 @@ export function vendorSupportsMapping(vendorId: string) {
 }
 
 export function vendorSupportsInvoiceImport(vendorId: string) {
+  if (vendorId === crossVendorBundlesVendorId) {
+    return false;
+  }
+
   if (isVendorDatapointId(vendorId)) {
     return true;
   }

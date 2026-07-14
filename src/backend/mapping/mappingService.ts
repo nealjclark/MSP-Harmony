@@ -1,5 +1,5 @@
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
-import { isVendorDatapointId, type VendorKey } from '../../shared/vendorDatapoints';
+import { crossVendorBundlesVendorId, isVendorDatapointId, type VendorKey } from '../../shared/vendorDatapoints';
 import { sqlLatestReconcilableSyncRunCte } from '../shared/reconcilableSyncRuns';
 import { defaultCoveProductMappings, type CoveProductMappingKey } from '../vendor/cove/rules';
 import { defaultNcentralProductMappings } from '../vendor/ncentral/rules';
@@ -158,6 +158,52 @@ export type ProductLinkRule = {
   reviewedAt?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type CrossVendorBundleCountStrategy = 'specific-driver' | 'highest-component' | 'lowest-component';
+
+export type CrossVendorBundleSource = {
+  sourceKey: string;
+  sourceName: string;
+  source: ProductLinkRuleSource;
+};
+
+export type CrossVendorBundleAddOn = {
+  addOnKey: string;
+  sourceKey: string;
+  connectwiseProductCode: string;
+  connectwiseProductName: string;
+  unitPrice?: number;
+  includedPerBaseQuantity: number;
+};
+
+export type CrossVendorProductBundle = {
+  id: string;
+  bundleKey: string;
+  bundleName: string;
+  target: ProductMappingTarget;
+  countStrategy: CrossVendorBundleCountStrategy;
+  defaultDriverSourceKey?: string;
+  sources: CrossVendorBundleSource[];
+  addOns: CrossVendorBundleAddOn[];
+  status: MappingStatus;
+  active: boolean;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type UpsertCrossVendorProductBundleInput = {
+  bundleKey?: string;
+  bundleName?: string;
+  targetProduct?: ProductMappingTarget;
+  countStrategy?: CrossVendorBundleCountStrategy;
+  defaultDriverSourceKey?: string;
+  sources?: CrossVendorBundleSource[];
+  addOns?: CrossVendorBundleAddOn[];
+  active?: boolean;
+  reviewedBy?: string;
 };
 
 export type UpsertProductLinkRuleInput = {
@@ -393,6 +439,25 @@ type ProductLinkRuleRow = {
   source_vendor_product_key: string;
   rule_name: string;
   sources: unknown;
+  mapping_status: MappingStatus;
+  active: boolean;
+  reviewed_by: string | null;
+  reviewed_at: Date | string | null;
+  created_at: Date | string | null;
+  updated_at: Date | string | null;
+};
+
+type CrossVendorProductBundleRow = {
+  id: string;
+  bundle_key: string;
+  bundle_name: string;
+  connectwise_product_code: string;
+  connectwise_product_name: string;
+  unit_price: string | number | null;
+  count_strategy: CrossVendorBundleCountStrategy | string;
+  default_driver_source_key: string | null;
+  sources: unknown;
+  add_ons: unknown;
   mapping_status: MappingStatus;
   active: boolean;
   reviewed_by: string | null;
@@ -952,6 +1017,38 @@ export async function listProductBundles(database: Queryable, vendorId: VendorKe
   );
 
   return result.rows.map(mapProductBundleRow);
+}
+
+export async function listCrossVendorProductBundles(database: Queryable): Promise<CrossVendorProductBundle[]> {
+  const result = await database.query<CrossVendorProductBundleRow>(
+    `select
+       id,
+       bundle_key,
+       bundle_name,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       count_strategy,
+       default_driver_source_key,
+       sources,
+       add_ons,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at
+     from cross_vendor_product_bundles
+     order by active desc, bundle_name, bundle_key`,
+  ).catch((error: unknown) => {
+    if (isMissingDatabaseRelation(error)) {
+      return { rows: [] as CrossVendorProductBundleRow[] };
+    }
+
+    throw error;
+  });
+
+  return result.rows.map(mapCrossVendorProductBundleRow);
 }
 
 export async function listProductLinkRules(database: Queryable, vendorId: VendorKey): Promise<ProductLinkRule[]> {
@@ -2104,11 +2201,15 @@ function microsoft365DatasetEntities(dataset: 'users' | 'licenses') {
 }
 
 function integrationDisplayName(integrationId: VendorKey) {
+  if (integrationId === crossVendorBundlesVendorId) {
+    return 'Cross-vendor bundles';
+  }
+
   if (isVendorDatapointId(integrationId)) {
     return integrationId.slice('datapoint:'.length);
   }
 
-  return getIntegrationSettingsDefinition(integrationId)?.displayName ?? integrationId;
+  return getIntegrationSettingsDefinition(integrationId as IntegrationId)?.displayName ?? integrationId;
 }
 
 export async function upsertProductBundle(
@@ -2237,6 +2338,160 @@ export async function deactivateProductBundle(
 
   return {
     vendorId,
+    bundleKey,
+    active: false,
+  };
+}
+
+export async function upsertCrossVendorProductBundle(
+  database: Queryable,
+  input: UpsertCrossVendorProductBundleInput,
+): Promise<CrossVendorProductBundle> {
+  const bundleName = input.bundleName?.trim();
+  if (!bundleName) {
+    throw new Error('Cross-vendor bundle requires a bundle name.');
+  }
+
+  const bundleKey = normalizeBundleKey(input.bundleKey || bundleName);
+  if (!bundleKey) {
+    throw new Error('Cross-vendor bundle requires a bundle key.');
+  }
+
+  const target = input.targetProduct;
+  if (!target?.connectwiseProductCode?.trim() || !target.connectwiseProductName?.trim()) {
+    throw new Error('Cross-vendor bundle requires a ConnectWise bundle product.');
+  }
+  const existingTarget = await loadExistingConnectWiseProductTarget(database, target);
+  if (!existingTarget) {
+    throw new Error(
+      'Cross-vendor bundles can only target an existing ConnectWise product. Search and select an existing ConnectWise catalog product before saving.',
+    );
+  }
+
+  const sources = normalizeCrossVendorBundleSources(input.sources ?? []);
+  if (sources.length === 0) {
+    throw new Error('Cross-vendor bundle requires at least one count source.');
+  }
+
+  const countStrategy = normalizeCrossVendorBundleCountStrategy(input.countStrategy);
+  const sourceKeys = new Set(sources.map((source) => source.sourceKey));
+  const defaultDriverSourceKey = input.defaultDriverSourceKey
+    ? normalizeBundleKey(input.defaultDriverSourceKey)
+    : undefined;
+  if (countStrategy === 'specific-driver' && (!defaultDriverSourceKey || !sourceKeys.has(defaultDriverSourceKey))) {
+    throw new Error('Specific-driver bundles require a default driver source from the bundle source list.');
+  }
+
+  const addOns = normalizeCrossVendorBundleAddOns(input.addOns ?? [], sourceKeys);
+  const validatedAddOns = await Promise.all(
+    addOns.map(async (addOn) => {
+      const existingAddOnTarget = await loadExistingConnectWiseProductTarget(database, {
+        connectwiseProductCode: addOn.connectwiseProductCode,
+        connectwiseProductName: addOn.connectwiseProductName,
+        unitPrice: addOn.unitPrice,
+      });
+      if (!existingAddOnTarget) {
+        throw new Error(`Add-on product ${addOn.connectwiseProductCode} must exist in ConnectWise before saving.`);
+      }
+
+      return {
+        ...addOn,
+        connectwiseProductCode: existingAddOnTarget.connectwiseProductCode,
+        connectwiseProductName: existingAddOnTarget.connectwiseProductName,
+        unitPrice: existingAddOnTarget.unitPrice ?? addOn.unitPrice,
+      };
+    }),
+  );
+
+  const result = await database.query<CrossVendorProductBundleRow>(
+    `insert into cross_vendor_product_bundles (
+       bundle_key,
+       bundle_name,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       count_strategy,
+       default_driver_source_key,
+       sources,
+       add_ons,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       updated_at
+     )
+     values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, 'approved', $10, $11, now(), now())
+     on conflict (bundle_key)
+     do update set
+       bundle_name = excluded.bundle_name,
+       connectwise_product_code = excluded.connectwise_product_code,
+       connectwise_product_name = excluded.connectwise_product_name,
+       unit_price = excluded.unit_price,
+       count_strategy = excluded.count_strategy,
+       default_driver_source_key = excluded.default_driver_source_key,
+       sources = excluded.sources,
+       add_ons = excluded.add_ons,
+       mapping_status = excluded.mapping_status,
+       active = excluded.active,
+       reviewed_by = excluded.reviewed_by,
+       reviewed_at = excluded.reviewed_at,
+       updated_at = now()
+     returning
+       id,
+       bundle_key,
+       bundle_name,
+       connectwise_product_code,
+       connectwise_product_name,
+       unit_price,
+       count_strategy,
+       default_driver_source_key,
+       sources,
+       add_ons,
+       mapping_status,
+       active,
+       reviewed_by,
+       reviewed_at,
+       created_at,
+       updated_at`,
+    [
+      bundleKey,
+      bundleName,
+      existingTarget.connectwiseProductCode,
+      existingTarget.connectwiseProductName,
+      existingTarget.unitPrice ?? null,
+      countStrategy,
+      defaultDriverSourceKey ?? null,
+      JSON.stringify(sources),
+      JSON.stringify(validatedAddOns),
+      input.active ?? true,
+      input.reviewedBy ?? 'user',
+    ],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('Unable to save cross-vendor bundle.');
+  }
+
+  return mapCrossVendorProductBundleRow(row);
+}
+
+export async function deactivateCrossVendorProductBundle(
+  database: Queryable,
+  bundleKey: string,
+  options: { reviewedBy?: string } = {},
+): Promise<{ bundleKey: string; active: false }> {
+  await database.query(
+    `update cross_vendor_product_bundles
+     set active = false,
+         reviewed_by = $2,
+         reviewed_at = now(),
+         updated_at = now()
+     where bundle_key = $1`,
+    [bundleKey, options.reviewedBy ?? 'user'],
+  );
+
+  return {
     bundleKey,
     active: false,
   };
@@ -3886,6 +4141,32 @@ function mapProductBundleRow(row: ProductBundleRow): ProductBundle {
   };
 }
 
+function mapCrossVendorProductBundleRow(row: CrossVendorProductBundleRow): CrossVendorProductBundle {
+  return {
+    id: row.id,
+    bundleKey: row.bundle_key,
+    bundleName: row.bundle_name,
+    target: {
+      connectwiseProductCode: row.connectwise_product_code,
+      connectwiseProductName: row.connectwise_product_name,
+      unitPrice: nullableNumber(row.unit_price),
+    },
+    countStrategy: normalizeCrossVendorBundleCountStrategy(row.count_strategy),
+    defaultDriverSourceKey: row.default_driver_source_key ?? undefined,
+    sources: normalizeCrossVendorBundleSources(crossVendorSourceArray(row.sources)),
+    addOns: normalizeCrossVendorBundleAddOns(
+      crossVendorAddOnArray(row.add_ons),
+      new Set(crossVendorSourceArray(row.sources).map((source) => source.sourceKey)),
+    ),
+    status: row.mapping_status,
+    active: row.active,
+    reviewedBy: row.reviewed_by ?? undefined,
+    reviewedAt: isoDate(row.reviewed_at),
+    createdAt: isoDate(row.created_at),
+    updatedAt: isoDate(row.updated_at),
+  };
+}
+
 function mapProductLinkRuleRow(row: ProductLinkRuleRow): ProductLinkRule {
   return {
     id: row.id,
@@ -3994,6 +4275,73 @@ function normalizeBundleComponents(components: ProductBundleComponent[]) {
   );
 }
 
+function normalizeCrossVendorBundleCountStrategy(value: unknown): CrossVendorBundleCountStrategy {
+  return value === 'highest-component' || value === 'lowest-component' || value === 'specific-driver'
+    ? value
+    : 'specific-driver';
+}
+
+function normalizeCrossVendorBundleSources(sources: CrossVendorBundleSource[]) {
+  const byKey = new Map<string, CrossVendorBundleSource>();
+  for (const source of sources) {
+    const sourceKey = normalizeBundleKey(source.sourceKey || source.sourceName || productLinkRuleSourceSortLabel(source.source));
+    const normalizedSources = normalizeProductLinkRuleSources([source.source]);
+    const normalizedSource = normalizedSources[0];
+    if (!sourceKey || !normalizedSource) {
+      continue;
+    }
+
+    byKey.set(sourceKey, {
+      sourceKey,
+      sourceName: source.sourceName?.trim() || productLinkRuleSourceSortLabel(normalizedSource),
+      source: normalizedSource,
+    });
+  }
+
+  return [...byKey.values()].sort(
+    (left, right) => left.sourceName.localeCompare(right.sourceName) || left.sourceKey.localeCompare(right.sourceKey),
+  );
+}
+
+function normalizeCrossVendorBundleAddOns(addOns: CrossVendorBundleAddOn[], sourceKeys: Set<string>) {
+  const byKey = new Map<string, CrossVendorBundleAddOn>();
+  for (const addOn of addOns) {
+    const sourceKey = normalizeBundleKey(addOn.sourceKey ?? '');
+    if (!sourceKey || !sourceKeys.has(sourceKey)) {
+      continue;
+    }
+
+    const connectwiseProductCode = addOn.connectwiseProductCode?.trim();
+    if (!connectwiseProductCode) {
+      continue;
+    }
+
+    const addOnKey = normalizeBundleKey(addOn.addOnKey || `${sourceKey}-${connectwiseProductCode}`);
+    if (!addOnKey) {
+      continue;
+    }
+
+    byKey.set(addOnKey, {
+      addOnKey,
+      sourceKey,
+      connectwiseProductCode,
+      connectwiseProductName: addOn.connectwiseProductName?.trim() || connectwiseProductCode,
+      unitPrice: addOn.unitPrice,
+      includedPerBaseQuantity:
+        typeof addOn.includedPerBaseQuantity === 'number' && Number.isFinite(addOn.includedPerBaseQuantity)
+          ? Math.max(0, addOn.includedPerBaseQuantity)
+          : 1,
+    });
+  }
+
+  return [...byKey.values()].sort(
+    (left, right) =>
+      left.connectwiseProductName.localeCompare(right.connectwiseProductName) ||
+      left.connectwiseProductCode.localeCompare(right.connectwiseProductCode) ||
+      left.addOnKey.localeCompare(right.addOnKey),
+  );
+}
+
 function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
   const byKey = new Map<string, ProductLinkRuleSource>();
 
@@ -4004,7 +4352,10 @@ function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
       if (!vendorId || !vendorProductKey) {
         continue;
       }
-      if (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId)) {
+      if (vendorId === crossVendorBundlesVendorId) {
+        continue;
+      }
+      if (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId as IntegrationId)) {
         continue;
       }
 
@@ -4035,7 +4386,13 @@ function normalizeProductLinkRuleSources(sources: ProductLinkRuleSource[]) {
       const vendorId = source.vendorId;
       const filter = normalizeProductLinkFilterNode(source.filter);
       const aggregation = normalizeProductLinkAggregation(source.aggregation);
-      if (!vendorId || (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId)) || !filter || !aggregation) {
+      if (
+        !vendorId ||
+        vendorId === crossVendorBundlesVendorId ||
+        (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId as IntegrationId)) ||
+        !filter ||
+        !aggregation
+      ) {
         continue;
       }
 
@@ -4190,14 +4547,14 @@ function sourceArray(value: unknown): ProductLinkRuleSource[] {
     if (sourceType === 'vendor-product') {
       const vendorId = typeof record.vendorId === 'string' ? record.vendorId : undefined;
       const vendorProductKey = typeof record.vendorProductKey === 'string' ? record.vendorProductKey : undefined;
-      if (!vendorId || !vendorProductKey || !getIntegrationSettingsDefinition(vendorId as IntegrationId)) {
+      if (!vendorId || !vendorProductKey || (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId as IntegrationId))) {
         return [];
       }
 
       return [
         {
           sourceType,
-          vendorId: vendorId as IntegrationId,
+          vendorId: vendorId as VendorKey,
           vendorProductKey,
           vendorProductName: typeof record.vendorProductName === 'string' ? record.vendorProductName : undefined,
         },
@@ -4223,7 +4580,7 @@ function sourceArray(value: unknown): ProductLinkRuleSource[] {
       const vendorId = typeof record.vendorId === 'string' ? record.vendorId : undefined;
       const filter = parseProductLinkFilterNode(record.filter);
       const aggregation = parseProductLinkAggregation(record.aggregation);
-      if (!vendorId || !getIntegrationSettingsDefinition(vendorId as IntegrationId) || !filter || !aggregation) {
+      if (!vendorId || (!isVendorDatapointId(vendorId) && !getIntegrationSettingsDefinition(vendorId as IntegrationId)) || !filter || !aggregation) {
         return [];
       }
 
@@ -4231,7 +4588,7 @@ function sourceArray(value: unknown): ProductLinkRuleSource[] {
       return [
         {
           sourceType,
-          vendorId: vendorId as IntegrationId,
+          vendorId: vendorId as VendorKey,
           dataset,
           label: typeof record.label === 'string' ? record.label : undefined,
           filter,
@@ -4241,6 +4598,74 @@ function sourceArray(value: unknown): ProductLinkRuleSource[] {
     }
 
     return [];
+  });
+}
+
+function crossVendorSourceArray(value: unknown): CrossVendorBundleSource[] {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.flatMap<CrossVendorBundleSource>((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return [];
+    }
+
+    const record = item as Record<string, unknown>;
+    const sourceKey = typeof record.sourceKey === 'string' ? record.sourceKey : undefined;
+    const sourceName = typeof record.sourceName === 'string' ? record.sourceName : sourceKey;
+    const sources = sourceArray(Array.isArray(record.source) ? record.source : [record.source]);
+    const source = sources[0];
+    return sourceKey && source
+      ? [
+          {
+            sourceKey,
+            sourceName: sourceName ?? sourceKey,
+            source,
+          },
+        ]
+      : [];
+  });
+}
+
+function crossVendorAddOnArray(value: unknown): CrossVendorBundleAddOn[] {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.flatMap<CrossVendorBundleAddOn>((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return [];
+    }
+
+    const record = item as Record<string, unknown>;
+    const addOnKey = typeof record.addOnKey === 'string' ? record.addOnKey : undefined;
+    const sourceKey = typeof record.sourceKey === 'string' ? record.sourceKey : undefined;
+    const connectwiseProductCode =
+      typeof record.connectwiseProductCode === 'string' ? record.connectwiseProductCode : undefined;
+    if (!addOnKey || !sourceKey || !connectwiseProductCode) {
+      return [];
+    }
+
+    const included = Number(record.includedPerBaseQuantity ?? 1);
+    return [
+      {
+        addOnKey,
+        sourceKey,
+        connectwiseProductCode,
+        connectwiseProductName:
+          typeof record.connectwiseProductName === 'string'
+            ? record.connectwiseProductName
+            : connectwiseProductCode,
+        unitPrice:
+          typeof record.unitPrice === 'number' || typeof record.unitPrice === 'string'
+            ? nullableNumber(record.unitPrice)
+            : undefined,
+        includedPerBaseQuantity: Number.isFinite(included) ? included : 1,
+      },
+    ];
   });
 }
 

@@ -120,6 +120,26 @@ CREATE TABLE IF NOT EXISTS vendor_product_link_rules (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS cross_vendor_product_bundles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  bundle_key text NOT NULL UNIQUE,
+  bundle_name text NOT NULL,
+  connectwise_product_code text NOT NULL,
+  connectwise_product_name text NOT NULL,
+  unit_price numeric(18, 4),
+  count_strategy text NOT NULL DEFAULT 'specific-driver',
+  default_driver_source_key text,
+  sources jsonb NOT NULL DEFAULT '[]'::jsonb,
+  add_ons jsonb NOT NULL DEFAULT '[]'::jsonb,
+  mapping_status text NOT NULL DEFAULT 'approved',
+  active boolean NOT NULL DEFAULT true,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS vendor_usage_overrides (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -469,6 +489,9 @@ CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_vendor_observed ON vendor_usage_
 CREATE INDEX IF NOT EXISTS idx_vendor_account_mappings_vendor ON vendor_account_mappings(vendor_id, external_account_id) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_mappings_vendor ON vendor_product_mappings(vendor_id, vendor_product_key) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_bundles_vendor ON vendor_product_bundles(vendor_id, bundle_key) WHERE active;
+CREATE INDEX IF NOT EXISTS idx_cross_vendor_product_bundles_active
+  ON cross_vendor_product_bundles(active, bundle_key)
+  WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_usage_overrides_scope
   ON vendor_usage_overrides(vendor_id, customer_id, agreement_id, source_vendor_product_key)
   WHERE active;

@@ -7,7 +7,12 @@ import {
   type IntegrationDataSourceType,
   type IntegrationId,
 } from '../../shared/integrationSettings';
-import { isVendorDatapointId, type VendorDatapointId, type VendorKey } from '../../shared/vendorDatapoints';
+import {
+  crossVendorBundlesVendorId,
+  isVendorDatapointId,
+  type VendorDatapointId,
+  type VendorKey,
+} from '../../shared/vendorDatapoints';
 import { CONSTANT_QUANTITY_ONE, isConstantQuantityOne, normalizeImportedCustomerLabel } from '../../shared/invoiceTableMapping';
 import { appRiverIntegrationId } from '../vendor/appriver/client';
 import { loadAppRiverProductMappings, type Queryable } from '../vendor/appriver/operations';
@@ -2156,7 +2161,11 @@ function assertMappedImportStorageVendor(vendorId: VendorKey) {
     return;
   }
 
-  assertInvoiceImportCapable(vendorId);
+  if (vendorId === crossVendorBundlesVendorId) {
+    throw new Error('Cross-vendor bundles do not support invoice table imports.');
+  }
+
+  assertInvoiceImportCapable(vendorId as IntegrationId);
 }
 
 function supportedInvoiceImportSourceType(
