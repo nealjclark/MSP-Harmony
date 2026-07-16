@@ -241,6 +241,10 @@ type CleanupPreviewRow = {
   payload: unknown;
 };
 
+type SavedCleanupCandidateRow = {
+  cleanup: unknown;
+};
+
 type CleanupActionRow = {
   id: string;
   batch_id: string;
@@ -531,7 +535,9 @@ export async function refreshAppRiverLicenseCleanupCandidate(
     chargeEvents: input.chargeEvents,
     now,
   });
-  const snapshotCandidate = report.rows.find((row) => row.id === input.rowId);
+  const snapshotCandidate =
+    report.rows.find((row) => row.id === input.rowId) ??
+    (await loadSavedAuditCleanupCandidate(database, input.rowId));
   if (!snapshotCandidate) {
     return undefined;
   }
@@ -1267,6 +1273,46 @@ async function liveCandidateForQueue(
     snapshotCandidate.subscriptionKey,
   );
   return candidateFromSource(liveSourceForCandidate(snapshotCandidate, detail, now), chargeIndex, now, defaultWindowDays);
+}
+
+async function loadSavedAuditCleanupCandidate(
+  database: Queryable,
+  rowId: string,
+): Promise<AppRiverLicenseCleanupCandidate | undefined> {
+  const result = await database.query<SavedCleanupCandidateRow>(
+    `select audit_row->'cleanup' as cleanup
+     from discrepancy_audits
+     cross join lateral jsonb_array_elements(report_json->'rows') audit_row
+     where comparison_id = 'appriver-license-cleanup'
+       and audit_row->>'id' = $1
+       and audit_row->'cleanup' is not null
+     order by created_at desc
+     limit 1`,
+    [rowId],
+  );
+  return cleanupCandidateFromUnknown(result.rows[0]?.cleanup, rowId);
+}
+
+function cleanupCandidateFromUnknown(value: unknown, expectedRowId?: string): AppRiverLicenseCleanupCandidate | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.id !== 'string' ||
+    (expectedRowId && value.id !== expectedRowId) ||
+    typeof value.customerName !== 'string' ||
+    typeof value.externalCustomerId !== 'string' ||
+    typeof value.productCode !== 'string' ||
+    typeof value.productName !== 'string' ||
+    typeof value.subscriptionKey !== 'string' ||
+    typeof value.totalLicenses !== 'number' ||
+    typeof value.unassignedLicenses !== 'number' ||
+    typeof value.proposedReduction !== 'number' ||
+    typeof value.proposedQuantity !== 'number' ||
+    !['Renewal', 'RecentOrder', 'Both'].includes(String(value.eligibilityReason)) ||
+    typeof value.observedAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return value as AppRiverLicenseCleanupCandidate;
 }
 
 function liveSourceForCandidate(
@@ -2186,16 +2232,8 @@ async function loadCleanupPreview(database: Queryable, previewId: string, actor:
   if (!['eligible', 'matched', 'scheduled-cancellation', 'unavailable'].includes(String(status))) {
     return undefined;
   }
-  const candidate = row.payload.candidate as AppRiverLicenseCleanupCandidate;
-  if (
-    typeof candidate.id !== 'string' ||
-    typeof candidate.externalCustomerId !== 'string' ||
-    typeof candidate.subscriptionKey !== 'string' ||
-    typeof candidate.totalLicenses !== 'number' ||
-    typeof candidate.proposedReduction !== 'number'
-  ) {
-    return undefined;
-  }
+  const candidate = cleanupCandidateFromUnknown(row.payload.candidate, row.entity_id);
+  if (!candidate) return undefined;
   return {
     rowId: row.entity_id,
     status: status as AppRiverLicenseCleanupPreviewStatus,

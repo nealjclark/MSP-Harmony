@@ -164,7 +164,7 @@ export async function refreshAppRiverLicenseCleanupCandidateHttp(
       liveClient: client,
     });
     if (!preview) {
-      return jsonResponse(404, { error: 'This cleanup row is no longer available in the latest AppRiver audit.' });
+      return jsonResponse(404, { error: 'This cleanup row is no longer available in the saved AppRiver audit.' });
     }
     return jsonResponse(200, {
       reportType: 'appriver-license-cleanup-preview',

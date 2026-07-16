@@ -89,6 +89,7 @@ class CleanupDatabase implements Queryable {
   actions: CleanupAction[] = [];
   batchIds: string[] = [];
   previews: Array<{ id: string; actor: string; rowId: string; occurredAt: string; payload: unknown }> = [];
+  savedCandidates = new Map<string, unknown>();
 
   constructor(snapshotRows: SnapshotRow[] = []) {
     this.snapshotRows = snapshotRows;
@@ -111,6 +112,11 @@ class CleanupDatabase implements Queryable {
 
     if (sql.includes('from vendor_usage_snapshots')) {
       return { rows: this.snapshotRows as T[] };
+    }
+
+    if (sql.includes('jsonb_array_elements') && sql.includes('discrepancy_audits')) {
+      const cleanup = this.savedCandidates.get(String(values?.[0] ?? ''));
+      return { rows: cleanup ? ([{ cleanup }] as T[]) : ([] as T[]) };
     }
 
     if (sql.includes("insert into audit_events") && sql.includes("preview.refreshed")) {
@@ -404,6 +410,7 @@ async function run() {
   await testQueueRefreshesLiveSubscriptionDetails();
   await testPreviewQueuesManualRemoval();
   await testPreviewMarksLiveMatch();
+  await testPreviewUsesCandidateFromSavedAudit();
   await testListAndCancelQueuedAction();
   await testDismissCanceledAction();
   await testLiveRevalidationAndVerification();
@@ -413,6 +420,43 @@ async function run() {
   await testVerificationTimeout();
 
   console.log('appriver license cleanup tests passed');
+}
+
+async function testPreviewUsesCandidateFromSavedAudit() {
+  const sourceDatabase = new CleanupDatabase([
+    snapshot('saved-only', { commitmentEndDate: '2026-07-14T00:00:00Z', totalLicenses: 5, assignedLicenses: 3, unassignedLicenses: 2 }),
+  ]);
+  const rowId = 'appriver-license-cleanup:cust-1:saved-only';
+  const savedCandidate = (await listAppRiverLicenseCleanupCandidates(sourceDatabase, { now })).rows.find(
+    (candidate) => candidate.id === rowId,
+  );
+  assert.ok(savedCandidate);
+
+  const database = new CleanupDatabase([]);
+  database.savedCandidates.set(rowId, savedCandidate);
+  const preview = await refreshAppRiverLicenseCleanupCandidate(database, {
+    actor: 'license@example.com',
+    rowId,
+    now,
+    liveClient: {
+      async getCustomerSubscriptionDetails(customerId, subscriptionKey) {
+        assert.equal(customerId, 'cust-1');
+        assert.equal(subscriptionKey, 'saved-only');
+        return detail({
+          subscriptionKey,
+          totalLicenses: 5,
+          subscriptionQuantity: 5,
+          assignedLicenses: 3,
+          unassignedLicenses: 2,
+          commitmentEndDate: '2026-07-14T00:00:00Z',
+        });
+      },
+    },
+  });
+
+  assert.equal(preview?.status, 'eligible');
+  assert.equal(preview?.candidate.externalCustomerId, 'cust-1');
+  assert.equal(preview?.candidate.subscriptionKey, 'saved-only');
 }
 
 async function testPreviewQueuesManualRemoval() {
