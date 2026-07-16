@@ -6452,7 +6452,12 @@ function App() {
 
   const loadLatestDiscrepancyAudit = async (
     pairId = selectedDiscrepancyPairId,
-    options: { auditStates?: DiscrepancyAuditState[]; includeMatched?: boolean; preserveCleanupMessage?: boolean } = {},
+    options: {
+      auditStates?: DiscrepancyAuditState[];
+      includeMatched?: boolean;
+      preserveCleanupMessage?: boolean;
+      silent?: boolean;
+    } = {},
   ) => {
     if (!pairId) {
       setDiscrepancyLoadState('idle');
@@ -6460,8 +6465,10 @@ function App() {
       return null;
     }
 
-    setDiscrepancyLoadState('loading');
-    setDiscrepancyMessage('Loading saved audit...');
+    if (!options.silent) {
+      setDiscrepancyLoadState('loading');
+      setDiscrepancyMessage('Loading saved audit...');
+    }
     if (!options.preserveCleanupMessage) {
       setAppRiverCleanupQueueState('idle');
       setAppRiverCleanupQueueMessage('');
@@ -6475,15 +6482,19 @@ function App() {
       setDiscrepancyReport(report);
       updateDiscrepancyAuditState(report.auditState);
       setDiscrepancyLoadState('ready');
-      const newerSnapshot = report.auditState?.hasNewerSnapshot ? ' New snapshot available.' : '';
-      setDiscrepancyMessage(
-        report.rows.length > 0
-          ? `Loaded saved audit with ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.${newerSnapshot}`
-          : `Saved audit has no rows for the current filters.${newerSnapshot}`,
-      );
+      if (!options.silent) {
+        const newerSnapshot = report.auditState?.hasNewerSnapshot ? ' New snapshot available.' : '';
+        setDiscrepancyMessage(
+          report.rows.length > 0
+            ? `Loaded saved audit with ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.${newerSnapshot}`
+            : `Saved audit has no rows for the current filters.${newerSnapshot}`,
+        );
+      }
       return report;
     } catch (error) {
-      setDiscrepancyReport(null);
+      if (!options.silent) {
+        setDiscrepancyReport(null);
+      }
       const auditState = options.auditStates?.find((state) => state.comparisonId === pairId);
       setDiscrepancyLoadState(auditState?.canRun ? 'idle' : 'failed');
       setDiscrepancyMessage(
@@ -9339,6 +9350,7 @@ function App() {
                   void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
                     includeMatched: value,
                     preserveCleanupMessage: true,
+                    silent: true,
                   });
                 } else {
                   resetDiscrepancyRun();
