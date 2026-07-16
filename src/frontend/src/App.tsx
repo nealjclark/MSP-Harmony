@@ -9904,16 +9904,23 @@ function DiscrepancyDashboardView(props: {
         (summary, row) => {
           const cleanup = row.cleanup;
           if (!cleanup) return summary;
-          const resultLabel = cleanupActionResultLabel(cleanup);
           const actionable = isAppRiverCleanupActionable(row);
+          const actionStatus = cleanup.pendingAction?.status ?? cleanup.latestAction?.status;
           return {
             proposedReduction: summary.proposedReduction + cleanup.proposedReduction,
             unassignedLicenses: summary.unassignedLicenses + cleanup.unassignedLicenses,
             skippedCancellations: summary.skippedCancellations + (cleanup.skipReason === 'ScheduledCancellation' ? 1 : 0),
             eligibleDecreases: summary.eligibleDecreases + (actionable ? 1 : 0),
-            pendingActions: summary.pendingActions + (cleanup.pendingAction ? 1 : 0),
-            completeActions: summary.completeActions + (resultLabel === 'Update Complete' ? 1 : 0),
-            failedActions: summary.failedActions + (resultLabel === 'Update Failed' ? 1 : 0),
+            queuedActions: summary.queuedActions + (actionStatus === 'queued' ? 1 : 0),
+            activeActions:
+              summary.activeActions +
+              (actionStatus && ['running', 'reviewing', 'updating', 'confirm', 'processing', 'accepted', 'verifying'].includes(actionStatus)
+                ? 1
+                : 0),
+            completeActions: summary.completeActions + (actionStatus === 'verified' ? 1 : 0),
+            failedActions:
+              summary.failedActions +
+              (actionStatus && ['needs_review', 'failed', 'timed_out'].includes(actionStatus) ? 1 : 0),
           };
         },
         {
@@ -9921,7 +9928,8 @@ function DiscrepancyDashboardView(props: {
           unassignedLicenses: 0,
           skippedCancellations: 0,
           eligibleDecreases: 0,
-          pendingActions: 0,
+          queuedActions: 0,
+          activeActions: 0,
           completeActions: 0,
           failedActions: 0,
         },
@@ -9975,11 +9983,19 @@ function DiscrepancyDashboardView(props: {
             <MetricCard icon={Database} label="Snapshot Date" tone="money" value={formatDateOnly(cleanupSnapshotDate) ?? 'No snapshot'} />
             <MetricCard
               icon={Activity}
-              label="Actions Taken"
+              label="Actions"
+              labelDetail={`Active ${formatCount(cleanupSummary.activeActions)}`}
               onClick={onCleanupActionsOpen}
               title="View queued, completed, failed, and canceled AppRiver cleanup actions"
               tone="approved"
-              value={`Q ${formatCount(cleanupSummary.pendingActions)} / C ${formatCount(cleanupSummary.completeActions)} / F ${formatCount(cleanupSummary.failedActions)}`}
+              value={
+                <span className="cleanup-action-metric-counts">
+                  <span>Queued <b>{formatCount(cleanupSummary.queuedActions)}</b></span>
+                  <span>Complete <b>{formatCount(cleanupSummary.completeActions)}</b></span>
+                  <span>Failed <b>{formatCount(cleanupSummary.failedActions)}</b></span>
+                </span>
+              }
+              valueClassName="cleanup-action-metric-value"
             />
           </>
         ) : (
@@ -13248,10 +13264,12 @@ function LinkedCountTestModal(props: {
 function MetricCard(props: {
   icon: typeof Activity;
   label: string;
+  labelDetail?: string;
   onClick?: () => void;
   tone: 'warn' | 'money' | 'ready' | 'approved';
   title?: string;
-  value: string;
+  value: ReactNode;
+  valueClassName?: string;
 }) {
   const Icon = props.icon;
   const content = (
@@ -13259,8 +13277,11 @@ function MetricCard(props: {
       <div className="metric-icon">
         <Icon size={20} />
       </div>
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
+      <span className={props.labelDetail ? 'metric-card-label-with-detail' : undefined}>
+        {props.label}
+        {props.labelDetail ? <small>{props.labelDetail}</small> : null}
+      </span>
+      <strong className={props.valueClassName}>{props.value}</strong>
     </>
   );
 

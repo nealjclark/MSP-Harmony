@@ -4408,6 +4408,45 @@ h2 {
   width: 112px;
 }
 
+.metric-card .metric-card-label-with-detail {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.metric-card .metric-card-label-with-detail small {
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.metric-card strong.cleanup-action-metric-value {
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.cleanup-action-metric-counts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.cleanup-action-metric-counts > span {
+  color: inherit;
+  font-size: inherit;
+}
+
+.cleanup-action-metric-counts b {
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
 .cleanup-table .cleanup-col-product {
   width: 230px;
 }
