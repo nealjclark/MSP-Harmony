@@ -10103,16 +10103,18 @@ function DiscrepancyDashboardView(props: {
                         return (
                           <tr key={row.id}>
                             <td className="cleanup-action-cell">
-                              <button
-                                className="button primary compact icon-button-text"
-                                disabled={!canQueueCleanupActions || !actionable || cleanupQueueState === 'queueing'}
-                                onClick={() => onCleanupAction(row)}
-                                title={cleanup?.skipReason === 'ScheduledCancellation' ? 'Skipped because this subscription cancels at term' : 'Decrease count now'}
-                                type="button"
-                              >
-                                <ArrowDown size={15} />
-                                Decrease
-                              </button>
+                              {actionable ? (
+                                <button
+                                  className="button primary compact icon-button-text"
+                                  disabled={!canQueueCleanupActions || cleanupQueueState === 'queueing'}
+                                  onClick={() => onCleanupAction(row)}
+                                  title="Decrease count now"
+                                  type="button"
+                                >
+                                  <ArrowDown size={15} />
+                                  Decrease
+                                </button>
+                              ) : null}
                             </td>
                             <td>
                               <strong>{cleanup?.productName ?? row.productFamily}</strong>
@@ -10810,7 +10812,12 @@ function groupDiscrepancyRowsByCustomer(rows: DiscrepancyRow[]) {
     const key = row.customer.customerName;
     groups.set(key, [...(groups.get(key) ?? []), row]);
   });
-  return [...groups.entries()].sort((left, right) => compareCustomerNames(left[0], right[0]));
+  return [...groups.entries()]
+    .map(([customerName, customerRows]) => [
+      customerName,
+      [...customerRows].sort((left, right) => Number(isUpcomingAppRiverCleanup(left)) - Number(isUpcomingAppRiverCleanup(right))),
+    ] as [string, DiscrepancyRow[]])
+    .sort((left, right) => compareCustomerNames(left[0], right[0]));
 }
 
 function discrepancyStatusLabel(status: DiscrepancySeverity) {
@@ -10831,10 +10838,15 @@ function isAppRiverCleanupActionable(row: DiscrepancyRow) {
   return Boolean(
     row.cleanup &&
     !row.cleanup.skipReason &&
+    !isUpcomingAppRiverCleanup(row) &&
     row.cleanup.proposedReduction > 0 &&
     !row.cleanup.pendingAction &&
     row.status !== 'unavailable',
   );
+}
+
+function isUpcomingAppRiverCleanup(row: DiscrepancyRow) {
+  return row.cleanup?.renewalWindow === 'Upcoming';
 }
 
 function discrepancyRowFromCleanupPreview(
