@@ -702,6 +702,13 @@ type AppRiverLicenseCleanupDetails = {
   notes?: string;
   observedAt: string;
   syncTimestamp?: string;
+  refresh?: {
+    syncRunId: string;
+    initialTotalLicenses: number;
+    initialAssignedLicenses?: number;
+    initialUnassignedLicenses: number;
+    refreshedAt: string;
+  };
   pendingAction?: {
     id: string;
     status: string;
@@ -10121,7 +10128,12 @@ function DiscrepancyDashboardView(props: {
                               <span>{cleanup?.productCode ?? cleanup?.vendorProductKey ?? 'AppRiver subscription'}</span>
                             </td>
                             <td>
-                              <strong>{cleanupCountsLabel(cleanup)}</strong>
+                              <strong className={cleanup?.refresh ? 'cleanup-refreshed-count' : undefined}>{cleanupCountsLabel(cleanup)}</strong>
+                              {cleanup?.refresh ? (
+                                <span className="cleanup-refreshed-from">
+                                  Refreshed · was {cleanup.refresh.initialTotalLicenses.toLocaleString()} total
+                                </span>
+                              ) : null}
                               <span>{cleanup?.unassignedLicenses.toLocaleString() ?? row.delta.toLocaleString()} unassigned</span>
                             </td>
                             <td>

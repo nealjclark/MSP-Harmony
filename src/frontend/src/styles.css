@@ -4590,6 +4590,16 @@ h2 {
   box-shadow: 0 28px 80px rgba(22, 36, 31, 0.28);
 }
 
+.cleanup-table td strong.cleanup-refreshed-count {
+  color: var(--teal-dark);
+}
+
+.cleanup-table td span.cleanup-refreshed-from {
+  color: var(--teal-dark);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
 .cleanup-confirmation-modal {
   width: min(600px, 100%);
   max-height: min(92vh, 720px);

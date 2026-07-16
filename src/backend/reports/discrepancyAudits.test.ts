@@ -36,6 +36,7 @@ class AuditDatabase implements Queryable {
     sentinelone: { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', completedAt: '2026-07-15T11:05:00.000Z' },
     'opentext-appriver': { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', completedAt: '2026-07-15T11:10:00.000Z' },
   };
+  cleanupMergeRows?: unknown[];
 
   async query<T = unknown>(sql: string, values?: unknown[]) {
     this.calls.push({ sql, values });
@@ -103,7 +104,7 @@ class AuditDatabase implements Queryable {
 
     if (sql.includes('jsonb_to_recordset')) {
       return {
-        rows: [
+        rows: (this.cleanupMergeRows ?? [
           {
             row_id: 'appriver-license-cleanup:cust-1:sub-1',
             pending_action_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
@@ -121,7 +122,7 @@ class AuditDatabase implements Queryable {
             latest_completed_at: null,
             latest_updated_at: '2026-07-15T12:05:00.000Z',
           },
-        ] as T[],
+        ]) as T[],
       };
     }
 
@@ -132,8 +133,66 @@ class AuditDatabase implements Queryable {
 async function run() {
   await testRunAndDetectNewerSnapshot();
   await testSavedAuditMergesCleanupActions();
+  await testSavedAuditHidesPersistedMatchedRefresh();
 
   console.log('discrepancy audit tests passed');
+}
+
+async function testSavedAuditHidesPersistedMatchedRefresh() {
+  const database = new AuditDatabase();
+  database.audits.push({
+    id: 'dddddddd-dddd-4ddd-8ddd-000000000002',
+    comparison_id: 'appriver-license-cleanup',
+    comparison_label: 'AppRiver license cleanup',
+    source_key: 'source:opentext-appriver:cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    source_snapshot: {
+      comparisonId: 'appriver-license-cleanup',
+      sources: [{ vendorId: 'opentext-appriver', syncRunId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }],
+    },
+    report_json: appRiverCleanupReport(),
+    generated_at: now,
+    created_at: now,
+    created_by: 'analyst@example.com',
+    row_count: 1,
+    open_discrepancy_count: 1,
+  });
+  const original = appRiverCleanupReport().rows[0]?.cleanup;
+  assert.ok(original);
+  database.cleanupMergeRows = [{
+    row_id: original.id,
+    pending_action_id: null,
+    latest_action_id: null,
+    refresh_candidate: {
+      ...original,
+      totalLicenses: 8,
+      assignedLicenses: 8,
+      unassignedLicenses: 0,
+      proposedReduction: 0,
+      proposedQuantity: 8,
+      refresh: {
+        syncRunId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        initialTotalLicenses: 10,
+        initialAssignedLicenses: 8,
+        initialUnassignedLicenses: 2,
+        refreshedAt: '2026-07-15T12:10:00.000Z',
+      },
+    },
+    preview_payload: null,
+  }];
+
+  const hidden = await getLatestDiscrepancyAuditReport(database, {
+    comparisonId: 'appriver-license-cleanup',
+    includeMatched: false,
+  });
+  assert.equal(hidden?.rows.length, 0);
+
+  const visible = await getLatestDiscrepancyAuditReport(database, {
+    comparisonId: 'appriver-license-cleanup',
+    includeMatched: true,
+  });
+  assert.equal(visible?.rows[0]?.status, 'matched');
+  assert.equal(visible?.rows[0]?.cleanup?.totalLicenses, 8);
+  assert.equal(visible?.rows[0]?.cleanup?.refresh?.initialTotalLicenses, 10);
 }
 
 async function testRunAndDetectNewerSnapshot() {

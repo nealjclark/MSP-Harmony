@@ -399,6 +399,24 @@ CREATE TABLE IF NOT EXISTS appriver_license_cleanup_actions (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS appriver_subscription_refreshes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  row_id text NOT NULL,
+  external_customer_id text NOT NULL,
+  subscription_key text NOT NULL,
+  initial_total_licenses integer NOT NULL,
+  initial_assigned_licenses integer,
+  initial_unassigned_licenses integer NOT NULL,
+  refreshed_total_licenses integer NOT NULL,
+  refreshed_assigned_licenses integer,
+  refreshed_unassigned_licenses integer NOT NULL,
+  candidate_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  refreshed_by text NOT NULL,
+  refreshed_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (sync_run_id, external_customer_id, subscription_key)
+);
+
 CREATE TABLE IF NOT EXISTS invoice_imports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -663,6 +681,8 @@ CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_next
   ON appriver_license_cleanup_actions(status, next_check_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_batch
   ON appriver_license_cleanup_actions(batch_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_appriver_subscription_refreshes_sync_row
+  ON appriver_subscription_refreshes(sync_run_id, row_id);
 ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_at timestamptz;
 ALTER TABLE appriver_license_cleanup_actions

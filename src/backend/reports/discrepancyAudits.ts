@@ -70,6 +70,7 @@ type CleanupActionMergeRow = {
   latest_completed_at: Date | string | null;
   latest_updated_at: Date | string | null;
   preview_payload: unknown;
+  refresh_candidate: unknown;
 };
 
 const activeAppRiverActionStatuses = ['queued', 'running', 'reviewing', 'updating', 'confirm'];
@@ -118,7 +119,11 @@ export async function getLatestDiscrepancyAuditReport(
 
   const summary = mapAuditSummaryRow(row);
   const state = await getDiscrepancyAuditState(database, options.comparisonId);
-  const mergedReport = await mergeDiscrepancyAuditExtras(database, report);
+  const mergedReport = await mergeDiscrepancyAuditExtras(
+    database,
+    report,
+    appRiverSyncRunId(row.source_snapshot),
+  );
 
   return {
     ...applyDiscrepancyReportFilters(mergedReport, options),
@@ -295,7 +300,11 @@ async function loadLatestAuditRow(database: Queryable, comparisonId: string) {
   return result.rows[0];
 }
 
-async function mergeDiscrepancyAuditExtras(database: Queryable, report: DiscrepancyReport): Promise<DiscrepancyReport> {
+async function mergeDiscrepancyAuditExtras(
+  database: Queryable,
+  report: DiscrepancyReport,
+  appRiverSyncRunIdValue?: string,
+): Promise<DiscrepancyReport> {
   const cleanupKeys = report.rows
     .map((row) => ({
       rowId: row.id,
@@ -333,6 +342,7 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
        latest_action.created_at as latest_created_at,
        latest_action.completed_at as latest_completed_at,
        latest_action.updated_at as latest_updated_at,
+       subscription_refresh.candidate_json as refresh_candidate,
        latest_preview.payload as preview_payload
      from row_keys
      left join lateral (
@@ -352,13 +362,18 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
        order by created_at desc
        limit 1
      ) latest_action on true
+     left join appriver_subscription_refreshes subscription_refresh
+       on subscription_refresh.sync_run_id = $3::uuid
+      and subscription_refresh.row_id = row_keys.row_id
+      and subscription_refresh.external_customer_id = row_keys.external_customer_id
+      and subscription_refresh.subscription_key = row_keys.subscription_key
      left join lateral (
        select payload
        from audit_events
        where event_type = 'appriver.license-cleanup.preview.refreshed'
          and entity_type = 'appriver_license_cleanup_preview'
          and entity_id = row_keys.row_id
-         and occurred_at >= $3::timestamptz
+         and occurred_at >= $4::timestamptz
        order by occurred_at desc
        limit 1
      ) latest_preview on true`,
@@ -371,6 +386,7 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
         })),
       ),
       activeAppRiverActionStatuses,
+      appRiverSyncRunIdValue ?? null,
       report.generatedAt,
     ],
   );
@@ -389,7 +405,8 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
       }
 
       const preview = cleanupPreviewPayload(actionRow.preview_payload);
-      const refreshedCleanup = preview?.candidate ?? row.cleanup;
+      const persistedRefresh = cleanupCandidatePayload(actionRow.refresh_candidate);
+      const refreshedCleanup = persistedRefresh ?? preview?.candidate ?? row.cleanup;
       const assignedCount =
         refreshedCleanup.assignedLicenses ??
         Math.max(refreshedCleanup.totalLicenses - refreshedCleanup.unassignedLicenses, 0);
@@ -423,7 +440,7 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
         delta: refreshedCleanup.unassignedLicenses,
         status: pendingAction
           ? 'warning'
-          : preview?.status === 'matched'
+          : refreshedCleanup.unassignedLicenses <= 0
             ? 'matched'
             : preview?.status === 'unavailable'
               ? 'unavailable'
@@ -441,6 +458,27 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
       };
     }),
   };
+}
+
+function appRiverSyncRunId(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.sources)) return undefined;
+  const source = value.sources.find(
+    (candidate) => isRecord(candidate) && candidate.vendorId === 'opentext-appriver',
+  );
+  return isRecord(source) && typeof source.syncRunId === 'string' ? source.syncRunId : undefined;
+}
+
+function cleanupCandidatePayload(value: unknown): AppRiverLicenseCleanupCandidate | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.id !== 'string' ||
+    typeof value.totalLicenses !== 'number' ||
+    typeof value.unassignedLicenses !== 'number' ||
+    typeof value.proposedReduction !== 'number'
+  ) {
+    return undefined;
+  }
+  return value as AppRiverLicenseCleanupCandidate;
 }
 
 function cleanupPreviewPayload(value: unknown): {

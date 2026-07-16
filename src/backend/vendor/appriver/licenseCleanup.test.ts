@@ -90,6 +90,7 @@ class CleanupDatabase implements Queryable {
   batchIds: string[] = [];
   previews: Array<{ id: string; actor: string; rowId: string; occurredAt: string; payload: unknown }> = [];
   savedCandidates = new Map<string, unknown>();
+  subscriptionRefreshes = new Map<string, unknown>();
 
   constructor(snapshotRows: SnapshotRow[] = []) {
     this.snapshotRows = snapshotRows;
@@ -111,12 +112,32 @@ class CleanupDatabase implements Queryable {
     }
 
     if (sql.includes('from vendor_usage_snapshots')) {
-      return { rows: this.snapshotRows as T[] };
+      return {
+        rows: this.snapshotRows.map((row) => ({
+          ...row,
+          refresh_candidate: this.subscriptionRefreshes.get(
+            `${values?.[1]}:${row.external_account_id}:${String(row.dimensions.subscriptionKey ?? '')}`,
+          ),
+        })) as T[],
+      };
     }
 
     if (sql.includes('jsonb_array_elements') && sql.includes('discrepancy_audits')) {
       const cleanup = this.savedCandidates.get(String(values?.[0] ?? ''));
-      return { rows: cleanup ? ([{ cleanup }] as T[]) : ([] as T[]) };
+      return { rows: cleanup ? ([{ cleanup, sync_run_id: syncRunId }] as T[]) : ([] as T[]) };
+    }
+
+    if (sql.includes('insert into appriver_subscription_refreshes')) {
+      this.subscriptionRefreshes.set(
+        `${values?.[0]}:${values?.[2]}:${values?.[3]}`,
+        JSON.parse(String(values?.[10] ?? '{}')),
+      );
+      return { rows: [] as T[] };
+    }
+
+    if (sql.includes('delete from appriver_subscription_refreshes')) {
+      this.subscriptionRefreshes.delete(`${values?.[0]}:${values?.[1]}:${values?.[2]}`);
+      return { rows: [] as T[] };
     }
 
     if (sql.includes("insert into audit_events") && sql.includes("preview.refreshed")) {
@@ -486,6 +507,10 @@ async function testPreviewQueuesManualRemoval() {
   assert.equal(preview?.changed, true);
   assert.equal(preview?.candidate.totalLicenses, 9);
   assert.equal(preview?.candidate.proposedReduction, 2);
+  assert.equal(preview?.candidate.refresh?.initialTotalLicenses, 10);
+  assert.equal(database.subscriptionRefreshes.size, 1);
+  const refreshedReport = await listAppRiverLicenseCleanupCandidates(database, { now });
+  assert.equal(refreshedReport.rows.find((candidate) => candidate.id === rowId)?.totalLicenses, 9);
   await assert.rejects(
     queueAppRiverLicenseCleanupPreview(database, {
       actor: 'license@example.com',
@@ -534,6 +559,12 @@ async function testPreviewMarksLiveMatch() {
   assert.equal(preview?.status, 'matched');
   assert.equal(preview?.candidate.totalLicenses, 7);
   assert.equal(preview?.candidate.proposedReduction, 0);
+  const refreshedReport = await listAppRiverLicenseCleanupCandidates(database, { now });
+  const refreshedCandidate = refreshedReport.rows.find(
+    (candidate) => candidate.id === 'appriver-license-cleanup:cust-1:now-matched',
+  );
+  assert.equal(refreshedCandidate?.unassignedLicenses, 0);
+  assert.equal(refreshedCandidate?.refresh?.initialTotalLicenses, 10);
 }
 
 async function testScheduledCancellationIsNotQueued() {
