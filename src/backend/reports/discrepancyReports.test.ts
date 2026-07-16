@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  discrepancyComparisonDefinitions,
   getDiscrepancyReport,
   type Queryable,
 } from './discrepancyReports';
@@ -77,13 +78,26 @@ const database: Queryable = {
 };
 
 async function run() {
+  await assert.rejects(
+    () => getDiscrepancyReport(database, { includeMatched: true }),
+    /comparisonId/,
+  );
+
+  assert.deepEqual(
+    discrepancyComparisonDefinitions.map((definition) => definition.id),
+    ['ncentral-sentinelone-devices', 'appriver-license-cleanup'],
+  );
+
   const report = await getDiscrepancyReport(database, {
+    comparisonId: 'ncentral-sentinelone-devices',
     includeMatched: true,
     now: '2026-06-29T10:30:00.000Z',
   });
 
   const deviceRow = report.rows.find((row) => row.comparisonPair.id === 'ncentral-sentinelone-devices');
   assert.ok(deviceRow);
+  assert.equal(report.comparisonPairs.length, 1);
+  assert.equal(report.comparisonPairs[0]?.id, 'ncentral-sentinelone-devices');
   assert.equal(deviceRow.customer.customerId, customerA);
   assert.equal(deviceRow.leftCount, 2);
   assert.equal(deviceRow.rightCount, 2);
@@ -93,13 +107,11 @@ async function run() {
   assert.deepEqual(deviceRow.missingFromRight.map((item) => item.displayName), ['LAPTOP-02']);
   assert.equal(deviceRow.missingFromLeft[0]?.details.LastCheckIn, '2026-06-29T09:45:00Z');
   assert.equal(deviceRow.missingFromRight[0]?.details.LastCheckIn, '2026-06-29T09:30:00Z');
-
-  const proofpointRow = report.rows.find((row) => row.comparisonPair.id === 'proofpoint-microsoft365-users');
-  assert.ok(proofpointRow);
-  assert.equal(proofpointRow.status, 'unavailable');
-  assert.match(proofpointRow.unavailableReason ?? '', /Proofpoint/);
+  assert.equal(deviceRow.syncTimestamps.left, '2026-06-29T09:05:00.000Z');
+  assert.equal(deviceRow.syncTimestamps.right, '2026-06-29T09:05:00.000Z');
 
   const filtered = await getDiscrepancyReport(database, {
+    comparisonId: 'ncentral-sentinelone-devices',
     basis: 'device',
     includeMatched: false,
     now: '2026-06-29T10:30:00.000Z',

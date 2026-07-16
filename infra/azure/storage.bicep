@@ -10,6 +10,9 @@ param appRiverQueueName string = 'appriver-sync-work'
 @description('Queue used by long-running integration sync starters.')
 param integrationSyncQueueName string = 'integration-sync-work'
 
+@description('Queue used by AppRiver license cleanup verification work.')
+param appRiverLicenseCleanupQueueName string = 'appriver-license-cleanup-work'
+
 @description('Storage SKU for the queue workload.')
 @allowed([
   'Standard_LRS'
@@ -50,7 +53,13 @@ resource integrationSyncQueue 'Microsoft.Storage/storageAccounts/queueServices/q
   name: integrationSyncQueueName
 }
 
+resource appRiverLicenseCleanupQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
+  parent: queueService
+  name: appRiverLicenseCleanupQueueName
+}
+
 output storageAccountName string = storageAccount.name
 output queueName string = appRiverQueue.name
 output integrationSyncQueueName string = integrationSyncQueue.name
+output appRiverLicenseCleanupQueueName string = appRiverLicenseCleanupQueue.name
 output queueEndpoint string = storageAccount.properties.primaryEndpoints.queue

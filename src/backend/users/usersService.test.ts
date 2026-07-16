@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   createManagedAppUser,
   listManagedAppUsers,
+  managedAppUserRoles,
   updateManagedAppUser,
   type ManagedAppUser,
 } from './usersService';
@@ -46,6 +47,7 @@ async function run() {
   const listedUsers = await listManagedAppUsers(listDatabase);
   assert.equal(listedUsers[0]?.email, 'admin@example.com');
   assert.equal(listedUsers[0]?.role, 'Admin');
+  assert.deepEqual(managedAppUserRoles(), ['Admin', 'Approver', 'LicenseAdmin', 'Analyst']);
 
   await assert.rejects(
     () => createManagedAppUser(new MockDatabase(), { email: 'not-an-email', role: 'Analyst' }, 'admin@example.com'),

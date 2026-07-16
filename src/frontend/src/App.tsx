@@ -1,5 +1,6 @@
 import {
   Activity,
+  ArrowDown,
   ArrowRight,
   BadgeCheck,
   BarChart3,
@@ -132,7 +133,18 @@ import {
 
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'settings';
 type SettingsSection = 'user-management' | 'integrations' | 'email-communication' | 'audit-logs';
-type AppRole = 'Admin' | 'Approver' | 'Analyst';
+type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
+
+type AuthSessionResponse = {
+  status: string;
+  roles?: AppRole[];
+  user?: {
+    appUserId?: string;
+    email?: string;
+    name?: string;
+    providerId?: string;
+  };
+};
 type ManagedUserStatus = 'active' | 'disabled';
 type InvoiceWorkspaceTab = 'overdue' | 'monthly' | 'standard';
 type OverdueInvoiceSortKey = 'customerName' | 'pastDueStatus' | 'invoiceCount' | 'pastDueBalance' | 'agingBalance';
@@ -631,7 +643,6 @@ type CustomerLicenseReportResponse = {
 
 type DiscrepancyBasis = 'user' | 'device';
 type DiscrepancySeverity = 'matched' | 'warning' | 'critical' | 'unavailable';
-type DiscrepancyFilterValue = 'all' | DiscrepancySeverity;
 
 type DiscrepancyComparisonPair = {
   id: string;
@@ -641,9 +652,10 @@ type DiscrepancyComparisonPair = {
   leftVendorName: string;
   rightVendorId: string;
   rightVendorName: string;
-  matchingStrategy: 'normalized-hostname' | 'email-upn' | 'aggregate-count';
+  matchingStrategy: 'normalized-hostname' | 'email-upn' | 'aggregate-count' | 'license-cleanup';
   productFamily: string;
   aggregateOnly: boolean;
+  comparisonType: 'vendor-discrepancy' | 'license-cleanup';
 };
 
 type DiscrepancyItem = {
@@ -656,6 +668,120 @@ type DiscrepancyItem = {
   domain?: string;
   observedAt?: string;
   details: Record<string, string | number | boolean | null>;
+};
+
+type AppRiverLicenseCleanupDetails = {
+  id: string;
+  customerId?: string;
+  connectWiseCompanyId?: string;
+  customerName: string;
+  externalCustomerId: string;
+  vendorProductKey?: string;
+  productCode: string;
+  productName: string;
+  subscriptionKey: string;
+  domain?: string;
+  totalLicenses: number;
+  assignedLicenses?: number;
+  unassignedLicenses: number;
+  proposedReduction: number;
+  proposedQuantity: number;
+  eligibilityReason: 'Renewal' | 'RecentOrder' | 'Both';
+  renewalWindow?: 'Upcoming' | 'Recent';
+  daysFromRenewal?: number;
+  daysUntilCommitmentEnd?: number;
+  commitmentEndDate?: string;
+  previousCommitmentEndDate?: string;
+  effectiveDate?: string;
+  availableLicensesToReduce?: number;
+  subscriptionTerm?: string;
+  billingFrequency?: string;
+  expirationBehavior?: string;
+  skipReason?: 'ScheduledCancellation';
+  isTrial?: boolean;
+  notes?: string;
+  observedAt: string;
+  syncTimestamp?: string;
+  pendingAction?: {
+    id: string;
+    status: string;
+    requestedQuantity: number;
+    requestedReduction: number;
+    createdAt: string;
+  };
+  latestAction?: {
+    id: string;
+    status: string;
+    requestedQuantity: number;
+    requestedReduction: number;
+    finalQuantity?: number;
+    errorMessage?: string;
+    createdAt: string;
+    completedAt?: string;
+    updatedAt?: string;
+  };
+};
+
+type AppRiverLicenseCleanupActionSummary = {
+  id: string;
+  batchId: string;
+  batchStatus: string;
+  requestedBy: string;
+  customerId?: string;
+  customerName?: string;
+  externalCustomerId: string;
+  vendorProductKey?: string;
+  productCode?: string;
+  productName: string;
+  subscriptionKey: string;
+  domain?: string;
+  status: string;
+  currentTotalLicenses: number;
+  currentAssignedLicenses?: number;
+  currentUnassignedLicenses: number;
+  requestedReduction: number;
+  requestedQuantity: number;
+  liveTotalLicenses?: number;
+  liveAssignedLicenses?: number;
+  liveUnassignedLicenses?: number;
+  finalQuantity?: number;
+  eligibilityReason?: string;
+  renewalWindow?: string;
+  effectiveDate?: string;
+  commitmentEndDate?: string;
+  previousCommitmentEndDate?: string;
+  attempts: number;
+  verificationAttempts: number;
+  nextCheckAt: string;
+  acceptedAt?: string;
+  verifiedAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  expiresAt: string;
+  errorMessage?: string;
+  dismissedAt?: string;
+  dismissedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  canCancel: boolean;
+  canDismiss: boolean;
+};
+
+type AppRiverLicenseCleanupActionsResponse = {
+  reportType: 'appriver-license-cleanup-actions';
+  actions: AppRiverLicenseCleanupActionSummary[];
+};
+
+type CancelAppRiverLicenseCleanupActionResponse = {
+  cancelled: boolean;
+  reason?: string;
+  action?: AppRiverLicenseCleanupActionSummary;
+};
+
+type DismissAppRiverLicenseCleanupActionResponse = {
+  dismissed: boolean;
+  reason?: string;
+  action?: AppRiverLicenseCleanupActionSummary;
 };
 
 type DiscrepancyRow = {
@@ -679,15 +805,59 @@ type DiscrepancyRow = {
   missingFromLeft: DiscrepancyItem[];
   missingFromRight: DiscrepancyItem[];
   referenceItems: DiscrepancyItem[];
+  cleanup?: AppRiverLicenseCleanupDetails;
   syncTimestamps: {
     left?: string;
     right?: string;
   };
 };
 
+type DiscrepancySourceSide = {
+  side: 'left' | 'right' | 'source';
+  vendorId: string;
+  vendorName: string;
+  syncRunId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  metadataEntity?: string;
+};
+
+type DiscrepancySourceSnapshot = {
+  comparisonId: string;
+  sourceKey: string;
+  sources: DiscrepancySourceSide[];
+  latestCompletedAt?: string;
+  missingSourceCount: number;
+};
+
+type DiscrepancyAuditSummary = {
+  id: string;
+  comparisonId: string;
+  comparisonLabel: string;
+  sourceKey: string;
+  sourceSnapshot: DiscrepancySourceSnapshot;
+  generatedAt: string;
+  createdAt: string;
+  createdBy: string | null;
+  rowCount: number;
+  openDiscrepancyCount: number;
+};
+
+type DiscrepancyAuditState = {
+  comparisonId: string;
+  currentSourceKey: string;
+  currentSourceSnapshot: DiscrepancySourceSnapshot;
+  latestAudit?: DiscrepancyAuditSummary;
+  hasNewerSnapshot: boolean;
+  canRun: boolean;
+};
+
 type DiscrepancyReportResponse = {
   reportType: 'discrepancies';
   generatedAt: string;
+  audit?: DiscrepancyAuditSummary;
+  auditState?: DiscrepancyAuditState;
+  auditMode?: 'saved' | 'new';
   filters: {
     customerId?: string;
     basis?: DiscrepancyBasis;
@@ -714,6 +884,12 @@ type DiscrepancyReportResponse = {
     customerName: string;
   }>;
   rows: DiscrepancyRow[];
+};
+
+type DiscrepancyComparisonsResponse = {
+  comparisonPairs: DiscrepancyComparisonPair[];
+  auditStates?: DiscrepancyAuditState[];
+  auditStateError?: string;
 };
 
 type ReconciliationLineStatus = 'matched' | 'needs-review' | 'not-billable' | 'unmapped';
@@ -3769,12 +3945,15 @@ async function saveProductProfitabilityReportSnapshot(payload: {
 }
 
 async function fetchDiscrepancyReport(options: {
+  comparisonId: string;
   basis?: DiscrepancyBasis;
   severity?: DiscrepancySeverity;
   customerId?: string;
   includeMatched?: boolean;
-} = {}) {
-  const params = new URLSearchParams();
+}) {
+  const params = new URLSearchParams({
+    comparisonId: options.comparisonId,
+  });
   if (options.basis) {
     params.set('basis', options.basis);
   }
@@ -3797,6 +3976,140 @@ async function fetchDiscrepancyReport(options: {
   }
 
   return body as unknown as DiscrepancyReportResponse;
+}
+
+async function fetchLatestDiscrepancyAudit(options: {
+  comparisonId: string;
+  basis?: DiscrepancyBasis;
+  severity?: DiscrepancySeverity;
+  customerId?: string;
+  includeMatched?: boolean;
+}) {
+  const params = discrepancyQueryParams(options);
+  const query = params.toString();
+  const response = await fetch(`/api/reports/discrepancies/audits/latest${query ? `?${query}` : ''}`);
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Saved discrepancy audit load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as DiscrepancyReportResponse;
+}
+
+async function runDiscrepancyAudit(options: {
+  comparisonId: string;
+  basis?: DiscrepancyBasis;
+  severity?: DiscrepancySeverity;
+  customerId?: string;
+  includeMatched?: boolean;
+}) {
+  const response = await fetch('/api/reports/discrepancies/audits', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Discrepancy audit run failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as DiscrepancyReportResponse;
+}
+
+function discrepancyQueryParams(options: {
+  comparisonId: string;
+  basis?: DiscrepancyBasis;
+  severity?: DiscrepancySeverity;
+  customerId?: string;
+  includeMatched?: boolean;
+}) {
+  const params = new URLSearchParams({
+    comparisonId: options.comparisonId,
+  });
+  if (options.basis) {
+    params.set('basis', options.basis);
+  }
+  if (options.severity) {
+    params.set('severity', options.severity);
+  }
+  if (options.customerId) {
+    params.set('customerId', options.customerId);
+  }
+  if (options.includeMatched) {
+    params.set('includeMatched', 'true');
+  }
+  return params;
+}
+
+async function fetchDiscrepancyComparisons() {
+  const response = await fetch('/api/reports/discrepancies/comparisons');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Discrepancy comparison load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as DiscrepancyComparisonsResponse;
+}
+
+async function queueAppRiverLicenseCleanupActions(rowIds: string[], requestedQuantities?: Record<string, number>) {
+  const response = await fetch('/api/reports/discrepancies/appriver-license-cleanup/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rowIds, requestedQuantities }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `AppRiver cleanup queue failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as {
+    batchId: string;
+    queued: number;
+    skipped: number;
+    missing: number;
+    duplicates: number;
+  };
+}
+
+async function fetchAppRiverLicenseCleanupActions() {
+  const response = await fetch('/api/reports/discrepancies/appriver-license-cleanup/actions?limit=250');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `AppRiver cleanup action load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as AppRiverLicenseCleanupActionsResponse;
+}
+
+async function cancelAppRiverLicenseCleanupAction(actionId: string) {
+  const response = await fetch(`/api/reports/discrepancies/appriver-license-cleanup/actions/${encodeURIComponent(actionId)}/cancel`, {
+    method: 'POST',
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.reason ?? body.error ?? `AppRiver cleanup action cancel failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as CancelAppRiverLicenseCleanupActionResponse;
+}
+
+async function dismissAppRiverLicenseCleanupAction(actionId: string) {
+  const response = await fetch(`/api/reports/discrepancies/appriver-license-cleanup/actions/${encodeURIComponent(actionId)}/dismiss`, {
+    method: 'POST',
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.reason ?? body.error ?? `AppRiver cleanup action dismiss failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as DismissAppRiverLicenseCleanupActionResponse;
 }
 
 async function fetchCustomerLicenseCustomers() {
@@ -4779,6 +5092,19 @@ async function responseJson(response: Response) {
   return (await response.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
+async function fetchCurrentAuthSession() {
+  const response = await fetch('/api/auth/session', {
+    headers: { Accept: 'application/json' },
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Auth session load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as AuthSessionResponse;
+}
+
 const invoiceWorkspaceCacheStorageKey = 'msp-harmony:invoice-workspace:v1';
 const invoiceWorkspaceCacheVersion = 1;
 const allInvoiceImportsCacheKey = 'all';
@@ -5510,15 +5836,27 @@ function App() {
   const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
     'Click Generate to load net profit by mapped vendor.',
   );
+  const [currentUserRoles, setCurrentUserRoles] = useState<AppRole[]>([]);
+  const [discrepancyComparisonPairs, setDiscrepancyComparisonPairs] = useState<DiscrepancyComparisonPair[]>([]);
+  const [discrepancyAuditStates, setDiscrepancyAuditStates] = useState<DiscrepancyAuditState[]>([]);
+  const [discrepancyComparisonLoadState, setDiscrepancyComparisonLoadState] =
+    useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [discrepancyReport, setDiscrepancyReport] = useState<DiscrepancyReportResponse | null>(null);
   const [discrepancyLoadState, setDiscrepancyLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
-  const [discrepancyMessage, setDiscrepancyMessage] = useState('Load vendor-to-vendor discrepancy checks.');
-  const [selectedDiscrepancyBasis, setSelectedDiscrepancyBasis] = useState<'all' | DiscrepancyBasis>('all');
-  const [selectedDiscrepancySeverity, setSelectedDiscrepancySeverity] = useState<DiscrepancyFilterValue>('all');
-  const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState('all');
-  const [selectedDiscrepancyCustomerId, setSelectedDiscrepancyCustomerId] = useState('all');
+  const [discrepancyMessage, setDiscrepancyMessage] = useState('Select a comparison, then run it.');
+  const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState('');
   const [includeMatchedDiscrepancies, setIncludeMatchedDiscrepancies] = useState(false);
   const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<DiscrepancyRow | null>(null);
+  const [showAppRiverCleanupActionsModal, setShowAppRiverCleanupActionsModal] = useState(false);
+  const [appRiverCleanupActions, setAppRiverCleanupActions] = useState<AppRiverLicenseCleanupActionSummary[]>([]);
+  const [appRiverCleanupActionsLoadState, setAppRiverCleanupActionsLoadState] =
+    useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [appRiverCleanupActionsMessage, setAppRiverCleanupActionsMessage] = useState('');
+  const [cancellingAppRiverCleanupActionId, setCancellingAppRiverCleanupActionId] = useState<string | null>(null);
+  const [dismissingAppRiverCleanupActionId, setDismissingAppRiverCleanupActionId] = useState<string | null>(null);
+  const [appRiverCleanupQueueState, setAppRiverCleanupQueueState] =
+    useState<'idle' | 'queueing' | 'queued' | 'failed'>('idle');
+  const [appRiverCleanupQueueMessage, setAppRiverCleanupQueueMessage] = useState('');
   const [customerLicenseCustomers, setCustomerLicenseCustomers] = useState<CustomerLicenseCustomerOption[]>([]);
   const [selectedCustomerLicenseCustomerId, setSelectedCustomerLicenseCustomerId] = useState('');
   const [selectedCustomerLicenseVendorId, setSelectedCustomerLicenseVendorId] = useState<CustomerLicenseReportVendorId>('all');
@@ -6015,30 +6353,245 @@ function App() {
     }
   };
 
-  const loadDiscrepancyReport = async () => {
-    setDiscrepancyLoadState('loading');
-    setDiscrepancyMessage('Comparing vendor data...');
+  const resetDiscrepancyRun = (message = 'Click Run to apply the current filters.') => {
+    setDiscrepancyReport(null);
+    setDiscrepancyLoadState('idle');
+    setDiscrepancyMessage(message);
+    setSelectedDiscrepancyRow(null);
+    setAppRiverCleanupQueueState('idle');
+    setAppRiverCleanupQueueMessage('');
+  };
+
+  const updateDiscrepancyAuditState = (auditState?: DiscrepancyAuditState) => {
+    if (!auditState) {
+      return;
+    }
+
+    setDiscrepancyAuditStates((current) => {
+      const others = current.filter((state) => state.comparisonId !== auditState.comparisonId);
+      return [...others, auditState];
+    });
+  };
+
+  const loadDiscrepancyComparisons = async () => {
+    setDiscrepancyComparisonLoadState('loading');
 
     try {
-      const report = await fetchDiscrepancyReport({
-        basis: selectedDiscrepancyBasis === 'all' ? undefined : selectedDiscrepancyBasis,
-        severity: selectedDiscrepancySeverity === 'all' ? undefined : selectedDiscrepancySeverity,
-        customerId: selectedDiscrepancyCustomerId === 'all' ? undefined : selectedDiscrepancyCustomerId,
+      const response = await fetchDiscrepancyComparisons();
+      setDiscrepancyComparisonPairs(response.comparisonPairs);
+      setDiscrepancyAuditStates(response.auditStates ?? []);
+      setDiscrepancyComparisonLoadState('ready');
+      const auditStates = response.auditStates ?? [];
+      const latestAuditState = auditStates
+        .filter((state) => state.latestAudit)
+        .sort(
+          (left, right) =>
+            Date.parse(right.latestAudit?.createdAt ?? '') - Date.parse(left.latestAudit?.createdAt ?? ''),
+        )[0];
+      const nextPairId = selectedDiscrepancyPairId || latestAuditState?.comparisonId || response.comparisonPairs[0]?.id || '';
+      if (nextPairId && !selectedDiscrepancyPairId) {
+        setSelectedDiscrepancyPairId(nextPairId);
+      }
+
+      const nextAuditState = auditStates.find((state) => state.comparisonId === nextPairId);
+      if (nextAuditState?.latestAudit) {
+        await loadLatestDiscrepancyAudit(nextPairId, { auditStates });
+      } else {
+        resetDiscrepancyRun(
+          nextPairId
+            ? 'No saved audit for this snapshot yet. Run the audit to save the comparison.'
+            : 'Select an audit comparison.',
+        );
+      }
+      return response;
+    } catch (error) {
+      setDiscrepancyComparisonPairs([]);
+      setDiscrepancyAuditStates([]);
+      setDiscrepancyComparisonLoadState('failed');
+      setDiscrepancyLoadState('failed');
+      setDiscrepancyMessage(error instanceof Error ? error.message : 'Unable to load discrepancy comparisons.');
+      return null;
+    }
+  };
+
+  const loadLatestDiscrepancyAudit = async (
+    pairId = selectedDiscrepancyPairId,
+    options: { auditStates?: DiscrepancyAuditState[]; includeMatched?: boolean; preserveCleanupMessage?: boolean } = {},
+  ) => {
+    if (!pairId) {
+      setDiscrepancyLoadState('idle');
+      setDiscrepancyMessage('Select an audit comparison.');
+      return null;
+    }
+
+    setDiscrepancyLoadState('loading');
+    setDiscrepancyMessage('Loading saved audit...');
+    if (!options.preserveCleanupMessage) {
+      setAppRiverCleanupQueueState('idle');
+      setAppRiverCleanupQueueMessage('');
+    }
+
+    try {
+      const report = await fetchLatestDiscrepancyAudit({
+        comparisonId: pairId,
+        includeMatched: options.includeMatched ?? includeMatchedDiscrepancies,
+      });
+      setDiscrepancyReport(report);
+      updateDiscrepancyAuditState(report.auditState);
+      setDiscrepancyLoadState('ready');
+      const newerSnapshot = report.auditState?.hasNewerSnapshot ? ' New snapshot available.' : '';
+      setDiscrepancyMessage(
+        report.rows.length > 0
+          ? `Loaded saved audit with ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.${newerSnapshot}`
+          : `Saved audit has no rows for the current filters.${newerSnapshot}`,
+      );
+      return report;
+    } catch (error) {
+      setDiscrepancyReport(null);
+      const auditState = options.auditStates?.find((state) => state.comparisonId === pairId);
+      setDiscrepancyLoadState(auditState?.canRun ? 'idle' : 'failed');
+      setDiscrepancyMessage(
+        auditState?.canRun
+          ? 'No saved audit is available yet. Run the audit to save this comparison.'
+          : error instanceof Error
+            ? error.message
+            : 'Unable to load saved discrepancy audit.',
+      );
+      return null;
+    }
+  };
+
+  const loadDiscrepancyReport = async (options: { preserveCleanupMessage?: boolean } = {}) => {
+    if (!selectedDiscrepancyPairId) {
+      setDiscrepancyLoadState('idle');
+      setDiscrepancyMessage('Select an audit comparison before running.');
+      return null;
+    }
+
+    setDiscrepancyLoadState('loading');
+    setDiscrepancyMessage('Running and saving audit...');
+    if (!options.preserveCleanupMessage) {
+      setAppRiverCleanupQueueState('idle');
+      setAppRiverCleanupQueueMessage('');
+    }
+
+    try {
+      const report = await runDiscrepancyAudit({
+        comparisonId: selectedDiscrepancyPairId,
         includeMatched: includeMatchedDiscrepancies,
       });
       setDiscrepancyReport(report);
+      updateDiscrepancyAuditState(report.auditState);
       setDiscrepancyLoadState('ready');
       setDiscrepancyMessage(
         report.rows.length > 0
-          ? `Loaded ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
-          : 'No discrepancy rows match the current filters.',
+          ? `Saved audit with ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
+          : 'Saved audit. No discrepancy rows match the current filters.',
       );
       return report;
     } catch (error) {
       setDiscrepancyReport(null);
       setDiscrepancyLoadState('failed');
-      setDiscrepancyMessage(error instanceof Error ? error.message : 'Unable to load discrepancy dashboard.');
+      setDiscrepancyMessage(error instanceof Error ? error.message : 'Unable to run discrepancy audit.');
       return null;
+    }
+  };
+
+  const queueAppRiverCleanupRows = async (rowIds: string[], requestedQuantities?: Record<string, number>) => {
+    if (rowIds.length === 0) {
+      setAppRiverCleanupQueueMessage('Choose an eligible AppRiver row.');
+      return null;
+    }
+
+    setAppRiverCleanupQueueState('queueing');
+    setAppRiverCleanupQueueMessage('Queueing AppRiver license cleanup actions...');
+
+    try {
+      const result = await queueAppRiverLicenseCleanupActions(rowIds, requestedQuantities);
+      const nextQueueMessage =
+        result.queued > 0
+          ? `Queued ${result.queued.toLocaleString()} actions. ${result.skipped.toLocaleString()} skipped.`
+          : `No actions queued. ${result.skipped.toLocaleString()} skipped.`;
+      setAppRiverCleanupQueueState('queued');
+      setAppRiverCleanupQueueMessage(nextQueueMessage);
+      await loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+      setAppRiverCleanupQueueState('queued');
+      setAppRiverCleanupQueueMessage(nextQueueMessage);
+      return result;
+    } catch (error) {
+      setAppRiverCleanupQueueState('failed');
+      setAppRiverCleanupQueueMessage(error instanceof Error ? error.message : 'Unable to queue AppRiver cleanup actions.');
+      return null;
+    }
+  };
+
+  const loadAppRiverCleanupActions = async () => {
+    setAppRiverCleanupActionsLoadState('loading');
+    setAppRiverCleanupActionsMessage('Loading AppRiver cleanup actions...');
+
+    try {
+      const response = await fetchAppRiverLicenseCleanupActions();
+      setAppRiverCleanupActions(response.actions);
+      setAppRiverCleanupActionsLoadState('ready');
+      setAppRiverCleanupActionsMessage(
+        response.actions.length > 0
+          ? `Loaded ${response.actions.length.toLocaleString()} cleanup actions.`
+          : 'No AppRiver cleanup actions have been queued yet.',
+      );
+      return response.actions;
+    } catch (error) {
+      setAppRiverCleanupActions([]);
+      setAppRiverCleanupActionsLoadState('failed');
+      setAppRiverCleanupActionsMessage(error instanceof Error ? error.message : 'Unable to load AppRiver cleanup actions.');
+      return null;
+    }
+  };
+
+  const openAppRiverCleanupActionsModal = () => {
+    setShowAppRiverCleanupActionsModal(true);
+    void loadAppRiverCleanupActions();
+  };
+
+  const cancelAppRiverCleanupActionFromModal = async (actionId: string) => {
+    setCancellingAppRiverCleanupActionId(actionId);
+    setAppRiverCleanupActionsMessage('Canceling queued AppRiver cleanup action...');
+
+    try {
+      const result = await cancelAppRiverLicenseCleanupAction(actionId);
+      setAppRiverCleanupActionsMessage(
+        result.cancelled ? 'Queued AppRiver cleanup action canceled.' : result.reason ?? 'Action could not be canceled.',
+      );
+      await loadAppRiverCleanupActions();
+      if (selectedDiscrepancyPairId === 'appriver-license-cleanup') {
+        await loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+      }
+      return result;
+    } catch (error) {
+      setAppRiverCleanupActionsLoadState('failed');
+      setAppRiverCleanupActionsMessage(error instanceof Error ? error.message : 'Unable to cancel AppRiver cleanup action.');
+      return null;
+    } finally {
+      setCancellingAppRiverCleanupActionId(null);
+    }
+  };
+
+  const dismissAppRiverCleanupActionFromModal = async (actionId: string) => {
+    setDismissingAppRiverCleanupActionId(actionId);
+    setAppRiverCleanupActionsMessage('Dismissing canceled AppRiver cleanup action...');
+
+    try {
+      const result = await dismissAppRiverLicenseCleanupAction(actionId);
+      setAppRiverCleanupActionsMessage(
+        result.dismissed ? 'Canceled AppRiver cleanup action dismissed.' : result.reason ?? 'Action could not be dismissed.',
+      );
+      await loadAppRiverCleanupActions();
+      return result;
+    } catch (error) {
+      setAppRiverCleanupActionsLoadState('failed');
+      setAppRiverCleanupActionsMessage(error instanceof Error ? error.message : 'Unable to dismiss AppRiver cleanup action.');
+      return null;
+    } finally {
+      setDismissingAppRiverCleanupActionId(null);
     }
   };
 
@@ -6959,12 +7512,26 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    const loadSession = async () => {
+      try {
+        const session = await fetchCurrentAuthSession();
+        if (!cancelled) {
+          setCurrentUserRoles(session.roles ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setCurrentUserRoles([]);
+        }
+      }
+    };
+
     refreshRuntimeIntegrations().then(() => {
       if (cancelled) {
         return;
       }
     });
     void loadCrossVendorBundles();
+    void loadSession();
 
     return () => {
       cancelled = true;
@@ -7033,14 +7600,29 @@ function App() {
       return;
     }
 
-    void loadDiscrepancyReport();
-  }, [
-    includeMatchedDiscrepancies,
-    selectedDiscrepancyBasis,
-    selectedDiscrepancyCustomerId,
-    selectedDiscrepancySeverity,
-    view,
-  ]);
+    if (discrepancyComparisonLoadState === 'idle') {
+      void loadDiscrepancyComparisons();
+    }
+  }, [discrepancyComparisonLoadState, view]);
+
+  useEffect(() => {
+    if (view !== 'discrepancies' || selectedDiscrepancyPairId !== 'appriver-license-cleanup') {
+      return;
+    }
+
+    const hasActiveCleanupAction = discrepancyReport?.rows.some((row) => row.cleanup?.pendingAction) ?? false;
+    if (!hasActiveCleanupAction) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+    }, 60_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [discrepancyReport, selectedDiscrepancyPairId, view]);
 
   useEffect(() => {
     if (view !== 'reports' || reportSection !== 'customer-license' || customerLicenseCustomers.length > 0) {
@@ -8503,6 +9085,12 @@ function App() {
     }
   };
 
+  const selectedDiscrepancyComparison = discrepancyComparisonPairs.find((pair) => pair.id === selectedDiscrepancyPairId);
+  const selectedDiscrepancyAuditState = discrepancyAuditStates.find(
+    (state) => state.comparisonId === selectedDiscrepancyPairId,
+  );
+  const canQueueAppRiverLicenseCleanup = currentUserRoles.some((role) => role === 'Admin' || role === 'LicenseAdmin');
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Main navigation">
@@ -8695,21 +9283,66 @@ function App() {
           )}
           {view === 'discrepancies' && (
             <DiscrepancyDashboardView
-              basisFilter={selectedDiscrepancyBasis}
-              customerFilter={selectedDiscrepancyCustomerId}
+              canQueueCleanupActions={canQueueAppRiverLicenseCleanup}
+              cleanupQueueMessage={appRiverCleanupQueueMessage}
+              cleanupQueueState={appRiverCleanupQueueState}
+              comparisonLoadState={discrepancyComparisonLoadState}
+              comparisonPairs={discrepancyComparisonPairs}
               includeMatched={includeMatchedDiscrepancies}
               loadMessage={discrepancyMessage}
               loadState={discrepancyLoadState}
-              onBasisFilterChange={setSelectedDiscrepancyBasis}
-              onCustomerFilterChange={setSelectedDiscrepancyCustomerId}
-              onIncludeMatchedChange={setIncludeMatchedDiscrepancies}
-              onPairFilterChange={setSelectedDiscrepancyPairId}
-              onRefresh={loadDiscrepancyReport}
+              onCleanupAction={(rowId) => queueAppRiverCleanupRows([rowId])}
+              onCleanupActionsOpen={openAppRiverCleanupActionsModal}
+              onCleanupManualOverride={(row) => {
+                const cleanup = row.cleanup;
+                if (!cleanup) {
+                  return Promise.resolve(null);
+                }
+                const entered = window.prompt(
+                  `Set ${cleanup.productName} to what license count?`,
+                  String(cleanup.proposedQuantity),
+                );
+                if (!entered) {
+                  return Promise.resolve(null);
+                }
+                const requestedQuantity = Number(entered);
+                if (!Number.isFinite(requestedQuantity)) {
+                  setAppRiverCleanupQueueState('failed');
+                  setAppRiverCleanupQueueMessage('Manual count must be a number.');
+                  return Promise.resolve(null);
+                }
+                return queueAppRiverCleanupRows([row.id], { [row.id]: Math.trunc(requestedQuantity) });
+              }}
+              onIncludeMatchedChange={(value) => {
+                setIncludeMatchedDiscrepancies(value);
+                if (selectedDiscrepancyPairId && discrepancyReport?.audit) {
+                  void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
+                    includeMatched: value,
+                    preserveCleanupMessage: true,
+                  });
+                } else {
+                  resetDiscrepancyRun();
+                }
+              }}
+              onPairFilterChange={(pairId) => {
+                setSelectedDiscrepancyPairId(pairId);
+                const auditState = discrepancyAuditStates.find((state) => state.comparisonId === pairId);
+                if (auditState?.latestAudit) {
+                  void loadLatestDiscrepancyAudit(pairId, { auditStates: discrepancyAuditStates });
+                } else {
+                  resetDiscrepancyRun(
+                    pairId
+                      ? 'No saved audit for this snapshot yet. Run the audit to save the comparison.'
+                      : 'Select an audit comparison.',
+                  );
+                }
+              }}
+              onRun={loadDiscrepancyReport}
               onRowSelect={setSelectedDiscrepancyRow}
-              onSeverityFilterChange={setSelectedDiscrepancySeverity}
               pairFilter={selectedDiscrepancyPairId}
               report={discrepancyReport}
-              severityFilter={selectedDiscrepancySeverity}
+              selectedAuditState={selectedDiscrepancyAuditState}
+              selectedComparison={selectedDiscrepancyComparison}
             />
           )}
           {view === 'integrations' && (
@@ -9123,6 +9756,20 @@ function App() {
           row={selectedDiscrepancyRow}
         />
       ) : null}
+      {showAppRiverCleanupActionsModal ? (
+        <AppRiverCleanupActionsModal
+          actions={appRiverCleanupActions}
+          canCancelActions={canQueueAppRiverLicenseCleanup}
+          cancellingActionId={cancellingAppRiverCleanupActionId}
+          dismissingActionId={dismissingAppRiverCleanupActionId}
+          loadState={appRiverCleanupActionsLoadState}
+          message={appRiverCleanupActionsMessage}
+          onCancelAction={(actionId) => void cancelAppRiverCleanupActionFromModal(actionId)}
+          onDismissAction={(actionId) => void dismissAppRiverCleanupActionFromModal(actionId)}
+          onClose={() => setShowAppRiverCleanupActionsModal(false)}
+          onRefresh={() => void loadAppRiverCleanupActions()}
+        />
+      ) : null}
     </div>
   );
 }
@@ -9158,125 +9805,149 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
 }
 
 function DiscrepancyDashboardView(props: {
-  basisFilter: 'all' | DiscrepancyBasis;
-  customerFilter: string;
+  canQueueCleanupActions: boolean;
+  cleanupQueueMessage: string;
+  cleanupQueueState: 'idle' | 'queueing' | 'queued' | 'failed';
+  comparisonLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  comparisonPairs: DiscrepancyComparisonPair[];
   includeMatched: boolean;
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
-  onBasisFilterChange: (basis: 'all' | DiscrepancyBasis) => void;
-  onCustomerFilterChange: (customerId: string) => void;
+  onCleanupAction: (rowId: string) => Promise<unknown>;
+  onCleanupActionsOpen: () => void;
+  onCleanupManualOverride: (row: DiscrepancyRow) => Promise<unknown>;
   onIncludeMatchedChange: (value: boolean) => void;
   onPairFilterChange: (pairId: string) => void;
-  onRefresh: () => Promise<DiscrepancyReportResponse | null>;
+  onRun: () => Promise<DiscrepancyReportResponse | null>;
   onRowSelect: (row: DiscrepancyRow) => void;
-  onSeverityFilterChange: (severity: DiscrepancyFilterValue) => void;
   pairFilter: string;
   report: DiscrepancyReportResponse | null;
-  severityFilter: DiscrepancyFilterValue;
+  selectedAuditState?: DiscrepancyAuditState;
+  selectedComparison?: DiscrepancyComparisonPair;
 }) {
   const {
-    basisFilter,
-    customerFilter,
+    canQueueCleanupActions,
+    cleanupQueueMessage,
+    cleanupQueueState,
+    comparisonLoadState,
+    comparisonPairs,
     includeMatched,
     loadMessage,
     loadState,
-    onBasisFilterChange,
-    onCustomerFilterChange,
+    onCleanupAction,
+    onCleanupActionsOpen,
+    onCleanupManualOverride,
     onIncludeMatchedChange,
     onPairFilterChange,
-    onRefresh,
+    onRun,
     onRowSelect,
-    onSeverityFilterChange,
     pairFilter,
     report,
-    severityFilter,
+    selectedAuditState,
+    selectedComparison,
   } = props;
-  const rows = useMemo(
-    () =>
-      (report?.rows ?? []).filter((row) =>
-        pairFilter === 'all' ? true : row.comparisonPair.id === pairFilter,
-      ),
-    [pairFilter, report],
-  );
+  const rows = report?.rows ?? [];
   const groupedRows = useMemo(() => groupDiscrepancyRowsByCustomer(rows), [rows]);
-  const pairOptions = report?.comparisonPairs ?? [];
-  const customers = report?.customers ?? [];
-  const generatedAt = formatDateTime(report?.generatedAt);
+  const pairOptions = comparisonPairs;
+  const reportComparison = selectedComparison ?? report?.comparisonPairs[0];
+  const isLicenseCleanup = reportComparison?.comparisonType === 'license-cleanup';
+  const auditState = report?.auditState ?? selectedAuditState;
+  const latestAudit = report?.audit ?? auditState?.latestAudit;
+  const showRunButton = Boolean(pairFilter && (!latestAudit || auditState?.hasNewerSnapshot));
+  const auditGeneratedLabel = latestAudit ? formatDateTime(latestAudit.generatedAt) : undefined;
+  const actionableCleanupRows = useMemo(() => rows.filter(isAppRiverCleanupActionable), [rows]);
+  const cleanupSummary = useMemo(
+    () =>
+      rows.reduce(
+        (summary, row) => {
+          const cleanup = row.cleanup;
+          if (!cleanup) return summary;
+          const resultLabel = cleanupActionResultLabel(cleanup);
+          const actionable = isAppRiverCleanupActionable(row);
+          return {
+            proposedReduction: summary.proposedReduction + cleanup.proposedReduction,
+            unassignedLicenses: summary.unassignedLicenses + cleanup.unassignedLicenses,
+            skippedCancellations: summary.skippedCancellations + (cleanup.skipReason === 'ScheduledCancellation' ? 1 : 0),
+            eligibleDecreases: summary.eligibleDecreases + (actionable ? 1 : 0),
+            pendingActions: summary.pendingActions + (cleanup.pendingAction ? 1 : 0),
+            completeActions: summary.completeActions + (resultLabel === 'Update Complete' ? 1 : 0),
+            failedActions: summary.failedActions + (resultLabel === 'Update Failed' ? 1 : 0),
+          };
+        },
+        {
+          proposedReduction: 0,
+          unassignedLicenses: 0,
+          skippedCancellations: 0,
+          eligibleDecreases: 0,
+          pendingActions: 0,
+          completeActions: 0,
+          failedActions: 0,
+        },
+      ),
+    [rows],
+  );
+  const cleanupSnapshotDate = rows.map((row) => row.cleanup?.syncTimestamp).find(Boolean);
 
   return (
     <section className="discrepancy-page" aria-label="Discrepancy dashboard">
       <div className="integrations-live-bar report-reminder">
         <div>
           <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
-          <strong>{loadState === 'failed' ? 'Dashboard issue' : loadState === 'loading' ? 'Comparing sources' : 'Vendor discrepancies'}</strong>
+          <strong>{loadState === 'failed' ? 'Dashboard issue' : loadState === 'loading' ? 'Comparing sources' : 'Discrepancy run control'}</strong>
           <span>{loadMessage}</span>
         </div>
-        <div className="integrations-live-meta">
-          <span>{generatedAt ? `Generated ${generatedAt}` : 'Latest complete syncs'}</span>
-          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
-            <RefreshCcw size={16} />
-            Refresh
-          </button>
+        <div className="integrations-live-meta discrepancy-top-controls">
+          <label className="config-field report-select">
+            <select aria-label="Audit comparison" onChange={(event) => onPairFilterChange(event.target.value)} value={pairFilter}>
+              <option value="">Select audit</option>
+              {pairOptions.map((pair) => (
+                <option key={pair.id} value={pair.id}>
+                  {pair.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {auditState?.hasNewerSnapshot ? <span className="discrepancy-audit-chip changed">New snapshot available</span> : null}
+          {latestAudit && !auditState?.hasNewerSnapshot ? (
+            <span className="discrepancy-audit-chip">Saved {auditGeneratedLabel ?? 'audit'}</span>
+          ) : null}
+          {showRunButton ? (
+            <button
+              className="button primary compact"
+              disabled={loadState === 'loading' || comparisonLoadState === 'loading' || !pairFilter}
+              onClick={() => void onRun()}
+              type="button"
+            >
+              <Zap size={16} />
+              Run
+            </button>
+          ) : null}
         </div>
       </div>
 
       <section className="metric-grid discrepancy-metrics" aria-label="Discrepancy summary">
-        <MetricCard icon={Link2} label="Open discrepancies" tone="warn" value={formatCount(report?.summary.openDiscrepancyCount ?? 0)} />
-        <MetricCard icon={Database} label="Device gaps" tone="ready" value={formatCount(report?.summary.deviceGapCount ?? 0)} />
-        <MetricCard icon={Users} label="User gaps" tone="money" value={formatCount(report?.summary.userGapCount ?? 0)} />
-        <MetricCard icon={Activity} label="Unavailable / stale" tone="approved" value={`${formatCount(report?.summary.unavailableCount ?? 0)} / ${formatCount(report?.summary.staleSourceCount ?? 0)}`} />
-      </section>
-
-      <section className="toolbar reports-toolbar discrepancy-toolbar" aria-label="Discrepancy filters">
-        <label className="config-field report-select">
-          <span>Customer</span>
-          <select onChange={(event) => onCustomerFilterChange(event.target.value)} value={customerFilter}>
-            <option value="all">All customers</option>
-            {customers.map((customer) => (
-              <option key={customer.customerId} value={customer.customerId}>
-                {customer.customerName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="config-field report-select">
-          <span>Comparison</span>
-          <select onChange={(event) => onPairFilterChange(event.target.value)} value={pairFilter}>
-            <option value="all">All comparisons</option>
-            {pairOptions.map((pair) => (
-              <option key={pair.id} value={pair.id}>
-                {pair.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="config-field compact-filter">
-          <span>Basis</span>
-          <select onChange={(event) => onBasisFilterChange(event.target.value as 'all' | DiscrepancyBasis)} value={basisFilter}>
-            <option value="all">All</option>
-            <option value="device">Devices</option>
-            <option value="user">Users</option>
-          </select>
-        </label>
-        <label className="config-field compact-filter">
-          <span>Severity</span>
-          <select onChange={(event) => onSeverityFilterChange(event.target.value as DiscrepancyFilterValue)} value={severityFilter}>
-            <option value="all">Open + unavailable</option>
-            <option value="critical">Critical</option>
-            <option value="warning">Warning</option>
-            <option value="unavailable">Unavailable</option>
-            <option value="matched">Matched</option>
-          </select>
-        </label>
-        <label className="switch-control customer-license-toggle">
-          <input
-            checked={includeMatched}
-            disabled={loadState === 'loading'}
-            onChange={(event) => onIncludeMatchedChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Show matched</span>
-        </label>
+        {isLicenseCleanup ? (
+          <>
+            <MetricCard icon={X} label="Skipped Cancellations" tone="warn" value={formatCount(cleanupSummary.skippedCancellations)} />
+            <MetricCard icon={ArrowDown} label="Eligible Decreases" tone="ready" value={formatCount(cleanupSummary.eligibleDecreases)} />
+            <MetricCard icon={Database} label="Snapshot Date" tone="money" value={formatDateOnly(cleanupSnapshotDate) ?? 'No snapshot'} />
+            <MetricCard
+              icon={Activity}
+              label="Actions Taken"
+              onClick={onCleanupActionsOpen}
+              title="View queued, completed, failed, and canceled AppRiver cleanup actions"
+              tone="approved"
+              value={`Q ${formatCount(cleanupSummary.pendingActions)} / C ${formatCount(cleanupSummary.completeActions)} / F ${formatCount(cleanupSummary.failedActions)}`}
+            />
+          </>
+        ) : (
+          <>
+            <MetricCard icon={Link2} label="Open discrepancies" tone="warn" value={formatCount(report?.summary.openDiscrepancyCount ?? 0)} />
+            <MetricCard icon={Database} label="Device gaps" tone="ready" value={formatCount(report?.summary.deviceGapCount ?? 0)} />
+            <MetricCard icon={Users} label="User gaps" tone="money" value={formatCount(report?.summary.userGapCount ?? 0)} />
+            <MetricCard icon={Activity} label="Unavailable / stale" tone="approved" value={`${formatCount(report?.summary.unavailableCount ?? 0)} / ${formatCount(report?.summary.staleSourceCount ?? 0)}`} />
+          </>
+        )}
       </section>
 
       <section className="work-surface discrepancy-surface">
@@ -9285,17 +9956,50 @@ function DiscrepancyDashboardView(props: {
             <span className="section-kicker">Operational coverage</span>
             <h2>{rows.length.toLocaleString()} comparison rows</h2>
           </div>
-          <span className="status-pill ready">{formatCount(report?.summary.comparisonCount ?? 0)} configured pairs</span>
+          <div className="surface-header-actions discrepancy-table-header-actions">
+            <label className="switch-control customer-license-toggle">
+              <input
+                checked={includeMatched}
+                disabled={loadState === 'loading'}
+                onChange={(event) => onIncludeMatchedChange(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Show matched</span>
+            </label>
+          </div>
         </div>
+
+        {comparisonLoadState === 'loading' ? (
+          <div className="empty-state report-empty">
+            <Activity size={20} />
+            <strong>Loading comparison options.</strong>
+          </div>
+        ) : null}
 
         {loadState === 'loading' ? (
           <div className="empty-state report-empty">
             <Activity size={20} />
-            <strong>Comparing latest complete syncs.</strong>
+            <strong>Loading audit data.</strong>
           </div>
         ) : null}
 
-        {loadState !== 'loading' && rows.length === 0 ? (
+        {loadState !== 'loading' && comparisonLoadState !== 'loading' && !pairFilter ? (
+          <div className="empty-state report-empty">
+            <Search size={20} />
+            <strong>Select an audit.</strong>
+            <span>Saved comparisons load here when snapshots have already been audited.</span>
+          </div>
+        ) : null}
+
+        {loadState === 'idle' && pairFilter && !report ? (
+          <div className="empty-state report-empty">
+            <Zap size={20} />
+            <strong>Ready to run.</strong>
+            <span>Run the selected audit to save this snapshot comparison.</span>
+          </div>
+        ) : null}
+
+        {loadState !== 'loading' && report && rows.length === 0 ? (
           <div className="empty-state report-empty">
             <Search size={20} />
             <strong>No discrepancy rows found.</strong>
@@ -9303,64 +10007,171 @@ function DiscrepancyDashboardView(props: {
           </div>
         ) : null}
 
-        {groupedRows.map(([customerName, customerRows]) => (
-          <section className="discrepancy-customer-group" key={customerName}>
-            <div className="discrepancy-customer-header">
-              <strong>{customerName}</strong>
-              <span>{customerRows.length.toLocaleString()} rows</span>
-            </div>
-            <div className="discrepancy-table-scroll">
-              <table className="discrepancy-table">
-                <thead>
-                  <tr>
-                    <th>Comparison</th>
-                    <th>Product family</th>
-                    <th>Basis</th>
-                    <th>Counts</th>
-                    <th>Delta</th>
-                    <th>Status</th>
-                    <th>Latest sync</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {customerRows.map((row) => (
-                    <tr key={row.id}>
-                      <td>
-                        <strong>{row.comparisonPair.label}</strong>
-                        <span>{row.comparisonPair.leftVendorName} vs {row.comparisonPair.rightVendorName}</span>
-                      </td>
-                      <td>
-                        <strong>{row.productFamily}</strong>
-                        <span>{row.domain ?? (row.aggregateOnly ? 'Aggregate count' : 'Item-level match')}</span>
-                      </td>
-                      <td>{row.basis === 'device' ? 'Device' : 'User'}</td>
-                      <td>
-                        {row.leftCount.toLocaleString()} / {row.rightCount.toLocaleString()}
-                      </td>
-                      <td className={row.delta >= 0 ? 'delta positive' : 'delta negative'}>
-                        {row.delta > 0 ? `+${row.delta}` : row.delta}
-                      </td>
-                      <td>
-                        <span className={`status-pill ${discrepancyStatusClass(row.status)}`}>
-                          {discrepancyStatusLabel(row.status)}
-                        </span>
-                        {row.stale ? <span className="stale-chip">Stale</span> : null}
-                      </td>
-                      <td>{latestDiscrepancySync(row)}</td>
-                      <td>
-                        <button className="button secondary compact" onClick={() => onRowSelect(row)} type="button">
-                          <Database size={15} />
-                          Details
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ))}
+        {isLicenseCleanup
+          ? groupedRows.map(([customerName, customerRows]) => (
+              <section className="discrepancy-customer-group" key={customerName}>
+                <div className="discrepancy-customer-header">
+                  <strong>{customerName}</strong>
+                  <span>{customerRows.length.toLocaleString()} cleanup rows</span>
+                </div>
+                <div className="discrepancy-table-scroll">
+                  <table className="discrepancy-table cleanup-table">
+                    <colgroup>
+                      <col className="cleanup-col-action" />
+                      <col className="cleanup-col-product" />
+                      <col className="cleanup-col-counts" />
+                      <col className="cleanup-col-proposed" />
+                      <col className="cleanup-col-eligibility" />
+                      <col className="cleanup-col-commitment" />
+                      <col className="cleanup-col-result" />
+                      <col className="cleanup-col-details" />
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        <th>Action</th>
+                        <th>Product</th>
+                        <th>Counts</th>
+                        <th>Proposed</th>
+                        <th>Eligibility</th>
+                        <th>Commitment</th>
+                        <th>Result</th>
+                        <th>Details</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customerRows.map((row) => {
+                        const cleanup = row.cleanup;
+                        const actionable = isAppRiverCleanupActionable(row);
+                        return (
+                          <tr key={row.id}>
+                            <td className="cleanup-action-cell">
+                              <button
+                                className="button primary compact icon-button-text"
+                                disabled={!canQueueCleanupActions || !actionable || cleanupQueueState === 'queueing'}
+                                onClick={() => void onCleanupAction(row.id)}
+                                title={cleanup?.skipReason === 'ScheduledCancellation' ? 'Skipped because this subscription cancels at term' : 'Decrease count now'}
+                                type="button"
+                              >
+                                <ArrowDown size={15} />
+                                Decrease
+                              </button>
+                              <button
+                                className="button secondary compact icon-only-button"
+                                disabled={!canQueueCleanupActions || !actionable || cleanupQueueState === 'queueing'}
+                                onClick={() => void onCleanupManualOverride(row)}
+                                title="Manual count override"
+                                type="button"
+                              >
+                                <MoreHorizontal size={16} />
+                              </button>
+                            </td>
+                            <td>
+                              <strong>{cleanup?.productName ?? row.productFamily}</strong>
+                              <span>{cleanup?.productCode ?? cleanup?.vendorProductKey ?? 'AppRiver subscription'}</span>
+                            </td>
+                            <td>
+                              <strong>{cleanupCountsLabel(cleanup)}</strong>
+                              <span>{cleanup?.unassignedLicenses.toLocaleString() ?? row.delta.toLocaleString()} unassigned</span>
+                            </td>
+                            <td>
+                              <strong>{cleanup?.skipReason === 'ScheduledCancellation' ? 'No decrease' : cleanup ? `${cleanup.proposedReduction.toLocaleString()} fewer` : 'None'}</strong>
+                              <span>{cleanup?.skipReason === 'ScheduledCancellation' ? 'AppRiver will cancel' : cleanup ? `New count ${cleanup.proposedQuantity.toLocaleString()}` : 'No proposal'}</span>
+                            </td>
+                            <td>
+                              <strong>{cleanup ? cleanupEligibilityLabel(cleanup) : 'Unavailable'}</strong>
+                              <span>{cleanup?.notes ?? row.unavailableReason ?? 'Eligible snapshot row'}</span>
+                            </td>
+                            <td>
+                              <strong>{formatDateOnly(cleanup?.commitmentEndDate) ?? 'No commitment'}</strong>
+                              <span>{cleanup?.previousCommitmentEndDate ? `Previous ${formatDateOnly(cleanup.previousCommitmentEndDate)}` : cleanup?.effectiveDate ? `Effective ${formatDateOnly(cleanup.effectiveDate)}` : 'Snapshot based'}</span>
+                            </td>
+                            <td>
+                              <span className={`status-pill ${cleanupResultStatusClass(row)}`}>{cleanupActionResultLabel(cleanup)}</span>
+                              <span>{cleanupActionDetailLabel(cleanup)}</span>
+                            </td>
+                            <td>
+                              <button className="button secondary compact" onClick={() => onRowSelect(row)} type="button">
+                                <Database size={15} />
+                                Details
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ))
+          : groupedRows.map(([customerName, customerRows]) => (
+              <section className="discrepancy-customer-group" key={customerName}>
+                <div className="discrepancy-customer-header">
+                  <strong>{customerName}</strong>
+                  <span>{customerRows.length.toLocaleString()} rows</span>
+                </div>
+                <div className="discrepancy-table-scroll">
+                  <table className="discrepancy-table">
+                    <thead>
+                      <tr>
+                        <th>Comparison</th>
+                        <th>Product family</th>
+                        <th>Basis</th>
+                        <th>Counts</th>
+                        <th>Delta</th>
+                        <th>Status</th>
+                        <th>Dates compared</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customerRows.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            <strong>{row.comparisonPair.label}</strong>
+                            <span>{row.comparisonPair.leftVendorName} vs {row.comparisonPair.rightVendorName}</span>
+                          </td>
+                          <td>
+                            <strong>{row.productFamily}</strong>
+                            <span>{row.domain ?? (row.aggregateOnly ? 'Aggregate count' : 'Item-level match')}</span>
+                          </td>
+                          <td>{row.basis === 'device' ? 'Device' : 'User'}</td>
+                          <td>
+                            {row.leftCount.toLocaleString()} / {row.rightCount.toLocaleString()}
+                          </td>
+                          <td className={row.delta >= 0 ? 'delta positive' : 'delta negative'}>
+                            {row.delta > 0 ? `+${row.delta}` : row.delta}
+                          </td>
+                          <td>
+                            <span className={`status-pill ${discrepancyStatusClass(row.status)}`}>
+                              {discrepancyStatusLabel(row.status)}
+                            </span>
+                            {row.stale ? <span className="stale-chip">Stale</span> : null}
+                          </td>
+                          <td>
+                            <div className="cleanup-date-list">
+                              <span>
+                                <strong>{row.comparisonPair.leftVendorName}</strong>
+                                {formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}
+                              </span>
+                              <span>
+                                <strong>{row.comparisonPair.rightVendorName}</strong>
+                                {formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <button className="button secondary compact" onClick={() => onRowSelect(row)} type="button">
+                              <Database size={15} />
+                              Details
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ))}
       </section>
     </section>
   );
@@ -9368,9 +10179,14 @@ function DiscrepancyDashboardView(props: {
 
 function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRow }) {
   const { onClose, row } = props;
-  const leftLabel = row.comparisonPair.leftVendorName;
-  const rightLabel = row.comparisonPair.rightVendorName;
-  const deltaLabel = row.delta > 0 ? `+${row.delta}` : String(row.delta);
+  const cleanup = row.cleanup;
+  const leftLabel = cleanup ? 'Total licenses' : row.comparisonPair.leftVendorName;
+  const rightLabel = cleanup ? 'Assigned licenses' : row.comparisonPair.rightVendorName;
+  const deltaLabel = cleanup
+    ? `${cleanup.proposedReduction.toLocaleString()} fewer`
+    : row.delta > 0
+      ? `+${row.delta}`
+      : String(row.delta);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -9402,7 +10218,7 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
             <strong>{row.rightCount.toLocaleString()}</strong>
           </div>
           <div className={`discrepancy-detail-stat ${row.delta === 0 ? 'matched' : row.delta > 0 ? 'positive' : 'negative'}`}>
-            <span>Delta</span>
+            <span>{cleanup ? 'Proposed reduction' : 'Delta'}</span>
             <strong>{deltaLabel}</strong>
           </div>
           <div className="discrepancy-detail-stat status">
@@ -9417,7 +10233,77 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
         </section>
 
         <section className="discrepancy-detail-body">
-          {row.unavailableReason ? (
+          {cleanup ? (
+            <section className="discrepancy-reference-panel discrepancy-cleanup-detail">
+              <div className="surface-header compact-header">
+                <div>
+                  <span className="section-kicker">AppRiver cleanup</span>
+                  <h3>{cleanup.productName}</h3>
+                </div>
+                <span className={`status-pill ${cleanupResultStatusClass(row)}`}>{cleanupActionResultLabel(cleanup)}</span>
+              </div>
+              <div className="discrepancy-cleanup-detail-grid">
+                <div>
+                  <span>Subscription key</span>
+                  <strong>{cleanup.subscriptionKey}</strong>
+                </div>
+                <div>
+                  <span>Product code</span>
+                  <strong>{cleanup.productCode}</strong>
+                </div>
+                <div>
+                  <span>Domain</span>
+                  <strong>{cleanup.domain ?? 'No domain'}</strong>
+                </div>
+                <div>
+                  <span>Eligibility</span>
+                  <strong>{cleanupEligibilityLabel(cleanup)}</strong>
+                </div>
+                <div>
+                  <span>Current count</span>
+                  <strong>{cleanup.totalLicenses.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Proposed count</span>
+                  <strong>{cleanup.proposedQuantity.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Available to reduce</span>
+                  <strong>{cleanup.availableLicensesToReduce?.toLocaleString() ?? cleanup.unassignedLicenses.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Result</span>
+                  <strong>{cleanupActionResultLabel(cleanup)}</strong>
+                </div>
+                <div>
+                  <span>Term</span>
+                  <strong>{cleanup.subscriptionTerm ?? 'Unknown'}</strong>
+                </div>
+                <div>
+                  <span>Billing</span>
+                  <strong>{cleanup.billingFrequency ?? 'Unknown'}</strong>
+                </div>
+                <div>
+                  <span>Expiration behavior</span>
+                  <strong>{cleanup.expirationBehavior ?? 'Unknown'}</strong>
+                </div>
+                <div>
+                  <span>Trial</span>
+                  <strong>{cleanup.isTrial ? 'Yes' : 'No'}</strong>
+                </div>
+              </div>
+              {cleanup.notes ? (
+                <div className="discrepancy-cleanup-note">
+                  <span>Notes</span>
+                  <strong>{cleanup.notes}</strong>
+                </div>
+              ) : null}
+              <div className="discrepancy-cleanup-note">
+                <span>Action detail</span>
+                <strong>{cleanupActionDetailLabel(cleanup)}</strong>
+              </div>
+            </section>
+          ) : row.unavailableReason ? (
             <div className="empty-state discrepancy-unavailable-note">
               <Database size={20} />
               <strong>Waiting for comparable data</strong>
@@ -9452,16 +10338,215 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
           ) : null}
         </section>
 
-        <section className="discrepancy-sync-panel" aria-label="Sync freshness">
+        {cleanup ? (
+          <section className="discrepancy-sync-panel cleanup-sync-panel" aria-label="AppRiver cleanup dates">
+            {cleanupDateRows(cleanup).map((dateRow) => (
+              <div key={dateRow.label}>
+                <span>{dateRow.label}</span>
+                <strong>{dateRow.value}</strong>
+              </div>
+            ))}
+          </section>
+        ) : (
+          <section className="discrepancy-sync-panel" aria-label="Sync freshness">
+            <div>
+              <span>{leftLabel}</span>
+              <strong>{formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}</strong>
+            </div>
+            <div>
+              <span>{rightLabel}</span>
+              <strong>{formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}</strong>
+            </div>
+          </section>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function AppRiverCleanupActionsModal(props: {
+  actions: AppRiverLicenseCleanupActionSummary[];
+  canCancelActions: boolean;
+  cancellingActionId: string | null;
+  dismissingActionId: string | null;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onCancelAction: (actionId: string) => void;
+  onDismissAction: (actionId: string) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const {
+    actions,
+    canCancelActions,
+    cancellingActionId,
+    dismissingActionId,
+    loadState,
+    message,
+    onCancelAction,
+    onDismissAction,
+    onClose,
+    onRefresh,
+  } = props;
+  const activeActions = actions.filter((action) => ['queued', 'running', 'reviewing', 'updating', 'confirm'].includes(action.status));
+  const confirmActions = actions.filter((action) => action.status === 'confirm');
+  const completeActions = actions.filter((action) => action.status === 'verified');
+  const needsReviewActions = actions.filter((action) => action.status === 'needs_review');
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="cleanup-actions-modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-actions-title">
+        <div className="modal-header">
           <div>
-            <span>{leftLabel}</span>
-            <strong>{formatDateTime(row.syncTimestamps.left) ?? 'No complete sync'}</strong>
+            <h2 id="cleanup-actions-title">
+              <Activity size={18} />
+              AppRiver cleanup actions
+            </h2>
+            <p>One update runs at a time. Confirm checks begin after queued updates finish.</p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <section className="cleanup-actions-summary" aria-label="Cleanup action summary">
+          <div>
+            <span>Queued</span>
+            <strong>{activeActions.filter((action) => action.status === 'queued').length.toLocaleString()}</strong>
           </div>
           <div>
-            <span>{rightLabel}</span>
-            <strong>{formatDateTime(row.syncTimestamps.right) ?? 'No complete sync'}</strong>
+            <span>Confirm</span>
+            <strong>{confirmActions.length.toLocaleString()}</strong>
+          </div>
+          <div>
+            <span>Complete</span>
+            <strong>{completeActions.length.toLocaleString()}</strong>
+          </div>
+          <div>
+            <span>Needs Review</span>
+            <strong>{needsReviewActions.length.toLocaleString()}</strong>
           </div>
         </section>
+
+        <div className="integrations-live-bar cleanup-actions-toolbar">
+          <div>
+            <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+            <strong>{loadState === 'loading' ? 'Loading actions' : loadState === 'failed' ? 'Action issue' : 'Action history'}</strong>
+            <span>{message}</span>
+          </div>
+          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={onRefresh} type="button">
+            <RefreshCcw size={15} />
+            Refresh
+          </button>
+        </div>
+
+        <div className="cleanup-actions-table-scroll">
+          <table className="discrepancy-table cleanup-actions-table">
+            <colgroup>
+              <col className="cleanup-actions-col-status" />
+              <col className="cleanup-actions-col-customer" />
+              <col className="cleanup-actions-col-product" />
+              <col className="cleanup-actions-col-counts" />
+              <col className="cleanup-actions-col-worker" />
+              <col className="cleanup-actions-col-dates" />
+              <col className="cleanup-actions-col-action" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Customer</th>
+                <th>Product</th>
+                <th>Counts</th>
+                <th>Worker</th>
+                <th>Dates</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {actions.map((action) => {
+                const canceling = cancellingActionId === action.id;
+                const dismissing = dismissingActionId === action.id;
+                return (
+                  <tr key={action.id}>
+                    <td title={action.errorMessage ?? `Batch: ${action.batchStatus}`}>
+                      <span className={`status-pill ${appRiverCleanupActionStatusClass(action.status)}`}>
+                        {appRiverCleanupActionStatusLabel(action.status)}
+                      </span>
+                    </td>
+                    <td>
+                      <strong>{action.customerName ?? action.externalCustomerId}</strong>
+                      <span>{action.domain ?? action.externalCustomerId}</span>
+                    </td>
+                    <td>
+                      <strong>{action.productName}</strong>
+                      <span>{action.productCode ?? action.vendorProductKey ?? action.subscriptionKey}</span>
+                    </td>
+                    <td>
+                      <strong>{cleanupActionCountLabel(action)}</strong>
+                    </td>
+                    <td>
+                      <strong>{action.attempts.toLocaleString()} run / {action.verificationAttempts.toLocaleString()} check</strong>
+                    </td>
+                    <td>
+                      <div className="cleanup-date-list">
+                        <span>
+                          <strong>Queued</strong>
+                          {formatDateTime(action.createdAt) ?? '-'}
+                        </span>
+                        <span>
+                          <strong>Updated</strong>
+                          {formatDateTime(action.updatedAt) ?? '-'}
+                        </span>
+                        <span>
+                          <strong>Done</strong>
+                          {formatDateTime(action.completedAt) ?? '-'}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      {action.status === 'cancelled' ? (
+                        <button
+                          className="button secondary compact"
+                          disabled={!canCancelActions || !action.canDismiss || dismissing}
+                          onClick={() => onDismissAction(action.id)}
+                          title="Hide this canceled action while retaining its audit history"
+                          type="button"
+                        >
+                          <Trash2 size={15} />
+                          {dismissing ? 'Dismissing' : 'Dismiss'}
+                        </button>
+                      ) : (
+                        <button
+                          className="button secondary compact"
+                          disabled={!canCancelActions || !action.canCancel || canceling}
+                          onClick={() => {
+                            if (window.confirm(`Cancel queued cleanup for ${action.productName}?`)) {
+                              onCancelAction(action.id);
+                            }
+                          }}
+                          title={
+                            action.canCancel
+                              ? 'Cancel this queued action before the worker starts it'
+                              : 'Only queued actions that have not started can be canceled'
+                          }
+                          type="button"
+                        >
+                          <X size={15} />
+                          {canceling ? 'Canceling' : 'Cancel'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {actions.length === 0 ? (
+                <tr>
+                  <td colSpan={7}>No AppRiver cleanup actions found.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </section>
     </div>
   );
@@ -9535,6 +10620,146 @@ function discrepancyStatusClass(status: DiscrepancySeverity) {
   if (status === 'warning') return 'needs-review';
   if (status === 'unavailable') return 'ready';
   return 'approved';
+}
+
+function isAppRiverCleanupActionable(row: DiscrepancyRow) {
+  return Boolean(
+    row.cleanup &&
+    !row.cleanup.skipReason &&
+    row.cleanup.proposedReduction > 0 &&
+    !row.cleanup.pendingAction &&
+    row.status !== 'unavailable',
+  );
+}
+
+function cleanupCountsLabel(cleanup?: AppRiverLicenseCleanupDetails) {
+  if (!cleanup) return 'No counts';
+  const assigned = typeof cleanup.assignedLicenses === 'number' ? cleanup.assignedLicenses.toLocaleString() : 'unknown';
+  return `${cleanup.totalLicenses.toLocaleString()} total / ${assigned} assigned`;
+}
+
+function cleanupEligibilityLabel(cleanup: AppRiverLicenseCleanupDetails) {
+  if (cleanup.skipReason === 'ScheduledCancellation') {
+    return 'Cancels at term';
+  }
+
+  const reason =
+    cleanup.eligibilityReason === 'Both'
+      ? 'Renewal + recent order'
+      : cleanup.eligibilityReason === 'RecentOrder'
+        ? 'Recent order'
+        : 'Renewal';
+  const windowLabel = cleanup.renewalWindow === 'Recent' ? 'just renewed' : undefined;
+  return windowLabel ? `${reason}, ${windowLabel}` : reason;
+}
+
+function cleanupDateRows(cleanup?: AppRiverLicenseCleanupDetails) {
+  if (!cleanup) {
+    return [{ label: 'Snapshot', value: 'No snapshot' }];
+  }
+
+  return [
+    { label: 'Snapshot', value: formatDateTime(cleanup.syncTimestamp ?? cleanup.observedAt) ?? 'No snapshot date' },
+    { label: 'Commitment', value: formatDateOnly(cleanup.commitmentEndDate) ?? 'No commitment date' },
+    { label: 'Previous term', value: formatDateOnly(cleanup.previousCommitmentEndDate) ?? 'No previous date' },
+    { label: 'Effective', value: formatDateOnly(cleanup.effectiveDate) ?? 'No effective date' },
+  ];
+}
+
+function cleanupActionResultLabel(cleanup?: AppRiverLicenseCleanupDetails) {
+  const action = cleanup?.latestAction;
+  if (!cleanup) return 'Update Failed';
+  if (cleanup.skipReason === 'ScheduledCancellation') return 'Skipped';
+  if (!action) return 'Ready';
+  if (action.status === 'verified') return 'Update Complete';
+  if (['queued', 'running', 'reviewing', 'updating', 'confirm', 'processing', 'accepted', 'verifying'].includes(action.status)) {
+    return 'Update Pending';
+  }
+  if (action.status === 'needs_review') return 'Needs Review';
+  if (action.status === 'failed' || action.status === 'timed_out') return 'Update Failed';
+  if (action.status === 'cancelled') return 'Canceled';
+  if (action.status === 'skipped') {
+    return /no longer has reducible|already has|no longer eligible/i.test(action.errorMessage ?? '')
+      ? 'Correct'
+      : 'Update Failed';
+  }
+  return 'Update Failed';
+}
+
+function cleanupActionDetailLabel(cleanup?: AppRiverLicenseCleanupDetails) {
+  const action = cleanup?.latestAction;
+  if (!cleanup) return 'No cleanup data';
+  if (cleanup.skipReason === 'ScheduledCancellation') {
+    return 'Scheduled to cancel at the end of the current term';
+  }
+  if (!action) {
+    return `${cleanup.unassignedLicenses.toLocaleString()} unassigned`;
+  }
+  const updated = formatDateTime(action.completedAt ?? action.updatedAt ?? action.createdAt);
+  const quantity =
+    typeof action.finalQuantity === 'number'
+      ? `Final count ${action.finalQuantity.toLocaleString()}`
+      : `Requested count ${action.requestedQuantity.toLocaleString()}`;
+  if (action.errorMessage) {
+    return `${quantity} / ${action.errorMessage}`;
+  }
+  return updated ? `${quantity} / ${updated}` : quantity;
+}
+
+function cleanupResultStatusClass(row: DiscrepancyRow) {
+  const label = cleanupActionResultLabel(row.cleanup);
+  if (label === 'Update Complete' || label === 'Correct') return 'approved';
+  if (label === 'Update Pending' || label === 'Ready' || label === 'Needs Review') return 'needs-review';
+  if (label === 'Canceled' || label === 'Skipped') return 'skipped';
+  return 'blocked';
+}
+
+function appRiverCleanupActionStatusLabel(status: string) {
+  switch (status) {
+    case 'queued':
+      return 'Queued';
+    case 'running':
+      return 'Running';
+    case 'reviewing':
+      return 'Reviewing';
+    case 'updating':
+      return 'Updating';
+    case 'confirm':
+      return 'Confirm';
+    case 'needs_review':
+      return 'Needs Review';
+    case 'processing':
+      return 'Processing';
+    case 'accepted':
+      return 'Accepted';
+    case 'verifying':
+      return 'Verifying';
+    case 'verified':
+      return 'Complete';
+    case 'failed':
+      return 'Failed';
+    case 'timed_out':
+      return 'Timed out';
+    case 'skipped':
+      return 'Skipped';
+    case 'cancelled':
+      return 'Canceled';
+    default:
+      return status || 'Unknown';
+  }
+}
+
+function appRiverCleanupActionStatusClass(status: string) {
+  if (status === 'verified') return 'approved';
+  if (status === 'failed' || status === 'timed_out') return 'blocked';
+  if (status === 'needs_review') return 'needs-review';
+  if (['queued', 'running', 'reviewing', 'updating', 'confirm', 'processing', 'accepted', 'verifying'].includes(status)) return 'ready';
+  if (status === 'cancelled' || status === 'skipped') return 'skipped';
+  return 'needs-review';
+}
+
+function cleanupActionCountLabel(action: AppRiverLicenseCleanupActionSummary) {
+  return `${action.currentTotalLicenses.toLocaleString()}->${action.requestedQuantity.toLocaleString()}`;
 }
 
 function latestDiscrepancySync(row: DiscrepancyRow) {
@@ -9982,7 +11207,7 @@ function SettingsEmailCommunicationView() {
 
 function SettingsView() {
   const [users, setUsers] = useState<ManagedAppUser[]>([]);
-  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Analyst']);
+  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'LicenseAdmin', 'Analyst']);
   const [statuses, setStatuses] = useState<ManagedUserStatus[]>(['active', 'disabled']);
   const [drafts, setDrafts] = useState<Record<string, ManagedUserDraft>>({});
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
@@ -10001,7 +11226,7 @@ function SettingsView() {
 
   const applyUsersResponse = (response: ManagedUsersResponse) => {
     setUsers(response.users);
-    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'Analyst']);
+    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'LicenseAdmin', 'Analyst']);
     setStatuses(response.statuses.length > 0 ? response.statuses : ['active', 'disabled']);
     setDrafts(draftsFromUsers(response.users));
   };
@@ -10125,7 +11350,7 @@ function SettingsView() {
           >
             {roles.map((role) => (
               <option key={role} value={role}>
-                {role}
+                {appRoleLabel(role)}
               </option>
             ))}
           </select>
@@ -10219,7 +11444,7 @@ function SettingsView() {
                         >
                           {roles.map((role) => (
                             <option key={role} value={role}>
-                              {role}
+                              {appRoleLabel(role)}
                             </option>
                           ))}
                         </select>
@@ -10310,6 +11535,11 @@ function compareManagedUsers(left: ManagedAppUser, right: ManagedAppUser) {
 
 function managedUserStatusLabel(status: ManagedUserStatus) {
   return status === 'active' ? 'Active' : 'Disabled';
+}
+
+function appRoleLabel(role: AppRole) {
+  if (role === 'LicenseAdmin') return 'License Admin';
+  return role;
 }
 
 function ReconcileView(props: {
@@ -11803,17 +13033,33 @@ function LinkedCountTestModal(props: {
 function MetricCard(props: {
   icon: typeof Activity;
   label: string;
+  onClick?: () => void;
   tone: 'warn' | 'money' | 'ready' | 'approved';
+  title?: string;
   value: string;
 }) {
   const Icon = props.icon;
-  return (
-    <article className={`metric-card ${props.tone}`}>
+  const content = (
+    <>
       <div className="metric-icon">
         <Icon size={20} />
       </div>
       <span>{props.label}</span>
       <strong>{props.value}</strong>
+    </>
+  );
+
+  if (props.onClick) {
+    return (
+      <button className={`metric-card metric-card-button ${props.tone}`} onClick={props.onClick} title={props.title} type="button">
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <article className={`metric-card ${props.tone}`} title={props.title}>
+      {content}
     </article>
   );
 }

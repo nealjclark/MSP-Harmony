@@ -1,4 +1,9 @@
 import { getIntegrationSettingsDefinition } from '../../shared/integrationSettings';
+import {
+  listAppRiverLicenseCleanupCandidates,
+  type AppRiverLicenseCleanupCandidate,
+} from '../vendor/appriver/licenseCleanup';
+import type { AppRiverChargeEvent } from '../vendor/appriver/client';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -10,7 +15,7 @@ export type Queryable = {
 
 export type DiscrepancyBasis = 'user' | 'device';
 export type DiscrepancySeverity = 'matched' | 'warning' | 'critical' | 'unavailable';
-export type DiscrepancyMatchingStrategy = 'normalized-hostname' | 'email-upn' | 'aggregate-count';
+export type DiscrepancyMatchingStrategy = 'normalized-hostname' | 'email-upn' | 'aggregate-count' | 'license-cleanup';
 
 export type DiscrepancyComparisonDefinition = {
   id: string;
@@ -23,6 +28,7 @@ export type DiscrepancyComparisonDefinition = {
   matchingStrategy: DiscrepancyMatchingStrategy;
   productFamily: string;
   aggregateOnly: boolean;
+  comparisonType: 'vendor-discrepancy' | 'license-cleanup';
 };
 
 export type DiscrepancyItem = {
@@ -58,6 +64,7 @@ export type DiscrepancyRow = {
   missingFromLeft: DiscrepancyItem[];
   missingFromRight: DiscrepancyItem[];
   referenceItems: DiscrepancyItem[];
+  cleanup?: AppRiverLicenseCleanupCandidate;
   syncTimestamps: {
     left?: string;
     right?: string;
@@ -96,11 +103,31 @@ export type DiscrepancyReport = {
 };
 
 export type DiscrepancyReportOptions = {
+  comparisonId?: string;
   customerId?: string;
   basis?: DiscrepancyBasis;
   severity?: DiscrepancySeverity;
   includeMatched?: boolean;
   now?: string;
+  appRiverChargeEvents?: AppRiverChargeEvent[];
+};
+
+export type DiscrepancySourceSide = {
+  side: 'left' | 'right' | 'source';
+  vendorId: string;
+  vendorName: string;
+  syncRunId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  metadataEntity?: string;
+};
+
+export type DiscrepancySourceSnapshot = {
+  comparisonId: string;
+  sourceKey: string;
+  sources: DiscrepancySourceSide[];
+  latestCompletedAt?: string;
+  missingSourceCount: number;
 };
 
 type SyncRunRow = {
@@ -182,26 +209,18 @@ export const discrepancyComparisonDefinitions: DiscrepancyComparisonDefinition[]
     matchingStrategy: 'normalized-hostname',
     productFamily: 'Endpoint devices',
     aggregateOnly: false,
+    comparisonType: 'vendor-discrepancy',
   }),
   comparisonDefinition({
-    id: 'proofpoint-microsoft365-users',
-    label: 'Proofpoint vs Microsoft 365 mailbox users',
+    id: 'appriver-license-cleanup',
+    label: 'AppRiver license cleanup',
     basis: 'user',
-    leftVendorId: 'proofpoint',
-    rightVendorId: 'microsoft-365',
-    matchingStrategy: 'aggregate-count',
-    productFamily: 'Licensed mailbox users',
-    aggregateOnly: true,
-  }),
-  comparisonDefinition({
-    id: 'huntress-microsoft365-users',
-    label: 'Huntress vs Microsoft 365 mailbox users',
-    basis: 'user',
-    leftVendorId: 'huntress',
-    rightVendorId: 'microsoft-365',
-    matchingStrategy: 'aggregate-count',
-    productFamily: 'Licensed mailbox users',
-    aggregateOnly: true,
+    leftVendorId: 'opentext-appriver',
+    rightVendorId: 'opentext-appriver',
+    matchingStrategy: 'license-cleanup',
+    productFamily: 'Unassigned licenses',
+    aggregateOnly: false,
+    comparisonType: 'license-cleanup',
   }),
 ];
 
@@ -210,7 +229,12 @@ export async function getDiscrepancyReport(
   options: DiscrepancyReportOptions = {},
 ): Promise<DiscrepancyReport> {
   const generatedAt = options.now ?? new Date().toISOString();
-  const definitions = discrepancyComparisonDefinitions.filter((definition) =>
+  const selectedDefinition = findDiscrepancyComparisonDefinition(options.comparisonId);
+  if (!selectedDefinition) {
+    throw new Error('Discrepancy report requires a supported comparisonId.');
+  }
+
+  const definitions = [selectedDefinition].filter((definition) =>
     options.basis ? definition.basis === options.basis : true,
   );
   const snapshotCache = new Map<string, Promise<VendorSnapshotSet>>();
@@ -225,6 +249,15 @@ export async function getDiscrepancyReport(
 
   const rows: DiscrepancyRow[] = [];
   for (const definition of definitions) {
+    if (definition.matchingStrategy === 'license-cleanup') {
+      const cleanupReport = await listAppRiverLicenseCleanupCandidates(database, {
+        chargeEvents: options.appRiverChargeEvents,
+        now: generatedAt,
+      });
+      rows.push(...buildAppRiverCleanupRows(definition, cleanupReport, generatedAt));
+      continue;
+    }
+
     const [left, right] = await Promise.all([
       loadSide(definition.leftVendorId),
       loadSide(definition.rightVendorId),
@@ -236,25 +269,82 @@ export async function getDiscrepancyReport(
     rows.push(...pairRows);
   }
 
-  const filteredRows = rows
+  const report: DiscrepancyReport = {
+    reportType: 'discrepancies',
+    generatedAt,
+    filters: {
+      includeMatched: true,
+    },
+    summary: buildSummary(rows, definitions.length),
+    comparisonPairs: definitions,
+    customers: customersForRows(rows),
+    rows: rows.sort(compareRows),
+  };
+
+  return applyDiscrepancyReportFilters(report, options);
+}
+
+export async function getDiscrepancySourceSnapshot(
+  database: Queryable,
+  comparisonId: string,
+): Promise<DiscrepancySourceSnapshot> {
+  const definition = findDiscrepancyComparisonDefinition(comparisonId);
+  if (!definition) {
+    throw new Error('Discrepancy source snapshot requires a supported comparisonId.');
+  }
+
+  const sources =
+    definition.matchingStrategy === 'license-cleanup'
+      ? [
+          sourceSide(
+            'source',
+            definition.leftVendorId,
+            definition.leftVendorName,
+            await loadLatestSyncRun(database, definition.leftVendorId, ['subscription-snapshots']),
+            'subscription-snapshots',
+          ),
+        ]
+      : await Promise.all([
+          latestVendorSourceSide(database, 'left', definition.leftVendorId, definition.leftVendorName),
+          latestVendorSourceSide(database, 'right', definition.rightVendorId, definition.rightVendorName),
+        ]);
+  const latestCompletedAt = latestSourceTimestamp(sources);
+
+  return {
+    comparisonId,
+    sourceKey: sourceKeyFor(sources),
+    sources,
+    latestCompletedAt,
+    missingSourceCount: sources.filter((source) => !source.syncRunId).length,
+  };
+}
+
+export function findDiscrepancyComparisonDefinition(comparisonId: string | undefined) {
+  return discrepancyComparisonDefinitions.find((definition) => definition.id === comparisonId);
+}
+
+export function applyDiscrepancyReportFilters(
+  report: DiscrepancyReport,
+  options: Pick<DiscrepancyReportOptions, 'customerId' | 'basis' | 'severity' | 'includeMatched'> = {},
+): DiscrepancyReport {
+  const rows = report.rows
     .filter((row) => (options.customerId ? row.customer.customerId === options.customerId : true))
+    .filter((row) => (options.basis ? row.basis === options.basis : true))
     .filter((row) => (options.severity ? row.status === options.severity : true))
     .filter((row) => (options.includeMatched ? true : row.status !== 'matched'))
     .sort(compareRows);
 
   return {
-    reportType: 'discrepancies',
-    generatedAt,
+    ...report,
     filters: {
       customerId: options.customerId,
       basis: options.basis,
       severity: options.severity,
       includeMatched: options.includeMatched === true,
     },
-    summary: buildSummary(filteredRows, definitions.length),
-    comparisonPairs: definitions,
-    customers: customersForRows(rows),
-    rows: filteredRows,
+    summary: buildSummary(rows, report.comparisonPairs.length),
+    customers: customersForRows(report.rows),
+    rows,
   };
 }
 
@@ -264,6 +354,10 @@ export function isDiscrepancyBasis(value: string | undefined): value is Discrepa
 
 export function isDiscrepancySeverity(value: string | undefined): value is DiscrepancySeverity {
   return value === 'matched' || value === 'warning' || value === 'critical' || value === 'unavailable';
+}
+
+export function isDiscrepancyComparisonId(value: string | undefined) {
+  return discrepancyComparisonDefinitions.some((definition) => definition.id === value);
 }
 
 async function loadVendorSnapshotSet(database: Queryable, vendorId: string): Promise<VendorSnapshotSet> {
@@ -348,6 +442,49 @@ async function loadLatestSyncRun(
     startedAt: isoDate(row.started_at) ?? new Date(0).toISOString(),
     completedAt: isoDate(row.completed_at),
   };
+}
+
+async function latestVendorSourceSide(
+  database: Queryable,
+  side: 'left' | 'right',
+  vendorId: string,
+  vendorName: string,
+) {
+  const metadataEntities = vendorId === 'microsoft-365' ? microsoft365UserSyncEntities : undefined;
+  const syncRun = await loadLatestSyncRun(database, vendorId, metadataEntities);
+  return sourceSide(side, vendorId, vendorName, syncRun, metadataEntities?.join(','));
+}
+
+function sourceSide(
+  side: DiscrepancySourceSide['side'],
+  vendorId: string,
+  vendorName: string,
+  syncRun?: SyncRun,
+  metadataEntity?: string,
+): DiscrepancySourceSide {
+  return {
+    side,
+    vendorId,
+    vendorName,
+    syncRunId: syncRun?.id,
+    startedAt: syncRun?.startedAt,
+    completedAt: syncRun?.completedAt,
+    metadataEntity,
+  };
+}
+
+function sourceKeyFor(sources: DiscrepancySourceSide[]) {
+  return sources
+    .map((source) => `${source.side}:${source.vendorId}:${source.syncRunId ?? 'none'}`)
+    .join('|');
+}
+
+function latestSourceTimestamp(sources: DiscrepancySourceSide[]) {
+  const timestamps = sources
+    .map((source) => source.completedAt ?? source.startedAt)
+    .filter((value): value is string => typeof value === 'string')
+    .sort((left, right) => Date.parse(right) - Date.parse(left));
+  return timestamps[0];
 }
 
 function buildItemComparisonRows(
@@ -465,6 +602,65 @@ function buildAggregateUserRows(
   });
 }
 
+function buildAppRiverCleanupRows(
+  definition: DiscrepancyComparisonDefinition,
+  cleanupReport: Awaited<ReturnType<typeof listAppRiverLicenseCleanupCandidates>>,
+  now: string,
+): DiscrepancyRow[] {
+  if (!cleanupReport.syncRun) {
+    const emptySide: VendorSnapshotSet = {
+      vendorId: definition.leftVendorId,
+      rows: [],
+    };
+    return [
+      unavailableRow(
+        definition,
+        emptySide,
+        emptySide,
+        now,
+        'No complete AppRiver subscription snapshot sync is available yet.',
+      ),
+    ];
+  }
+
+  const syncRun = cleanupReport.syncRun;
+  return cleanupReport.rows.map((cleanup) => ({
+    id: cleanup.id,
+    customer: {
+      customerId: cleanup.customerId,
+      connectWiseCompanyId: cleanup.connectWiseCompanyId,
+      customerName: cleanup.customerName,
+    },
+    comparisonPair: definition,
+    basis: definition.basis,
+    productFamily: cleanup.productName,
+    domain: cleanup.domain,
+    leftCount: cleanup.totalLicenses,
+    rightCount: cleanup.assignedLicenses ?? Math.max(cleanup.totalLicenses - cleanup.unassignedLicenses, 0),
+    delta: cleanup.unassignedLicenses,
+    status: cleanup.skipReason === 'ScheduledCancellation' || cleanup.pendingAction
+      ? 'warning'
+      : severityForMismatch(cleanup.proposedReduction),
+    stale: sideIsStale(
+      {
+        vendorId: definition.leftVendorId,
+        syncRun,
+        rows: [],
+      },
+      now,
+    ),
+    aggregateOnly: false,
+    missingFromLeft: [],
+    missingFromRight: [],
+    referenceItems: [],
+    cleanup,
+    syncTimestamps: {
+      left: cleanup.syncTimestamp ?? syncRun.completedAt ?? syncRun.startedAt,
+      right: cleanup.effectiveDate ?? cleanup.commitmentEndDate,
+    },
+  }));
+}
+
 function unavailableRows(
   definition: DiscrepancyComparisonDefinition,
   left: VendorSnapshotSet,
@@ -536,6 +732,7 @@ function unavailableRow(
     missingFromLeft: [],
     missingFromRight: [],
     referenceItems: [],
+    cleanup: undefined,
     syncTimestamps: syncTimestamps(left, right),
   };
 }

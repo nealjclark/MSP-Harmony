@@ -51,7 +51,7 @@ type AppUserRow = {
   updated_at: Date | string;
 };
 
-const appRoles: AppRole[] = ['Admin', 'Approver', 'Analyst'];
+const appRoles: AppRole[] = ['Admin', 'Approver', 'LicenseAdmin', 'Analyst'];
 const appStatuses: AppUserStatus[] = ['active', 'disabled'];
 
 const appUserColumns = `

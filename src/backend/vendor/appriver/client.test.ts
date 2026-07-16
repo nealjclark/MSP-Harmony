@@ -74,6 +74,9 @@ const responses: Array<{ status: number; body: unknown; headers?: Record<string,
       Domain: 'mapped.example',
       IsTrial: false,
       ExpirationBehavior: 'AutoRenew',
+      SubscriptionStatus: 'Scheduled to Uninstall',
+      CancellationDate: '2027-01-01T00:00:00Z',
+      ScheduledUninstallDate: '2027-01-31T00:00:00Z',
       ReadonlySubscriptionDetails: [
         { Name: 'TotalLicenses', Value: '3' },
         { Name: 'AssignedLicenses', Value: '1' },
@@ -144,6 +147,9 @@ async function run() {
     assert.equal(detail.unassignedLicenses, 2);
     assert.equal(detail.subscriptionQuantity, 3);
     assert.equal(detail.commitmentEndDate, '2027-01-01T00:00:00Z');
+    assert.equal(detail.status, 'Scheduled to Uninstall');
+    assert.equal(detail.cancellationDate, '2027-01-01T00:00:00Z');
+    assert.equal(detail.scheduledUninstallDate, '2027-01-31T00:00:00Z');
     assert.equal(appRiverLicenseQuantity(detail), 3);
     assert.equal(appRiverProductKeyForSubscription(detail), 'Microsoft 365 Business Premium|Annual|Monthly');
     assert.deepEqual(rotatedRefreshTokens, ['rotated-refresh-1', 'rotated-refresh-2']);
@@ -188,6 +194,56 @@ async function run() {
     await retryingClient.authenticate();
     assert.equal(persistAttempts, 2);
     assert.deepEqual(rotatedRefreshTokens, ['rotated-refresh-1', 'rotated-refresh-2', 'rotated-refresh-3']);
+
+    responses.push(
+      {
+        status: 404,
+        body: {
+          message: 'Not found on short endpoint',
+        },
+      },
+      {
+        status: 200,
+        body: {
+          Message: 'Subscription quantity update accepted',
+        },
+      },
+    );
+    const fallbackUpdate = await client.setCustomerSubscriptionLicenseCount('customer-1', 'subscription/key 1', 2);
+    const fallbackShortCall = calls[calls.length - 2];
+    const fallbackServiceCall = calls[calls.length - 1];
+    assert.equal(fallbackUpdate.accepted, true);
+    assert.equal(fallbackUpdate.message, 'Subscription quantity update accepted');
+    assert.equal(
+      fallbackShortCall?.url,
+      'https://unityapi.webrootcloudav.com/api/securecloud/customers/customer-1/subscriptions/subscription%2Fkey%201',
+    );
+    assert.equal(
+      fallbackServiceCall?.url,
+      'https://unityapi.webrootcloudav.com/service/api/securecloud/customers/customer-1/subscriptions/subscription%2Fkey%201',
+    );
+    assert.equal(fallbackServiceCall?.init?.method, 'PATCH');
+    assert.equal(
+      fallbackServiceCall?.init?.body,
+      JSON.stringify({
+        ConfigurableSubscriptionDetails: [
+          {
+            Name: 'SubscriptionQuantity',
+            Value: '2',
+          },
+        ],
+      }),
+    );
+
+    responses.push({
+      status: 400,
+      body: {
+        message: 'The request has been accepted for processing.',
+      },
+    });
+    const acceptedUpdate = await client.setCustomerSubscriptionLicenseCount('customer-1', 'subscription/key 1', 1);
+    assert.equal(acceptedUpdate.accepted, true);
+    assert.match(acceptedUpdate.message ?? '', /accepted for processing/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

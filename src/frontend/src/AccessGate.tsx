@@ -1,7 +1,7 @@
 import { LoaderCircle, LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
-type AppRole = 'Admin' | 'Approver' | 'Analyst';
+type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
 
 type AuthSessionStatus = 'authorized' | 'pending' | 'database-unavailable' | 'unauthenticated';
 
