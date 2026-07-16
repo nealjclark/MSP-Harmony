@@ -708,6 +708,7 @@ type AppRiverLicenseCleanupDetails = {
     initialAssignedLicenses?: number;
     initialUnassignedLicenses: number;
     refreshedAt: string;
+    quantitySource?: 'subscription';
   };
   pendingAction?: {
     id: string;
@@ -5887,6 +5888,7 @@ function App() {
   const [appRiverCleanupActions, setAppRiverCleanupActions] = useState<AppRiverLicenseCleanupActionSummary[]>([]);
   const [appRiverCleanupActionsLoadState, setAppRiverCleanupActionsLoadState] =
     useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [appRiverCleanupDashboardRefreshing, setAppRiverCleanupDashboardRefreshing] = useState(false);
   const [appRiverCleanupActionsMessage, setAppRiverCleanupActionsMessage] = useState('');
   const [cancellingAppRiverCleanupActionId, setCancellingAppRiverCleanupActionId] = useState<string | null>(null);
   const [dismissingAppRiverCleanupActionId, setDismissingAppRiverCleanupActionId] = useState<string | null>(null);
@@ -6595,6 +6597,24 @@ function App() {
       setAppRiverCleanupActionsLoadState('failed');
       setAppRiverCleanupActionsMessage(error instanceof Error ? error.message : 'Unable to load AppRiver cleanup actions.');
       return null;
+    }
+  };
+
+  const refreshAppRiverCleanupDashboard = async () => {
+    setAppRiverCleanupDashboardRefreshing(true);
+    try {
+      await Promise.all([
+        loadAppRiverCleanupActions(),
+        selectedDiscrepancyPairId
+          ? loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
+              includeMatched: includeMatchedDiscrepancies,
+              preserveCleanupMessage: true,
+              silent: true,
+            })
+          : Promise.resolve(null),
+      ]);
+    } finally {
+      setAppRiverCleanupDashboardRefreshing(false);
     }
   };
 
@@ -9344,6 +9364,7 @@ function App() {
               loadState={discrepancyLoadState}
               onCleanupAction={setAppRiverCleanupConfirmationRow}
               onCleanupActionsOpen={openAppRiverCleanupActionsModal}
+              onCleanupRefresh={refreshAppRiverCleanupDashboard}
               onIncludeMatchedChange={(value) => {
                 setIncludeMatchedDiscrepancies(value);
                 if (selectedDiscrepancyPairId && discrepancyReport?.audit) {
@@ -9372,6 +9393,7 @@ function App() {
               onRun={loadDiscrepancyReport}
               onRowSelect={setSelectedDiscrepancyRow}
               pairFilter={selectedDiscrepancyPairId}
+              refreshingCleanup={appRiverCleanupDashboardRefreshing}
               report={discrepancyReport}
               selectedAuditState={selectedDiscrepancyAuditState}
               selectedComparison={selectedDiscrepancyComparison}
@@ -9878,11 +9900,13 @@ function DiscrepancyDashboardView(props: {
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
   onCleanupAction: (row: DiscrepancyRow) => void;
   onCleanupActionsOpen: () => void;
+  onCleanupRefresh: () => Promise<void>;
   onIncludeMatchedChange: (value: boolean) => void;
   onPairFilterChange: (pairId: string) => void;
   onRun: () => Promise<DiscrepancyReportResponse | null>;
   onRowSelect: (row: DiscrepancyRow) => void;
   pairFilter: string;
+  refreshingCleanup: boolean;
   report: DiscrepancyReportResponse | null;
   selectedAuditState?: DiscrepancyAuditState;
   selectedComparison?: DiscrepancyComparisonPair;
@@ -9898,11 +9922,13 @@ function DiscrepancyDashboardView(props: {
     loadState,
     onCleanupAction,
     onCleanupActionsOpen,
+    onCleanupRefresh,
     onIncludeMatchedChange,
     onPairFilterChange,
     onRun,
     onRowSelect,
     pairFilter,
+    refreshingCleanup,
     report,
     selectedAuditState,
     selectedComparison,
@@ -10043,6 +10069,17 @@ function DiscrepancyDashboardView(props: {
               />
               <span>Show matched</span>
             </label>
+            {isLicenseCleanup ? (
+              <button
+                className="button secondary compact"
+                disabled={refreshingCleanup || !pairFilter}
+                onClick={() => void onCleanupRefresh()}
+                type="button"
+              >
+                <RefreshCcw className={refreshingCleanup ? 'sync-button-spin' : undefined} size={15} />
+                {refreshingCleanup ? 'Refreshing' : 'Refresh'}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -10137,7 +10174,11 @@ function DiscrepancyDashboardView(props: {
                             </td>
                             <td>
                               <strong>{cleanup?.productName ?? row.productFamily}</strong>
-                              <span>{cleanup?.productCode ?? cleanup?.vendorProductKey ?? 'AppRiver subscription'}</span>
+                              <span title={cleanup?.subscriptionKey}>
+                                {cleanup
+                                  ? `Subscription ${cleanup.subscriptionKey} · ${cleanup.totalLicenses.toLocaleString()} licenses`
+                                  : 'AppRiver subscription'}
+                              </span>
                             </td>
                             <td>
                               <strong className={cleanup?.refresh ? 'cleanup-refreshed-count' : undefined}>{cleanupCountsLabel(cleanup)}</strong>
@@ -10564,6 +10605,17 @@ function AppRiverCleanupConfirmationModal(props: {
         </div>
 
         <div className="cleanup-confirmation-footer">
+          {row.cleanup?.externalCustomerId ? (
+            <a
+              className="button secondary cleanup-confirmation-manage-link"
+              href={`https://cp.appriver.com/PP/CustomerDetails.aspx#!/customer/${encodeURIComponent(row.cleanup.externalCustomerId)}/subscriptions`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <ExternalLink size={16} />
+              Manage in AppRiver
+            </a>
+          ) : null}
           <button className="button secondary" disabled={submitting} onClick={onClose} type="button">
             {preview?.status === 'matched' ? 'Done' : 'Cancel'}
           </button>

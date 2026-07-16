@@ -431,6 +431,7 @@ async function run() {
   await testQueueRefreshesLiveSubscriptionDetails();
   await testPreviewQueuesManualRemoval();
   await testPreviewMarksLiveMatch();
+  await testAggregateProductCountsNeverReplaceSubscriptionQuantity();
   await testPreviewUsesCandidateFromSavedAudit();
   await testListAndCancelQueuedAction();
   await testDismissCanceledAction();
@@ -567,6 +568,90 @@ async function testPreviewMarksLiveMatch() {
   assert.equal(refreshedCandidate?.refresh?.initialTotalLicenses, 10);
 }
 
+async function testAggregateProductCountsNeverReplaceSubscriptionQuantity() {
+  const database = new CleanupDatabase([
+    snapshot('monthly-business-premium', {
+      commitmentEndDate: '2026-07-14T00:00:00Z',
+      totalLicenses: 156,
+      subscriptionQuantity: 21,
+      assignedLicenses: 154,
+      unassignedLicenses: 2,
+    }),
+  ]);
+  const rowId = 'appriver-license-cleanup:cust-1:monthly-business-premium';
+  const initialCandidate = (await listAppRiverLicenseCleanupCandidates(database, { now })).rows.find(
+    (candidate) => candidate.id === rowId,
+  );
+  assert.equal(initialCandidate?.totalLicenses, 21);
+  assert.equal(initialCandidate?.assignedLicenses, 19);
+  assert.equal(initialCandidate?.proposedQuantity, 19);
+
+  database.subscriptionRefreshes.set(`${syncRunId}:cust-1:monthly-business-premium`, {
+    ...initialCandidate,
+    totalLicenses: 154,
+    assignedLicenses: 154,
+    unassignedLicenses: 0,
+    proposedReduction: 0,
+    proposedQuantity: 154,
+    refresh: {
+      syncRunId,
+      initialTotalLicenses: 21,
+      initialAssignedLicenses: 19,
+      initialUnassignedLicenses: 2,
+      refreshedAt: now,
+    },
+  });
+  const correctedLegacyCandidate = (await listAppRiverLicenseCleanupCandidates(database, { now })).rows.find(
+    (candidate) => candidate.id === rowId,
+  );
+  assert.equal(correctedLegacyCandidate?.totalLicenses, 19);
+  assert.equal(correctedLegacyCandidate?.assignedLicenses, 19);
+  assert.equal(correctedLegacyCandidate?.proposedQuantity, 19);
+
+  await assert.rejects(
+    refreshAppRiverLicenseCleanupCandidate(database, {
+      actor: 'license@example.com',
+      rowId,
+      now,
+      liveClient: {
+        async getCustomerSubscriptionDetails(_customerId, subscriptionKey) {
+          return detail({
+            subscriptionKey,
+            totalLicenses: 154,
+            assignedLicenses: 154,
+            unassignedLicenses: 0,
+          });
+        },
+      },
+    }),
+    /No license decrease will be attempted/,
+  );
+
+  const preview = await refreshAppRiverLicenseCleanupCandidate(database, {
+    actor: 'license@example.com',
+    rowId,
+    now,
+    liveClient: {
+      async getCustomerSubscriptionDetails(_customerId, subscriptionKey) {
+        return detail({
+          subscriptionKey,
+          totalLicenses: 154,
+          subscriptionQuantity: 19,
+          assignedLicenses: 154,
+          unassignedLicenses: 0,
+        });
+      },
+    },
+  });
+
+  assert.equal(preview?.status, 'matched');
+  assert.equal(preview?.candidate.totalLicenses, 19);
+  assert.equal(preview?.candidate.assignedLicenses, 19);
+  assert.equal(preview?.candidate.proposedQuantity, 19);
+  assert.equal(preview?.candidate.refresh?.initialTotalLicenses, 21);
+  assert.equal(preview?.candidate.refresh?.quantitySource, 'subscription');
+}
+
 async function testScheduledCancellationIsNotQueued() {
   const database = new CleanupDatabase([
     snapshot('canceling', {
@@ -599,7 +684,7 @@ async function testReportEligibility() {
     snapshot('no-unassigned', { commitmentEndDate: '2026-07-20T00:00:00Z', totalLicenses: 5, assignedLicenses: 5, unassignedLicenses: 0 }),
     snapshot('floor', { commitmentEndDate: '2026-07-20T00:00:00Z', totalLicenses: 2, assignedLicenses: 0, unassignedLicenses: 5 }),
     {
-      ...snapshot('verified-result', { commitmentEndDate: '2026-07-20T00:00:00Z', totalLicenses: 7, assignedLicenses: 7, unassignedLicenses: 0 }),
+      ...snapshot('verified-result', { commitmentEndDate: '2026-07-20T00:00:00Z', totalLicenses: 9, assignedLicenses: 7, unassignedLicenses: 2 }),
       latest_action_id: 'cccccccc-cccc-4ccc-8ccc-999999999999',
       latest_action_status: 'verified',
       latest_requested_quantity: 7,
@@ -637,7 +722,9 @@ async function testReportEligibility() {
   assert.equal(bySubscription.get('no-unassigned'), undefined);
   assert.equal(bySubscription.get('floor'), undefined);
   assert.equal(bySubscription.get('verified-result')?.latestAction?.status, 'verified');
+  assert.equal(bySubscription.get('verified-result')?.totalLicenses, 7);
   assert.equal(bySubscription.get('verified-result')?.unassignedLicenses, 0);
+  assert.equal(bySubscription.get('verified-result')?.proposedReduction, 0);
 }
 
 async function testQueueDuplicatePrevention() {
@@ -974,6 +1061,7 @@ function snapshot(
   input: {
     commitmentEndDate: string;
     totalLicenses: number;
+    subscriptionQuantity?: number;
     assignedLicenses: number;
     unassignedLicenses: number;
     subscriptionTerm?: string;
@@ -990,13 +1078,13 @@ function snapshot(
     vendor_product_key: `${subscriptionKey}-key`,
     product_code: subscriptionKey.toUpperCase(),
     product_name: productName,
-    quantity: input.totalLicenses,
+    quantity: input.subscriptionQuantity ?? input.totalLicenses,
     observed_at: '2026-07-15T11:45:00.000Z',
     dimensions: {
       subscriptionKey,
       productName,
       totalLicenses: input.totalLicenses,
-      subscriptionQuantity: input.totalLicenses,
+      subscriptionQuantity: input.subscriptionQuantity ?? input.totalLicenses,
       assignedLicenses: input.assignedLicenses,
       unassignedLicenses: input.unassignedLicenses,
       commitmentEndDate: input.commitmentEndDate,

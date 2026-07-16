@@ -436,7 +436,10 @@ export function appRiverProductKeyForSubscription(detail: AppRiverSubscriptionDe
 }
 
 export function appRiverLicenseQuantity(detail: AppRiverSubscriptionDetail) {
-  return detail.totalLicenses ?? detail.subscriptionQuantity ?? 0;
+  // SubscriptionQuantity is the configurable quantity for this specific
+  // subscription. TotalLicenses can be an aggregate across multiple
+  // subscriptions for the same product and must never take precedence here.
+  return detail.subscriptionQuantity ?? detail.totalLicenses ?? 0;
 }
 
 export function fallbackAppRiverProductCode(vendorProductKey: string) {

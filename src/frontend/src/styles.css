@@ -4708,6 +4708,10 @@ h2 {
   background: #fbfcfa;
 }
 
+.cleanup-confirmation-manage-link {
+  margin-right: auto;
+}
+
 @media (max-width: 640px) {
   .cleanup-confirmation-counts {
     grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1,7 +1,6 @@
 import {
   AppRiverApiError,
   appRiverIntegrationId,
-  appRiverLicenseQuantity,
   appRiverProductKeyForSubscription,
   fallbackAppRiverProductCode,
   type AppRiverChargeEvent,
@@ -79,6 +78,7 @@ export type AppRiverLicenseCleanupCandidate = {
     initialAssignedLicenses?: number;
     initialUnassignedLicenses: number;
     refreshedAt: string;
+    quantitySource?: 'subscription';
   };
   pendingAction?: {
     id: string;
@@ -593,6 +593,7 @@ export async function refreshAppRiverLicenseCleanupCandidate(
         initialAssignedLicenses,
         initialUnassignedLicenses,
         refreshedAt: now,
+        quantitySource: 'subscription',
       },
     };
     await upsertSubscriptionRefresh(database, {
@@ -1026,7 +1027,7 @@ async function verifyCleanupAction(
   now: string,
 ) {
   const detail = await client.getCustomerSubscriptionDetails(action.external_customer_id, action.subscription_key);
-  const observedQuantity = appRiverLicenseQuantity(detail);
+  const observedQuantity = appRiverSubscriptionQuantityForCleanup(detail);
   const requestedQuantity = integerValue(action.requested_quantity);
   const liveSource = sourceFromLiveDetail(action, detail, now);
   await persistWorkerSubscriptionRefresh(database, action, liveSource, now);
@@ -1208,10 +1209,17 @@ async function loadLatestAppRiverSnapshotRows(database: Queryable, syncRunId: st
 function sourceFromSnapshotRow(row: SnapshotRow, syncRun: AppRiverLicenseCleanupSyncRun): CandidateSource {
   const dimensions = recordFromJson(row.dimensions);
   const refreshedCandidate = cleanupCandidateFromUnknown(row.refresh_candidate);
-  const totalLicenses =
-    integerValue(dimensions.totalLicenses) ||
+  const snapshotQuantity =
     integerValue(dimensions.subscriptionQuantity) ||
-    integerValue(row.quantity);
+    integerValue(row.quantity) ||
+    integerValue(dimensions.totalLicenses);
+  const aggregateTotalLicenses = integerValue(dimensions.totalLicenses);
+  const totalLicenses = refreshedCandidate
+    ? refreshedSubscriptionQuantity(refreshedCandidate, snapshotQuantity, aggregateTotalLicenses)
+    : snapshotQuantity;
+  const reportedUnassignedLicenses = refreshedCandidate?.unassignedLicenses ?? integerValue(dimensions.unassignedLicenses);
+  const unassignedLicenses = Math.min(reportedUnassignedLicenses, totalLicenses);
+  const assignedLicenses = Math.max(totalLicenses - unassignedLicenses, 0);
   const subscriptionKey = stringValue(dimensions.subscriptionKey) ?? row.id;
 
   return {
@@ -1230,9 +1238,9 @@ function sourceFromSnapshotRow(row: SnapshotRow, syncRun: AppRiverLicenseCleanup
     productName: refreshedCandidate?.productName ?? stringValue(dimensions.productName) ?? row.product_name,
     subscriptionKey,
     domain: refreshedCandidate?.domain ?? stringValue(dimensions.domain),
-    totalLicenses: refreshedCandidate?.totalLicenses ?? totalLicenses,
-    assignedLicenses: refreshedCandidate?.assignedLicenses ?? optionalInteger(dimensions.assignedLicenses),
-    unassignedLicenses: refreshedCandidate?.unassignedLicenses ?? integerValue(dimensions.unassignedLicenses),
+    totalLicenses,
+    assignedLicenses,
+    unassignedLicenses,
     commitmentEndDate: refreshedCandidate?.commitmentEndDate ?? stringValue(dimensions.commitmentEndDate),
     subscriptionTerm: refreshedCandidate?.subscriptionTerm ?? stringValue(dimensions.subscriptionTerm),
     billingFrequency: refreshedCandidate?.billingFrequency ?? stringValue(dimensions.billingFrequency),
@@ -1268,6 +1276,30 @@ function sourceFromSnapshotRow(row: SnapshotRow, syncRun: AppRiverLicenseCleanup
       : undefined,
     refresh: refreshedCandidate?.refresh,
   };
+}
+
+function refreshedSubscriptionQuantity(
+  candidate: AppRiverLicenseCleanupCandidate,
+  snapshotQuantity: number,
+  snapshotAggregateTotal: number,
+) {
+  if (candidate.refresh?.quantitySource === 'subscription') {
+    return candidate.totalLicenses;
+  }
+
+  // Older refreshes stored product-wide TotalLicenses. Recover this
+  // subscription's count by applying the aggregate change to its original
+  // SubscriptionQuantity.
+  const maximumExpectedAggregateChange = Math.max(candidate.refresh?.initialUnassignedLicenses ?? 0, 10);
+  const looksLikeLegacyAggregateRefresh =
+    snapshotAggregateTotal > snapshotQuantity &&
+    candidate.totalLicenses > snapshotQuantity &&
+    Math.abs(candidate.totalLicenses - snapshotAggregateTotal) <= maximumExpectedAggregateChange;
+  if (!looksLikeLegacyAggregateRefresh) {
+    return candidate.totalLicenses;
+  }
+
+  return Math.max(snapshotQuantity + candidate.totalLicenses - snapshotAggregateTotal, 1);
 }
 
 async function persistWorkerSubscriptionRefresh(
@@ -1307,6 +1339,7 @@ async function persistWorkerSubscriptionRefresh(
       initialAssignedLicenses,
       initialUnassignedLicenses,
       refreshedAt: now,
+      quantitySource: 'subscription',
     },
   };
   await upsertSubscriptionRefresh(database, {
@@ -1320,12 +1353,13 @@ async function persistWorkerSubscriptionRefresh(
 function sourceFromLiveDetail(action: CleanupActionRow, detail: AppRiverSubscriptionDetail, now: string): CandidateSource {
   const vendorProductKey = appRiverProductKeyForSubscription(detail);
   const productCode = detail.productCode ?? fallbackAppRiverProductCode(vendorProductKey);
-  const totalLicenses = appRiverLicenseQuantity(detail);
-  const unassignedLicenses =
+  const totalLicenses = appRiverSubscriptionQuantityForCleanup(detail);
+  const reportedUnassignedLicenses =
     detail.unassignedLicenses ??
     (typeof detail.assignedLicenses === 'number'
-      ? Math.max(totalLicenses - detail.assignedLicenses, 0)
+      ? Math.max((detail.totalLicenses ?? totalLicenses) - detail.assignedLicenses, 0)
       : integerValue(action.current_unassigned_licenses));
+  const unassignedLicenses = Math.min(reportedUnassignedLicenses, totalLicenses);
 
   return {
     id: `appriver-license-cleanup:${action.external_customer_id}:${detail.subscriptionKey}`,
@@ -1338,7 +1372,7 @@ function sourceFromLiveDetail(action: CleanupActionRow, detail: AppRiverSubscrip
     subscriptionKey: detail.subscriptionKey,
     domain: detail.domain ?? action.domain ?? undefined,
     totalLicenses,
-    assignedLicenses: detail.assignedLicenses,
+    assignedLicenses: Math.max(totalLicenses - unassignedLicenses, 0),
     unassignedLicenses,
     commitmentEndDate: detail.commitmentEndDate,
     subscriptionTerm: detail.subscriptionTerm,
@@ -1416,6 +1450,16 @@ function cleanupCandidateFromUnknown(value: unknown, expectedRowId?: string): Ap
   return value as AppRiverLicenseCleanupCandidate;
 }
 
+function appRiverSubscriptionQuantityForCleanup(detail: AppRiverSubscriptionDetail) {
+  const quantity = detail.subscriptionQuantity;
+  if (typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity < 1) {
+    throw new Error(
+      `AppRiver did not return a valid SubscriptionQuantity for subscription "${detail.subscriptionKey}". No license decrease will be attempted.`,
+    );
+  }
+  return quantity;
+}
+
 function liveSourceForCandidate(
   snapshotCandidate: AppRiverLicenseCleanupCandidate,
   detail: AppRiverSubscriptionDetail,
@@ -1423,13 +1467,14 @@ function liveSourceForCandidate(
 ): CandidateSource {
   const vendorProductKey = appRiverProductKeyForSubscription(detail);
   const productCode = detail.productCode ?? snapshotCandidate.productCode ?? fallbackAppRiverProductCode(vendorProductKey);
-  const liveQuantity = appRiverLicenseQuantity(detail);
-  const assignedLicenses = detail.assignedLicenses ?? snapshotCandidate.assignedLicenses;
-  const unassignedLicenses =
+  const liveQuantity = appRiverSubscriptionQuantityForCleanup(detail);
+  const reportedUnassignedLicenses =
     detail.unassignedLicenses ??
-    (typeof assignedLicenses === 'number'
-      ? Math.max(liveQuantity - assignedLicenses, 0)
+    (typeof detail.assignedLicenses === 'number'
+      ? Math.max((detail.totalLicenses ?? liveQuantity) - detail.assignedLicenses, 0)
       : snapshotCandidate.unassignedLicenses);
+  const unassignedLicenses = Math.min(reportedUnassignedLicenses, liveQuantity);
+  const assignedLicenses = Math.max(liveQuantity - unassignedLicenses, 0);
 
   return {
     id: snapshotCandidate.id,
@@ -1504,6 +1549,9 @@ function candidateFromSource(
   const recentIncrease = recentIncreaseFor(chargeIndex, source.customerName, source.productName ?? source.productCode ?? source.subscriptionKey, source.totalLicenses);
   const hasRenewal = renewal.isRecent;
   const hasRecentOrder = recentIncrease.availableLicensesToReduce > 0;
+  if (source.latestAction?.status === 'verified') {
+    return actionResultCandidate(source, renewal, recentIncrease);
+  }
   if (source.unassignedLicenses <= 0 && source.refresh) {
     return refreshedMatchedCandidate(source, renewal, recentIncrease);
   }
@@ -1632,7 +1680,10 @@ function actionResultCandidate(
   }
 
   const requestedReduction = latestAction.requestedReduction || Math.max(source.totalLicenses - latestAction.requestedQuantity, 0);
+  const actionVerified = latestAction.status === 'verified';
   const proposedQuantity = latestAction.finalQuantity ?? latestAction.requestedQuantity;
+  const totalLicenses = actionVerified ? proposedQuantity : source.totalLicenses;
+  const unassignedLicenses = actionVerified ? 0 : source.unassignedLicenses;
   return {
     id: source.id,
     customerId: source.customerId,
@@ -1644,10 +1695,10 @@ function actionResultCandidate(
     productName: source.productName ?? source.productCode ?? source.subscriptionKey,
     subscriptionKey: source.subscriptionKey,
     domain: source.domain,
-    totalLicenses: source.totalLicenses,
-    assignedLicenses: source.assignedLicenses,
-    unassignedLicenses: source.unassignedLicenses,
-    proposedReduction: requestedReduction,
+    totalLicenses,
+    assignedLicenses: actionVerified ? totalLicenses : source.assignedLicenses,
+    unassignedLicenses,
+    proposedReduction: actionVerified ? 0 : requestedReduction,
     proposedQuantity,
     eligibilityReason: recentIncrease.availableLicensesToReduce > 0 ? 'RecentOrder' : 'Renewal',
     renewalWindow: renewal.isUpcoming ? 'Upcoming' : renewal.isRecent ? 'Recent' : undefined,

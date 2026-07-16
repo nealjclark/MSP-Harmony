@@ -406,7 +406,23 @@ async function mergeDiscrepancyAuditExtras(
 
       const preview = cleanupPreviewPayload(actionRow.preview_payload);
       const persistedRefresh = cleanupCandidatePayload(actionRow.refresh_candidate);
-      const refreshedCleanup = persistedRefresh ?? preview?.candidate ?? row.cleanup;
+      const savedOrRefreshedCleanup = persistedRefresh ?? preview?.candidate ?? row.cleanup;
+      const verifiedQuantity =
+        !persistedRefresh &&
+        actionRow.latest_action_status === 'verified'
+          ? optionalInteger(actionRow.latest_final_quantity) ?? optionalInteger(actionRow.latest_requested_quantity)
+          : undefined;
+      const refreshedCleanup =
+        verifiedQuantity !== undefined && verifiedQuantity > 0
+          ? {
+              ...savedOrRefreshedCleanup,
+              totalLicenses: verifiedQuantity,
+              assignedLicenses: verifiedQuantity,
+              unassignedLicenses: 0,
+              proposedReduction: 0,
+              proposedQuantity: verifiedQuantity,
+            }
+          : savedOrRefreshedCleanup;
       const assignedCount =
         refreshedCleanup.assignedLicenses ??
         Math.max(refreshedCleanup.totalLicenses - refreshedCleanup.unassignedLicenses, 0);

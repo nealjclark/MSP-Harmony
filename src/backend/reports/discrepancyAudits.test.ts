@@ -134,6 +134,7 @@ async function run() {
   await testRunAndDetectNewerSnapshot();
   await testSavedAuditMergesCleanupActions();
   await testSavedAuditHidesPersistedMatchedRefresh();
+  await testSavedAuditHidesHistoricalVerifiedAction();
 
   console.log('discrepancy audit tests passed');
 }
@@ -193,6 +194,58 @@ async function testSavedAuditHidesPersistedMatchedRefresh() {
   assert.equal(visible?.rows[0]?.status, 'matched');
   assert.equal(visible?.rows[0]?.cleanup?.totalLicenses, 8);
   assert.equal(visible?.rows[0]?.cleanup?.refresh?.initialTotalLicenses, 10);
+}
+
+async function testSavedAuditHidesHistoricalVerifiedAction() {
+  const database = new AuditDatabase();
+  database.audits.push({
+    id: 'dddddddd-dddd-4ddd-8ddd-000000000003',
+    comparison_id: 'appriver-license-cleanup',
+    comparison_label: 'AppRiver license cleanup',
+    source_key: 'source:opentext-appriver:cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    source_snapshot: {
+      comparisonId: 'appriver-license-cleanup',
+      sources: [{ vendorId: 'opentext-appriver', syncRunId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }],
+    },
+    report_json: appRiverCleanupReport(),
+    generated_at: now,
+    created_at: now,
+    created_by: 'analyst@example.com',
+    row_count: 1,
+    open_discrepancy_count: 1,
+  });
+  const original = appRiverCleanupReport().rows[0]?.cleanup;
+  assert.ok(original);
+  database.cleanupMergeRows = [{
+    row_id: original.id,
+    pending_action_id: null,
+    latest_action_id: 'eeeeeeee-eeee-4eee-8eee-000000000003',
+    latest_action_status: 'verified',
+    latest_requested_quantity: 8,
+    latest_requested_reduction: 2,
+    latest_final_quantity: 8,
+    latest_error_message: null,
+    latest_created_at: '2026-07-15T12:05:00.000Z',
+    latest_completed_at: '2026-07-15T12:10:00.000Z',
+    latest_updated_at: '2026-07-15T12:10:00.000Z',
+    refresh_candidate: null,
+    preview_payload: null,
+  }];
+
+  const hidden = await getLatestDiscrepancyAuditReport(database, {
+    comparisonId: 'appriver-license-cleanup',
+    includeMatched: false,
+  });
+  assert.equal(hidden?.rows.length, 0);
+
+  const visible = await getLatestDiscrepancyAuditReport(database, {
+    comparisonId: 'appriver-license-cleanup',
+    includeMatched: true,
+  });
+  assert.equal(visible?.rows[0]?.status, 'matched');
+  assert.equal(visible?.rows[0]?.cleanup?.totalLicenses, 8);
+  assert.equal(visible?.rows[0]?.cleanup?.unassignedLicenses, 0);
+  assert.equal(visible?.rows[0]?.cleanup?.latestAction?.status, 'verified');
 }
 
 async function testRunAndDetectNewerSnapshot() {

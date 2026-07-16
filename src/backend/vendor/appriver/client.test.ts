@@ -78,13 +78,13 @@ const responses: Array<{ status: number; body: unknown; headers?: Record<string,
       CancellationDate: '2027-01-01T00:00:00Z',
       ScheduledUninstallDate: '2027-01-31T00:00:00Z',
       ReadonlySubscriptionDetails: [
-        { Name: 'TotalLicenses', Value: '3' },
-        { Name: 'AssignedLicenses', Value: '1' },
+        { Name: 'TotalLicenses', Value: '156' },
+        { Name: 'AssignedLicenses', Value: '154' },
         { Name: 'UnassignedLicenses', Value: '2' },
         { Name: 'CommitmentEndDate', Value: '2027-01-01T00:00:00Z' },
       ],
       ConfigurableSubscriptionDetails: [
-        { Name: 'SubscriptionQuantity', Value: '3' },
+        { Name: 'SubscriptionQuantity', Value: '21' },
       ],
     },
   },
@@ -142,15 +142,15 @@ async function run() {
 
     const detail = await client.getCustomerSubscriptionDetails('customer-1', 'subscription/key 1');
     assert.equal(detail.productName, 'Microsoft 365 Business Premium');
-    assert.equal(detail.totalLicenses, 3);
-    assert.equal(detail.assignedLicenses, 1);
+    assert.equal(detail.totalLicenses, 156);
+    assert.equal(detail.assignedLicenses, 154);
     assert.equal(detail.unassignedLicenses, 2);
-    assert.equal(detail.subscriptionQuantity, 3);
+    assert.equal(detail.subscriptionQuantity, 21);
     assert.equal(detail.commitmentEndDate, '2027-01-01T00:00:00Z');
     assert.equal(detail.status, 'Scheduled to Uninstall');
     assert.equal(detail.cancellationDate, '2027-01-01T00:00:00Z');
     assert.equal(detail.scheduledUninstallDate, '2027-01-31T00:00:00Z');
-    assert.equal(appRiverLicenseQuantity(detail), 3);
+    assert.equal(appRiverLicenseQuantity(detail), 21);
     assert.equal(appRiverProductKeyForSubscription(detail), 'Microsoft 365 Business Premium|Annual|Monthly');
     assert.deepEqual(rotatedRefreshTokens, ['rotated-refresh-1', 'rotated-refresh-2']);
     assert.equal(
