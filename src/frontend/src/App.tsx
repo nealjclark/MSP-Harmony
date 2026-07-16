@@ -10817,7 +10817,11 @@ function groupDiscrepancyRowsByCustomer(rows: DiscrepancyRow[]) {
       customerName,
       [...customerRows].sort((left, right) => Number(isUpcomingAppRiverCleanup(left)) - Number(isUpcomingAppRiverCleanup(right))),
     ] as [string, DiscrepancyRow[]])
-    .sort((left, right) => compareCustomerNames(left[0], right[0]));
+    .sort((left, right) => {
+      const leftHasActions = left[1].some(isAppRiverCleanupActionable);
+      const rightHasActions = right[1].some(isAppRiverCleanupActionable);
+      return Number(rightHasActions) - Number(leftHasActions) || compareCustomerNames(left[0], right[0]);
+    });
 }
 
 function discrepancyStatusLabel(status: DiscrepancySeverity) {
