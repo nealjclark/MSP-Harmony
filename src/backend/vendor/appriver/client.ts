@@ -48,6 +48,8 @@ export type AppRiverSubscriptionDetail = AppRiverSubscription & {
   billingFrequency?: string;
   isTrial?: boolean;
   expirationBehavior?: string;
+  cancellationDate?: string;
+  scheduledUninstallDate?: string;
   domain?: string;
   notes?: string;
 };
@@ -60,6 +62,13 @@ export type AppRiverChargeEvent = {
   previousQuantity?: number;
   effectiveDate?: string;
   raw: unknown;
+};
+
+export type AppRiverSubscriptionQuantityUpdateResult = {
+  accepted: boolean;
+  endpoint: string;
+  message?: string;
+  response?: unknown;
 };
 
 export type AppRiverListOptions = {
@@ -182,6 +191,58 @@ export class AppRiverClient {
     );
 
     return rows.map(parseChargeEvent);
+  }
+
+  async setCustomerSubscriptionLicenseCount(
+    customerId: string,
+    subscriptionKey: string,
+    licenseCount: number,
+  ): Promise<AppRiverSubscriptionQuantityUpdateResult> {
+    const body = JSON.stringify({
+      ConfigurableSubscriptionDetails: [
+        {
+          Name: 'SubscriptionQuantity',
+          Value: String(licenseCount),
+        },
+      ],
+    });
+
+    for (const prefix of ['api', 'service/api']) {
+      const endpoint = `/${prefix}/securecloud/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subscriptionKey)}`;
+      try {
+        const response = await this.request<unknown>(endpoint, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body,
+        });
+        const record = recordValue(response);
+        return {
+          accepted: true,
+          endpoint: absoluteUrl(endpoint, this.baseUrl),
+          message: stringValue(valueByKeys(record, ['Message', 'message'])),
+          response,
+        };
+      } catch (error) {
+        if (prefix === 'api' && error instanceof AppRiverApiError && error.status === 404) {
+          continue;
+        }
+
+        if (isAcceptedForProcessingError(error)) {
+          return {
+            accepted: true,
+            endpoint: absoluteUrl(endpoint, this.baseUrl),
+            message: error instanceof Error ? error.message : 'The request has been accepted for processing.',
+            response: error instanceof AppRiverApiError ? error.responseText : undefined,
+          };
+        }
+
+        throw error;
+      }
+    }
+
+    throw new AppRiverApiError('AppRiver subscription quantity update failed for both supported endpoints.');
   }
 
   private async listPaged<T>(
@@ -375,7 +436,7 @@ export function appRiverProductKeyForSubscription(detail: AppRiverSubscriptionDe
 }
 
 export function appRiverLicenseQuantity(detail: AppRiverSubscriptionDetail) {
-  return detail.subscriptionQuantity ?? detail.totalLicenses ?? 0;
+  return detail.totalLicenses ?? detail.subscriptionQuantity ?? 0;
 }
 
 export function fallbackAppRiverProductCode(vendorProductKey: string) {
@@ -438,6 +499,8 @@ function parseSubscriptionDetail(record: Record<string, unknown>): AppRiverSubsc
     billingFrequency: stringValue(valueByKeys(record, ['BillingFrequency', 'billingFrequency'])),
     isTrial: booleanValue(valueByKeys(record, ['IsTrial', 'isTrial'])),
     expirationBehavior: stringValue(valueByKeys(record, ['ExpirationBehavior', 'expirationBehavior'])),
+    cancellationDate: stringValue(valueByKeys(record, ['CancellationDate', 'cancellationDate'])),
+    scheduledUninstallDate: stringValue(valueByKeys(record, ['ScheduledUninstallDate', 'scheduledUninstallDate'])),
     domain: stringValue(valueByKeys(record, ['Domain', 'PrimaryDomain', 'domain'])),
     notes: stringValue(valueByKeys(record, ['Notes', 'notes'])),
   };
@@ -453,6 +516,15 @@ function parseChargeEvent(record: Record<string, unknown>): AppRiverChargeEvent 
     effectiveDate: stringValue(valueByKeys(record, ['EffectiveDate', 'effectiveDate'])),
     raw: record,
   };
+}
+
+function isAcceptedForProcessingError(error: unknown) {
+  if (!(error instanceof AppRiverApiError)) {
+    return false;
+  }
+
+  const combined = `${error.message} ${error.responseText ?? ''}`;
+  return /accepted for processing/i.test(combined);
 }
 
 function arrayFromResponse<T>(response: unknown, keys: string[]): T[] {

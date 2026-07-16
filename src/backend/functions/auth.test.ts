@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readAuthPrincipal, requireRole } from './auth';
+import { hasLicenseActionRole, readAuthPrincipal, requireRole } from './auth';
 
 const originalAllowHeaderRoleAuth = process.env.ALLOW_HEADER_ROLE_AUTH;
 const originalWebsiteSiteName = process.env.WEBSITE_SITE_NAME;
@@ -28,6 +28,18 @@ async function run() {
   assert.equal((await requireRole(analystRequest, 'Analyst')).response?.status, 403);
   delete process.env.WEBSITE_SITE_NAME;
 
+  const licenseAdminRequest = {
+    headers: new Headers({
+      'x-ms-client-principal-name': 'license@example.com',
+      'x-ms-client-principal-role': 'LicenseAdmin',
+    }),
+  } as never;
+  const licenseAdmin = await requireRole(licenseAdminRequest, 'Analyst');
+  assert.equal(licenseAdmin.principal?.name, 'license@example.com');
+  assert.deepEqual(licenseAdmin.principal?.roles, ['LicenseAdmin']);
+  assert.equal(hasLicenseActionRole(licenseAdmin.principal), true);
+  assert.equal((await requireRole(licenseAdminRequest, 'Admin')).response?.status, 403);
+
   const principalPayload = Buffer.from(
     JSON.stringify({
       userId: 'principal-id',
@@ -44,6 +56,7 @@ async function run() {
   assert.equal(principal?.id, 'principal-id');
   assert.equal(principal?.name, 'admin@example.com');
   assert.deepEqual(principal?.roles, ['Admin']);
+  assert.equal(hasLicenseActionRole(principal), true);
 
   console.log('auth function tests passed');
 }

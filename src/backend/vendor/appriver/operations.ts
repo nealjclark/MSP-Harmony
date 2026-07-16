@@ -811,7 +811,7 @@ async function processAppRiverCustomerWorkItem(
   };
 }
 
-function createAppRiverClient(settings: IntegrationRuntimeSettings) {
+export function createAppRiverClient(settings: IntegrationRuntimeSettings) {
   const credentials = appRiverCredentialsFromSettings(settings);
 
   return new AppRiverClient(credentials, {
@@ -1323,6 +1323,9 @@ function dimensionsForSubscription(customer: AppRiverCustomer, detail: AppRiverS
     billingFrequency: detail.billingFrequency,
     isTrial: detail.isTrial,
     expirationBehavior: detail.expirationBehavior,
+    subscriptionStatus: detail.status,
+    cancellationDate: detail.cancellationDate,
+    scheduledUninstallDate: detail.scheduledUninstallDate,
     domain: detail.domain,
     notes: detail.notes,
   };

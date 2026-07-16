@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   aad_user_id text,
   email text NOT NULL,
   display_name text,
-  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'Analyst')),
+  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'LicenseAdmin', 'Analyst')),
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   last_seen_at timestamptz,
   created_by text,
@@ -338,6 +338,65 @@ CREATE TABLE IF NOT EXISTS appriver_sync_work_items (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (sync_run_id, external_customer_id)
+);
+
+CREATE TABLE IF NOT EXISTS appriver_license_cleanup_batches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  requested_by text NOT NULL,
+  status text NOT NULL DEFAULT 'queued',
+  requested_count integer NOT NULL DEFAULT 0,
+  queued_count integer NOT NULL DEFAULT 0,
+  skipped_count integer NOT NULL DEFAULT 0,
+  verified_count integer NOT NULL DEFAULT 0,
+  failed_count integer NOT NULL DEFAULT 0,
+  timed_out_count integer NOT NULL DEFAULT 0,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS appriver_license_cleanup_actions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id uuid NOT NULL REFERENCES appriver_license_cleanup_batches(id) ON DELETE CASCADE,
+  customer_id uuid REFERENCES customers(id),
+  customer_name text,
+  external_customer_id text NOT NULL,
+  vendor_product_key text,
+  product_code text,
+  product_name text NOT NULL,
+  subscription_key text NOT NULL,
+  domain text,
+  status text NOT NULL DEFAULT 'queued',
+  current_total_licenses integer NOT NULL,
+  current_assigned_licenses integer,
+  current_unassigned_licenses integer NOT NULL,
+  requested_reduction integer NOT NULL,
+  requested_quantity integer NOT NULL,
+  live_total_licenses integer,
+  live_assigned_licenses integer,
+  live_unassigned_licenses integer,
+  final_quantity integer,
+  eligibility_reason text,
+  renewal_window text,
+  effective_date timestamptz,
+  commitment_end_date date,
+  previous_commitment_end_date date,
+  attempts integer NOT NULL DEFAULT 0,
+  verification_attempts integer NOT NULL DEFAULT 0,
+  next_check_at timestamptz NOT NULL DEFAULT now(),
+  accepted_at timestamptz,
+  verified_at timestamptz,
+  started_at timestamptz,
+  completed_at timestamptz,
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+  error_message text,
+  request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  response_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  dismissed_at timestamptz,
+  dismissed_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS invoice_imports (
@@ -598,6 +657,40 @@ CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_next
   ON appriver_sync_work_items(sync_run_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_appriver_sync_work_items_customer
   ON appriver_sync_work_items(external_customer_id);
+CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_batches_status
+  ON appriver_license_cleanup_batches(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_next
+  ON appriver_license_cleanup_actions(status, next_check_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_batch
+  ON appriver_license_cleanup_actions(batch_id, status, created_at);
+ALTER TABLE appriver_license_cleanup_actions
+  ADD COLUMN IF NOT EXISTS dismissed_at timestamptz;
+ALTER TABLE appriver_license_cleanup_actions
+  ADD COLUMN IF NOT EXISTS dismissed_by text;
+UPDATE appriver_license_cleanup_actions
+SET status = CASE status
+      WHEN 'processing' THEN 'running'
+      WHEN 'accepted' THEN 'confirm'
+      WHEN 'verifying' THEN 'confirm'
+      WHEN 'timed_out' THEN 'failed'
+      ELSE status
+    END,
+    expires_at = CASE
+      WHEN status IN ('queued', 'processing', 'accepted', 'verifying')
+        THEN greatest(expires_at, created_at + interval '24 hours')
+      ELSE expires_at
+    END,
+    updated_at = now()
+WHERE status IN ('queued', 'processing', 'accepted', 'verifying', 'timed_out');
+
+DROP INDEX IF EXISTS ux_appriver_license_cleanup_actions_active_subscription;
+CREATE UNIQUE INDEX ux_appriver_license_cleanup_actions_active_subscription
+  ON appriver_license_cleanup_actions(external_customer_id, subscription_key)
+  WHERE status IN ('queued', 'running', 'reviewing', 'updating', 'confirm');
+
+ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
+ALTER TABLE app_users
+  ADD CONSTRAINT app_users_role_check CHECK (role IN ('Admin', 'Approver', 'LicenseAdmin', 'Analyst'));
 
 ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS invoice_number text;
 CREATE TABLE IF NOT EXISTS invoice_line_items (
@@ -818,6 +911,28 @@ CREATE TABLE IF NOT EXISTS saved_product_profitability_reports (
 
 CREATE INDEX IF NOT EXISTS idx_saved_product_profitability_reports_created_at
   ON saved_product_profitability_reports(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS discrepancy_audits (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  comparison_id text NOT NULL,
+  comparison_label text NOT NULL,
+  source_key text NOT NULL,
+  source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+  filters jsonb NOT NULL DEFAULT '{}'::jsonb,
+  report_json jsonb NOT NULL,
+  summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  row_count integer NOT NULL DEFAULT 0,
+  open_discrepancy_count integer NOT NULL DEFAULT 0,
+  generated_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by text
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_discrepancy_audits_comparison_source
+  ON discrepancy_audits(comparison_id, source_key);
+
+CREATE INDEX IF NOT EXISTS idx_discrepancy_audits_comparison_created
+  ON discrepancy_audits(comparison_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS communication_settings (
   id text PRIMARY KEY DEFAULT 'default',

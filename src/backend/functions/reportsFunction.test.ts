@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   generateChangeReportHttp,
   getCustomerLicenseReportHttp,
+  getDiscrepancyReportHttp,
   listCustomerLicenseReportCustomersHttp,
+  listDiscrepancyComparisonsHttp,
   recordRawPayloadAccess,
 } from './reportsFunction';
 
@@ -85,6 +87,28 @@ async function run() {
     {} as never,
   );
   assert.equal(unsupportedChangeReportModeResponse.status, 400);
+
+  const comparisonListResponse = await listDiscrepancyComparisonsHttp(
+    request({}, analystHeaders),
+    {} as never,
+  );
+  assert.equal(comparisonListResponse.status, 200);
+  assert.deepEqual(
+    (comparisonListResponse.jsonBody as { comparisonPairs: Array<{ id: string }> }).comparisonPairs.map((pair) => pair.id),
+    ['ncentral-sentinelone-devices', 'appriver-license-cleanup'],
+  );
+
+  const missingComparisonResponse = await getDiscrepancyReportHttp(
+    request({}, analystHeaders),
+    {} as never,
+  );
+  assert.equal(missingComparisonResponse.status, 400);
+
+  const unsupportedComparisonResponse = await getDiscrepancyReportHttp(
+    request({ comparisonId: 'proofpoint-microsoft365-users' }, analystHeaders),
+    {} as never,
+  );
+  assert.equal(unsupportedComparisonResponse.status, 400);
 
   clearDatabaseEnv();
   const missingDatabaseResponse = await listCustomerLicenseReportCustomersHttp(

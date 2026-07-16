@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { getDatabaseSettings } from '../database/config';
 import { getSharedDatabasePool } from '../database/pool';
 
-export type AppRole = 'Admin' | 'Approver' | 'Analyst';
+export type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
 
 export type AuthPrincipal = {
   appUserId?: string;
@@ -21,11 +21,12 @@ type StaticWebAppsPrincipal = {
 
 const roleRank: Record<AppRole, number> = {
   Analyst: 1,
+  LicenseAdmin: 1,
   Approver: 2,
   Admin: 3,
 };
 
-const appRoles: AppRole[] = ['Admin', 'Approver', 'Analyst'];
+const appRoles: AppRole[] = ['Admin', 'Approver', 'LicenseAdmin', 'Analyst'];
 let authPool: Pool | undefined;
 let authPoolPromise: Promise<Pool> | undefined;
 
@@ -135,6 +136,10 @@ export function readAuthPrincipal(request: HttpRequest): AuthPrincipal | undefin
 export function hasMinimumRole(principal: AuthPrincipal, minimumRole: AppRole) {
   const requiredRank = roleRank[minimumRole];
   return principal.roles.some((role) => roleRank[role] >= requiredRank);
+}
+
+export function hasLicenseActionRole(principal: AuthPrincipal) {
+  return principal.roles.some((role) => role === 'Admin' || role === 'LicenseAdmin');
 }
 
 function decodeStaticWebAppsPrincipal(value: string): StaticWebAppsPrincipal | undefined {

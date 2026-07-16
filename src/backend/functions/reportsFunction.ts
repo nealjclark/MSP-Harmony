@@ -13,10 +13,17 @@ import {
   listCustomerLicenseReportCustomers,
 } from '../reports/customerLicenseReports';
 import {
+  discrepancyComparisonDefinitions,
   getDiscrepancyReport,
   isDiscrepancyBasis,
+  isDiscrepancyComparisonId,
   isDiscrepancySeverity,
 } from '../reports/discrepancyReports';
+import {
+  getLatestDiscrepancyAuditReport,
+  listDiscrepancyAuditStates,
+  runAndSaveDiscrepancyAudit,
+} from '../reports/discrepancyAudits';
 import { getProductProfitabilityReport, type ProductProfitabilityReport } from '../reports/productProfitabilityReports';
 import {
   getSavedProductProfitabilityReport,
@@ -27,6 +34,8 @@ import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../r
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { assertConnectWiseReady } from '../connectwise/operations';
+import { AppRiverApiError } from '../vendor/appriver/client';
+import { assertAppRiverReady, createAppRiverClient } from '../vendor/appriver/operations';
 import { listClosedTicketsInRange, syncClosedTicketsForRange } from '../connectwise/ticketSync';
 import { listAllActiveLaborMappings } from '../mapping/laborMappings';
 import type { Queryable } from '../reports/agreementReports';
@@ -37,6 +46,7 @@ import {
   readJsonBody,
   requireMutatingRequestOrigin,
   serverErrorResponse,
+  type OptionalPostgresSettingsRepository,
 } from './runtime';
 
 loadDotEnv({ override: false });
@@ -607,9 +617,17 @@ export async function getDiscrepancyReportHttp(
   if (auth.response) return auth.response;
 
   const customerId = request.query.get('customerId') ?? undefined;
+  const comparisonId = request.query.get('comparisonId') ?? undefined;
   const basis = request.query.get('basis') ?? undefined;
   const severity = request.query.get('severity') ?? undefined;
   const includeMatched = booleanQueryValue(request.query.get('includeMatched'));
+
+  if (!comparisonId || !isDiscrepancyComparisonId(comparisonId)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report requires a supported comparisonId.',
+      supportedComparisonIds: discrepancyComparisonDefinitions.map((definition) => definition.id),
+    });
+  }
 
   if (customerId && !isUuid(customerId)) {
     return jsonResponse(400, {
@@ -641,19 +659,211 @@ export async function getDiscrepancyReportHttp(
   }
 
   try {
+    const appRiverChargeEvents =
+      comparisonId === 'appriver-license-cleanup'
+        ? await loadAppRiverChargeEventsForReport(repositoryContext)
+        : undefined;
+
     return jsonResponse(200, await getDiscrepancyReport(repositoryContext.pool, {
+      comparisonId,
       customerId,
       basis: isDiscrepancyBasis(basis) ? basis : undefined,
       severity: isDiscrepancySeverity(severity) ? severity : undefined,
       includeMatched,
+      appRiverChargeEvents,
     }));
   } catch (error) {
+    if (error instanceof AppRiverApiError) {
+      return jsonResponse(502, {
+        error: error.message || 'Unable to load AppRiver charge events for license cleanup.',
+        status: error.status,
+      });
+    }
+
     return jsonResponse(500, {
       error: error instanceof Error ? error.message : 'Unable to load discrepancy report.',
     });
   } finally {
     await repositoryContext.close();
   }
+}
+
+export async function getLatestDiscrepancyAuditReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const customerId = request.query.get('customerId') ?? undefined;
+  const comparisonId = request.query.get('comparisonId') ?? undefined;
+  const basis = request.query.get('basis') ?? undefined;
+  const severity = request.query.get('severity') ?? undefined;
+  const includeMatched = booleanQueryValue(request.query.get('includeMatched'));
+
+  const validationResponse = validateDiscrepancyReportQuery({
+    customerId,
+    comparisonId,
+    basis,
+    severity,
+  });
+  if (validationResponse) return validationResponse;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Discrepancy audit reporting needs PostgreSQL settings before it can load saved audits.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const report = await getLatestDiscrepancyAuditReport(repositoryContext.pool, {
+      comparisonId: comparisonId as string,
+      customerId,
+      basis: isDiscrepancyBasis(basis) ? basis : undefined,
+      severity: isDiscrepancySeverity(severity) ? severity : undefined,
+      includeMatched,
+    });
+
+    if (!report) {
+      return jsonResponse(404, {
+        error: 'No saved discrepancy audit is available for this comparison yet.',
+      });
+    }
+
+    return jsonResponse(200, report);
+  } catch (error) {
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to load saved discrepancy audit.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function runDiscrepancyAuditReportHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const bodyResult = await readJsonBody<{
+    comparisonId?: string;
+    customerId?: string;
+    basis?: string;
+    severity?: string;
+    includeMatched?: boolean;
+  }>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+
+  const comparisonId = typeof bodyResult.body.comparisonId === 'string' ? bodyResult.body.comparisonId : undefined;
+  const customerId = typeof bodyResult.body.customerId === 'string' ? bodyResult.body.customerId : undefined;
+  const basis = typeof bodyResult.body.basis === 'string' ? bodyResult.body.basis : undefined;
+  const severity = typeof bodyResult.body.severity === 'string' ? bodyResult.body.severity : undefined;
+  const includeMatched = bodyResult.body.includeMatched === true;
+
+  const validationResponse = validateDiscrepancyReportQuery({
+    customerId,
+    comparisonId,
+    basis,
+    severity,
+  });
+  if (validationResponse) return validationResponse;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Discrepancy audit reporting needs PostgreSQL settings before it can save audits.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const appRiverChargeEvents =
+      comparisonId === 'appriver-license-cleanup'
+        ? await loadAppRiverChargeEventsForReport(repositoryContext)
+        : undefined;
+
+    const report = await runAndSaveDiscrepancyAudit(repositoryContext.pool, {
+      comparisonId: comparisonId as string,
+      customerId,
+      basis: isDiscrepancyBasis(basis) ? basis : undefined,
+      severity: isDiscrepancySeverity(severity) ? severity : undefined,
+      includeMatched,
+      appRiverChargeEvents,
+      createdBy: auth.principal.email ?? auth.principal.name,
+    });
+
+    return jsonResponse(201, report);
+  } catch (error) {
+    if (error instanceof AppRiverApiError) {
+      return jsonResponse(502, {
+        error: error.message || 'Unable to load AppRiver charge events for license cleanup.',
+        status: error.status,
+      });
+    }
+
+    return jsonResponse(500, {
+      error: error instanceof Error ? error.message : 'Unable to run discrepancy audit.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listDiscrepancyComparisonsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+
+  if (!repositoryContext.pool) {
+    return jsonResponse(200, {
+      comparisonPairs: discrepancyComparisonDefinitions,
+      auditStates: [],
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, {
+      comparisonPairs: discrepancyComparisonDefinitions,
+      auditStates: await listDiscrepancyAuditStates(repositoryContext.pool),
+    });
+  } catch (error) {
+    return jsonResponse(200, {
+      comparisonPairs: discrepancyComparisonDefinitions,
+      auditStates: [],
+      auditStateError: error instanceof Error ? error.message : 'Unable to load discrepancy comparison audit states.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+async function loadAppRiverChargeEventsForReport(repositoryContext: OptionalPostgresSettingsRepository) {
+  if (!repositoryContext.repository) {
+    return [];
+  }
+
+  const provider = createIntegrationSettingsProvider({
+    loadLocalEnv: true,
+    metadataReader: repositoryContext.repository,
+  });
+  const settings = await provider.getIntegrationSettings('opentext-appriver');
+  assertAppRiverReady(settings);
+  const client = createAppRiverClient(settings);
+  return client.listChargeEvents({ pageSize: 1000, maxPages: 5 });
 }
 
 export async function listCustomerLicenseReportCustomersHttp(
@@ -752,6 +962,42 @@ export async function getCustomerLicenseReportHttp(
   }
 }
 
+function validateDiscrepancyReportQuery(input: {
+  customerId?: string;
+  comparisonId?: string;
+  basis?: string;
+  severity?: string;
+}) {
+  if (!input.comparisonId || !isDiscrepancyComparisonId(input.comparisonId)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report requires a supported comparisonId.',
+      supportedComparisonIds: discrepancyComparisonDefinitions.map((definition) => definition.id),
+    });
+  }
+
+  if (input.customerId && !isUuid(input.customerId)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report customerId must be a UUID.',
+    });
+  }
+
+  if (input.basis && !isDiscrepancyBasis(input.basis)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report basis must be "user" or "device".',
+      supportedBasis: ['user', 'device'],
+    });
+  }
+
+  if (input.severity && !isDiscrepancySeverity(input.severity)) {
+    return jsonResponse(400, {
+      error: 'Discrepancy report severity is not supported.',
+      supportedSeverities: ['matched', 'warning', 'critical', 'unavailable'],
+    });
+  }
+
+  return undefined;
+}
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -834,6 +1080,27 @@ app.http('getDiscrepancyReport', {
   authLevel: 'anonymous',
   route: 'reports/discrepancies',
   handler: getDiscrepancyReportHttp,
+});
+
+app.http('getLatestDiscrepancyAuditReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/discrepancies/audits/latest',
+  handler: getLatestDiscrepancyAuditReportHttp,
+});
+
+app.http('runDiscrepancyAuditReport', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reports/discrepancies/audits',
+  handler: runDiscrepancyAuditReportHttp,
+});
+
+app.http('listDiscrepancyComparisons', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/discrepancies/comparisons',
+  handler: listDiscrepancyComparisonsHttp,
 });
 
 app.http('listCustomerLicenseReportCustomers', {
