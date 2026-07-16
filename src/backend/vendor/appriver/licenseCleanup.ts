@@ -108,6 +108,21 @@ export type QueueAppRiverLicenseCleanupResult = {
   duplicates: number;
 };
 
+export type AppRiverLicenseCleanupPreviewStatus =
+  | 'eligible'
+  | 'matched'
+  | 'scheduled-cancellation'
+  | 'unavailable';
+
+export type AppRiverLicenseCleanupPreview = {
+  previewId: string;
+  rowId: string;
+  status: AppRiverLicenseCleanupPreviewStatus;
+  changed: boolean;
+  reason?: string;
+  candidate: AppRiverLicenseCleanupCandidate;
+};
+
 export type AppRiverLicenseCleanupProcessResult = {
   status: 'idle' | 'processed' | 'waiting' | 'failed';
   shouldContinue: boolean;
@@ -218,6 +233,12 @@ type BatchRow = {
 type ExistingActionRow = {
   id: string;
   status: string;
+};
+
+type CleanupPreviewRow = {
+  id: string;
+  entity_id: string;
+  payload: unknown;
 };
 
 type CleanupActionRow = {
@@ -491,6 +512,144 @@ export async function queueAppRiverLicenseCleanupActions(
     queued,
     skipped,
     missing,
+    duplicates,
+  };
+}
+
+export async function refreshAppRiverLicenseCleanupCandidate(
+  database: Queryable,
+  input: {
+    actor: string;
+    rowId: string;
+    chargeEvents?: AppRiverChargeEvent[];
+    liveClient: Pick<AppRiverLicenseCleanupClient, 'getCustomerSubscriptionDetails'>;
+    now?: string;
+  },
+): Promise<AppRiverLicenseCleanupPreview | undefined> {
+  const now = input.now ?? new Date().toISOString();
+  const report = await listAppRiverLicenseCleanupCandidates(database, {
+    chargeEvents: input.chargeEvents,
+    now,
+  });
+  const snapshotCandidate = report.rows.find((row) => row.id === input.rowId);
+  if (!snapshotCandidate) {
+    return undefined;
+  }
+
+  const chargeIndex = buildChargeIncreaseIndex(input.chargeEvents ?? [], now, defaultWindowDays);
+  const detail = await input.liveClient.getCustomerSubscriptionDetails(
+    snapshotCandidate.externalCustomerId,
+    snapshotCandidate.subscriptionKey,
+  );
+  const liveSource = liveSourceForCandidate(snapshotCandidate, detail, now);
+  const evaluatedCandidate = candidateFromSource(liveSource, chargeIndex, now, defaultWindowDays);
+  const candidate = evaluatedCandidate ?? candidateFromIneligibleLiveSource(snapshotCandidate, liveSource);
+  const status: AppRiverLicenseCleanupPreviewStatus =
+    candidate.unassignedLicenses <= 0
+      ? 'matched'
+      : candidate.skipReason === 'ScheduledCancellation'
+        ? 'scheduled-cancellation'
+        : evaluatedCandidate && evaluatedCandidate.proposedReduction > 0
+          ? 'eligible'
+          : 'unavailable';
+  const reason =
+    status === 'matched'
+      ? 'The refreshed AppRiver count already matches assigned usage.'
+      : status === 'scheduled-cancellation'
+        ? 'This subscription is scheduled to cancel, so no decrease will be queued.'
+        : status === 'unavailable'
+          ? 'This subscription is no longer eligible for a decrease.'
+          : undefined;
+  const changed =
+    candidate.totalLicenses !== snapshotCandidate.totalLicenses ||
+    candidate.assignedLicenses !== snapshotCandidate.assignedLicenses ||
+    candidate.unassignedLicenses !== snapshotCandidate.unassignedLicenses;
+  const previewId = await saveCleanupPreview(database, {
+    actor: input.actor,
+    rowId: input.rowId,
+    now,
+    payload: { status, reason, candidate },
+  });
+
+  return {
+    previewId,
+    rowId: input.rowId,
+    status,
+    changed,
+    reason,
+    candidate,
+  };
+}
+
+export async function queueAppRiverLicenseCleanupPreview(
+  database: Queryable,
+  input: {
+    actor: string;
+    previewId: string;
+    rowId: string;
+    requestedQuantity: number;
+    now?: string;
+  },
+): Promise<QueueAppRiverLicenseCleanupResult> {
+  const now = input.now ?? new Date().toISOString();
+  const preview = await loadCleanupPreview(database, input.previewId, input.actor, now);
+  if (!preview || preview.rowId !== input.rowId || preview.status !== 'eligible') {
+    throw new Error('The refreshed AppRiver preview is missing, expired, or no longer eligible. Refresh the count and try again.');
+  }
+
+  const queuedCandidate = candidateWithRequestedQuantity(preview.candidate, input.requestedQuantity);
+  if (!queuedCandidate) {
+    throw new Error('The requested decrease must leave a count below the refreshed total and at or above assigned usage.');
+  }
+
+  const existing = await findActiveCleanupAction(
+    database,
+    queuedCandidate.externalCustomerId,
+    queuedCandidate.subscriptionKey,
+  );
+  const batchId = await createCleanupBatch(database, {
+    actor: input.actor,
+    requestedCount: 1,
+    now,
+  });
+  let queued = 0;
+  let duplicates = 0;
+  if (existing) {
+    duplicates = 1;
+  } else {
+    try {
+      await insertCleanupAction(database, batchId, queuedCandidate, now);
+      queued = 1;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        duplicates = 1;
+      } else {
+        throw error;
+      }
+    }
+  }
+  const skipped = duplicates;
+  await updateCleanupBatchAfterQueue(database, batchId, {
+    status: queued ? 'queued' : 'skipped',
+    queued,
+    skipped,
+    now,
+  });
+  await insertAuditEvent(database, {
+    actor: input.actor,
+    eventType: 'appriver.license-cleanup.batch.queued',
+    entityType: 'appriver_license_cleanup_batch',
+    entityId: batchId,
+    payload: { requested: 1, queued, missing: 0, duplicates, previewId: input.previewId },
+  });
+
+  return {
+    batchId,
+    status: queued ? 'queued' : 'skipped',
+    requested: 1,
+    queued,
+    skipped,
+    missing: 0,
     duplicates,
   };
 }
@@ -1107,6 +1266,14 @@ async function liveCandidateForQueue(
     snapshotCandidate.externalCustomerId,
     snapshotCandidate.subscriptionKey,
   );
+  return candidateFromSource(liveSourceForCandidate(snapshotCandidate, detail, now), chargeIndex, now, defaultWindowDays);
+}
+
+function liveSourceForCandidate(
+  snapshotCandidate: AppRiverLicenseCleanupCandidate,
+  detail: AppRiverSubscriptionDetail,
+  now: string,
+): CandidateSource {
   const vendorProductKey = appRiverProductKeyForSubscription(detail);
   const productCode = detail.productCode ?? snapshotCandidate.productCode ?? fallbackAppRiverProductCode(vendorProductKey);
   const liveQuantity = appRiverLicenseQuantity(detail);
@@ -1117,39 +1284,61 @@ async function liveCandidateForQueue(
       ? Math.max(liveQuantity - assignedLicenses, 0)
       : snapshotCandidate.unassignedLicenses);
 
-  return candidateFromSource(
-    {
-      id: snapshotCandidate.id,
-      customerId: snapshotCandidate.customerId,
-      connectWiseCompanyId: snapshotCandidate.connectWiseCompanyId,
-      customerName: snapshotCandidate.customerName,
-      externalCustomerId: snapshotCandidate.externalCustomerId,
-      vendorProductKey,
-      productCode,
-      productName: detail.productName ?? snapshotCandidate.productName,
-      subscriptionKey: detail.subscriptionKey || snapshotCandidate.subscriptionKey,
-      domain: detail.domain ?? snapshotCandidate.domain,
-      totalLicenses: liveQuantity,
-      assignedLicenses,
-      unassignedLicenses,
-      commitmentEndDate: detail.commitmentEndDate ?? snapshotCandidate.commitmentEndDate,
-      subscriptionTerm: detail.subscriptionTerm ?? snapshotCandidate.subscriptionTerm,
-      billingFrequency: detail.billingFrequency ?? snapshotCandidate.billingFrequency,
-      expirationBehavior: detail.expirationBehavior ?? snapshotCandidate.expirationBehavior,
-      subscriptionStatus: detail.status,
-      cancellationDate: detail.cancellationDate,
-      scheduledUninstallDate: detail.scheduledUninstallDate,
-      isTrial: typeof detail.isTrial === 'boolean' ? detail.isTrial : snapshotCandidate.isTrial,
-      notes: detail.notes ?? snapshotCandidate.notes,
-      observedAt: now,
-      syncTimestamp: now,
-      pendingAction: snapshotCandidate.pendingAction,
-      latestAction: snapshotCandidate.latestAction,
-    },
-    chargeIndex,
-    now,
-    defaultWindowDays,
-  );
+  return {
+    id: snapshotCandidate.id,
+    customerId: snapshotCandidate.customerId,
+    connectWiseCompanyId: snapshotCandidate.connectWiseCompanyId,
+    customerName: snapshotCandidate.customerName,
+    externalCustomerId: snapshotCandidate.externalCustomerId,
+    vendorProductKey,
+    productCode,
+    productName: detail.productName ?? snapshotCandidate.productName,
+    subscriptionKey: detail.subscriptionKey || snapshotCandidate.subscriptionKey,
+    domain: detail.domain ?? snapshotCandidate.domain,
+    totalLicenses: liveQuantity,
+    assignedLicenses,
+    unassignedLicenses,
+    commitmentEndDate: detail.commitmentEndDate ?? snapshotCandidate.commitmentEndDate,
+    subscriptionTerm: detail.subscriptionTerm ?? snapshotCandidate.subscriptionTerm,
+    billingFrequency: detail.billingFrequency ?? snapshotCandidate.billingFrequency,
+    expirationBehavior: detail.expirationBehavior ?? snapshotCandidate.expirationBehavior,
+    subscriptionStatus: detail.status,
+    cancellationDate: detail.cancellationDate,
+    scheduledUninstallDate: detail.scheduledUninstallDate,
+    isTrial: typeof detail.isTrial === 'boolean' ? detail.isTrial : snapshotCandidate.isTrial,
+    notes: detail.notes ?? snapshotCandidate.notes,
+    observedAt: now,
+    syncTimestamp: now,
+    pendingAction: snapshotCandidate.pendingAction,
+    latestAction: snapshotCandidate.latestAction,
+  };
+}
+
+function candidateFromIneligibleLiveSource(
+  snapshotCandidate: AppRiverLicenseCleanupCandidate,
+  source: CandidateSource,
+): AppRiverLicenseCleanupCandidate {
+  return {
+    ...snapshotCandidate,
+    vendorProductKey: source.vendorProductKey,
+    productCode: source.productCode ?? snapshotCandidate.productCode,
+    productName: source.productName ?? snapshotCandidate.productName,
+    subscriptionKey: source.subscriptionKey,
+    domain: source.domain,
+    totalLicenses: source.totalLicenses,
+    assignedLicenses: source.assignedLicenses,
+    unassignedLicenses: source.unassignedLicenses,
+    proposedReduction: 0,
+    proposedQuantity: source.totalLicenses,
+    commitmentEndDate: source.commitmentEndDate,
+    subscriptionTerm: source.subscriptionTerm,
+    billingFrequency: source.billingFrequency,
+    expirationBehavior: source.expirationBehavior,
+    isTrial: source.isTrial,
+    notes: source.notes,
+    observedAt: source.observedAt,
+    syncTimestamp: source.syncTimestamp,
+  };
 }
 
 function candidateFromSource(
@@ -1338,7 +1527,12 @@ function candidateWithRequestedQuantity(
 
   const maxReduction = candidate.proposedReduction;
   const requestedReduction = candidate.totalLicenses - normalizedQuantity;
-  if (normalizedQuantity < 1 || requestedReduction <= 0 || requestedReduction > maxReduction) {
+  if (
+    normalizedQuantity < 1 ||
+    requestedReduction <= 0 ||
+    requestedReduction > maxReduction ||
+    (typeof candidate.assignedLicenses === 'number' && normalizedQuantity < candidate.assignedLicenses)
+  ) {
     return undefined;
   }
 
@@ -1950,12 +2144,75 @@ async function insertAuditEvent(
   );
 }
 
+async function saveCleanupPreview(
+  database: Queryable,
+  input: {
+    actor: string;
+    rowId: string;
+    now: string;
+    payload: Record<string, unknown>;
+  },
+) {
+  const result = await database.query<{ id: string }>(
+    `insert into audit_events (actor, event_type, entity_type, entity_id, occurred_at, payload)
+     values ($1, 'appriver.license-cleanup.preview.refreshed', 'appriver_license_cleanup_preview', $2, $3::timestamptz, $4::jsonb)
+     returning id`,
+    [input.actor, input.rowId, input.now, JSON.stringify(input.payload)],
+  );
+  const previewId = result.rows[0]?.id;
+  if (!previewId) {
+    throw new Error('Unable to save the refreshed AppRiver preview.');
+  }
+  return previewId;
+}
+
+async function loadCleanupPreview(database: Queryable, previewId: string, actor: string, now: string) {
+  const result = await database.query<CleanupPreviewRow>(
+    `select id, entity_id, payload
+     from audit_events
+     where id = $1
+       and actor = $2
+       and event_type = 'appriver.license-cleanup.preview.refreshed'
+       and entity_type = 'appriver_license_cleanup_preview'
+       and occurred_at >= $3::timestamptz - interval '15 minutes'
+     limit 1`,
+    [previewId, actor, now],
+  );
+  const row = result.rows[0];
+  if (!row || !isRecord(row.payload) || !isRecord(row.payload.candidate)) {
+    return undefined;
+  }
+  const status = row.payload.status;
+  if (!['eligible', 'matched', 'scheduled-cancellation', 'unavailable'].includes(String(status))) {
+    return undefined;
+  }
+  const candidate = row.payload.candidate as AppRiverLicenseCleanupCandidate;
+  if (
+    typeof candidate.id !== 'string' ||
+    typeof candidate.externalCustomerId !== 'string' ||
+    typeof candidate.subscriptionKey !== 'string' ||
+    typeof candidate.totalLicenses !== 'number' ||
+    typeof candidate.proposedReduction !== 'number'
+  ) {
+    return undefined;
+  }
+  return {
+    rowId: row.entity_id,
+    status: status as AppRiverLicenseCleanupPreviewStatus,
+    candidate,
+  };
+}
+
 function compareCleanupCandidates(left: AppRiverLicenseCleanupCandidate, right: AppRiverLicenseCleanupCandidate) {
   return (
     left.customerName.localeCompare(right.customerName) ||
     left.productName.localeCompare(right.productName) ||
     left.subscriptionKey.localeCompare(right.subscriptionKey)
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function mapCleanupActionSummaryRow(row: CleanupActionSummaryRow): AppRiverLicenseCleanupActionSummary {

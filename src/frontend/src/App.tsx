@@ -722,6 +722,15 @@ type AppRiverLicenseCleanupDetails = {
   };
 };
 
+type AppRiverLicenseCleanupPreview = {
+  previewId: string;
+  rowId: string;
+  status: 'eligible' | 'matched' | 'scheduled-cancellation' | 'unavailable';
+  changed: boolean;
+  reason?: string;
+  candidate: AppRiverLicenseCleanupDetails;
+};
+
 type AppRiverLicenseCleanupActionSummary = {
   id: string;
   batchId: string;
@@ -4054,11 +4063,15 @@ async function fetchDiscrepancyComparisons() {
   return body as unknown as DiscrepancyComparisonsResponse;
 }
 
-async function queueAppRiverLicenseCleanupActions(rowIds: string[], requestedQuantities?: Record<string, number>) {
+async function queueAppRiverLicenseCleanupActions(
+  rowIds: string[],
+  requestedQuantities?: Record<string, number>,
+  previewId?: string,
+) {
   const response = await fetch('/api/reports/discrepancies/appriver-license-cleanup/actions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rowIds, requestedQuantities }),
+    body: JSON.stringify({ rowIds, requestedQuantities, previewId }),
   });
   const body = await responseJson(response);
 
@@ -4073,6 +4086,21 @@ async function queueAppRiverLicenseCleanupActions(rowIds: string[], requestedQua
     missing: number;
     duplicates: number;
   };
+}
+
+async function refreshAppRiverLicenseCleanupCandidate(rowId: string) {
+  const response = await fetch('/api/reports/discrepancies/appriver-license-cleanup/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rowId }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `AppRiver count refresh failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as AppRiverLicenseCleanupPreview;
 }
 
 async function fetchAppRiverLicenseCleanupActions() {
@@ -5847,6 +5875,7 @@ function App() {
   const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState('');
   const [includeMatchedDiscrepancies, setIncludeMatchedDiscrepancies] = useState(false);
   const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<DiscrepancyRow | null>(null);
+  const [appRiverCleanupConfirmationRow, setAppRiverCleanupConfirmationRow] = useState<DiscrepancyRow | null>(null);
   const [showAppRiverCleanupActionsModal, setShowAppRiverCleanupActionsModal] = useState(false);
   const [appRiverCleanupActions, setAppRiverCleanupActions] = useState<AppRiverLicenseCleanupActionSummary[]>([]);
   const [appRiverCleanupActionsLoadState, setAppRiverCleanupActionsLoadState] =
@@ -6497,7 +6526,11 @@ function App() {
     }
   };
 
-  const queueAppRiverCleanupRows = async (rowIds: string[], requestedQuantities?: Record<string, number>) => {
+  const queueAppRiverCleanupRows = async (
+    rowIds: string[],
+    requestedQuantities?: Record<string, number>,
+    previewId?: string,
+  ) => {
     if (rowIds.length === 0) {
       setAppRiverCleanupQueueMessage('Choose an eligible AppRiver row.');
       return null;
@@ -6507,7 +6540,7 @@ function App() {
     setAppRiverCleanupQueueMessage('Queueing AppRiver license cleanup actions...');
 
     try {
-      const result = await queueAppRiverLicenseCleanupActions(rowIds, requestedQuantities);
+      const result = await queueAppRiverLicenseCleanupActions(rowIds, requestedQuantities, previewId);
       const nextQueueMessage =
         result.queued > 0
           ? `Queued ${result.queued.toLocaleString()} actions. ${result.skipped.toLocaleString()} skipped.`
@@ -9291,28 +9324,8 @@ function App() {
               includeMatched={includeMatchedDiscrepancies}
               loadMessage={discrepancyMessage}
               loadState={discrepancyLoadState}
-              onCleanupAction={(rowId) => queueAppRiverCleanupRows([rowId])}
+              onCleanupAction={setAppRiverCleanupConfirmationRow}
               onCleanupActionsOpen={openAppRiverCleanupActionsModal}
-              onCleanupManualOverride={(row) => {
-                const cleanup = row.cleanup;
-                if (!cleanup) {
-                  return Promise.resolve(null);
-                }
-                const entered = window.prompt(
-                  `Set ${cleanup.productName} to what license count?`,
-                  String(cleanup.proposedQuantity),
-                );
-                if (!entered) {
-                  return Promise.resolve(null);
-                }
-                const requestedQuantity = Number(entered);
-                if (!Number.isFinite(requestedQuantity)) {
-                  setAppRiverCleanupQueueState('failed');
-                  setAppRiverCleanupQueueMessage('Manual count must be a number.');
-                  return Promise.resolve(null);
-                }
-                return queueAppRiverCleanupRows([row.id], { [row.id]: Math.trunc(requestedQuantity) });
-              }}
               onIncludeMatchedChange={(value) => {
                 setIncludeMatchedDiscrepancies(value);
                 if (selectedDiscrepancyPairId && discrepancyReport?.audit) {
@@ -9756,6 +9769,37 @@ function App() {
           row={selectedDiscrepancyRow}
         />
       ) : null}
+      {appRiverCleanupConfirmationRow ? (
+        <AppRiverCleanupConfirmationModal
+          onClose={() => setAppRiverCleanupConfirmationRow(null)}
+          onConfirm={async (preview, requestedQuantity) => {
+            const result = await queueAppRiverCleanupRows(
+              [preview.rowId],
+              { [preview.rowId]: requestedQuantity },
+              preview.previewId,
+            );
+            if (result?.queued) {
+              setAppRiverCleanupConfirmationRow(null);
+            }
+            return result;
+          }}
+          onRefreshed={(preview) => {
+            setDiscrepancyReport((current) => {
+              if (!current) return current;
+              const refreshedRows = current.rows.map((row) =>
+                row.id === preview.rowId ? discrepancyRowFromCleanupPreview(row, preview) : row,
+              );
+              return {
+                ...current,
+                rows: includeMatchedDiscrepancies
+                  ? refreshedRows
+                  : refreshedRows.filter((row) => row.status !== 'matched'),
+              };
+            });
+          }}
+          row={appRiverCleanupConfirmationRow}
+        />
+      ) : null}
       {showAppRiverCleanupActionsModal ? (
         <AppRiverCleanupActionsModal
           actions={appRiverCleanupActions}
@@ -9813,9 +9857,8 @@ function DiscrepancyDashboardView(props: {
   includeMatched: boolean;
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
-  onCleanupAction: (rowId: string) => Promise<unknown>;
+  onCleanupAction: (row: DiscrepancyRow) => void;
   onCleanupActionsOpen: () => void;
-  onCleanupManualOverride: (row: DiscrepancyRow) => Promise<unknown>;
   onIncludeMatchedChange: (value: boolean) => void;
   onPairFilterChange: (pairId: string) => void;
   onRun: () => Promise<DiscrepancyReportResponse | null>;
@@ -9836,7 +9879,6 @@ function DiscrepancyDashboardView(props: {
     loadState,
     onCleanupAction,
     onCleanupActionsOpen,
-    onCleanupManualOverride,
     onIncludeMatchedChange,
     onPairFilterChange,
     onRun,
@@ -10048,21 +10090,12 @@ function DiscrepancyDashboardView(props: {
                               <button
                                 className="button primary compact icon-button-text"
                                 disabled={!canQueueCleanupActions || !actionable || cleanupQueueState === 'queueing'}
-                                onClick={() => void onCleanupAction(row.id)}
+                                onClick={() => onCleanupAction(row)}
                                 title={cleanup?.skipReason === 'ScheduledCancellation' ? 'Skipped because this subscription cancels at term' : 'Decrease count now'}
                                 type="button"
                               >
                                 <ArrowDown size={15} />
                                 Decrease
-                              </button>
-                              <button
-                                className="button secondary compact icon-only-button"
-                                disabled={!canQueueCleanupActions || !actionable || cleanupQueueState === 'queueing'}
-                                onClick={() => void onCleanupManualOverride(row)}
-                                title="Manual count override"
-                                type="button"
-                              >
-                                <MoreHorizontal size={16} />
                               </button>
                             </td>
                             <td>
@@ -10364,6 +10397,162 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
   );
 }
 
+function AppRiverCleanupConfirmationModal(props: {
+  row: DiscrepancyRow;
+  onClose: () => void;
+  onConfirm: (
+    preview: AppRiverLicenseCleanupPreview,
+    requestedQuantity: number,
+  ) => Promise<{ queued: number } | null>;
+  onRefreshed: (preview: AppRiverLicenseCleanupPreview) => void;
+}) {
+  const { row, onClose, onConfirm, onRefreshed } = props;
+  const [preview, setPreview] = useState<AppRiverLicenseCleanupPreview | null>(null);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [message, setMessage] = useState('Refreshing the current subscription count from AppRiver...');
+  const [licensesToRemove, setLicensesToRemove] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setLoadState('loading');
+    setMessage('Refreshing the current subscription count from AppRiver...');
+    setPreview(null);
+    setLicensesToRemove('');
+    void refreshAppRiverLicenseCleanupCandidate(row.id)
+      .then((result) => {
+        if (!active) return;
+        setPreview(result);
+        setLicensesToRemove(result.status === 'eligible' ? String(result.candidate.proposedReduction) : '');
+        setLoadState('ready');
+        setMessage(
+          result.reason ??
+            (result.changed
+              ? 'AppRiver returned updated counts. The cleanup row has been refreshed.'
+              : 'Current counts confirmed with AppRiver.'),
+        );
+        onRefreshed(result);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setLoadState('failed');
+        setMessage(error instanceof Error ? error.message : 'Unable to refresh the AppRiver count.');
+      });
+    return () => {
+      active = false;
+    };
+  }, [row.id]);
+
+  const candidate = preview?.candidate;
+  const parsedRemoval = Number(licensesToRemove);
+  const assignedCount = candidate
+    ? candidate.assignedLicenses ?? Math.max(candidate.totalLicenses - candidate.unassignedLicenses, 0)
+    : 0;
+  const maxRemoval = candidate
+    ? Math.max(0, Math.min(candidate.proposedReduction, candidate.totalLicenses - assignedCount))
+    : 0;
+  const removalIsInteger = Number.isInteger(parsedRemoval);
+  const requestedQuantity = candidate && removalIsInteger ? candidate.totalLicenses - parsedRemoval : candidate?.totalLicenses ?? 0;
+  const validRemoval = Boolean(
+    preview?.status === 'eligible' &&
+      removalIsInteger &&
+      parsedRemoval >= 1 &&
+      parsedRemoval <= maxRemoval &&
+      requestedQuantity < (candidate?.totalLicenses ?? 0) &&
+      requestedQuantity >= assignedCount,
+  );
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="cleanup-confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-confirmation-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="cleanup-confirmation-title">
+              <ArrowDown size={18} />
+              Confirm AppRiver decrease
+            </h2>
+            <p>{row.customer.customerName} · {row.cleanup?.productName ?? row.productFamily}</p>
+          </div>
+          <button className="modal-close" disabled={submitting} onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="cleanup-confirmation-body">
+          <div className={`cleanup-confirmation-notice ${loadState === 'failed' ? 'failed' : preview?.status === 'matched' ? 'matched' : ''}`}>
+            <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+            <div>
+              <strong>{loadState === 'loading' ? 'Checking AppRiver' : loadState === 'failed' ? 'Refresh failed' : preview?.status === 'matched' ? 'Already matched' : 'Live count refreshed'}</strong>
+              <span>{message}</span>
+            </div>
+          </div>
+
+          {candidate ? (
+            <>
+              <section className="cleanup-confirmation-counts" aria-label="Refreshed license counts">
+                <div><span>Current</span><strong>{candidate.totalLicenses.toLocaleString()}</strong></div>
+                <div><span>Assigned</span><strong>{assignedCount.toLocaleString()}</strong></div>
+                <div><span>Available</span><strong>{maxRemoval.toLocaleString()}</strong></div>
+                <div><span>New count</span><strong>{validRemoval ? requestedQuantity.toLocaleString() : '—'}</strong></div>
+              </section>
+
+              {preview?.status === 'eligible' ? (
+                <label className="config-field cleanup-removal-field">
+                  <span>Licenses to remove</span>
+                  <input
+                    autoFocus
+                    disabled={submitting}
+                    inputMode="numeric"
+                    max={maxRemoval}
+                    min={1}
+                    onChange={(event) => setLicensesToRemove(event.target.value)}
+                    step={1}
+                    type="number"
+                    value={licensesToRemove}
+                  />
+                  <small>Enter 1–{maxRemoval.toLocaleString()}. The new count cannot be below assigned usage.</small>
+                </label>
+              ) : null}
+
+              {licensesToRemove && !validRemoval && preview?.status === 'eligible' ? (
+                <p className="field-error">Choose a whole number from 1 through {maxRemoval.toLocaleString()}.</p>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+
+        <div className="cleanup-confirmation-footer">
+          <button className="button secondary" disabled={submitting} onClick={onClose} type="button">
+            {preview?.status === 'matched' ? 'Done' : 'Cancel'}
+          </button>
+          {preview?.status === 'eligible' ? (
+            <button
+              className="button primary"
+              disabled={!validRemoval || submitting}
+              onClick={() => {
+                if (!validRemoval || !preview) return;
+                setSubmitting(true);
+                setMessage('Adding the confirmed decrease to the production queue...');
+                void onConfirm(preview, requestedQuantity)
+                  .then((result) => {
+                    if (!result) {
+                      setMessage('The decrease was not queued. Review the page message, then refresh and try again.');
+                    }
+                  })
+                  .finally(() => setSubmitting(false));
+              }}
+              type="button"
+            >
+              <ArrowDown size={16} />
+              {submitting ? 'Queueing...' : `Decrease to ${requestedQuantity.toLocaleString()}`}
+            </button>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AppRiverCleanupActionsModal(props: {
   actions: AppRiverLicenseCleanupActionSummary[];
   canCancelActions: boolean;
@@ -10630,6 +10819,32 @@ function isAppRiverCleanupActionable(row: DiscrepancyRow) {
     !row.cleanup.pendingAction &&
     row.status !== 'unavailable',
   );
+}
+
+function discrepancyRowFromCleanupPreview(
+  row: DiscrepancyRow,
+  preview: AppRiverLicenseCleanupPreview,
+): DiscrepancyRow {
+  const candidate = preview.candidate;
+  const assignedCount = candidate.assignedLicenses ?? Math.max(candidate.totalLicenses - candidate.unassignedLicenses, 0);
+  return {
+    ...row,
+    leftCount: candidate.totalLicenses,
+    rightCount: assignedCount,
+    delta: candidate.unassignedLicenses,
+    status:
+      preview.status === 'matched'
+        ? 'matched'
+        : preview.status === 'unavailable'
+          ? 'unavailable'
+          : 'warning',
+    unavailableReason: preview.status === 'unavailable' ? preview.reason : undefined,
+    cleanup: candidate,
+    syncTimestamps: {
+      ...row.syncTimestamps,
+      left: candidate.syncTimestamp ?? candidate.observedAt,
+    },
+  };
 }
 
 function cleanupCountsLabel(cleanup?: AppRiverLicenseCleanupDetails) {

@@ -9,6 +9,7 @@ import {
   type DiscrepancySourceSnapshot,
   type Queryable,
 } from './discrepancyReports';
+import type { AppRiverLicenseCleanupCandidate } from '../vendor/appriver/licenseCleanup';
 
 export type DiscrepancyAuditSummary = {
   id: string;
@@ -68,9 +69,10 @@ type CleanupActionMergeRow = {
   latest_created_at: Date | string | null;
   latest_completed_at: Date | string | null;
   latest_updated_at: Date | string | null;
+  preview_payload: unknown;
 };
 
-const activeAppRiverActionStatuses = ['queued', 'processing', 'accepted', 'verifying'];
+const activeAppRiverActionStatuses = ['queued', 'running', 'reviewing', 'updating', 'confirm'];
 
 export async function listDiscrepancyAuditStates(database: Queryable): Promise<DiscrepancyAuditState[]> {
   return Promise.all(
@@ -330,7 +332,8 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
        latest_action.error_message as latest_error_message,
        latest_action.created_at as latest_created_at,
        latest_action.completed_at as latest_completed_at,
-       latest_action.updated_at as latest_updated_at
+       latest_action.updated_at as latest_updated_at,
+       latest_preview.payload as preview_payload
      from row_keys
      left join lateral (
        select id, status, requested_quantity, requested_reduction, created_at
@@ -348,7 +351,17 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
          and subscription_key = row_keys.subscription_key
        order by created_at desc
        limit 1
-     ) latest_action on true`,
+     ) latest_action on true
+     left join lateral (
+       select payload
+       from audit_events
+       where event_type = 'appriver.license-cleanup.preview.refreshed'
+         and entity_type = 'appriver_license_cleanup_preview'
+         and entity_id = row_keys.row_id
+         and occurred_at >= $3::timestamptz
+       order by occurred_at desc
+       limit 1
+     ) latest_preview on true`,
     [
       JSON.stringify(
         cleanupKeys.map((row) => ({
@@ -358,6 +371,7 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
         })),
       ),
       activeAppRiverActionStatuses,
+      report.generatedAt,
     ],
   );
   const actionsByRowId = new Map(result.rows.map((row) => [row.row_id, row]));
@@ -374,6 +388,11 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
         return row;
       }
 
+      const preview = cleanupPreviewPayload(actionRow.preview_payload);
+      const refreshedCleanup = preview?.candidate ?? row.cleanup;
+      const assignedCount =
+        refreshedCleanup.assignedLicenses ??
+        Math.max(refreshedCleanup.totalLicenses - refreshedCleanup.unassignedLicenses, 0);
       const pendingAction = actionRow.pending_action_id
         ? {
             id: actionRow.pending_action_id,
@@ -399,15 +418,57 @@ async function mergeDiscrepancyAuditExtras(database: Queryable, report: Discrepa
 
       return {
         ...row,
-        status: pendingAction ? 'warning' : row.status,
+        leftCount: refreshedCleanup.totalLicenses,
+        rightCount: assignedCount,
+        delta: refreshedCleanup.unassignedLicenses,
+        status: pendingAction
+          ? 'warning'
+          : preview?.status === 'matched'
+            ? 'matched'
+            : preview?.status === 'unavailable'
+              ? 'unavailable'
+              : row.status,
+        unavailableReason: preview?.status === 'unavailable' ? preview.reason : row.unavailableReason,
         cleanup: {
-          ...row.cleanup,
+          ...refreshedCleanup,
           pendingAction,
           latestAction,
+        },
+        syncTimestamps: {
+          ...row.syncTimestamps,
+          left: refreshedCleanup.syncTimestamp ?? refreshedCleanup.observedAt,
         },
       };
     }),
   };
+}
+
+function cleanupPreviewPayload(value: unknown): {
+  status: 'eligible' | 'matched' | 'scheduled-cancellation' | 'unavailable';
+  reason?: string;
+  candidate: AppRiverLicenseCleanupCandidate;
+} | undefined {
+  if (!isRecord(value) || !isRecord(value.candidate)) return undefined;
+  const status = String(value.status);
+  if (!['eligible', 'matched', 'scheduled-cancellation', 'unavailable'].includes(status)) return undefined;
+  const candidate = value.candidate as AppRiverLicenseCleanupCandidate;
+  if (
+    typeof candidate.id !== 'string' ||
+    typeof candidate.totalLicenses !== 'number' ||
+    typeof candidate.unassignedLicenses !== 'number' ||
+    typeof candidate.proposedReduction !== 'number'
+  ) {
+    return undefined;
+  }
+  return {
+    status: status as 'eligible' | 'matched' | 'scheduled-cancellation' | 'unavailable',
+    reason: typeof value.reason === 'string' ? value.reason : undefined,
+    candidate,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function insertAuditEvent(

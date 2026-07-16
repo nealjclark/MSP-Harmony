@@ -5,7 +5,9 @@ import {
   listAppRiverLicenseCleanupActions,
   listAppRiverLicenseCleanupCandidates,
   processNextAppRiverLicenseCleanupAction,
+  queueAppRiverLicenseCleanupPreview,
   queueAppRiverLicenseCleanupActions,
+  refreshAppRiverLicenseCleanupCandidate,
   type AppRiverLicenseCleanupClient,
   type Queryable,
 } from './licenseCleanup';
@@ -86,6 +88,7 @@ class CleanupDatabase implements Queryable {
   snapshotRows: SnapshotRow[] = [];
   actions: CleanupAction[] = [];
   batchIds: string[] = [];
+  previews: Array<{ id: string; actor: string; rowId: string; occurredAt: string; payload: unknown }> = [];
 
   constructor(snapshotRows: SnapshotRow[] = []) {
     this.snapshotRows = snapshotRows;
@@ -108,6 +111,27 @@ class CleanupDatabase implements Queryable {
 
     if (sql.includes('from vendor_usage_snapshots')) {
       return { rows: this.snapshotRows as T[] };
+    }
+
+    if (sql.includes("insert into audit_events") && sql.includes("preview.refreshed")) {
+      const id = `dddddddd-dddd-4ddd-8ddd-${String(this.previews.length + 1).padStart(12, '0')}`;
+      this.previews.push({
+        id,
+        actor: String(values?.[0]),
+        rowId: String(values?.[1]),
+        occurredAt: String(values?.[2]),
+        payload: JSON.parse(String(values?.[3] ?? '{}')),
+      });
+      return { rows: [{ id }] as T[] };
+    }
+
+    if (sql.includes('from audit_events') && sql.includes("preview.refreshed")) {
+      const preview = this.previews.find(
+        (item) => item.id === values?.[0] && item.actor === values?.[1] && Date.parse(item.occurredAt) >= Date.parse(String(values?.[2])) - 15 * 60 * 1000,
+      );
+      return {
+        rows: preview ? ([{ id: preview.id, entity_id: preview.rowId, payload: preview.payload }] as T[]) : ([] as T[]),
+      };
     }
 
     if (sql.includes('from appriver_license_cleanup_actions') && sql.includes('join appriver_license_cleanup_batches')) {
@@ -378,6 +402,8 @@ async function run() {
   await testScheduledCancellationIsNotQueued();
   await testQueueDuplicatePrevention();
   await testQueueRefreshesLiveSubscriptionDetails();
+  await testPreviewQueuesManualRemoval();
+  await testPreviewMarksLiveMatch();
   await testListAndCancelQueuedAction();
   await testDismissCanceledAction();
   await testLiveRevalidationAndVerification();
@@ -387,6 +413,83 @@ async function run() {
   await testVerificationTimeout();
 
   console.log('appriver license cleanup tests passed');
+}
+
+async function testPreviewQueuesManualRemoval() {
+  const database = new CleanupDatabase([
+    snapshot('manual-decrease', { commitmentEndDate: '2026-07-14T00:00:00Z', totalLicenses: 10, assignedLicenses: 7, unassignedLicenses: 3 }),
+  ]);
+  const rowId = 'appriver-license-cleanup:cust-1:manual-decrease';
+  const preview = await refreshAppRiverLicenseCleanupCandidate(database, {
+    actor: 'license@example.com',
+    rowId,
+    now,
+    liveClient: {
+      async getCustomerSubscriptionDetails(_customerId, subscriptionKey) {
+        return detail({
+          subscriptionKey,
+          totalLicenses: 9,
+          subscriptionQuantity: 9,
+          assignedLicenses: 7,
+          unassignedLicenses: 2,
+          commitmentEndDate: '2026-07-14T00:00:00Z',
+        });
+      },
+    },
+  });
+
+  assert.equal(preview?.status, 'eligible');
+  assert.equal(preview?.changed, true);
+  assert.equal(preview?.candidate.totalLicenses, 9);
+  assert.equal(preview?.candidate.proposedReduction, 2);
+  await assert.rejects(
+    queueAppRiverLicenseCleanupPreview(database, {
+      actor: 'license@example.com',
+      previewId: preview?.previewId ?? '',
+      rowId,
+      requestedQuantity: 6,
+      now,
+    }),
+    /at or above assigned usage/,
+  );
+  const result = await queueAppRiverLicenseCleanupPreview(database, {
+    actor: 'license@example.com',
+    previewId: preview?.previewId ?? '',
+    rowId,
+    requestedQuantity: 8,
+    now,
+  });
+  assert.equal(result.queued, 1);
+  assert.equal(database.actions[0]?.current_total_licenses, 9);
+  assert.equal(database.actions[0]?.requested_reduction, 1);
+  assert.equal(database.actions[0]?.requested_quantity, 8);
+}
+
+async function testPreviewMarksLiveMatch() {
+  const database = new CleanupDatabase([
+    snapshot('now-matched', { commitmentEndDate: '2026-07-14T00:00:00Z', totalLicenses: 10, assignedLicenses: 7, unassignedLicenses: 3 }),
+  ]);
+  const preview = await refreshAppRiverLicenseCleanupCandidate(database, {
+    actor: 'license@example.com',
+    rowId: 'appriver-license-cleanup:cust-1:now-matched',
+    now,
+    liveClient: {
+      async getCustomerSubscriptionDetails(_customerId, subscriptionKey) {
+        return detail({
+          subscriptionKey,
+          totalLicenses: 7,
+          subscriptionQuantity: 7,
+          assignedLicenses: 7,
+          unassignedLicenses: 0,
+          commitmentEndDate: '2026-07-14T00:00:00Z',
+        });
+      },
+    },
+  });
+
+  assert.equal(preview?.status, 'matched');
+  assert.equal(preview?.candidate.totalLicenses, 7);
+  assert.equal(preview?.candidate.proposedReduction, 0);
 }
 
 async function testScheduledCancellationIsNotQueued() {

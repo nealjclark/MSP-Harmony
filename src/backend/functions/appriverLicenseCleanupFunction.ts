@@ -8,7 +8,9 @@ import {
   dismissAppRiverLicenseCleanupAction,
   listAppRiverLicenseCleanupActions,
   processNextAppRiverLicenseCleanupAction,
+  queueAppRiverLicenseCleanupPreview,
   queueAppRiverLicenseCleanupActions,
+  refreshAppRiverLicenseCleanupCandidate,
 } from '../vendor/appriver/licenseCleanup';
 import { hasLicenseActionRole, requireRole } from './auth';
 import {
@@ -23,6 +25,11 @@ loadDotEnv({ override: false });
 type QueueLicenseCleanupBody = {
   rowIds?: unknown;
   requestedQuantities?: unknown;
+  previewId?: unknown;
+};
+
+type RefreshLicenseCleanupBody = {
+  rowId?: unknown;
 };
 
 type AppRiverLicenseCleanupQueueMessage = {
@@ -71,12 +78,33 @@ export async function queueAppRiverLicenseCleanupActionsHttp(
   }
 
   try {
+    const previewId = typeof bodyResult.body.previewId === 'string' ? bodyResult.body.previewId.trim() : '';
+    const requestedQuantities = parseRequestedQuantities(bodyResult.body.requestedQuantities);
+    if (previewId) {
+      if (!isUuid(previewId) || rowIds.length !== 1 || typeof requestedQuantities?.[rowIds[0]] !== 'number') {
+        return jsonResponse(400, { error: 'A valid refreshed preview and requested count are required.' });
+      }
+      const result = await queueAppRiverLicenseCleanupPreview(repositoryContext.pool, {
+        actor: auth.principal.email ?? auth.principal.name,
+        previewId,
+        rowId: rowIds[0],
+        requestedQuantity: requestedQuantities[rowIds[0]],
+      });
+      if (result.queued > 0) {
+        enqueueAppRiverLicenseCleanupWorker(context, result.batchId);
+      }
+      return jsonResponse(202, {
+        reportType: 'appriver-license-cleanup-actions',
+        ...result,
+      });
+    }
+
     const client = await createConfiguredAppRiverClient(repositoryContext.repository);
     const chargeEvents = await client.listChargeEvents({ pageSize: 1000, maxPages: 5 });
     const result = await queueAppRiverLicenseCleanupActions(repositoryContext.pool, {
       actor: auth.principal.email ?? auth.principal.name,
       rowIds,
-      requestedQuantities: parseRequestedQuantities(bodyResult.body.requestedQuantities),
+      requestedQuantities,
       chargeEvents,
       liveClient: client,
     });
@@ -91,6 +119,59 @@ export async function queueAppRiverLicenseCleanupActionsHttp(
     });
   } catch (error) {
     return appRiverCleanupErrorResponse(error, 'Unable to queue AppRiver license cleanup actions.');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function refreshAppRiverLicenseCleanupCandidateHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  if (!hasLicenseActionRole(auth.principal)) {
+    return jsonResponse(403, {
+      error: 'The Admin or License Admin role is required to refresh AppRiver cleanup counts.',
+    });
+  }
+
+  const bodyResult = await readJsonBody<RefreshLicenseCleanupBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const rowId = typeof bodyResult.body.rowId === 'string' ? bodyResult.body.rowId.trim() : '';
+  if (!rowId) {
+    return jsonResponse(400, { error: 'Choose an AppRiver cleanup row to refresh.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    return jsonResponse(400, {
+      error: 'AppRiver license cleanup needs PostgreSQL settings before counts can be refreshed.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const client = await createConfiguredAppRiverClient(repositoryContext.repository);
+    const chargeEvents = await client.listChargeEvents({ pageSize: 1000, maxPages: 5 });
+    const preview = await refreshAppRiverLicenseCleanupCandidate(repositoryContext.pool, {
+      actor: auth.principal.email ?? auth.principal.name,
+      rowId,
+      chargeEvents,
+      liveClient: client,
+    });
+    if (!preview) {
+      return jsonResponse(404, { error: 'This cleanup row is no longer available in the latest AppRiver audit.' });
+    }
+    return jsonResponse(200, {
+      reportType: 'appriver-license-cleanup-preview',
+      ...preview,
+    });
+  } catch (error) {
+    return appRiverCleanupErrorResponse(error, 'Unable to refresh the AppRiver subscription count.');
   } finally {
     await repositoryContext.close();
   }
@@ -276,6 +357,13 @@ app.http('queueAppRiverLicenseCleanupActions', {
   route: 'reports/discrepancies/appriver-license-cleanup/actions',
   extraOutputs: [appRiverLicenseCleanupQueueOutput],
   handler: queueAppRiverLicenseCleanupActionsHttp,
+});
+
+app.http('refreshAppRiverLicenseCleanupCandidate', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reports/discrepancies/appriver-license-cleanup/preview',
+  handler: refreshAppRiverLicenseCleanupCandidateHttp,
 });
 
 app.http('listAppRiverLicenseCleanupActions', {
