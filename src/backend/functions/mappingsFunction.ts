@@ -72,6 +72,12 @@ import {
   type UpsertNcentralFilterMappingInput,
 } from '../vendor/ncentral/filterMappings';
 import { requireRole } from './auth';
+import {
+  createDeviceMatchExclusion,
+  deactivateDeviceMatchExclusion,
+  listDeviceMatchExclusions,
+  type CreateDeviceMatchExclusionInput,
+} from '../mapping/deviceMatchExclusions';
 import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, requireMutatingRequestOrigin } from './runtime';
 
 loadDotEnv({ override: false });
@@ -121,6 +127,61 @@ type NcentralFilterMappingBody = UpsertNcentralFilterMappingInput;
 type LaborMappingBody = UpsertLaborMappingInput;
 
 type InvestigationTicketMappingBody = UpsertInvestigationTicketMappingInput;
+
+type DeviceMatchExclusionBody = Omit<CreateDeviceMatchExclusionInput, 'sourceVendorId' | 'approvedBy'>;
+
+export async function listDeviceMatchExclusionsHttp(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const vendorId = request.params.vendorId;
+  if (!vendorId) return jsonResponse(400, { error: 'A source vendor is required.' });
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) return jsonResponse(400, { error: 'Device exclusions need PostgreSQL settings.' });
+  try {
+    return jsonResponse(200, { vendorId, exclusions: await listDeviceMatchExclusions(repositoryContext.pool, vendorId) });
+  } catch (error) {
+    return jsonResponse(500, { error: error instanceof Error ? error.message : 'Unable to load device exclusions.' });
+  } finally { await repositoryContext.close(); }
+}
+
+export async function createDeviceMatchExclusionHttp(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const sourceVendorId = request.params.vendorId;
+  if (!sourceVendorId) return jsonResponse(400, { error: 'A source vendor is required.' });
+  const bodyResult = await readJsonBody<DeviceMatchExclusionBody>(request, { fallback: {} as DeviceMatchExclusionBody });
+  if (!bodyResult.ok) return bodyResult.response;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) return jsonResponse(400, { error: 'Device exclusions need PostgreSQL settings.' });
+  try {
+    const exclusion = await createDeviceMatchExclusion(repositoryContext.pool, {
+      ...bodyResult.body, sourceVendorId, approvedBy: auth.principal.name,
+    });
+    return jsonResponse(200, { exclusion });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to save device exclusion.' });
+  } finally { await repositoryContext.close(); }
+}
+
+export async function deactivateDeviceMatchExclusionHttp(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const vendorId = request.params.vendorId;
+  const exclusionId = request.params.exclusionId;
+  if (!vendorId || !exclusionId) return jsonResponse(400, { error: 'Vendor and exclusion are required.' });
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) return jsonResponse(400, { error: 'Device exclusions need PostgreSQL settings.' });
+  try {
+    await deactivateDeviceMatchExclusion(repositoryContext.pool, vendorId, exclusionId, auth.principal.name);
+    return jsonResponse(200, { exclusionId, active: false });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to remove device exclusion.' });
+  } finally { await repositoryContext.close(); }
+}
 
 export async function listMappingsHttp(
   request: HttpRequest,
@@ -1438,6 +1499,18 @@ app.http('deactivateProductBundle', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/bundles/{bundleKey}/deactivate',
   handler: deactivateProductBundleHttp,
+});
+
+app.http('listDeviceMatchExclusions', {
+  methods: ['GET'], authLevel: 'anonymous', route: 'mappings/{vendorId}/device-exclusions', handler: listDeviceMatchExclusionsHttp,
+});
+
+app.http('createDeviceMatchExclusion', {
+  methods: ['POST'], authLevel: 'anonymous', route: 'mappings/{vendorId}/device-exclusions', handler: createDeviceMatchExclusionHttp,
+});
+
+app.http('deactivateDeviceMatchExclusion', {
+  methods: ['DELETE', 'POST'], authLevel: 'anonymous', route: 'mappings/{vendorId}/device-exclusions/{exclusionId}/deactivate', handler: deactivateDeviceMatchExclusionHttp,
 });
 
 app.http('listCrossVendorBundles', {

@@ -32,6 +32,15 @@ export type PsaAgreementReconcileMode = 'merge-multiple-products' | 'separate-mu
 export const detailOnlySyncSettingKey = 'detailOnlySync';
 export const psaAgreementReconcileModeSettingKey = 'psaAgreementReconcileMode';
 export const doNotSuggestNewAdditionsSettingKey = 'doNotSuggestNewAdditions';
+export const enableApiSyncSettingKey = 'enableApiSync';
+export const enableManualDetailImportsSettingKey = 'enableManualDetailImports';
+export const enableInvoiceImportSettingKey = 'enableInvoiceImport';
+
+export type IntegrationApiOperationDefinition = {
+  key: string;
+  label: string;
+  dataSourceKey?: string;
+};
 
 export type IntegrationSecretDefinition = {
   key: string;
@@ -78,6 +87,27 @@ export type IntegrationSettingsDefinition = {
   scopes: string[];
   syncFrequency: IntegrationSyncFrequency;
   webhookSupported: boolean;
+};
+
+const integrationApiOperations: Partial<Record<IntegrationId, IntegrationApiOperationDefinition[]>> = {
+  connectwise: [{ key: 'agreement-report', label: 'Agreement report' }],
+  cove: [{ key: 'usage-snapshots', label: 'Protected systems', dataSourceKey: 'cove-protected-systems' }],
+  ncentral: [{ key: 'usage-snapshots', label: 'Filter and device counts', dataSourceKey: 'ncentral-device-filters' }],
+  sentinelone: [{ key: 'usage-snapshots', label: 'Site and agent counts', dataSourceKey: 'sentinelone-sites' }],
+  datto: [
+    { key: 'datto-bcdr', label: 'BCDR protected agents', dataSourceKey: 'datto-bcdr-agents' },
+    { key: 'datto-saas', label: 'SaaS Protection seats', dataSourceKey: 'datto-saas-seats' },
+  ],
+  'microsoft-365': [
+    { key: 'm365-licenses', label: 'Subscription and license counts', dataSourceKey: 'microsoft365-product-totals' },
+    { key: 'm365-users', label: 'User and assigned-license detail', dataSourceKey: 'microsoft365-user-licenses' },
+  ],
+  'opentext-appriver': [
+    { key: 'subscription-snapshots', label: 'Customer subscription snapshots', dataSourceKey: 'appriver-customer-products' },
+  ],
+  huntress: [
+    { key: 'usage-snapshots', label: 'Organization product usage', dataSourceKey: 'huntress-organization-product-usage' },
+  ],
 };
 
 export type IntegrationSettingsState = {
@@ -263,13 +293,22 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     capabilities: ['live-api', 'mapping', 'invoice-import'],
     dataSources: [
       dataSource(
-        'datto-product-lines',
-        'Product-line usage',
+        'datto-bcdr-agents',
+        'BCDR protected agents',
         'customer-product-breakdown',
         ['live-api', 'csv', 'excel'],
         true,
         false,
-        'Customer-level BCDR protected agents and SaaS Protection product-line seat counts.',
+        'Customer-level BCDR protected-agent counts.',
+      ),
+      dataSource(
+        'datto-saas-seats',
+        'SaaS Protection seats',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Customer-level SaaS Protection product-line seat counts.',
       ),
       resellerInvoiceTotals(),
     ],
@@ -541,6 +580,22 @@ export function listIntegrationDataSources(integrationId: IntegrationId) {
   return getIntegrationSettingsDefinition(integrationId)?.dataSources ?? [];
 }
 
+export function getIntegrationDataSourceByKey(integrationId: IntegrationId, dataSourceKey: string | undefined) {
+  return dataSourceKey
+    ? listIntegrationDataSources(integrationId).find((source) => source.key === dataSourceKey)
+    : undefined;
+}
+
+export function listIntegrationApiOperations(integrationId: IntegrationId) {
+  return integrationApiOperations[integrationId] ?? [];
+}
+
+export function getIntegrationApiOperation(integrationId: IntegrationId, operationKey: string | undefined) {
+  return operationKey
+    ? listIntegrationApiOperations(integrationId).find((operation) => operation.key === operationKey)
+    : undefined;
+}
+
 export function getIntegrationDataSource(
   integrationId: IntegrationId,
   sourceType?: IntegrationDataSourceType,
@@ -554,7 +609,23 @@ export function integrationDataSourceRequiresCustomerMapping(sourceType: Integra
 }
 
 export function listIntegrationNonSecretDefinitions(definition: IntegrationSettingsDefinition) {
-  return [...definition.requiredNonSecrets, ...(definition.optionalNonSecrets ?? [])];
+  return [
+    ...definition.requiredNonSecrets,
+    ...integrationChannelSettings(definition),
+    ...(definition.optionalNonSecrets ?? []),
+  ];
+}
+
+export function listIntegrationChannelSettings(definition: IntegrationSettingsDefinition) {
+  return integrationChannelSettings(definition);
+}
+
+export function integrationChannelEnabled(
+  nonSecrets: Record<string, string | undefined>,
+  key: typeof enableApiSyncSettingKey | typeof enableManualDetailImportsSettingKey | typeof enableInvoiceImportSettingKey,
+  fallback = false,
+) {
+  return typeof nonSecrets[key] === 'undefined' ? fallback : booleanSettingEnabled(nonSecrets[key]);
 }
 
 export function integrationDetailOnlySyncEnabled(
@@ -694,6 +765,7 @@ function detailOnlySyncOption(envVar: string, defaultValue = 'false') {
     defaultValue,
     'checkbox',
     'Customer-mapped detail is stored for reports and linked counts without product mapping.',
+    'Enabled workflows',
   );
 }
 
@@ -750,6 +822,49 @@ function mappingIntegrationOptions(
     psaAgreementReconcileModeOption(`${envVarPrefix}_PSA_AGREEMENT_RECONCILE_MODE`, reconcileModeDefault),
     doNotSuggestNewAdditionsOption(`${envVarPrefix}_DO_NOT_SUGGEST_NEW_ADDITIONS`),
   ];
+}
+
+function integrationChannelSettings(definition: IntegrationSettingsDefinition) {
+  const envPrefix = definition.integrationId.replace(/-/g, '_').toUpperCase();
+  const settings: IntegrationNonSecretDefinition[] = [];
+
+  if (definition.capabilities.includes('live-api')) {
+    settings.push(optionalNonSecret(
+      enableApiSyncSettingKey,
+      'Enable API Sync',
+      `${envPrefix}_ENABLE_API_SYNC`,
+      undefined,
+      'checkbox',
+      'Show API operations and allow this integration to run live synchronization.',
+      'Enabled workflows',
+    ));
+  }
+
+  if (definition.capabilities.includes('mapping')) {
+    settings.push(optionalNonSecret(
+      enableManualDetailImportsSettingKey,
+      'Enable Manual Detail Imports',
+      `${envPrefix}_ENABLE_MANUAL_DETAIL_IMPORTS`,
+      undefined,
+      'checkbox',
+      'Show manual vendor datapoints and file-import tools for this integration.',
+      'Enabled workflows',
+    ));
+  }
+
+  if (definition.capabilities.includes('invoice-import')) {
+    settings.push(optionalNonSecret(
+      enableInvoiceImportSettingKey,
+      'Enable Invoice Import',
+      `${envPrefix}_ENABLE_INVOICE_IMPORT`,
+      undefined,
+      'checkbox',
+      'Show invoice-import tools for this integration. Reporting-column mapping remains a later step.',
+      'Enabled workflows',
+    ));
+  }
+
+  return settings;
 }
 
 function dataSource(

@@ -4,6 +4,7 @@ import {
   type AppRiverLicenseCleanupCandidate,
 } from '../vendor/appriver/licenseCleanup';
 import type { AppRiverChargeEvent } from '../vendor/appriver/client';
+import { applyDeviceMatchExclusions } from '../mapping/deviceMatchExclusions';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -269,7 +270,7 @@ export async function getDiscrepancyReport(
     rows.push(...pairRows);
   }
 
-  const report: DiscrepancyReport = {
+  const report: DiscrepancyReport = await applyDeviceMatchExclusions(database, {
     reportType: 'discrepancies',
     generatedAt,
     filters: {
@@ -279,7 +280,7 @@ export async function getDiscrepancyReport(
     comparisonPairs: definitions,
     customers: customersForRows(rows),
     rows: rows.sort(compareRows),
-  };
+  });
 
   return applyDiscrepancyReportFilters(report, options);
 }

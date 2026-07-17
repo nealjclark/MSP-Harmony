@@ -181,6 +181,18 @@ async function run() {
 
     process.env.DATABASE_URL = 'postgres://user:pass@localhost:5432/mspharmony';
     const queuedMessages: unknown[] = [];
+    let nextJobNumber = 0;
+    const createRepositoryContext = async () => ({
+      missingDatabaseSettings: [],
+      pool: {} as never,
+      repository: {
+        async createSyncJob() {
+          nextJobNumber += 1;
+          return `sync-job-${nextJobNumber}`;
+        },
+      } as never,
+      async close() {},
+    });
     const queuedMicrosoft365SyncResponse = await syncIntegrationHttp(
       {
         params: { integrationId: 'microsoft-365' },
@@ -197,6 +209,7 @@ async function run() {
           },
         },
       } as never,
+      { createRepositoryContext },
     );
     assert.equal(queuedMicrosoft365SyncResponse.status, 202);
     assert.equal((queuedMicrosoft365SyncResponse.jsonBody as { status?: string }).status, 'queued');
@@ -204,6 +217,7 @@ async function run() {
       integrationId: 'microsoft-365',
       requestedBy: 'admin@example.com',
       requestedAt: (queuedMessages[0] as { requestedAt: string }).requestedAt,
+      jobId: 'sync-job-1',
       dataset: 'licenses',
       pageSize: 100,
       maxPages: 100,
@@ -225,12 +239,14 @@ async function run() {
           },
         },
       } as never,
+      { createRepositoryContext },
     );
     assert.equal(queuedDattoSyncResponse.status, 202);
     assert.deepEqual(queuedMessages[1], {
       integrationId: 'datto',
       requestedBy: 'admin@example.com',
       requestedAt: (queuedMessages[1] as { requestedAt: string }).requestedAt,
+      jobId: 'sync-job-2',
       pageSize: 100,
       maxPages: 100,
       seatPageSize: 500,

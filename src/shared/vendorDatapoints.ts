@@ -40,6 +40,7 @@ export type VendorDatapointRecord = {
   displayName: string;
   description?: string;
   linkedIntegrationId?: IntegrationId;
+  dataSourceKey?: string;
   sourceType: string;
   syncMode: ManualImportSyncMode;
   columnMap: InvoiceTableColumnMap;
@@ -57,6 +58,7 @@ export type CreateVendorDatapointInput = {
   displayName: string;
   description?: string;
   linkedIntegrationId?: IntegrationId;
+  dataSourceKey?: string;
   sourceType: string;
   syncMode?: ManualImportSyncMode;
   columnMap?: InvoiceTableColumnMap;
@@ -68,6 +70,7 @@ export type UpdateVendorDatapointInput = {
   displayName?: string;
   description?: string;
   linkedIntegrationId?: IntegrationId | null;
+  dataSourceKey?: string | null;
   sourceType?: string;
   syncMode?: ManualImportSyncMode;
   columnMap?: InvoiceTableColumnMap;

@@ -21,6 +21,7 @@ import { createOptionalPostgresSettingsRepository, jsonResponse, readJsonBody, r
 loadDotEnv({ override: false });
 
 type InvoiceImportBody = {
+  dataSourceKey?: string;
   fileName?: string;
   content?: string;
   importMode?: string;
@@ -172,6 +173,7 @@ export async function importMappedInvoiceTableHttp(
   const sourceType = parseInvoiceImportSourceType(body.sourceType);
   const syncMode = parseManualImportSyncMode(body.syncMode);
   const linkedIntegrationId = parseRegistryIntegrationId(body.linkedIntegrationId);
+  const dataSourceKey = typeof body.dataSourceKey === 'string' ? body.dataSourceKey.trim() || undefined : undefined;
 
   if (!fileName || !content || !columnMap) {
     return jsonResponse(400, {
@@ -198,6 +200,7 @@ export async function importMappedInvoiceTableHttp(
       import: await importMappedInvoiceTableCsv(repositoryContext.pool, {
         vendorId,
         linkedIntegrationId,
+        dataSourceKey,
         fileName,
         content,
         columnMap,

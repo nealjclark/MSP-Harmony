@@ -1,5 +1,5 @@
-import type { IntegrationId, IntegrationTestResult } from '../../shared/integrationSettings';
-import type { IntegrationOperationalStatus, IntegrationOperationalStatusReader } from '../api/integrations';
+import { getIntegrationSettingsDefinition, listIntegrationApiOperations, type IntegrationId, type IntegrationTestResult } from '../../shared/integrationSettings';
+import type { IntegrationOperationalStatus, IntegrationOperationalStatusReader, IntegrationSyncJob } from '../api/integrations';
 import type { IntegrationSettingsMetadata, IntegrationSettingsMetadataReader } from './settingsProvider';
 import type { IntegrationSettingsRepository } from './settingsUpdater';
 
@@ -20,16 +20,41 @@ type IntegrationSettingsRow = {
 };
 
 type SyncRunSummaryRow = {
+  id: string;
   started_at: Date | string;
   completed_at: Date | string | null;
   status: string;
   records_read: number;
   records_written: number;
   error_message: string | null;
+  metadata?: unknown;
+};
+
+type AppRiverSyncProgressRow = {
+  total_customers: string | number;
+  completed_customers: string | number;
+  failed_customers: string | number;
+  queued_customers: string | number;
+  processing_customers: string | number;
+  current_customer_name: string | null;
 };
 
 type CountRow = {
   count: string | number;
+};
+
+type IntegrationSyncJobRow = {
+  id: string;
+  integration_id: IntegrationId;
+  operation_key: string;
+  operation_label: string;
+  status: IntegrationSyncJob['status'];
+  requested_by: string;
+  requested_at: Date | string;
+  started_at: Date | string | null;
+  completed_at: Date | string | null;
+  sync_run_id: string | null;
+  error_message: string | null;
 };
 
 export type SaveIntegrationTestResultInput = {
@@ -47,6 +72,105 @@ export class PostgresIntegrationSettingsRepository
   implements IntegrationSettingsRepository, IntegrationSettingsMetadataReader, IntegrationOperationalStatusReader
 {
   constructor(private readonly database: Queryable) {}
+
+  async createSyncJob(input: {
+    integrationId: IntegrationId;
+    integrationName: string;
+    operationKey: string;
+    operationLabel: string;
+    requestedBy: string;
+    requestedAt: string;
+  }) {
+    const result = await this.database.query<{ id: string }>(
+      `insert into integration_sync_jobs (
+         integration_id, operation_key, operation_label, status, requested_by, requested_at
+       ) values ($1, $2, $3, 'queued', $4, $5::timestamptz)
+       returning id`,
+      [input.integrationId, input.operationKey, input.operationLabel, input.requestedBy, input.requestedAt],
+    );
+    const id = result.rows[0]?.id;
+    if (!id) throw new Error(`Unable to create ${input.integrationName} sync job.`);
+    return id;
+  }
+
+  async markSyncJobRunning(jobId: string) {
+    await this.database.query(
+      `update integration_sync_jobs
+       set status = 'running', started_at = coalesce(started_at, now()), updated_at = now()
+       where id = $1::uuid and status in ('queued', 'running')`,
+      [jobId],
+    );
+  }
+
+  async attachSyncJobRun(jobId: string, syncRunId: string) {
+    await this.database.query(
+      `update integration_sync_jobs set sync_run_id = $2::uuid, updated_at = now() where id = $1::uuid`,
+      [jobId, syncRunId],
+    );
+  }
+
+  async completeSyncJob(jobId: string, syncRunId?: string) {
+    await this.database.query(
+      `update integration_sync_jobs
+       set status = 'complete', completed_at = now(), sync_run_id = coalesce($2::uuid, sync_run_id),
+           error_message = null, updated_at = now()
+       where id = $1::uuid`,
+      [jobId, syncRunId ?? null],
+    );
+  }
+
+  async failSyncJob(jobId: string, error: string, syncRunId?: string) {
+    await this.database.query(
+      `update integration_sync_jobs
+       set status = 'failed', completed_at = now(), sync_run_id = coalesce($3::uuid, sync_run_id),
+           error_message = $2, updated_at = now()
+       where id = $1::uuid`,
+      [jobId, error, syncRunId ?? null],
+    );
+  }
+
+  async listRecentSyncJobs(limit = 20): Promise<IntegrationSyncJob[]> {
+    const result = await this.database.query<IntegrationSyncJobRow>(
+      `select id, integration_id, operation_key, operation_label, status, requested_by, requested_at,
+              started_at, completed_at, sync_run_id, error_message
+       from integration_sync_jobs
+       where status in ('queued', 'running') or requested_at >= now() - interval '24 hours'
+       order by requested_at desc
+       limit $1`,
+      [limit],
+    );
+
+    return Promise.all(result.rows.map(async (row) => {
+      let progress: IntegrationSyncJob['progress'];
+      if (row.integration_id === 'opentext-appriver' && row.sync_run_id) {
+        const appRiver = await this.loadAppRiverSyncProgress(row.sync_run_id);
+        if (appRiver) {
+          progress = {
+            completed: appRiver.processedCustomers,
+            total: appRiver.totalCustomers,
+            failed: appRiver.failedCustomers,
+            currentItem: appRiver.currentCustomerName,
+            unitLabel: 'customers',
+          };
+        }
+      }
+      return {
+        id: row.id,
+        integrationId: row.integration_id,
+        integrationName: getIntegrationSettingsDefinition(row.integration_id)?.displayName ?? row.integration_id,
+        operationKey: row.operation_key,
+        operationLabel: row.operation_label,
+        status: row.status,
+        requestedBy: row.requested_by,
+        requestedAt: isoDate(row.requested_at) ?? new Date(0).toISOString(),
+        startedAt: isoDate(row.started_at) ?? undefined,
+        completedAt: isoDate(row.completed_at) ?? undefined,
+        syncRunId: row.sync_run_id ?? undefined,
+        error: row.error_message ?? undefined,
+        progress,
+      };
+    }));
+  }
 
   async saveNonSecrets(input: {
     integrationId: IntegrationId;
@@ -213,7 +337,7 @@ export class PostgresIntegrationSettingsRepository
 
   async loadOperationalStatus(integrationId: IntegrationId): Promise<IntegrationOperationalStatus | undefined> {
     const syncRunResult = await this.database.query<SyncRunSummaryRow>(
-      `select started_at, completed_at, status, records_read, records_written, error_message
+      `select id, started_at, completed_at, status, records_read, records_written, error_message
        from sync_runs
        where integration_id = $1
        order by started_at desc
@@ -222,6 +346,10 @@ export class PostgresIntegrationSettingsRepository
     );
     const latestSyncRun = syncRunResult.rows[0];
     const storedRecordCount = await this.loadStoredRecordCount(integrationId);
+    const syncProgress = integrationId === 'opentext-appriver' && latestSyncRun
+      ? await this.loadAppRiverSyncProgress(latestSyncRun.id)
+      : undefined;
+    const operations = await this.loadOperationStatuses([integrationId]);
 
     if (!latestSyncRun && typeof storedRecordCount === 'undefined') {
       return undefined;
@@ -235,6 +363,8 @@ export class PostgresIntegrationSettingsRepository
       lastSyncRecordsWritten: latestSyncRun?.records_written,
       lastSyncError: latestSyncRun?.error_message ?? undefined,
       storedRecordCount,
+      syncProgress,
+      operations: operations.get(integrationId),
     };
   }
 
@@ -246,6 +376,7 @@ export class PostgresIntegrationSettingsRepository
     const latestSyncRuns = await this.database.query<SyncRunSummaryRow & { integration_id: IntegrationId }>(
       `select distinct on (integration_id)
          integration_id,
+         id,
          started_at,
          completed_at,
          status,
@@ -259,11 +390,15 @@ export class PostgresIntegrationSettingsRepository
     );
     const syncRunsById = new Map(latestSyncRuns.rows.map((row) => [row.integration_id, row]));
     const storedCountsById = await this.loadStoredRecordCounts(integrationIds);
+    const operationStatusesById = await this.loadOperationStatuses(integrationIds);
     const statuses = new Map<IntegrationId, IntegrationOperationalStatus>();
 
     for (const integrationId of integrationIds) {
       const latestSyncRun = syncRunsById.get(integrationId);
       const storedRecordCount = storedCountsById.get(integrationId);
+      const syncProgress = integrationId === 'opentext-appriver' && latestSyncRun
+        ? await this.loadAppRiverSyncProgress(latestSyncRun.id)
+        : undefined;
 
       if (!latestSyncRun && typeof storedRecordCount === 'undefined') {
         continue;
@@ -277,7 +412,112 @@ export class PostgresIntegrationSettingsRepository
         lastSyncRecordsWritten: latestSyncRun?.records_written,
         lastSyncError: latestSyncRun?.error_message ?? undefined,
         storedRecordCount,
+        syncProgress,
+        operations: operationStatusesById.get(integrationId),
       });
+    }
+
+    return statuses;
+  }
+
+  private async loadAppRiverSyncProgress(syncRunId: string) {
+    const result = await this.database.query<AppRiverSyncProgressRow>(
+      `select
+         count(*) as total_customers,
+         count(*) filter (where status = 'complete') as completed_customers,
+         count(*) filter (where status = 'failed') as failed_customers,
+         count(*) filter (where status = 'queued') as queued_customers,
+         count(*) filter (where status = 'processing') as processing_customers,
+         max(customer_name) filter (where status = 'processing') as current_customer_name
+       from appriver_sync_work_items
+       where sync_run_id = $1::uuid`,
+      [syncRunId],
+    );
+    const row = result.rows[0];
+    const totalCustomers = normalizeCount(row?.total_customers);
+    if (totalCustomers === 0) return undefined;
+    const completedCustomers = normalizeCount(row?.completed_customers);
+    const failedCustomers = normalizeCount(row?.failed_customers);
+    return {
+      totalCustomers,
+      processedCustomers: completedCustomers + failedCustomers,
+      completedCustomers,
+      failedCustomers,
+      queuedCustomers: normalizeCount(row?.queued_customers),
+      processingCustomers: normalizeCount(row?.processing_customers),
+      currentCustomerName: row?.current_customer_name ?? undefined,
+    };
+  }
+
+  private async loadOperationStatuses(integrationIds: IntegrationId[]) {
+    const result = await this.database.query<SyncRunSummaryRow & { integration_id: IntegrationId }>(
+      `select distinct on (
+         integration_id,
+         coalesce(metadata->>'operationKey', metadata->>'entity', 'legacy')
+       )
+         integration_id,
+         id,
+         started_at,
+         completed_at,
+         status,
+         records_read,
+         records_written,
+         error_message,
+         metadata
+       from sync_runs
+       where integration_id = any($1::text[])
+       order by
+         integration_id,
+         coalesce(metadata->>'operationKey', metadata->>'entity', 'legacy'),
+         started_at desc`,
+      [integrationIds],
+    );
+    const statuses = new Map<IntegrationId, IntegrationOperationalStatus['operations']>();
+
+    for (const row of result.rows) {
+      const metadata = recordFromJson(row.metadata);
+      const operationKey = String(metadata.operationKey ?? metadata.entity ?? 'legacy');
+      // Microsoft 365 originally used one combined `license-snapshots` operation.
+      // Keep those rows available to reports and reconciliation, but do not expose
+      // the retired operation as a third, actionable API sync in Integrations.
+      if (row.integration_id === 'microsoft-365' && operationKey === 'license-snapshots') {
+        continue;
+      }
+      const definition = listIntegrationApiOperations(row.integration_id).find((item) => item.key === operationKey);
+      const dataSourceKey = typeof metadata.dataSourceKey === 'string' ? metadata.dataSourceKey : definition?.dataSourceKey;
+      const currentItem = row.integration_id === 'opentext-appriver' && row.status !== 'complete' && row.status !== 'failed'
+        ? (await this.loadAppRiverSyncProgress(row.id))?.currentCustomerName
+        : undefined;
+      const operation = {
+        operationKey,
+        label: definition?.label ?? legacyOperationLabel(row.integration_id, operationKey),
+        dataSourceKey,
+        status: row.status,
+        startedAt: isoDate(row.started_at) ?? new Date(0).toISOString(),
+        completedAt: isoDate(row.completed_at ?? null),
+        recordsRead: row.records_read,
+        recordsWritten: row.records_written,
+        error: row.error_message ?? undefined,
+        currentItem,
+      };
+      statuses.set(row.integration_id, [...(statuses.get(row.integration_id) ?? []), operation]);
+    }
+
+    for (const integrationId of integrationIds) {
+      const existing = statuses.get(integrationId) ?? [];
+      const existingKeys = new Set(existing.map((item) => item.operationKey));
+      const neverRun = listIntegrationApiOperations(integrationId)
+        .filter((definition) => !existingKeys.has(definition.key))
+        .map((definition) => ({
+          operationKey: definition.key,
+          label: definition.label,
+          dataSourceKey: definition.dataSourceKey,
+          status: 'never',
+          startedAt: '',
+        }));
+      if (existing.length > 0 || neverRun.length > 0) {
+        statuses.set(integrationId, [...existing, ...neverRun]);
+      }
     }
 
     return statuses;
@@ -380,6 +620,16 @@ function isoDate(value: Date | string | null) {
   }
 
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function legacyOperationLabel(integrationId: IntegrationId, operationKey: string) {
+  if (integrationId === 'datto' && operationKey === 'usage-snapshots') return 'Combined Datto sync (legacy)';
+  if (operationKey === 'legacy') return 'Legacy sync';
+  return operationKey
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(' ');
 }
 
 function normalizeCount(count: string | number | undefined) {

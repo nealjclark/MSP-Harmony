@@ -1,4 +1,5 @@
 import {
+  getIntegrationDataSourceByKey,
   getIntegrationSettingsDefinition,
   type IntegrationDataSourceType,
   type IntegrationId,
@@ -21,6 +22,7 @@ type VendorDatapointRow = {
   display_name: string;
   description: string | null;
   linked_integration_id: string | null;
+  data_source_key: string | null;
   source_type: string;
   sync_mode: string;
   column_map: InvoiceTableColumnMap | string;
@@ -40,6 +42,7 @@ export async function listVendorDatapoints(database: Queryable): Promise<VendorD
             display_name,
             description,
             linked_integration_id,
+            data_source_key,
             source_type,
             sync_mode,
             column_map,
@@ -65,6 +68,7 @@ export async function getVendorDatapoint(database: Queryable, id: string): Promi
             display_name,
             description,
             linked_integration_id,
+            data_source_key,
             source_type,
             sync_mode,
             column_map,
@@ -91,6 +95,7 @@ export async function createVendorDatapoint(
 ): Promise<VendorDatapointRecord> {
   assertDatapointSourceType(input.sourceType);
   assertLinkedIntegrationId(input.linkedIntegrationId);
+  assertDataSourceKey(input.linkedIntegrationId, input.dataSourceKey, input.sourceType);
 
   const result = await database.query<VendorDatapointRow>(
     `insert into vendor_datapoints (
@@ -101,13 +106,15 @@ export async function createVendorDatapoint(
        sync_mode,
        column_map,
        known_headers,
-       default_import_mode
+       default_import_mode,
+       data_source_key
      )
-     values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+     values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
      returning id,
                display_name,
                description,
                linked_integration_id,
+               data_source_key,
                source_type,
                sync_mode,
                column_map,
@@ -128,6 +135,7 @@ export async function createVendorDatapoint(
       JSON.stringify(input.columnMap ?? {}),
       JSON.stringify(input.knownHeaders ?? []),
       'merge',
+      input.dataSourceKey ?? null,
     ],
   );
 
@@ -155,6 +163,11 @@ export async function updateVendorDatapoint(
   if (input.linkedIntegrationId) {
     assertLinkedIntegrationId(input.linkedIntegrationId);
   }
+  assertDataSourceKey(
+    input.linkedIntegrationId === undefined ? existing.linkedIntegrationId : input.linkedIntegrationId ?? undefined,
+    input.dataSourceKey === undefined ? existing.dataSourceKey : input.dataSourceKey ?? undefined,
+    input.sourceType ?? existing.sourceType,
+  );
 
   const result = await database.query<VendorDatapointRow>(
     `update vendor_datapoints
@@ -167,12 +180,14 @@ export async function updateVendorDatapoint(
             known_headers = $8::jsonb,
             default_import_mode = $9,
             active = $10,
+            data_source_key = $11,
             updated_at = now()
       where id = $1::uuid
       returning id,
                 display_name,
                 description,
                 linked_integration_id,
+                data_source_key,
                 source_type,
                 sync_mode,
                 column_map,
@@ -200,6 +215,7 @@ export async function updateVendorDatapoint(
       ),
       'merge',
       input.active ?? existing.active,
+      input.dataSourceKey === undefined ? existing.dataSourceKey ?? null : input.dataSourceKey,
     ],
   );
 
@@ -239,6 +255,7 @@ export async function importVendorDatapointFile(
   const imported = await importMappedInvoiceTableCsv(database, {
     vendorId: 'custom-table',
     linkedIntegrationId: datapoint.linkedIntegrationId,
+    dataSourceKey: datapoint.dataSourceKey,
     datapointId: datapoint.id,
     datapointVendorId,
     storageVendorIdOverride: datapoint.linkedIntegrationId ? undefined : datapointVendorId,
@@ -264,6 +281,7 @@ export async function importVendorDatapointFile(
                 display_name,
                 description,
                 linked_integration_id,
+                data_source_key,
                 source_type,
                 sync_mode,
                 column_map,
@@ -315,6 +333,22 @@ function assertLinkedIntegrationId(linkedIntegrationId: IntegrationId | undefine
   }
 }
 
+function assertDataSourceKey(
+  linkedIntegrationId: IntegrationId | undefined,
+  dataSourceKey: string | undefined,
+  sourceType: string,
+) {
+  if (!dataSourceKey) return;
+  const integrationId = linkedIntegrationId ?? 'custom-table';
+  const source = getIntegrationDataSourceByKey(integrationId, dataSourceKey);
+  if (!source) {
+    throw new Error(`Data stream "${dataSourceKey}" is not registered for integration "${integrationId}".`);
+  }
+  if (source.sourceType !== sourceType) {
+    throw new Error(`Data stream "${dataSourceKey}" expects source type "${source.sourceType}".`);
+  }
+}
+
 function mapVendorDatapointRow(row: VendorDatapointRow): VendorDatapointRecord {
   const columnMap =
     typeof row.column_map === 'string'
@@ -328,6 +362,7 @@ function mapVendorDatapointRow(row: VendorDatapointRow): VendorDatapointRecord {
     displayName: row.display_name,
     description: row.description ?? undefined,
     linkedIntegrationId: row.linked_integration_id ? (row.linked_integration_id as IntegrationId) : undefined,
+    ...(row.data_source_key ? { dataSourceKey: row.data_source_key } : {}),
     sourceType: row.source_type,
     syncMode: row.sync_mode === 'info-only' ? 'info-only' : 'full-vendor-sync',
     columnMap,

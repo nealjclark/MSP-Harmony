@@ -399,6 +399,54 @@ CREATE TABLE IF NOT EXISTS appriver_license_cleanup_actions (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS integration_sync_jobs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  integration_id text NOT NULL,
+  operation_key text NOT NULL,
+  operation_label text NOT NULL,
+  status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'complete', 'failed')),
+  requested_by text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_activity
+  ON integration_sync_jobs(status, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_integration
+  ON integration_sync_jobs(integration_id, operation_key, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS vendor_device_match_exclusions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  comparison_id text NOT NULL,
+  source_vendor_id text NOT NULL,
+  target_vendor_id text NOT NULL,
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  source_item_id text,
+  source_identity text NOT NULL,
+  source_display_name text NOT NULL,
+  reason text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  approved_by text NOT NULL,
+  approved_at timestamptz NOT NULL DEFAULT now(),
+  deactivated_by text,
+  deactivated_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_vendor_device_match_exclusions_direction CHECK (source_vendor_id <> target_vendor_id),
+  CONSTRAINT ux_vendor_device_match_exclusions_identity UNIQUE (
+    comparison_id,
+    source_vendor_id,
+    target_vendor_id,
+    customer_id,
+    source_identity
+  )
+);
+
 CREATE TABLE IF NOT EXISTS appriver_subscription_refreshes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
@@ -420,6 +468,7 @@ CREATE TABLE IF NOT EXISTS appriver_subscription_refreshes (
 CREATE TABLE IF NOT EXISTS invoice_imports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
+  data_source_key text,
   file_name text NOT NULL,
   invoice_number text,
   imported_at timestamptz NOT NULL DEFAULT now(),
@@ -572,8 +621,14 @@ CREATE INDEX IF NOT EXISTS idx_cross_vendor_product_bundles_active
 CREATE INDEX IF NOT EXISTS idx_vendor_usage_overrides_scope
   ON vendor_usage_overrides(vendor_id, customer_id, agreement_id, source_vendor_product_key)
   WHERE active;
+CREATE INDEX IF NOT EXISTS idx_vendor_device_match_exclusions_source
+  ON vendor_device_match_exclusions(source_vendor_id, target_vendor_id, customer_id)
+  WHERE active;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS data_source_key text;
 CREATE INDEX IF NOT EXISTS idx_invoice_imports_vendor_latest
   ON invoice_imports(vendor_id, invoice_date DESC, imported_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invoice_imports_vendor_source_latest
+  ON invoice_imports(vendor_id, data_source_key, imported_at DESC);
 CREATE INDEX IF NOT EXISTS idx_invoice_line_items_import_scope
   ON invoice_line_items(invoice_import_id, customer_id, agreement_id, connectwise_product_code);
 CREATE INDEX IF NOT EXISTS idx_invoice_line_items_vendor_external
@@ -794,6 +849,7 @@ CREATE TABLE IF NOT EXISTS vendor_datapoints (
   display_name text NOT NULL,
   description text,
   linked_integration_id text,
+  data_source_key text,
   source_type text NOT NULL,
   sync_mode text NOT NULL DEFAULT 'full-vendor-sync' CHECK (sync_mode IN ('info-only', 'full-vendor-sync')),
   column_map jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -806,10 +862,15 @@ CREATE TABLE IF NOT EXISTS vendor_datapoints (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE vendor_datapoints ADD COLUMN IF NOT EXISTS known_headers jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE vendor_datapoints ADD COLUMN IF NOT EXISTS data_source_key text;
+
 CREATE INDEX IF NOT EXISTS idx_vendor_datapoints_active_name
   ON vendor_datapoints(active, display_name);
 
-ALTER TABLE vendor_datapoints ADD COLUMN IF NOT EXISTS known_headers jsonb NOT NULL DEFAULT '[]'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_vendor_datapoints_integration_source
+  ON vendor_datapoints(linked_integration_id, data_source_key)
+  WHERE active;
 
 CREATE TABLE IF NOT EXISTS vendor_product_addition_pins (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1112,3 +1173,53 @@ CREATE TABLE IF NOT EXISTS vendor_investigation_ticket_products (
 
 CREATE INDEX IF NOT EXISTS idx_vendor_investigation_ticket_products_ticket
   ON vendor_investigation_ticket_products(investigation_ticket_id);
+CREATE TABLE IF NOT EXISTS invoice_import_templates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  integration_id text NOT NULL,
+  name text NOT NULL,
+  data_source_key text,
+  source_type text NOT NULL DEFAULT 'invoice',
+  column_map jsonb NOT NULL DEFAULT '{}'::jsonb,
+  known_headers jsonb NOT NULL DEFAULT '[]'::jsonb,
+  version integer NOT NULL DEFAULT 1,
+  active boolean NOT NULL DEFAULT true,
+  archived_at timestamptz,
+  created_by text,
+  updated_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_invoice_import_templates_active_name
+  ON invoice_import_templates(integration_id, lower(name))
+  WHERE active;
+
+CREATE INDEX IF NOT EXISTS idx_invoice_import_templates_integration
+  ON invoice_import_templates(integration_id, active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS invoice_import_template_signatures (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id uuid NOT NULL REFERENCES invoice_import_templates(id) ON DELETE CASCADE,
+  header_fingerprint text NOT NULL,
+  headers jsonb NOT NULL DEFAULT '[]'::jsonb,
+  normalized_headers jsonb NOT NULL DEFAULT '[]'::jsonb,
+  column_map jsonb NOT NULL DEFAULT '{}'::jsonb,
+  sample_file_name text,
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(template_id, header_fingerprint)
+);
+
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS template_id uuid REFERENCES invoice_import_templates(id) ON DELETE SET NULL;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS template_name text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS template_version integer;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS imported_by text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS original_blob_name text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS original_content_type text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS original_file_size bigint;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS original_sha256 text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS source_table_locator text;
+ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS mapping_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_invoice_imports_template_history
+  ON invoice_imports(template_id, imported_at DESC);

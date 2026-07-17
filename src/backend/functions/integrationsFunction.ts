@@ -1,8 +1,15 @@
 import { app, output, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
-import type { IntegrationId } from '../../shared/integrationSettings';
+import {
+  enableApiSyncSettingKey,
+  integrationChannelEnabled,
+  listIntegrationApiOperations,
+  listIntegrationNonSecretDefinitions,
+  validateIntegrationSettings,
+  type IntegrationId,
+} from '../../shared/integrationSettings';
 import { listRuntimeIntegrations } from '../api/integrations';
-import { createIntegrationSettingsProvider } from '../config/settingsProvider';
+import { createIntegrationSettingsProvider, type IntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseApiError } from '../connectwise/client';
 import { syncConnectWiseAgreementReport, testConnectWiseConnection } from '../connectwise/operations';
 import {
@@ -39,6 +46,7 @@ import { requireRole } from './auth';
 loadDotEnv({ override: false });
 
 type SyncBody = {
+  operationKey?: string;
   pageSize?: number;
   maxPages?: number;
   subscriptionPageSize?: number;
@@ -47,6 +55,11 @@ type SyncBody = {
   seatMaxPages?: number;
   includeBcdr?: boolean;
   dataset?: 'users' | 'licenses';
+};
+
+type TestBody = {
+  nonSecrets?: Record<string, string | undefined>;
+  secrets?: Record<string, string | undefined>;
 };
 
 type SyncableIntegrationId = Extract<
@@ -62,12 +75,14 @@ type SyncableIntegrationId = Extract<
 >;
 
 type IntegrationSyncQueueMessage = SyncBody & {
+  jobId: string;
   integrationId: SyncableIntegrationId;
   requestedBy: string;
   requestedAt: string;
 };
 
 type AppRiverSyncQueueMessage = {
+  jobId: string;
   syncRunId: string;
   subscriptionPageSize?: number;
   subscriptionMaxPages?: number;
@@ -101,6 +116,7 @@ export async function listIntegrationsHttp(
 
     return jsonResponse(200, {
       integrations,
+      syncJobs: await repositoryContext.repository?.listRecentSyncJobs() ?? [],
       nonSecretStorage: repositoryContext.repository ? 'database' : 'not-configured',
       missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
     });
@@ -139,16 +155,32 @@ export async function testIntegrationHttp(
   }
 
   const repositoryContext = await createOptionalPostgresSettingsRepository();
-  const provider = createIntegrationSettingsProvider({
+  const savedProvider = createIntegrationSettingsProvider({
     loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
   });
+  const bodyResult = await readJsonBody<TestBody>(request, { fallback: {} });
+  if (!bodyResult.ok) {
+    await repositoryContext.close();
+    return bodyResult.response;
+  }
+  const transient = Object.keys(bodyResult.body.nonSecrets ?? {}).length > 0 || Object.keys(bodyResult.body.secrets ?? {}).length > 0;
+  let provider = savedProvider;
+
+  if (transient) {
+    try {
+      provider = await transientTestProvider(savedProvider, integrationId, bodyResult.body);
+    } catch (error) {
+      await repositoryContext.close();
+      return jsonResponse(400, { error: error instanceof Error ? error.message : 'Invalid test settings.' });
+    }
+  }
   const saveTestResult = async (result: 'success' | 'failure') => {
-    if (!repositoryContext.repository) {
+    if (!repositoryContext.repository || transient) {
       return;
     }
 
-    const settings = await provider.getIntegrationSettings(integrationId);
+    const settings = await savedProvider.getIntegrationSettings(integrationId);
     await repositoryContext.repository.saveTestResult({
       integrationId,
       displayName: settings.definition.displayName,
@@ -282,6 +314,9 @@ export async function testIntegrationHttp(
 export async function syncIntegrationHttp(
   request: HttpRequest,
   context: InvocationContext,
+  dependencies: {
+    createRepositoryContext?: typeof createOptionalPostgresSettingsRepository;
+  } = {},
 ): Promise<HttpResponseInit> {
   const auth = await requireRole(request, 'Admin');
   if (auth.response) return auth.response;
@@ -306,7 +341,7 @@ export async function syncIntegrationHttp(
     });
   }
 
-  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  const repositoryContext = await (dependencies.createRepositoryContext ?? createOptionalPostgresSettingsRepository)();
   if (!repositoryContext.pool || !repositoryContext.repository) {
     return jsonResponse(400, {
       error: `${integrationDisplayName(integrationId)} sync needs PostgreSQL settings before it can store sync data.`,
@@ -325,9 +360,27 @@ export async function syncIntegrationHttp(
         supportedDatasets: ['users', 'licenses'],
       });
     }
+    const supportedOperationKeys = listIntegrationApiOperations(integrationId).map((operation) => operation.key);
+    if (body.operationKey && !supportedOperationKeys.includes(body.operationKey)) {
+      return jsonResponse(400, {
+        error: `Unsupported sync operation "${body.operationKey}" for ${integrationDisplayName(integrationId)}.`,
+        supportedOperationKeys,
+      });
+    }
 
     const queuedAt = new Date().toISOString();
-    const message = buildIntegrationSyncQueueMessage(integrationId, body, auth.principal.name, queuedAt);
+    const operationKey = body.operationKey ?? listIntegrationApiOperations(integrationId)[0]?.key ?? 'sync';
+    const operationLabel = listIntegrationApiOperations(integrationId).find((operation) => operation.key === operationKey)?.label
+      ?? `${integrationDisplayName(integrationId)} sync`;
+    const jobId = await repositoryContext.repository.createSyncJob({
+      integrationId,
+      integrationName: integrationDisplayName(integrationId),
+      operationKey,
+      operationLabel,
+      requestedBy: auth.principal.name,
+      requestedAt: queuedAt,
+    });
+    const message = { ...buildIntegrationSyncQueueMessage(integrationId, body, auth.principal.name, queuedAt), jobId };
     enqueueIntegrationSyncWorker(context, message);
 
     return jsonResponse(202, {
@@ -336,6 +389,8 @@ export async function syncIntegrationHttp(
       queued: true,
       dataset: integrationId === 'microsoft-365' ? message.dataset : undefined,
       includeBcdr: integrationId === 'datto' ? message.includeBcdr : undefined,
+      operationKey: message.operationKey,
+      jobId,
       queuedAt,
       requestedBy: auth.principal.name,
     });
@@ -362,7 +417,15 @@ export async function processIntegrationSyncQueueMessage(
     metadataReader: repositoryContext.repository,
   });
 
+  let syncRunId: string | undefined;
   try {
+    await repositoryContext.repository.markSyncJobRunning(parsed.jobId);
+    const settings = await provider.getIntegrationSettings(parsed.integrationId);
+    if (!integrationChannelEnabled(settings.nonSecrets, enableApiSyncSettingKey, true)) {
+      throw new Error(
+        `API Sync is disabled for ${integrationDisplayName(parsed.integrationId)}. Enable it in Configure before starting a sync.`,
+      );
+    }
     context.log(
       `Starting queued ${integrationDisplayName(parsed.integrationId)} sync requested by ${parsed.requestedBy}.`,
     );
@@ -374,7 +437,9 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
-      context.log(`ConnectWise queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`ConnectWise queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -385,7 +450,9 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
-      context.log(`Cove queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Cove queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -396,7 +463,9 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
-      context.log(`N-central queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`N-central queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -409,8 +478,11 @@ export async function processIntegrationSyncQueueMessage(
         seatPageSize: parsed.seatPageSize,
         seatMaxPages: parsed.seatMaxPages,
         includeBcdr: parsed.includeBcdr,
+        dataset: parsed.operationKey === 'datto-bcdr' ? 'bcdr' : parsed.operationKey === 'datto-saas' ? 'saas' : undefined,
       });
-      context.log(`Datto queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Datto queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -421,11 +493,15 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.attachSyncJobRun(parsed.jobId, syncRunId);
       if (result.status === 'queued') {
-        enqueueAppRiverSyncWorker(context, result.syncRunId, {
+        enqueueAppRiverSyncWorker(context, parsed.jobId, result.syncRunId, {
           subscriptionPageSize: parsed.subscriptionPageSize,
           subscriptionMaxPages: parsed.subscriptionMaxPages,
         });
+      } else {
+        await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
       }
       context.log(`AppRiver queued sync ${result.syncRunId} ${result.status}.`);
       return;
@@ -438,7 +514,9 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
-      context.log(`SentinelOne queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`SentinelOne queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -449,11 +527,17 @@ export async function processIntegrationSyncQueueMessage(
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
       });
-      context.log(`Huntress queued sync ${result.syncRunId} completed.`);
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Huntress queued sync ${syncRunId} completed.`);
       return;
     }
 
-    const dataset = parsed.dataset ?? 'users';
+    const dataset = parsed.operationKey === 'm365-licenses'
+      ? 'licenses'
+      : parsed.operationKey === 'm365-users'
+        ? 'users'
+        : parsed.dataset ?? 'users';
     const result =
       dataset === 'licenses'
         ? await syncMicrosoft365ProductSubscriptionSnapshots({
@@ -466,7 +550,16 @@ export async function processIntegrationSyncQueueMessage(
             pageSize: parsed.pageSize,
             maxPages: parsed.maxPages,
           });
-    context.log(`Microsoft 365 ${dataset} queued sync ${result.syncRunId} completed.`);
+    syncRunId = result.syncRunId;
+    await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+    context.log(`Microsoft 365 ${dataset} queued sync ${syncRunId} completed.`);
+  } catch (error) {
+    await repositoryContext.repository.failSyncJob(
+      parsed.jobId,
+      error instanceof Error ? error.message : 'Sync worker failed.',
+      syncRunId,
+    ).catch(() => undefined);
+    throw error;
   } finally {
     await repositoryContext.close();
   }
@@ -501,11 +594,22 @@ export async function processAppRiverSyncQueueMessage(
     );
 
     if (result.shouldContinue) {
-      enqueueAppRiverSyncWorker(context, parsed.syncRunId, {
+      enqueueAppRiverSyncWorker(context, parsed.jobId, parsed.syncRunId, {
         subscriptionPageSize: parsed.subscriptionPageSize,
         subscriptionMaxPages: parsed.subscriptionMaxPages,
       });
+    } else if (result.status === 'completed') {
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, parsed.syncRunId);
+    } else if (result.status === 'failed') {
+      await repositoryContext.repository.failSyncJob(parsed.jobId, result.errorMessage ?? 'AppRiver sync failed.', parsed.syncRunId);
     }
+  } catch (error) {
+    await repositoryContext.repository.failSyncJob(
+      parsed.jobId,
+      error instanceof Error ? error.message : 'AppRiver sync worker failed.',
+      parsed.syncRunId,
+    ).catch(() => undefined);
+    throw error;
   } finally {
     await repositoryContext.close();
   }
@@ -629,12 +733,52 @@ function safePositiveInteger(value: number | undefined, fallback: number) {
   return value;
 }
 
+async function transientTestProvider(
+  savedProvider: IntegrationSettingsProvider,
+  integrationId: IntegrationId,
+  body: TestBody,
+): Promise<IntegrationSettingsProvider> {
+  const saved = await savedProvider.getIntegrationSettings(integrationId);
+  const allowedNonSecrets = new Set(listIntegrationNonSecretDefinitions(saved.definition).map((setting) => setting.key));
+  const allowedSecrets = new Set(saved.definition.requiredSecrets.map((setting) => setting.key));
+  const unknownNonSecrets = Object.keys(body.nonSecrets ?? {}).filter((key) => !allowedNonSecrets.has(key));
+  const unknownSecrets = Object.keys(body.secrets ?? {}).filter((key) => !allowedSecrets.has(key));
+  if (unknownNonSecrets.length > 0 || unknownSecrets.length > 0) {
+    throw new Error(`Unknown test setting keys: ${[...unknownNonSecrets, ...unknownSecrets].join(', ')}`);
+  }
+
+  const nonSecrets = { ...saved.nonSecrets, ...(body.nonSecrets ?? {}) };
+  const secrets = { ...saved.secrets };
+  for (const [key, value] of Object.entries(body.secrets ?? {})) {
+    if (value?.trim()) secrets[key] = value.trim();
+  }
+  const validation = validateIntegrationSettings(saved.definition, {
+    integrationId,
+    nonSecrets,
+    availableKeyVaultSecrets: saved.definition.requiredSecrets
+      .filter((setting) => Boolean(secrets[setting.key]?.trim()))
+      .map((setting) => setting.keyVaultSecretName),
+    lastTestResult: 'untested',
+  });
+  const transientSettings = { ...saved, nonSecrets, secrets, validation };
+
+  return {
+    async getIntegrationSettings(requestedId) {
+      return requestedId === integrationId ? transientSettings : savedProvider.getIntegrationSettings(requestedId);
+    },
+    async listIntegrationSettings() {
+      const settings = await savedProvider.listIntegrationSettings();
+      return settings.map((item) => item.definition.integrationId === integrationId ? transientSettings : item);
+    },
+  };
+}
+
 function buildIntegrationSyncQueueMessage(
   integrationId: SyncableIntegrationId,
   body: SyncBody,
   requestedBy: string,
   requestedAt: string,
-): IntegrationSyncQueueMessage {
+): Omit<IntegrationSyncQueueMessage, 'jobId'> {
   if (integrationId === 'connectwise') {
     return {
       integrationId,
@@ -670,6 +814,7 @@ function buildIntegrationSyncQueueMessage(
       integrationId,
       requestedBy,
       requestedAt,
+      ...(body.operationKey ? { operationKey: body.operationKey } : {}),
       pageSize: safePositiveInteger(body.pageSize, 100),
       maxPages: safePositiveInteger(body.maxPages, 100),
       seatPageSize: safePositiveInteger(body.seatPageSize, 500),
@@ -714,6 +859,7 @@ function buildIntegrationSyncQueueMessage(
     integrationId,
     requestedBy,
     requestedAt,
+    ...(body.operationKey ? { operationKey: body.operationKey } : {}),
     dataset: body.dataset ?? 'users',
     pageSize: safePositiveInteger(body.pageSize, 100),
     maxPages: safePositiveInteger(body.maxPages, 100),
@@ -726,10 +872,12 @@ function enqueueIntegrationSyncWorker(context: InvocationContext, message: Integ
 
 function enqueueAppRiverSyncWorker(
   context: InvocationContext,
+  jobId: string,
   syncRunId: string,
   options: Pick<AppRiverSyncQueueMessage, 'subscriptionPageSize' | 'subscriptionMaxPages'> = {},
 ) {
   context.extraOutputs?.set(appRiverSyncQueueOutput, {
+    jobId,
     syncRunId,
     ...options,
   } satisfies AppRiverSyncQueueMessage);
@@ -758,12 +906,16 @@ function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage |
     throw new Error('Microsoft 365 sync queue message has an unsupported dataset.');
   }
 
-  return buildIntegrationSyncQueueMessage(
-    parsed.integrationId,
-    parsed,
-    parsed.requestedBy || 'unknown',
-    parsed.requestedAt || new Date().toISOString(),
-  );
+  if (!parsed.jobId) throw new Error('Integration sync queue message is missing jobId.');
+  return {
+    ...buildIntegrationSyncQueueMessage(
+      parsed.integrationId,
+      parsed,
+      parsed.requestedBy || 'unknown',
+      parsed.requestedAt || new Date().toISOString(),
+    ),
+    jobId: parsed.jobId,
+  };
 }
 
 function parseAppRiverSyncQueueMessage(message: AppRiverSyncQueueMessage | string): AppRiverSyncQueueMessage {
@@ -772,11 +924,12 @@ function parseAppRiverSyncQueueMessage(message: AppRiverSyncQueueMessage | strin
       ? (JSON.parse(message) as Partial<AppRiverSyncQueueMessage>)
       : message;
 
-  if (!parsed.syncRunId) {
-    throw new Error('AppRiver queue message is missing syncRunId.');
+  if (!parsed.syncRunId || !parsed.jobId) {
+    throw new Error('AppRiver queue message is missing syncRunId or jobId.');
   }
 
   return {
+    jobId: parsed.jobId,
     syncRunId: parsed.syncRunId,
     subscriptionPageSize: parsed.subscriptionPageSize,
     subscriptionMaxPages: parsed.subscriptionMaxPages,

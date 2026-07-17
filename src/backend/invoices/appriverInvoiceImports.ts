@@ -1,6 +1,7 @@
 import {
   getIntegrationSettingsDefinition,
   getIntegrationDataSource,
+  getIntegrationDataSourceByKey,
   integrationDataSourceRequiresCustomerMapping,
   integrationHasCapability,
   integrationIdsWithCapability,
@@ -14,13 +15,17 @@ import {
   type VendorKey,
 } from '../../shared/vendorDatapoints';
 import { CONSTANT_QUANTITY_ONE, isConstantQuantityOne, normalizeImportedCustomerLabel } from '../../shared/invoiceTableMapping';
+import type { InvoiceImportPreview } from '../../shared/invoiceImportTemplates';
 import { appRiverIntegrationId } from '../vendor/appriver/client';
-import { loadAppRiverProductMappings, type Queryable } from '../vendor/appriver/operations';
+import { loadAppRiverProductMappings, type Queryable as OperationsQueryable } from '../vendor/appriver/operations';
 import type { AppRiverProductMapping } from '../vendor/appriver/rules';
+
+export type Queryable = OperationsQueryable;
 
 export type InvoiceImportSummary = {
   id: string;
   vendorId: VendorKey;
+  dataSourceKey?: string;
   fileName: string;
   invoiceNumber?: string;
   importedAt: string;
@@ -31,6 +36,14 @@ export type InvoiceImportSummary = {
   matchedRows: number;
   exceptionRows: number;
   status: 'ready' | 'review';
+  templateId?: string;
+  templateName?: string;
+  templateVersion?: number;
+  importedBy?: string;
+  originalFileAvailable?: boolean;
+  originalFileSize?: number;
+  originalSha256?: string;
+  sourceTableLocator?: string;
 };
 
 export type InvoiceQuantity = {
@@ -44,6 +57,31 @@ export type InvoiceQuantity = {
 
 export type InvoiceImportMode = 'merge' | 'overwrite';
 export type ManualImportSyncMode = 'info-only' | 'full-vendor-sync';
+
+export type MappedInvoiceTableInput = {
+  vendorId: IntegrationId;
+  linkedIntegrationId?: IntegrationId;
+  datapointId?: string;
+  datapointVendorId?: VendorDatapointId;
+  storageVendorIdOverride?: VendorKey;
+  dataSourceKey?: string;
+  fileName: string;
+  content: string;
+  columnMap: InvoiceTableColumnMap;
+  sourceType?: InvoiceImportSourceType;
+  syncMode?: ManualImportSyncMode;
+  importMode?: InvoiceImportMode;
+  importId?: string;
+  templateId?: string;
+  templateName?: string;
+  templateVersion?: number;
+  importedBy?: string;
+  originalBlobName?: string;
+  originalContentType?: string;
+  originalFileSize?: number;
+  originalSha256?: string;
+  sourceTableLocator?: string;
+};
 
 export type InvoiceTableColumnMap = {
   externalAccountId?: string;
@@ -171,6 +209,7 @@ export type InvoiceImportRefreshResult = {
 type InvoiceImportRow = {
   id: string;
   vendor_id: IntegrationId;
+  data_source_key: string | null;
   file_name: string;
   invoice_number: string | null;
   imported_at: Date | string;
@@ -181,6 +220,14 @@ type InvoiceImportRow = {
   matched_rows: string | number;
   exception_rows: string | number;
   status: string;
+  template_id: string | null;
+  template_name: string | null;
+  template_version: string | number | null;
+  imported_by: string | null;
+  original_blob_name: string | null;
+  original_file_size: string | number | null;
+  original_sha256: string | null;
+  source_table_locator: string | null;
 };
 
 type InvoiceExceptionLineRow = {
@@ -438,9 +485,10 @@ export async function importAppRiverInvoiceCsv(
        matched_rows,
        exception_rows,
        status,
-       raw_summary
+       raw_summary,
+       data_source_key
      )
-     values ($1, $2, $3, $4::date, $5::date, $6::date, $7, $8, $9, $10, $11::jsonb)
+     values ($1, $2, $3, $4::date, $5::date, $6::date, $7, $8, $9, $10, $11::jsonb, $12)
      returning id`,
     [
       appRiverInvoiceVendorId,
@@ -454,6 +502,7 @@ export async function importAppRiverInvoiceCsv(
       exceptionRows,
       status,
       JSON.stringify(rawSummary(input.fileName, parsed.headers, lines)),
+      'appriver-customer-products',
     ],
   );
 
@@ -488,28 +537,22 @@ export async function importAppRiverInvoiceCsv(
 
 export async function importMappedInvoiceTableCsv(
   database: Queryable,
-  input: {
-    vendorId: IntegrationId;
-    linkedIntegrationId?: IntegrationId;
-    datapointId?: string;
-    datapointVendorId?: VendorDatapointId;
-    storageVendorIdOverride?: VendorKey;
-    fileName: string;
-    content: string;
-    columnMap: InvoiceTableColumnMap;
-    sourceType?: InvoiceImportSourceType;
-    syncMode?: ManualImportSyncMode;
-    importMode?: InvoiceImportMode;
-  },
+  input: MappedInvoiceTableInput,
 ): Promise<InvoiceImportSummary> {
   assertInvoiceImportCapable(input.vendorId);
   const importVendorId = input.datapointVendorId ?? input.vendorId;
   const mappingVendorId = input.storageVendorIdOverride ?? linkedMappingVendorId(input.vendorId, input.linkedIntegrationId);
   const storageVendorId = mappingVendorId;
   assertMappedImportStorageVendor(storageVendorId);
-  const importMode = input.importMode ?? 'merge';
   const syncMode = input.syncMode ?? 'full-vendor-sync';
   const sourceType = supportedInvoiceImportSourceType(input.vendorId, input.sourceType);
+  if (input.dataSourceKey) {
+    const source = getIntegrationDataSourceByKey(input.linkedIntegrationId ?? input.vendorId, input.dataSourceKey)
+      ?? getIntegrationDataSourceByKey(input.vendorId, input.dataSourceKey);
+    if (!source || source.sourceType !== sourceType) {
+      throw new Error(`Data stream "${input.dataSourceKey}" is not valid for this ${sourceType} import.`);
+    }
+  }
   const parsed = parseTabularContent({ fileName: input.fileName, content: input.content });
   if (parsed.rows.length === 0) {
     throw new Error('Invoice table import did not contain any data rows.');
@@ -556,9 +599,22 @@ export async function importMappedInvoiceTableCsv(
        matched_rows,
        exception_rows,
        status,
-       raw_summary
+       raw_summary,
+       data_source_key,
+       template_id,
+       template_name,
+       template_version,
+       imported_by,
+       original_blob_name,
+       original_content_type,
+       original_file_size,
+       original_sha256,
+       source_table_locator,
+       mapping_snapshot,
+       id
      )
-     values ($1, $2, $3, $4::date, $5::date, $6::date, $7, $8, $9, $10, $11::jsonb)
+     values ($1, $2, $3, $4::date, $5::date, $6::date, $7, $8, $9, $10, $11::jsonb, $12,
+             $13::uuid, $14, $15, $16, $17, $18, $19, $20, $21, $22::jsonb, coalesce($23::uuid, gen_random_uuid()))
      returning id`,
     [
       storageVendorId,
@@ -577,12 +633,25 @@ export async function importMappedInvoiceTableCsv(
         importVendorId,
         mappingVendorId,
         linkedIntegrationId: input.linkedIntegrationId ?? undefined,
+        dataSourceKey: input.dataSourceKey ?? undefined,
         datapointId: input.datapointId ?? undefined,
         datapointVendorId: input.datapointVendorId ?? undefined,
         syncMode,
         sourceType,
         columnMap,
       }),
+      input.dataSourceKey ?? null,
+      input.templateId ?? null,
+      input.templateName ?? null,
+      input.templateVersion ?? null,
+      input.importedBy ?? null,
+      input.originalBlobName ?? null,
+      input.originalContentType ?? null,
+      input.originalFileSize ?? null,
+      input.originalSha256 ?? null,
+      input.sourceTableLocator ?? null,
+      JSON.stringify({ columnMap, headers: parsed.headers, sourceType, dataSourceKey: input.dataSourceKey }),
+      input.importId ?? null,
     ],
   );
 
@@ -595,16 +664,6 @@ export async function importMappedInvoiceTableCsv(
     await insertInvoiceLine(database, importId, line);
   }
 
-  if (importMode === 'overwrite') {
-    await deleteExistingInvoiceImports(database, {
-      currentImportId: importId,
-      fileName: input.fileName,
-      invoiceDate,
-      invoiceNumber,
-      vendorId: storageVendorId,
-    });
-  }
-
   await syncInvoiceImportUsageSnapshots(database, storageVendorId, importId);
 
   const imported = await loadInvoiceImport(database, importId);
@@ -615,6 +674,77 @@ export async function importMappedInvoiceTableCsv(
   return imported;
 }
 
+export async function previewMappedInvoiceTableCsv(
+  database: Queryable,
+  input: MappedInvoiceTableInput & { fileHash: string },
+): Promise<InvoiceImportPreview> {
+  assertInvoiceImportCapable(input.vendorId);
+  const importVendorId = input.datapointVendorId ?? input.vendorId;
+  const mappingVendorId = input.storageVendorIdOverride ?? linkedMappingVendorId(input.vendorId, input.linkedIntegrationId);
+  const storageVendorId = mappingVendorId;
+  const syncMode = input.syncMode ?? 'full-vendor-sync';
+  const sourceType = supportedInvoiceImportSourceType(input.vendorId, input.sourceType);
+  const parsed = parseTabularContent({ fileName: input.fileName, content: input.content });
+  const blockingErrors: string[] = [];
+  if (parsed.rows.length === 0) blockingErrors.push('The detected table does not contain data rows.');
+  let columnMap: ReturnType<typeof normalizedInvoiceTableColumnMap>;
+  try {
+    columnMap = normalizedInvoiceTableColumnMap(input.columnMap, parsed.headers);
+    assertRequiredTableColumns(columnMap, sourceType);
+  } catch (error) {
+    blockingErrors.push(error instanceof Error ? error.message : 'Required invoice columns are not mapped.');
+    columnMap = input.columnMap as ReturnType<typeof normalizedInvoiceTableColumnMap>;
+  }
+  let lines: NormalizedInvoiceLine[] = [];
+  if (blockingErrors.length === 0) {
+    const [accountIndex, productMappings] = await Promise.all([
+      loadGenericAccountIndex(database, mappingVendorId),
+      loadGenericProductMappings(database, mappingVendorId),
+    ]);
+    const productIndex = buildProductMappingIndex(productMappings);
+    try {
+      lines = parsed.rows.map((row) => normalizeMappedInvoiceLine(
+        row, storageVendorId, importVendorId, mappingVendorId, sourceType, syncMode,
+        columnMap, accountIndex, productIndex,
+      ));
+    } catch (error) {
+      blockingErrors.push(error instanceof Error ? error.message : 'Invoice rows could not be normalized.');
+    }
+  }
+  const exceptionRows = lines.filter((line) => !isMappedInvoiceLine(line)).length;
+  return {
+    fileName: input.fileName,
+    fileHash: input.fileHash,
+    templateId: input.templateId,
+    templateVersion: input.templateVersion,
+    integrationId: input.vendorId,
+    tableLocator: input.sourceTableLocator ?? 'Detected table',
+    headers: parsed.headers,
+    rowCount: parsed.rows.length,
+    validRows: lines.length,
+    exceptionRows,
+    blockingErrors,
+    warnings: exceptionRows > 0 ? [`${exceptionRows.toLocaleString()} rows need customer or product mapping review.`] : [],
+    sampleRows: lines.slice(0, 15).map((line) => ({
+      rowNumber: line.rawRowNumber,
+      values: {
+        customerAccount: line.externalAccountId,
+        customerName: line.externalAccountName,
+        productCode: line.productCode,
+        productName: line.productName,
+        quantity: line.quantity,
+        invoiceNumber: stringValue(line.raw[columnMap.invoiceNumber ?? '']),
+        invoiceDate: line.invoiceDate,
+        billedAmount: line.billedAmount,
+      },
+      warnings: isMappedInvoiceLine(line) ? [] : [
+        ...(!line.customerId ? ['Customer mapping missing'] : []),
+        ...(!line.connectWiseProductCode ? ['Product mapping missing'] : []),
+      ],
+    })),
+  };
+}
+
 export async function listInvoiceImports(
   database: Queryable,
   options: { vendorId?: VendorKey; datapointId?: string; limit?: number } = {},
@@ -623,6 +753,7 @@ export async function listInvoiceImports(
   const result = await database.query<InvoiceImportRow>(
     `select id,
             vendor_id,
+            data_source_key,
             file_name,
             invoice_number,
             imported_at,
@@ -632,7 +763,9 @@ export async function listInvoiceImports(
             row_count,
             matched_rows,
             exception_rows,
-            status
+            status,
+            template_id, template_name, template_version, imported_by,
+            original_blob_name, original_file_size, original_sha256, source_table_locator
        from invoice_imports
       where ($1::text is null or vendor_id = $1)
         and ($3::text is null or raw_summary->>'datapointId' = $3)
@@ -652,6 +785,9 @@ export async function deleteInvoiceImport(
   const invoiceImport = await loadInvoiceImportForVendor(database, importId, vendorId);
   if (!invoiceImport) {
     return undefined;
+  }
+  if (invoiceImport.templateId) {
+    throw new Error('Approved vendor invoice versions are immutable and cannot be deleted. Import a corrected version instead.');
   }
 
   const syncRuns = await database.query<{ id: string }>(
@@ -934,6 +1070,7 @@ export async function loadLatestInvoiceImportSummary(
   const result = await database.query<InvoiceImportRow>(
     `select id,
             vendor_id,
+            data_source_key,
             file_name,
             invoice_number,
             imported_at,
@@ -943,7 +1080,9 @@ export async function loadLatestInvoiceImportSummary(
             row_count,
             matched_rows,
             exception_rows,
-            status
+            status,
+            template_id, template_name, template_version, imported_by,
+            original_blob_name, original_file_size, original_sha256, source_table_locator
      from invoice_imports
       where vendor_id = $1
         and coalesce(raw_summary->>'syncMode', 'full-vendor-sync') <> 'info-only'
@@ -1468,6 +1607,7 @@ async function loadInvoiceImport(database: Queryable, importId: string) {
   const result = await database.query<InvoiceImportRow>(
     `select id,
             vendor_id,
+            data_source_key,
             file_name,
             invoice_number,
             imported_at,
@@ -1477,7 +1617,9 @@ async function loadInvoiceImport(database: Queryable, importId: string) {
             row_count,
             matched_rows,
             exception_rows,
-            status
+            status,
+            template_id, template_name, template_version, imported_by,
+            original_blob_name, original_file_size, original_sha256, source_table_locator
        from invoice_imports
       where id = $1::uuid`,
     [importId],
@@ -1494,6 +1636,7 @@ async function loadInvoiceImportForVendor(
   const result = await database.query<InvoiceImportRow>(
     `select id,
             vendor_id,
+            data_source_key,
             file_name,
             invoice_number,
             imported_at,
@@ -1503,7 +1646,9 @@ async function loadInvoiceImportForVendor(
             row_count,
             matched_rows,
             exception_rows,
-            status
+            status,
+            template_id, template_name, template_version, imported_by,
+            original_blob_name, original_file_size, original_sha256, source_table_locator
        from invoice_imports
       where id = $1::uuid
         and vendor_id = $2`,
@@ -2516,6 +2661,7 @@ function mapInvoiceImportRow(row: InvoiceImportRow): InvoiceImportSummary {
   return {
     id: row.id,
     vendorId: row.vendor_id,
+    ...(row.data_source_key ? { dataSourceKey: row.data_source_key } : {}),
     fileName: row.file_name,
     invoiceNumber: row.invoice_number ?? undefined,
     importedAt: isoDateTime(row.imported_at) ?? new Date(0).toISOString(),
@@ -2526,6 +2672,18 @@ function mapInvoiceImportRow(row: InvoiceImportRow): InvoiceImportSummary {
     matchedRows: integerValue(row.matched_rows),
     exceptionRows: integerValue(row.exception_rows),
     status: row.status === 'ready' ? 'ready' : 'review',
+    ...(row.template_id ? { templateId: row.template_id } : {}),
+    ...(row.template_name ? { templateName: row.template_name } : {}),
+    ...(row.template_version === null || typeof row.template_version === 'undefined'
+      ? {}
+      : { templateVersion: integerValue(row.template_version) }),
+    ...(row.imported_by ? { importedBy: row.imported_by } : {}),
+    ...(row.original_blob_name ? { originalFileAvailable: true } : {}),
+    ...(row.original_file_size === null || typeof row.original_file_size === 'undefined'
+      ? {}
+      : { originalFileSize: integerValue(row.original_file_size) }),
+    ...(row.original_sha256 ? { originalSha256: row.original_sha256 } : {}),
+    ...(row.source_table_locator ? { sourceTableLocator: row.source_table_locator } : {}),
   };
 }
 

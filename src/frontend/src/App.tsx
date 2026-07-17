@@ -17,6 +17,7 @@ import {
   FileUp,
   Filter,
   History,
+  Info,
   KeyRound,
   Layers3,
   Link2,
@@ -51,11 +52,17 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  enableApiSyncSettingKey,
+  enableInvoiceImportSettingKey,
+  enableManualDetailImportsSettingKey,
+  integrationChannelEnabled,
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationDetailOnlySyncEnabled,
   integrationDoNotSuggestNewAdditions,
   getIntegrationSettingsDefinition,
+  listIntegrationApiOperations,
+  listIntegrationChannelSettings,
   integrationSettingsRegistry,
   validateIntegrationRegistry,
   doNotSuggestNewAdditionsSettingKey,
@@ -109,7 +116,14 @@ import {
   quantityColumnSelectOptions,
   suggestInvoiceTableColumnMap,
 } from '../../shared/invoiceTableMapping';
-import { readWorkbookObjectRows } from './importWorkbook';
+import {
+  autoSelectedInvoiceTemplate,
+  matchInvoiceImportTemplates,
+  type InvoiceImportPreview,
+  type InvoiceImportTemplate,
+  type InvoiceTableCandidate,
+} from '../../shared/invoiceImportTemplates';
+import { readWorkbookObjectRows, readWorkbookTableSheets } from './importWorkbook';
 import {
   preferredReconciliationCountSource,
   type ReconciliationCountSource,
@@ -160,10 +174,10 @@ type IssueStatus =
   | 'blocked'
   | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
-type IntegrationTab = 'api' | 'invoice';
+type IntegrationWorkflowTab = 'api' | 'manual' | 'invoice';
 type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -318,6 +332,8 @@ type Integration = {
   description: string;
   lastSync?: string;
   lastSyncStatus?: string;
+  syncProgress?: AppRiverSyncProgress;
+  operations: IntegrationSyncOperationStatus[];
   records?: string;
   enabled: boolean;
   endpoint: string;
@@ -328,6 +344,29 @@ type Integration = {
   missingSecrets: string[];
   missingNonSecrets: string[];
   webhookSupported: boolean;
+};
+
+type AppRiverSyncProgress = {
+  totalCustomers: number;
+  processedCustomers: number;
+  completedCustomers: number;
+  failedCustomers: number;
+  queuedCustomers: number;
+  processingCustomers: number;
+  currentCustomerName?: string;
+};
+
+type IntegrationSyncOperationStatus = {
+  operationKey: string;
+  label: string;
+  dataSourceKey?: string;
+  status: string;
+  startedAt: string;
+  completedAt?: string;
+  recordsRead?: number;
+  recordsWritten?: number;
+  error?: string;
+  currentItem?: string;
 };
 
 type IntegrationSettingsPayload = {
@@ -347,13 +386,37 @@ type RuntimeIntegrationSummary = IntegrationSettingsDefinition & {
     lastSyncRecordsWritten?: number;
     lastSyncError?: string;
     storedRecordCount?: number;
+    syncProgress?: AppRiverSyncProgress;
+    operations?: IntegrationSyncOperationStatus[];
   };
 };
 
 type RuntimeIntegrationsResponse = {
   integrations: RuntimeIntegrationSummary[];
+  syncJobs: IntegrationSyncJob[];
   nonSecretStorage: 'database' | 'not-configured';
   missingDatabaseSettings: string[];
+};
+
+type IntegrationSyncJob = {
+  id: string;
+  integrationId: IntegrationId;
+  integrationName: string;
+  operationKey: string;
+  operationLabel: string;
+  status: 'queued' | 'running' | 'complete' | 'failed';
+  requestedBy: string;
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  progress?: {
+    completed: number;
+    total: number;
+    failed: number;
+    currentItem?: string;
+    unitLabel: string;
+  };
 };
 
 type ManagedAppUser = {
@@ -388,7 +451,7 @@ type RawSyncRun = {
 };
 
 type RawSyncDataset = 'users' | 'licenses';
-type DattoSyncTarget = 'datto-saas' | 'datto-saas-bcdr';
+type DattoSyncTarget = 'datto-saas' | 'datto-bcdr' | 'datto-saas-bcdr';
 type IntegrationSyncTarget = RawSyncDataset | DattoSyncTarget;
 type DattoMappingDataset = 'saas' | 'bcdr';
 type HuntressMappingDataset = 'edr' | 'itdr' | 'sat' | 'siem' | 'ispm' | 'siem-extended-retention';
@@ -730,6 +793,22 @@ type AppRiverLicenseCleanupDetails = {
   };
 };
 
+type DeviceMatchExclusion = {
+  id: string;
+  comparisonId: string;
+  sourceVendorId: string;
+  targetVendorId: string;
+  customerId: string;
+  customerName?: string;
+  sourceItemId?: string;
+  sourceIdentity: string;
+  sourceDisplayName: string;
+  reason: string;
+  active: boolean;
+  approvedBy: string;
+  approvedAt: string;
+};
+
 type AppRiverLicenseCleanupPreview = {
   previewId: string;
   rowId: string;
@@ -976,6 +1055,7 @@ type ReconciliationRunMeta = {
 type InvoiceImportSummary = {
   id: string;
   vendorId: VendorKey;
+  dataSourceKey?: string;
   fileName: string;
   invoiceNumber?: string;
   importedAt: string;
@@ -986,6 +1066,14 @@ type InvoiceImportSummary = {
   matchedRows: number;
   exceptionRows: number;
   status: 'ready' | 'review';
+  templateId?: string;
+  templateName?: string;
+  templateVersion?: number;
+  importedBy?: string;
+  originalFileAvailable?: boolean;
+  originalFileSize?: number;
+  originalSha256?: string;
+  sourceTableLocator?: string;
 };
 
 type InvoiceImportMode = 'overwrite' | 'merge';
@@ -1977,7 +2065,7 @@ type ProductMappingCustomerReview = {
   customers: ProductMappingCustomer[];
 };
 
-type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-saas-bcdr';
+type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-bcdr' | 'sync-datto-saas-bcdr';
 type IntegrationActionKey = `${IntegrationId}:${IntegrationAction}`;
 
 const clientProfiles: Record<string, ClientProfile> = {};
@@ -2275,13 +2363,24 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       description: definition.description,
       lastSync: formatDateTime(operationalStatus?.lastSyncCompletedAt ?? operationalStatus?.lastSyncAt),
       lastSyncStatus: operationalStatus?.lastSyncStatus,
+      syncProgress: operationalStatus?.syncProgress,
+      operations: operationalStatus?.operations ?? listIntegrationApiOperations(definition.integrationId).map((operation) => ({
+        operationKey: operation.key,
+        label: operation.label,
+        dataSourceKey: operation.dataSourceKey,
+        status: 'never',
+        startedAt: '',
+      })),
       records: typeof records === 'number' ? records.toLocaleString() : undefined,
       enabled: validation?.configuredStatus !== 'not-configured',
       endpoint: definition.endpoint,
       nonSecrets: definition.nonSecrets ?? {},
       requiredSecrets: definition.requiredSecrets,
       requiredNonSecrets: definition.requiredNonSecrets,
-      optionalNonSecrets: definition.optionalNonSecrets ?? [],
+      optionalNonSecrets: [
+        ...listIntegrationChannelSettings(definition),
+        ...(definition.optionalNonSecrets ?? []),
+      ],
       missingSecrets: validation?.missingSecrets.map((setting) => setting.label) ?? [],
       missingNonSecrets: validation?.missingNonSecrets.map((setting) => setting.label) ?? [],
       webhookSupported: definition.webhookSupported,
@@ -3715,6 +3814,7 @@ async function fetchRuntimeIntegrations() {
   const body = (await response.json()) as Partial<RuntimeIntegrationsResponse>;
   return {
     integrations: body.integrations ?? [],
+    syncJobs: body.syncJobs ?? [],
     nonSecretStorage: body.nonSecretStorage ?? 'not-configured',
     missingDatabaseSettings: body.missingDatabaseSettings ?? [],
   } satisfies RuntimeIntegrationsResponse;
@@ -4244,6 +4344,7 @@ async function importInvoiceTableFile(
   sourceType: IntegrationDataSourceType,
   importMode: InvoiceImportMode,
   syncMode: ManualImportSyncMode,
+  dataSourceKey?: string,
   linkedIntegrationId?: IntegrationId,
 ) {
   const table = await readImportTableFile(file);
@@ -4259,6 +4360,7 @@ async function importInvoiceTableFile(
       sourceType,
       importMode,
       syncMode,
+      dataSourceKey,
       linkedIntegrationId,
     }),
   });
@@ -5142,6 +5244,142 @@ async function fetchCurrentAuthSession() {
 }
 
 const invoiceWorkspaceCacheStorageKey = 'msp-harmony:invoice-workspace:v1';
+const discrepancyAuditSessionStorageKey = 'msp-harmony:selected-discrepancy-audit';
+
+function selectedDiscrepancyAuditFromSession() {
+  try {
+    return window.sessionStorage.getItem(discrepancyAuditSessionStorageKey)?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+async function fetchInvoiceImportTemplates(integrationId?: IntegrationId) {
+  const query = integrationId ? `?integrationId=${encodeURIComponent(integrationId)}` : '';
+  const response = await fetch(`/api/invoice-import-templates${query}`);
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? 'Unable to load invoice templates.'));
+  return (body as { templates: InvoiceImportTemplate[] }).templates ?? [];
+}
+
+async function saveInvoiceImportTemplateRequest(
+  template: Partial<InvoiceImportTemplate> & Pick<InvoiceImportTemplate, 'integrationId' | 'name' | 'sourceType' | 'columnMap'>,
+) {
+  const response = await fetch(template.id ? `/api/invoice-import-templates/${encodeURIComponent(template.id)}` : '/api/invoice-import-templates', {
+    method: template.id ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      integrationId: template.integrationId,
+      name: template.name,
+      dataSourceKey: template.dataSourceKey,
+      sourceType: template.sourceType,
+      columnMap: template.columnMap,
+      knownHeaders: template.knownHeaders,
+      expectedVersion: template.version,
+    }),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? 'Unable to save invoice template.'));
+  return (body as { template: InvoiceImportTemplate }).template;
+}
+
+async function setInvoiceImportTemplateArchivedRequest(templateId: string, archived: boolean) {
+  const response = await fetch(`/api/invoice-import-templates/${encodeURIComponent(templateId)}/${archived ? 'archive' : 'restore'}`, { method: 'POST' });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? 'Unable to update invoice template.'));
+  return (body as { template: InvoiceImportTemplate }).template;
+}
+
+type VendorInvoiceUploadDraft = {
+  file: File;
+  table: ParsedImportTableFile;
+  integrationId: IntegrationId;
+  template?: InvoiceImportTemplate;
+  templateName: string;
+  dataSourceKey?: string;
+  sourceType: IntegrationDataSourceType;
+  columnMap: InvoiceTableColumnMap;
+};
+
+async function vendorInvoicePreviewRequest(draft: VendorInvoiceUploadDraft) {
+  const form = vendorInvoiceFormData(draft);
+  const response = await fetch('/api/invoice-imports/preview', { method: 'POST', body: form });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? 'Unable to preview vendor invoice.'));
+  return (body as { preview: InvoiceImportPreview }).preview;
+}
+
+async function approveVendorInvoiceRequest(draft: VendorInvoiceUploadDraft, preview: InvoiceImportPreview) {
+  const form = vendorInvoiceFormData(draft, preview.fileHash);
+  const response = await fetch('/api/invoice-imports/approve', { method: 'POST', body: form });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? 'Unable to approve vendor invoice.'));
+  return body as { import: InvoiceImportSummary; templateId: string };
+}
+
+function vendorInvoiceFormData(draft: VendorInvoiceUploadDraft, previewHash?: string) {
+  const form = new FormData();
+  form.set('file', draft.file);
+  form.set('metadata', JSON.stringify({
+    integrationId: draft.integrationId,
+    templateId: draft.template?.id,
+    templateVersion: draft.template?.version,
+    templateName: draft.templateName,
+    dataSourceKey: draft.dataSourceKey,
+    sourceType: draft.sourceType,
+    columnMap: draft.columnMap,
+    headers: draft.table.headers,
+    normalizedContent: draft.table.content,
+    tableLocator: draft.table.locator,
+    previewHash,
+  }));
+  return form;
+}
+
+async function fetchDeviceMatchExclusions(integrationId: VendorKey) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(integrationId)}/device-exclusions`);
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? `Device exclusions load failed with HTTP ${response.status}.`));
+  return body as unknown as { vendorId: string; exclusions: DeviceMatchExclusion[] };
+}
+
+async function createDeviceMatchExclusionRequest(
+  sourceVendorId: string,
+  payload: {
+    comparisonId: string;
+    targetVendorId: string;
+    customerId: string;
+    sourceItemId?: string;
+    sourceIdentity: string;
+    sourceDisplayName: string;
+    reason: string;
+  },
+) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(sourceVendorId)}/device-exclusions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? `Device exclusion save failed with HTTP ${response.status}.`));
+  return body as unknown as { exclusion: DeviceMatchExclusion };
+}
+
+async function deactivateDeviceMatchExclusionRequest(sourceVendorId: string, exclusionId: string) {
+  const response = await fetch(`/api/mappings/${encodeURIComponent(sourceVendorId)}/device-exclusions/${encodeURIComponent(exclusionId)}/deactivate`, { method: 'POST' });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? `Device exclusion removal failed with HTTP ${response.status}.`));
+}
+
+function rememberSelectedDiscrepancyAudit(pairId: string) {
+  try {
+    if (pairId) {
+      window.sessionStorage.setItem(discrepancyAuditSessionStorageKey, pairId);
+    } else {
+      window.sessionStorage.removeItem(discrepancyAuditSessionStorageKey);
+    }
+  } catch {
+    // Session storage may be unavailable in restricted browser contexts.
+  }
+}
 const invoiceWorkspaceCacheVersion = 1;
 const allInvoiceImportsCacheKey = 'all';
 
@@ -5365,17 +5603,29 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId, target?: In
   }
 
   if (integrationId === 'datto') {
+    if (target === 'datto-saas-bcdr') {
+      return {
+        pageSize: 100,
+        maxPages: 100,
+        seatPageSize: 500,
+        seatMaxPages: 100,
+        includeBcdr: true,
+      };
+    }
+
     return {
+      operationKey: target === 'datto-bcdr' ? 'datto-bcdr' : 'datto-saas',
       pageSize: 100,
       maxPages: 100,
       seatPageSize: 500,
       seatMaxPages: 100,
-      includeBcdr: target !== 'datto-saas',
+      includeBcdr: target === 'datto-bcdr',
     };
   }
 
   if (integrationId === 'microsoft-365') {
     return {
+      operationKey: target === 'licenses' ? 'm365-licenses' : 'm365-users',
       dataset: target === 'licenses' ? 'licenses' : 'users',
       pageSize: 100,
       maxPages: 25,
@@ -5410,7 +5660,8 @@ function syncActionKey(integrationId: IntegrationId, target?: IntegrationSyncTar
   }
 
   if (integrationId === 'datto') {
-    return target === 'datto-saas' ? `${integrationId}:sync-datto-saas` : `${integrationId}:sync-datto-saas-bcdr`;
+    if (target === 'datto-bcdr') return `${integrationId}:sync-datto-bcdr`;
+    return target === 'datto-saas-bcdr' ? `${integrationId}:sync-datto-saas-bcdr` : `${integrationId}:sync-datto-saas`;
   }
 
   return `${integrationId}:sync`;
@@ -5422,7 +5673,8 @@ function syncStartingMessage(integrationId: IntegrationId, target?: IntegrationS
   }
 
   if (integrationId === 'datto') {
-    return target === 'datto-saas' ? 'Starting Datto SaaS sync...' : 'Starting Datto SaaS + BCDR sync...';
+    if (target === 'datto-bcdr') return 'Starting Datto BCDR sync...';
+    return target === 'datto-saas-bcdr' ? 'Starting Datto SaaS and BCDR sync...' : 'Starting Datto SaaS sync...';
   }
 
   return 'Starting sync...';
@@ -5494,9 +5746,9 @@ function formatIntegrationSyncSuccess(integrationId: IntegrationId, body: Record
     }
 
     if (integrationId === 'datto') {
-      return body.includeBcdr === false
-        ? 'Queued Datto SaaS sync. Results will appear after the background worker finishes.'
-        : 'Queued Datto SaaS + BCDR sync. Results will appear after the background worker finishes.';
+      return body.operationKey === 'datto-bcdr'
+        ? 'Queued Datto BCDR sync. Results will appear after the background worker finishes.'
+        : 'Queued Datto SaaS sync. Results will appear after the background worker finishes.';
     }
 
     return `Queued ${integrationName(integrationId)} sync. Results will appear after the background worker finishes.`;
@@ -5834,10 +6086,12 @@ function App() {
   } | null>(null);
   const [investigationTicketPresence, setInvestigationTicketPresence] = useState<Record<string, number>>({});
   const [selectedIntegration, setSelectedIntegration] = useState<Integration | null>(null);
-  const [integrationTab, setIntegrationTab] = useState<IntegrationTab>('api');
   const [integrationSaveMessage, setIntegrationSaveMessage] = useState<string | null>(null);
   const [savingIntegrationId, setSavingIntegrationId] = useState<IntegrationId | null>(null);
   const [runtimeIntegrations, setRuntimeIntegrations] = useState<RuntimeIntegrationSummary[] | null>(null);
+  const [syncJobs, setSyncJobs] = useState<IntegrationSyncJob[]>([]);
+  const [showSyncTracker, setShowSyncTracker] = useState(false);
+  const [syncTrackerOpen, setSyncTrackerOpen] = useState(false);
   const [integrationLoadState, setIntegrationLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [integrationLoadMessage, setIntegrationLoadMessage] = useState<string>('Loading live integration status...');
   const [vendorDatapoints, setVendorDatapoints] = useState<VendorDatapointRecord[]>([]);
@@ -5847,6 +6101,8 @@ function App() {
   const [editingVendorDatapointId, setEditingVendorDatapointId] = useState<string | null>(null);
   const [selectedVendorDatapointId, setSelectedVendorDatapointId] = useState<string | null>(null);
   const [integrationActionMessages, setIntegrationActionMessages] = useState<Partial<Record<IntegrationId, string>>>({});
+  const appRiverSyncPollRef = useRef(0);
+  const integrationOperationPollRef = useRef<Record<string, number>>({});
   const [busyIntegrationAction, setBusyIntegrationAction] = useState<IntegrationActionKey | null>(null);
   const [reportSection, setReportSection] = useState<ReportSection>('raw-sync');
   const [selectedRawSyncIntegrationId, setSelectedRawSyncIntegrationId] = useState<IntegrationId | ''>('');
@@ -5880,7 +6136,7 @@ function App() {
   const [discrepancyReport, setDiscrepancyReport] = useState<DiscrepancyReportResponse | null>(null);
   const [discrepancyLoadState, setDiscrepancyLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [discrepancyMessage, setDiscrepancyMessage] = useState('Select a comparison, then run it.');
-  const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState('');
+  const [selectedDiscrepancyPairId, setSelectedDiscrepancyPairId] = useState(selectedDiscrepancyAuditFromSession);
   const [includeMatchedDiscrepancies, setIncludeMatchedDiscrepancies] = useState(false);
   const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<DiscrepancyRow | null>(null);
   const [appRiverCleanupConfirmationRow, setAppRiverCleanupConfirmationRow] = useState<DiscrepancyRow | null>(null);
@@ -5907,6 +6163,7 @@ function App() {
   const [crossVendorBundles, setCrossVendorBundles] = useState<CrossVendorProductBundle[]>([]);
   const [crossVendorBundleMessage, setCrossVendorBundleMessage] = useState('Load cross-vendor bundle rules.');
   const [usageOverrides, setUsageOverrides] = useState<UsageOverride[]>([]);
+  const [deviceMatchExclusions, setDeviceMatchExclusions] = useState<DeviceMatchExclusion[]>([]);
   const [ncentralFilters, setNcentralFilters] = useState<NcentralFilter[]>([]);
   const [ncentralFilterMappings, setNcentralFilterMappings] = useState<NcentralFilterMapping[]>([]);
   const [laborMappings, setLaborMappings] = useState<LaborMapping[]>([]);
@@ -6013,6 +6270,10 @@ function App() {
     try {
       const response = await fetchRuntimeIntegrations();
       setRuntimeIntegrations(response.integrations);
+      setSyncJobs(response.syncJobs);
+      if (response.syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) {
+        setShowSyncTracker(true);
+      }
       setIntegrationLoadState('ready');
       setIntegrationLoadMessage('Live integration status loaded.');
 
@@ -6420,15 +6681,12 @@ function App() {
       setDiscrepancyAuditStates(response.auditStates ?? []);
       setDiscrepancyComparisonLoadState('ready');
       const auditStates = response.auditStates ?? [];
-      const latestAuditState = auditStates
-        .filter((state) => state.latestAudit)
-        .sort(
-          (left, right) =>
-            Date.parse(right.latestAudit?.createdAt ?? '') - Date.parse(left.latestAudit?.createdAt ?? ''),
-        )[0];
-      const nextPairId = selectedDiscrepancyPairId || latestAuditState?.comparisonId || response.comparisonPairs[0]?.id || '';
-      if (nextPairId && !selectedDiscrepancyPairId) {
-        setSelectedDiscrepancyPairId(nextPairId);
+      const nextPairId = response.comparisonPairs.some((pair) => pair.id === selectedDiscrepancyPairId)
+        ? selectedDiscrepancyPairId
+        : '';
+      if (selectedDiscrepancyPairId && !nextPairId) {
+        setSelectedDiscrepancyPairId('');
+        rememberSelectedDiscrepancyAudit('');
       }
 
       const nextAuditState = auditStates.find((state) => state.comparisonId === nextPairId);
@@ -7336,6 +7594,23 @@ function App() {
     }
   };
 
+  const loadDeviceMatchExclusions = async (integrationId: VendorKey) => {
+    if (integrationId !== 'ncentral' && integrationId !== 'sentinelone') {
+      setDeviceMatchExclusions([]);
+      return [];
+    }
+    try {
+      const response = await fetchDeviceMatchExclusions(integrationId);
+      setDeviceMatchExclusions(response.exclusions);
+      return response.exclusions;
+    } catch (error) {
+      setDeviceMatchExclusions([]);
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to load device exclusions.');
+      return [];
+    }
+  };
+
   const loadNcentralFilterWorkspace = async () => {
     try {
       const [filtersResponse, mappingsResponse] = await Promise.all([
@@ -7419,9 +7694,11 @@ function App() {
       : await loadMappings(integrationId);
     if (!isLaborOnly) {
       await loadUsageOverrides(integrationId);
+      await loadDeviceMatchExclusions(integrationId);
     } else {
       setMappingState(null);
       setUsageOverrides([]);
+      setDeviceMatchExclusions([]);
       setMappingLoadState('ready');
       setMappingMessage('Configure labeled labor filters for ConnectWise ticket hours.');
     }
@@ -7610,6 +7887,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) return;
+    const timer = window.setInterval(() => {
+      void fetchRuntimeIntegrations()
+        .then((response) => {
+          setRuntimeIntegrations(response.integrations);
+          setSyncJobs(response.syncJobs);
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [syncJobs.map((job) => `${job.id}:${job.status}`).join('|')]);
+
+  useEffect(() => {
     const handlePopState = () => {
       const nextView = viewFromLocation(window.location);
       const nextMappingIntegrationId = mappingIntegrationIdFromLocation(window.location);
@@ -7760,7 +8050,10 @@ function App() {
           id: integration.id,
           name: integration.name,
           sourceKind: 'sync' as const,
-          lastRefreshedLabel: integration.lastSync ?? 'Never',
+          lastRefreshedLabel:
+            integration.syncProgress && integration.lastSyncStatus !== 'complete' && integration.lastSyncStatus !== 'failed'
+              ? `${integration.lastSync ?? 'Running'} · Progress: ${integration.syncProgress.processedCustomers.toLocaleString()} / ${integration.syncProgress.totalCustomers.toLocaleString()}`
+              : integration.lastSync ?? 'Never',
           canSync: hasLiveIntegrationActions(integration.id),
           syncIntegrationId: hasLiveIntegrationActions(integration.id) ? integration.id : undefined,
         })),
@@ -8189,7 +8482,6 @@ function App() {
 
   const openIntegrationModal = (integration: Integration) => {
     setSelectedIntegration(integration);
-    setIntegrationTab('api');
     setIntegrationSaveMessage(null);
   };
 
@@ -8200,6 +8492,7 @@ function App() {
     sourceType: IntegrationDataSourceType,
     importMode: InvoiceImportMode,
     syncMode: ManualImportSyncMode,
+    dataSourceKey?: string,
     linkedIntegrationId?: IntegrationId,
   ) => {
     const storageIntegrationId = linkedIntegrationId ?? integrationId;
@@ -8220,6 +8513,7 @@ function App() {
         sourceType,
         importMode,
         syncMode,
+        dataSourceKey,
         linkedIntegrationId,
       );
       setSelectedInvoiceIntegrationId(storageIntegrationId);
@@ -8299,17 +8593,20 @@ function App() {
     }
   };
 
-  const testIntegration = async (integrationId: IntegrationId) => {
+  const testIntegration = async (integrationId: IntegrationId, payload?: IntegrationSettingsPayload) => {
     const actionKey: IntegrationActionKey = `${integrationId}:test`;
     setBusyIntegrationAction(actionKey);
     setIntegrationActionMessages((messages) => ({
       ...messages,
       [integrationId]: 'Testing connection...',
     }));
+    setIntegrationSaveMessage(payload ? 'Testing the values currently entered in this form...' : 'Testing the saved credentials...');
 
     try {
       const response = await fetch(`/api/integrations/${integrationId}/test`, {
         method: 'POST',
+        headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+        body: payload ? JSON.stringify({ nonSecrets: payload.nonSecrets, secrets: payload.secrets }) : undefined,
       });
       const body = await responseJson(response);
 
@@ -8317,19 +8614,98 @@ function App() {
         throw new Error(String(body.error ?? `Test failed with HTTP ${response.status}.`));
       }
 
+      const successMessage = formatIntegrationTestSuccess(integrationId, body);
       setIntegrationActionMessages((messages) => ({
         ...messages,
-        [integrationId]: formatIntegrationTestSuccess(integrationId, body),
+        [integrationId]: successMessage,
       }));
-      await refreshRuntimeIntegrations();
+      setIntegrationSaveMessage(successMessage);
+      if (!payload) await refreshRuntimeIntegrations();
     } catch (error) {
       setIntegrationActionMessages((messages) => ({
         ...messages,
         [integrationId]: error instanceof Error ? error.message : 'Connection test failed.',
       }));
+      setIntegrationSaveMessage(error instanceof Error ? `Test failed: ${error.message}` : 'Test failed.');
     } finally {
       setBusyIntegrationAction(null);
     }
+  };
+
+  const pollAppRiverSyncProgress = async (queuedAt: string, token: number, attempt = 0): Promise<void> => {
+    if (appRiverSyncPollRef.current !== token || attempt >= 4800) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 3000));
+    if (appRiverSyncPollRef.current !== token) return;
+    try {
+      const response = await fetchRuntimeIntegrations();
+      setRuntimeIntegrations(response.integrations);
+      setSyncJobs(response.syncJobs);
+      const appRiver = response.integrations.find((integration) => integration.integrationId === 'opentext-appriver');
+      const status = appRiver?.operationalStatus;
+      const startedAt = status?.lastSyncAt ? Date.parse(status.lastSyncAt) : Number.NaN;
+      const isRequestedRun = Number.isFinite(startedAt) && startedAt >= Date.parse(queuedAt) - 1000;
+      if (isRequestedRun) {
+        setIntegrationActionMessages((messages) => ({
+          ...messages,
+          'opentext-appriver': formatAppRiverSyncProgress(status),
+        }));
+        if (status?.lastSyncStatus === 'complete' || status?.lastSyncStatus === 'failed') return;
+      }
+    } catch {
+      // A brief status request failure should not stop monitoring an active background sync.
+    }
+    return pollAppRiverSyncProgress(queuedAt, token, attempt + 1);
+  };
+
+  const pollIntegrationOperation = async (
+    integrationId: IntegrationId,
+    operationKey: string,
+    token: number,
+    attempt = 0,
+  ): Promise<void> => {
+    const pollKey = `${integrationId}:${operationKey}`;
+    if (integrationOperationPollRef.current[pollKey] !== token || attempt >= 1200) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 3000));
+    if (integrationOperationPollRef.current[pollKey] !== token) return;
+    try {
+      const response = await fetchRuntimeIntegrations();
+      setRuntimeIntegrations(response.integrations);
+      setSyncJobs(response.syncJobs);
+      const runtime = response.integrations.find((item) => item.integrationId === integrationId);
+      const operation = runtime?.operationalStatus?.operations?.find((item) => item.operationKey === operationKey);
+      if (operation?.status === 'complete' || operation?.status === 'failed') {
+        setIntegrationActionMessages((messages) => ({
+          ...messages,
+          [integrationId]: operation.status === 'complete'
+            ? `${operation.label} sync complete. All saved results are ready.`
+            : `${operation.label} sync failed${operation.error ? `: ${operation.error}` : '.'}`,
+        }));
+        if (operation.status === 'complete') {
+          if (selectedRawSyncIntegrationId === integrationId) {
+            await loadRawSyncRuns(integrationId, selectedRawSyncDataset);
+          }
+          if (
+            reconciliationComparisonRequested &&
+            isRegistryIntegrationId(integrationId) &&
+            selectedReconciliationIntegrationSet.has(integrationId) &&
+            reconciliationVendorIds.includes(integrationId)
+          ) {
+            await loadVendorReconciliation(integrationId);
+          }
+          if (
+            reconciliationComparisonRequested &&
+            integrationId === 'connectwise' &&
+            selectedReconciliationIntegrationIds.length > 0
+          ) {
+            await loadSelectedVendorReconciliations(selectedReconciliationIntegrationIds);
+          }
+        }
+        return;
+      }
+    } catch {
+      // Keep monitoring through brief status request failures.
+    }
+    return pollIntegrationOperation(integrationId, operationKey, token, attempt + 1);
   };
 
   const syncIntegration = async (integrationId: IntegrationId, target?: IntegrationSyncTarget) => {
@@ -8359,7 +8735,25 @@ function App() {
         ...messages,
         [integrationId]: formatIntegrationSyncSuccess(integrationId, body),
       }));
+      if (queuedSync) setShowSyncTracker(true);
       await refreshRuntimeIntegrations();
+      if (queuedSync && integrationId === 'opentext-appriver') {
+        const queuedAt = typeof body.queuedAt === 'string' ? body.queuedAt : new Date().toISOString();
+        const token = appRiverSyncPollRef.current + 1;
+        appRiverSyncPollRef.current = token;
+        void pollAppRiverSyncProgress(queuedAt, token);
+      }
+      if (queuedSync) {
+        const operationKey = typeof body.operationKey === 'string'
+          ? body.operationKey
+          : listIntegrationApiOperations(integrationId)[0]?.key;
+        if (operationKey) {
+          const pollKey = `${integrationId}:${operationKey}`;
+          const token = (integrationOperationPollRef.current[pollKey] ?? 0) + 1;
+          integrationOperationPollRef.current[pollKey] = token;
+          void pollIntegrationOperation(integrationId, operationKey, token);
+        }
+      }
       if (!queuedSync && selectedRawSyncIntegrationId === integrationId) {
         await loadRawSyncRuns(integrationId, selectedRawSyncDataset);
       }
@@ -9161,6 +9555,9 @@ function App() {
     (state) => state.comparisonId === selectedDiscrepancyPairId,
   );
   const canQueueAppRiverLicenseCleanup = currentUserRoles.some((role) => role === 'Admin' || role === 'LicenseAdmin');
+  const activeSyncJobs = syncJobs.filter((job) => job.status === 'queued' || job.status === 'running');
+  const latestTrackedSyncJobs = syncJobs.slice(0, 10);
+  const latestSyncJobsFailed = latestTrackedSyncJobs.some((job) => job.status === 'failed');
 
   return (
     <div className="app-shell">
@@ -9242,6 +9639,66 @@ function App() {
             <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view, settingsSection)}</h1>
           </div>
           <div className="top-actions">
+            {showSyncTracker ? (
+              <div className="sync-tracker">
+                <button
+                  aria-expanded={syncTrackerOpen}
+                  aria-haspopup="dialog"
+                  className={`sync-tracker-trigger${activeSyncJobs.length > 0 ? ' active' : latestSyncJobsFailed ? ' failed' : ' complete'}`}
+                  onClick={() => setSyncTrackerOpen((open) => !open)}
+                  title={activeSyncJobs.length > 0 ? `${activeSyncJobs.length} sync job${activeSyncJobs.length === 1 ? '' : 's'} active` : 'Sync jobs finished'}
+                  type="button"
+                >
+                  <RefreshCcw className={activeSyncJobs.length > 0 ? 'sync-tracker-spin' : undefined} size={18} />
+                  <span>{activeSyncJobs.length > 0 ? `${activeSyncJobs.length} syncing` : latestSyncJobsFailed ? 'Sync failed' : 'Sync complete'}</span>
+                </button>
+                {syncTrackerOpen ? (
+                  <section aria-label="Sync job status" className="sync-tracker-popover" role="dialog">
+                    <header className="sync-tracker-header">
+                      <div>
+                        <span className="section-kicker">Background activity</span>
+                        <h2>Sync jobs</h2>
+                      </div>
+                      <button aria-label="Close sync job status" className="icon-button" onClick={() => setSyncTrackerOpen(false)} type="button">
+                        <X size={17} />
+                      </button>
+                    </header>
+                    <div className="sync-tracker-list">
+                      {latestTrackedSyncJobs.length > 0 ? latestTrackedSyncJobs.map((job) => (
+                        <article className={`sync-tracker-job ${job.status}`} key={job.id}>
+                          <div className="sync-tracker-job-heading">
+                            <div><strong>{job.integrationName}</strong><span>{job.operationLabel}</span></div>
+                            <span className={`sync-tracker-status ${job.status}`}>{syncJobStatusLabel(job.status)}</span>
+                          </div>
+                          {job.progress ? (
+                            <div className="sync-tracker-progress">
+                              <div className="sync-tracker-progress-label">
+                                <span>{job.progress.completed.toLocaleString()} of {job.progress.total.toLocaleString()} {job.progress.unitLabel}</span>
+                                <strong>{syncJobProgressPercent(job.progress.completed, job.progress.total)}%</strong>
+                              </div>
+                              <div className="sync-tracker-progress-rail" aria-hidden="true">
+                                <span style={{ width: `${syncJobProgressPercent(job.progress.completed, job.progress.total)}%` }} />
+                              </div>
+                              {job.progress.currentItem ? <p>Current: {job.progress.currentItem}</p> : null}
+                              {job.progress.failed > 0 ? <p className="sync-tracker-error">{job.progress.failed.toLocaleString()} failed</p> : null}
+                            </div>
+                          ) : <p className="sync-tracker-detail">{syncJobDetail(job)}</p>}
+                          {job.error ? <p className="sync-tracker-error">{job.error}</p> : null}
+                          <time dateTime={job.completedAt ?? job.startedAt ?? job.requestedAt}>
+                            {formatDateTime(job.completedAt ?? job.startedAt ?? job.requestedAt)}
+                          </time>
+                        </article>
+                      )) : <p className="sync-tracker-empty">No sync jobs to show.</p>}
+                    </div>
+                    {activeSyncJobs.length === 0 ? (
+                      <button className="button secondary sync-tracker-dismiss" onClick={() => { setSyncTrackerOpen(false); setShowSyncTracker(false); }} type="button">
+                        Dismiss completed jobs
+                      </button>
+                    ) : null}
+                  </section>
+                ) : null}
+              </div>
+            ) : null}
             {view === 'reconcile' ? (
               queuedAgreementUpdateIssues.length > 0 ? (
                 <button
@@ -9379,6 +9836,7 @@ function App() {
               }}
               onPairFilterChange={(pairId) => {
                 setSelectedDiscrepancyPairId(pairId);
+                rememberSelectedDiscrepancyAudit(pairId);
                 const auditState = discrepancyAuditStates.find((state) => state.comparisonId === pairId);
                 if (auditState?.latestAudit) {
                   void loadLatestDiscrepancyAudit(pairId, { auditStates: discrepancyAuditStates });
@@ -9431,6 +9889,7 @@ function App() {
               onInvoiceProductMappingSave={saveInvoiceExceptionProductMapping}
               onInvoiceRefreshReview={reloadInvoiceExceptionReview}
               onInvoiceReviewImport={openInvoiceExceptionReview}
+              onInvoiceApproved={(invoiceImport) => updateInvoiceImportSummary(invoiceImport)}
               onInvoiceTableUpload={importMappedInvoiceTable}
               onInvoiceUpload={importVendorInvoice}
               onOpenMappings={(integrationId) => {
@@ -9479,6 +9938,7 @@ function App() {
               loadMessage={mappingMessage}
               loadState={mappingLoadState}
               mappingState={mappingState}
+              deviceMatchExclusions={deviceMatchExclusions}
               ncentralFilterMappings={ncentralFilterMappings}
               ncentralFilters={ncentralFilters}
               laborBoards={laborBoards}
@@ -9503,6 +9963,15 @@ function App() {
               onProductLinkRuleDelete={deleteProductLinkRule}
               onProductLinkRuleSave={saveProductLinkRule}
               onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
+              onDeviceExclusionDeactivate={async (exclusion) => {
+                setBusyMappingAction(`device-exclusion:${exclusion.id}`);
+                try {
+                  await deactivateDeviceMatchExclusionRequest(exclusion.sourceVendorId, exclusion.id);
+                  await loadDeviceMatchExclusions(selectedMappingIntegrationId);
+                } finally {
+                  setBusyMappingAction(null);
+                }
+              }}
               onNcentralFilterMappingSave={saveNcentralFilterMapping}
               onLaborMappingSave={saveLaborMapping}
               onInvestigationTicketMappingSave={saveInvestigationTicketMapping}
@@ -9766,11 +10235,11 @@ function App() {
           <IntegrationModal
             integration={selectedIntegration}
             onSave={saveIntegrationSettings}
+            onTest={testIntegration}
             onClose={closeIntegrationModal}
-            onTabChange={setIntegrationTab}
+            testing={busyIntegrationAction === `${selectedIntegration.id}:test`}
             saving={savingIntegrationId === selectedIntegration.id}
             saveMessage={integrationSaveMessage}
-            tab={integrationTab}
           />
       )}
       {manualOverrideIssue && (
@@ -9807,6 +10276,14 @@ function App() {
       {selectedDiscrepancyRow ? (
         <DiscrepancyDetailModal
           onClose={() => setSelectedDiscrepancyRow(null)}
+          onExclusionApproved={(exclusion) => {
+            setDiscrepancyReport((current) => current ? applyDeviceExclusionToReport(current, exclusion, includeMatchedDiscrepancies) : current);
+            setSelectedDiscrepancyRow((current) => current ? applyDeviceExclusionToRow(current, exclusion) : current);
+            void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
+              includeMatched: includeMatchedDiscrepancies,
+              silent: true,
+            });
+          }}
           row={selectedDiscrepancyRow}
         />
       ) : null}
@@ -10293,8 +10770,18 @@ function DiscrepancyDashboardView(props: {
   );
 }
 
-function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRow }) {
-  const { onClose, row } = props;
+function DiscrepancyDetailModal(props: {
+  onClose: () => void;
+  onExclusionApproved: (exclusion: DeviceMatchExclusion) => void;
+  row: DiscrepancyRow;
+}) {
+  const { onClose, onExclusionApproved, row } = props;
+  const [exclusionTarget, setExclusionTarget] = useState<{
+    item: DiscrepancyItem; sourceVendorId: string; targetVendorId: string;
+  } | null>(null);
+  const [exclusionReason, setExclusionReason] = useState('');
+  const [exclusionMessage, setExclusionMessage] = useState('');
+  const [savingExclusion, setSavingExclusion] = useState(false);
   const cleanup = row.cleanup;
   const leftLabel = cleanup ? 'Total licenses' : row.comparisonPair.leftVendorName;
   const rightLabel = cleanup ? 'Assigned licenses' : row.comparisonPair.rightVendorName;
@@ -10431,11 +10918,15 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
                 emptyLabel={`No ${rightLabel} items are missing from ${leftLabel}.`}
                 items={row.missingFromLeft}
                 title={`In ${rightLabel}, not in ${leftLabel}`}
+                actionLabel={`Exclude from ${deviceVendorLabel(row.comparisonPair.leftVendorId)}`}
+                onExclude={(item) => setExclusionTarget({ item, sourceVendorId: row.comparisonPair.rightVendorId, targetVendorId: row.comparisonPair.leftVendorId })}
               />
               <DiscrepancyItemPanel
                 emptyLabel={`No ${leftLabel} items are missing from ${rightLabel}.`}
                 items={row.missingFromRight}
                 title={`In ${leftLabel}, not in ${rightLabel}`}
+                actionLabel={`Exclude from ${deviceVendorLabel(row.comparisonPair.rightVendorId)}`}
+                onExclude={(item) => setExclusionTarget({ item, sourceVendorId: row.comparisonPair.leftVendorId, targetVendorId: row.comparisonPair.rightVendorId })}
               />
             </section>
           )}
@@ -10475,6 +10966,35 @@ function DiscrepancyDetailModal(props: { onClose: () => void; row: DiscrepancyRo
             </div>
           </section>
         )}
+        {exclusionTarget ? (
+          <div className="device-exclusion-confirm">
+            <div>
+              <strong>Exclude {exclusionTarget.item.displayName} from {deviceVendorLabel(exclusionTarget.targetVendorId)}?</strong>
+              <span>This auditor-approved exception will stop this device from being counted as a mismatch.</span>
+            </div>
+            <label>
+              Reason <span aria-hidden="true">*</span>
+              <textarea autoFocus onChange={(event) => setExclusionReason(event.target.value)} placeholder="Explain why this device does not need to match" rows={3} value={exclusionReason} />
+            </label>
+            {exclusionMessage ? <p className="form-message error">{exclusionMessage}</p> : null}
+            <div className="modal-actions">
+              <button className="button secondary" disabled={savingExclusion} onClick={() => { setExclusionTarget(null); setExclusionReason(''); setExclusionMessage(''); }} type="button">Cancel</button>
+              <button className="button primary" disabled={savingExclusion || !exclusionReason.trim()} onClick={() => {
+                if (!row.customer.customerId || !exclusionTarget) return;
+                setSavingExclusion(true); setExclusionMessage('');
+                void createDeviceMatchExclusionRequest(exclusionTarget.sourceVendorId, {
+                  comparisonId: row.comparisonPair.id, targetVendorId: exclusionTarget.targetVendorId,
+                  customerId: row.customer.customerId, sourceItemId: exclusionTarget.item.id,
+                  sourceIdentity: exclusionTarget.item.identity, sourceDisplayName: exclusionTarget.item.displayName,
+                  reason: exclusionReason,
+                }).then(({ exclusion }) => {
+                  onExclusionApproved(exclusion); setExclusionTarget(null); setExclusionReason('');
+                }).catch((error) => setExclusionMessage(error instanceof Error ? error.message : 'Unable to save exclusion.'))
+                  .finally(() => setSavingExclusion(false));
+              }} type="button"><BadgeCheck size={16} />{savingExclusion ? 'Approving...' : 'Approve exclusion'}</button>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );
@@ -10645,6 +11165,42 @@ function AppRiverCleanupConfirmationModal(props: {
       </section>
     </div>
   );
+}
+
+function formatAppRiverSyncProgress(status: RuntimeIntegrationSummary['operationalStatus']) {
+  const progress = status?.syncProgress;
+  if (!progress) {
+    return 'Queued AppRiver sync. Waiting for the background worker to gather customers.';
+  }
+  const count = `${progress.processedCustomers.toLocaleString()} / ${progress.totalCustomers.toLocaleString()}`;
+  if (status?.lastSyncStatus === 'complete') {
+    return `AppRiver sync complete. Progress: ${count}${progress.failedCustomers > 0 ? ` · ${progress.failedCustomers.toLocaleString()} failed` : ''}.`;
+  }
+  if (status?.lastSyncStatus === 'failed') {
+    return `AppRiver sync failed. Progress: ${count}${status.lastSyncError ? ` · ${status.lastSyncError}` : ''}`;
+  }
+  const current = progress.currentCustomerName ? ` · Processing ${progress.currentCustomerName}` : '';
+  const failed = progress.failedCustomers > 0 ? ` · ${progress.failedCustomers.toLocaleString()} failed` : '';
+  return `AppRiver sync running. Progress: ${count}${current}${failed}.`;
+}
+
+function syncJobStatusLabel(status: IntegrationSyncJob['status']) {
+  if (status === 'complete') return 'Complete';
+  if (status === 'failed') return 'Failed';
+  if (status === 'running') return 'Running';
+  return 'Queued';
+}
+
+function syncJobProgressPercent(completed: number, total: number) {
+  if (total <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+}
+
+function syncJobDetail(job: IntegrationSyncJob) {
+  if (job.status === 'queued') return 'Waiting for a background worker.';
+  if (job.status === 'running') return 'Worker is processing the outer sync loop.';
+  if (job.status === 'failed') return 'The sync stopped before all results were saved.';
+  return 'All sync results have been saved and are ready to load.';
 }
 
 function AppRiverCleanupActionsModal(props: {
@@ -10835,7 +11391,7 @@ function AppRiverCleanupActionsModal(props: {
   );
 }
 
-function DiscrepancyItemPanel(props: { emptyLabel: string; items: DiscrepancyItem[]; title: string }) {
+function DiscrepancyItemPanel(props: { emptyLabel: string; items: DiscrepancyItem[]; title: string; actionLabel?: string; onExclude?: (item: DiscrepancyItem) => void }) {
   return (
     <section className="discrepancy-item-panel">
       <div className="surface-header compact-header">
@@ -10853,13 +11409,13 @@ function DiscrepancyItemPanel(props: { emptyLabel: string; items: DiscrepancyIte
           <strong>{props.emptyLabel}</strong>
         </div>
       ) : (
-        <DiscrepancyItemList items={props.items} />
+        <DiscrepancyItemList actionLabel={props.actionLabel} items={props.items} onExclude={props.onExclude} />
       )}
     </section>
   );
 }
 
-function DiscrepancyItemList(props: { items: DiscrepancyItem[] }) {
+function DiscrepancyItemList(props: { items: DiscrepancyItem[]; actionLabel?: string; onExclude?: (item: DiscrepancyItem) => void }) {
   if (props.items.length === 0) {
     return null;
   }
@@ -10876,6 +11432,9 @@ function DiscrepancyItemList(props: { items: DiscrepancyItem[] }) {
             <strong>{item.productName ?? item.productKey ?? item.vendorId}</strong>
             <span>{discrepancyItemDetail(item)}</span>
           </div>
+          {props.onExclude ? (
+            <button className="button secondary compact" onClick={() => props.onExclude?.(item)} type="button">{props.actionLabel ?? 'Exclude'}</button>
+          ) : null}
         </article>
       ))}
     </div>
@@ -10898,6 +11457,31 @@ function groupDiscrepancyRowsByCustomer(rows: DiscrepancyRow[]) {
       const rightHasActions = right[1].some(isAppRiverCleanupActionable);
       return Number(rightHasActions) - Number(leftHasActions) || compareCustomerNames(left[0], right[0]);
     });
+}
+
+function deviceVendorLabel(vendorId: string) {
+  if (vendorId === 'ncentral') return 'N-able N-central';
+  if (vendorId === 'sentinelone') return 'SentinelOne (SKOUT)';
+  return vendorId;
+}
+
+function applyDeviceExclusionToRow(row: DiscrepancyRow, exclusion: DeviceMatchExclusion): DiscrepancyRow {
+  if (row.comparisonPair.id !== exclusion.comparisonId || row.customer.customerId !== exclusion.customerId) return row;
+  const fromLeft = exclusion.sourceVendorId === row.comparisonPair.rightVendorId && exclusion.targetVendorId === row.comparisonPair.leftVendorId;
+  const fromRight = exclusion.sourceVendorId === row.comparisonPair.leftVendorId && exclusion.targetVendorId === row.comparisonPair.rightVendorId;
+  const matches = (item: DiscrepancyItem) => item.identity.trim().toLowerCase() === exclusion.sourceIdentity.trim().toLowerCase();
+  const missingFromLeft = fromLeft ? row.missingFromLeft.filter((item) => !matches(item)) : row.missingFromLeft;
+  const missingFromRight = fromRight ? row.missingFromRight.filter((item) => !matches(item)) : row.missingFromRight;
+  const leftCount = Math.max(0, row.leftCount - (row.missingFromRight.length - missingFromRight.length));
+  const rightCount = Math.max(0, row.rightCount - (row.missingFromLeft.length - missingFromLeft.length));
+  const delta = leftCount - rightCount;
+  const score = Math.max(Math.abs(delta), missingFromLeft.length, missingFromRight.length);
+  return { ...row, leftCount, rightCount, delta, status: score === 0 ? 'matched' : score >= 5 ? 'critical' : 'warning', missingFromLeft, missingFromRight };
+}
+
+function applyDeviceExclusionToReport(report: DiscrepancyReportResponse, exclusion: DeviceMatchExclusion, includeMatched: boolean) {
+  const rows = report.rows.map((row) => applyDeviceExclusionToRow(row, exclusion));
+  return { ...report, rows: includeMatched ? rows : rows.filter((row) => row.status !== 'matched') };
 }
 
 function discrepancyStatusLabel(status: DiscrepancySeverity) {
@@ -10953,6 +11537,7 @@ function discrepancyRowFromCleanupPreview(
       left: candidate.syncTimestamp ?? candidate.observedAt,
     },
   };
+
 }
 
 function cleanupCountsLabel(cleanup?: AppRiverLicenseCleanupDetails) {
@@ -14036,6 +14621,7 @@ function IntegrationsView(props: {
   onInvoiceProductMappingSave: (product: InvoiceProductException, target: ProductMappingTarget) => Promise<boolean>;
   onInvoiceRefreshReview: () => Promise<InvoiceImportExceptionReview | null>;
   onInvoiceReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
+  onInvoiceApproved: (invoiceImport: InvoiceImportSummary) => void;
   onInvoiceTableUpload: (
     integrationId: VendorKey,
     file: File,
@@ -14043,6 +14629,7 @@ function IntegrationsView(props: {
     sourceType: IntegrationDataSourceType,
     importMode: InvoiceImportMode,
     syncMode: ManualImportSyncMode,
+    dataSourceKey?: string,
     linkedIntegrationId?: IntegrationId,
   ) => Promise<InvoiceImportSummary | null>;
   onInvoiceUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
@@ -14098,6 +14685,7 @@ function IntegrationsView(props: {
     onInvoiceProductMappingSave,
     onInvoiceRefreshReview,
     onInvoiceReviewImport,
+    onInvoiceApproved,
     onInvoiceTableUpload,
     onInvoiceUpload,
     onOpenMappings,
@@ -14118,7 +14706,9 @@ function IntegrationsView(props: {
     onDeleteDatapointImport,
     onUpdateVendorDatapoint,
   } = props;
-  const [managementTab, setManagementTab] = useState<'api' | 'invoice' | 'datapoints'>('api');
+  const [workflowTabByIntegration, setWorkflowTabByIntegration] = useState<Partial<Record<IntegrationId, IntegrationWorkflowTab>>>({});
+  const [invoiceWizardIntegrationId, setInvoiceWizardIntegrationId] = useState<IntegrationId | '' | null>(null);
+  const [templateManagerIntegrationId, setTemplateManagerIntegrationId] = useState<IntegrationId | null>(null);
   const connectedCount = integrations.filter((integration) => integration.status === 'connected').length;
   const degradedCount = integrations.filter((integration) => integration.status === 'degraded').length;
   const activeIntegrations = sortIntegrationsForDisplay(
@@ -14130,9 +14720,94 @@ function IntegrationsView(props: {
   const comingSoonIntegrations = sortIntegrationsForDisplay(
     integrations.filter((integration) => !isImplementedIntegration(integration.id)),
   );
-  const selectedVendorDatapoint = selectedVendorDatapointId
-    ? vendorDatapoints.find((datapoint) => datapoint.id === selectedVendorDatapointId)
-    : undefined;
+  const renderIntegrationPanel = (integration: Integration, comingSoon = false) => {
+    const scopedDatapoints = vendorDatapoints.filter((datapoint) =>
+      integration.id === 'custom-table' ? !datapoint.linkedIntegrationId : datapoint.linkedIntegrationId === integration.id,
+    );
+    const scopedImports = invoiceImports.filter((item) => item.vendorId === integration.id);
+    const apiEnabled = integrationChannelEnabled(integration.nonSecrets, enableApiSyncSettingKey, integration.enabled);
+    const manualEnabled = integrationChannelEnabled(
+      integration.nonSecrets,
+      enableManualDetailImportsSettingKey,
+      scopedDatapoints.length > 0,
+    );
+    const invoiceEnabled = integrationChannelEnabled(
+      integration.nonSecrets,
+      enableInvoiceImportSettingKey,
+      scopedImports.length > 0,
+    );
+    const workflowTabs = comingSoon ? [] : [
+      ...(hasLiveIntegrationActions(integration.id) && apiEnabled ? [{ id: 'api' as const, label: 'API Sync' }] : []),
+      ...(integrationHasCapability(integration.id, 'mapping') && manualEnabled ? [{ id: 'manual' as const, label: 'Manual Detail Imports' }] : []),
+      ...(integrationHasCapability(integration.id, 'invoice-import') && invoiceEnabled ? [{ id: 'invoice' as const, label: 'Invoice Import' }] : []),
+    ];
+    const requestedTab = workflowTabByIntegration[integration.id];
+    const activeWorkflow = workflowTabs.some((item) => item.id === requestedTab) ? requestedTab : workflowTabs[0]?.id;
+    const effectiveIntegration = {
+      ...integration,
+      nonSecrets: {
+        ...integration.nonSecrets,
+        ...(typeof integration.nonSecrets[enableApiSyncSettingKey] === 'undefined' && hasLiveIntegrationActions(integration.id)
+          ? { [enableApiSyncSettingKey]: apiEnabled ? 'true' : 'false' }
+          : {}),
+        ...(typeof integration.nonSecrets[enableManualDetailImportsSettingKey] === 'undefined' && integrationHasCapability(integration.id, 'mapping')
+          ? { [enableManualDetailImportsSettingKey]: manualEnabled ? 'true' : 'false' }
+          : {}),
+        ...(typeof integration.nonSecrets[enableInvoiceImportSettingKey] === 'undefined' && integrationHasCapability(integration.id, 'invoice-import')
+          ? { [enableInvoiceImportSettingKey]: invoiceEnabled ? 'true' : 'false' }
+          : {}),
+      },
+    };
+    const selectedVendorDatapoint = selectedVendorDatapointId
+      ? scopedDatapoints.find((datapoint) => datapoint.id === selectedVendorDatapointId)
+      : undefined;
+
+    return (
+      <IntegrationCard
+        actionMessage={actionMessages[integration.id]}
+        activeWorkflow={activeWorkflow}
+        busyAction={busyAction}
+        comingSoon={comingSoon}
+        integration={integration}
+        key={integration.id}
+        onConfigure={() => onConfigure(effectiveIntegration)}
+        onOpenMappings={onOpenMappings}
+        onSync={onSync}
+        onWorkflowChange={(tab) => {
+          setWorkflowTabByIntegration((current) => ({ ...current, [integration.id]: tab }));
+          if (tab === 'invoice') onInvoiceIntegrationChange(integration.id);
+        }}
+        workflowTabs={workflowTabs}
+      >
+        {activeWorkflow === 'manual' ? (
+          <VendorDatapointsView
+            datapoints={scopedDatapoints}
+            integrations={[integration]}
+            loadState={vendorDatapointLoadState}
+            message={vendorDatapointMessage}
+            onCreate={onCreateVendorDatapoint}
+            onEdit={onEditVendorDatapoint}
+            onImport={onImportVendorDatapoint}
+            onOpenMappings={(vendorId) => onOpenMappings(vendorId)}
+            onSaveMapping={onSaveVendorDatapointMapping}
+            onDeleteImport={onDeleteDatapointImport}
+            onSelect={onSelectVendorDatapoint}
+            selectedDatapoint={selectedVendorDatapoint}
+          />
+        ) : activeWorkflow === 'invoice' ? (
+          <VendorInvoiceIntegrationPanel
+            imports={scopedImports}
+            integration={integration}
+            loadState={invoiceLoadState}
+            message={invoiceMessage}
+            onEditTemplates={() => setTemplateManagerIntegrationId(integration.id)}
+            onImport={() => setInvoiceWizardIntegrationId(integration.id)}
+            onReviewImport={onInvoiceReviewImport}
+          />
+        ) : null}
+      </IntegrationCard>
+    );
+  };
 
   return (
     <section className="integrations-page" aria-label="Vendor API integrations">
@@ -14145,6 +14820,10 @@ function IntegrationsView(props: {
         <div className="integrations-live-meta">
           <span>{connectedCount} connected</span>
           <span>{degradedCount} degraded</span>
+          <button className="button primary compact" onClick={() => setInvoiceWizardIntegrationId('')} type="button">
+            <Upload size={16} />
+            Import vendor invoice
+          </button>
           <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
             <RefreshCcw size={16} />
             Refresh
@@ -14152,131 +14831,315 @@ function IntegrationsView(props: {
         </div>
       </div>
 
-      <div className="integration-management-tabs">
-        <div className="segmented-control" role="tablist" aria-label="Integration management mode">
-          {([
-            { id: 'api' as const, label: 'API' },
-            { id: 'datapoints' as const, label: 'Vendor datapoints' },
-            { id: 'invoice' as const, label: 'Invoice' },
-          ]).map((tab) => (
-            <button
-              aria-selected={managementTab === tab.id}
-              className={managementTab === tab.id ? 'active' : ''}
-              key={tab.id}
-              onClick={() => setManagementTab(tab.id)}
-              role="tab"
-              type="button"
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+      <div className="integration-list" aria-label="Enabled integrations">
+        {activeIntegrations.map((integration) => renderIntegrationPanel(integration))}
       </div>
 
-      {managementTab === 'api' ? (
-        <>
-          <div className="integration-list" aria-label="Enabled integrations">
-            {activeIntegrations.map((integration) => (
-              <IntegrationCard
-                actionMessage={actionMessages[integration.id]}
-                busyAction={busyAction}
-                integration={integration}
-                key={integration.id}
-                onConfigure={onConfigure}
-                onOpenMappings={onOpenMappings}
-                onSync={onSync}
-                onTest={onTest}
-              />
-            ))}
+      {availableIntegrations.length > 0 ? (
+        <details className="integration-drawer">
+          <summary>
+            <div>
+              <strong>Inactive Integrations</strong>
+              <span>{availableIntegrations.length} available to configure</span>
+            </div>
+            <ChevronRight className="drawer-chevron" size={18} />
+          </summary>
+          <div className="integration-drawer-body">
+            {availableIntegrations.map((integration) => renderIntegrationPanel(integration))}
           </div>
+        </details>
+      ) : null}
 
-          {availableIntegrations.length > 0 ? (
-            <details className="integration-drawer">
-              <summary>
-                <div>
-                  <strong>Inactive Integrations</strong>
-                  <span>{availableIntegrations.length} not configured or invoice-only</span>
-                </div>
-                <ChevronRight className="drawer-chevron" size={18} />
-              </summary>
-              <div className="integration-drawer-body">
-                {availableIntegrations.map((integration) => (
-                  <IntegrationCard
-                    actionMessage={actionMessages[integration.id]}
-                    busyAction={busyAction}
-                    integration={integration}
-                    key={integration.id}
-                    onConfigure={onConfigure}
-                    onOpenMappings={onOpenMappings}
-                    onSync={onSync}
-                    onTest={onTest}
-                  />
-                ))}
-              </div>
-            </details>
-          ) : null}
+      {comingSoonIntegrations.length > 0 ? (
+        <details className="integration-drawer">
+          <summary>
+            <div>
+              <strong>Coming Soon Integrations</strong>
+              <span>{comingSoonIntegrations.length} disabled roadmap integrations</span>
+            </div>
+            <ChevronRight className="drawer-chevron" size={18} />
+          </summary>
+          <div className="integration-drawer-body">
+            {comingSoonIntegrations.map((integration) => renderIntegrationPanel(integration, true))}
+          </div>
+        </details>
+      ) : null}
 
-          {comingSoonIntegrations.length > 0 ? (
-            <details className="integration-drawer">
-              <summary>
-                <div>
-                  <strong>Coming Soon Integrations</strong>
-                  <span>{comingSoonIntegrations.length} disabled roadmap integrations</span>
-                </div>
-                <ChevronRight className="drawer-chevron" size={18} />
-              </summary>
-              <div className="integration-drawer-body">
-                {comingSoonIntegrations.map((integration) => (
-                  <IntegrationCard comingSoon integration={integration} key={integration.id} />
-                ))}
-              </div>
-            </details>
-          ) : null}
-        </>
-      ) : managementTab === 'datapoints' ? (
-        <VendorDatapointsView
-          datapoints={vendorDatapoints}
-          integrations={integrations}
-          loadState={vendorDatapointLoadState}
-          message={vendorDatapointMessage}
-          onCreate={onCreateVendorDatapoint}
-          onEdit={onEditVendorDatapoint}
-          onImport={onImportVendorDatapoint}
-          onOpenMappings={(vendorId) => onOpenMappings(vendorId)}
-          onSaveMapping={onSaveVendorDatapointMapping}
-          onDeleteImport={onDeleteDatapointImport}
-          onSelect={onSelectVendorDatapoint}
-          selectedDatapoint={selectedVendorDatapoint}
-        />
-      ) : (
-        <ImportsView
-          busyReviewAction={busyInvoiceReviewAction}
-          customerOptions={invoiceCustomerOptions}
-          importing={invoiceImporting}
-          importMode={invoiceImportMode}
-          imports={invoiceImports}
+      {invoiceWizardIntegrationId !== null ? (
+        <VendorInvoiceWizardModal
+          initialIntegrationId={invoiceWizardIntegrationId || undefined}
           integrations={invoiceImportIntegrations}
-          loadState={invoiceLoadState}
-          message={invoiceMessage}
-          onAccountMappingSave={onInvoiceAccountMappingSave}
-          onCloseReview={onInvoiceCloseReview}
-          onProductCatalogSearch={onInvoiceProductCatalogSearch}
-          onProductMappingSave={onInvoiceProductMappingSave}
-          onRefreshReview={onInvoiceRefreshReview}
-          onReviewImport={onInvoiceReviewImport}
-          onTableUpload={onInvoiceTableUpload}
-          onUpload={onInvoiceUpload}
-          onVendorChange={onInvoiceIntegrationChange}
-          review={invoiceReview}
-          reviewLoadState={invoiceReviewLoadState}
-          reviewMessage={invoiceReviewMessage}
-          selectedVendorId={selectedInvoiceIntegrationId}
-          setImportMode={setInvoiceImportMode}
-          vendorDatapoints={vendorDatapoints}
+          onApproved={(invoiceImport) => {
+            onInvoiceApproved(invoiceImport);
+            setInvoiceWizardIntegrationId(null);
+          }}
+          onClose={() => setInvoiceWizardIntegrationId(null)}
         />
-      )}
+      ) : null}
+
+      {templateManagerIntegrationId ? (
+        <InvoiceTemplateManagerModal
+          integration={integrations.find((item) => item.id === templateManagerIntegrationId)}
+          integrations={invoiceImportIntegrations}
+          onClose={() => setTemplateManagerIntegrationId(null)}
+        />
+      ) : null}
     </section>
   );
+}
+
+function VendorInvoiceIntegrationPanel(props: {
+  integration: Integration;
+  imports: InvoiceImportSummary[];
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  message: string;
+  onImport: () => void;
+  onEditTemplates: () => void;
+  onReviewImport: (invoiceImport: InvoiceImportSummary) => Promise<InvoiceImportExceptionReview | null>;
+}) {
+  const { integration, imports, loadState, message, onEditTemplates, onImport, onReviewImport } = props;
+  const latest = imports[0];
+  return (
+    <section className="vendor-invoice-panel" aria-label={`${integration.name} vendor invoices`}>
+      <div className="vendor-invoice-panel-header">
+        <div>
+          <span className="section-kicker">Vendor sync</span>
+          <h3>Invoice import</h3>
+          <p>{latest ? `Current sync: ${latest.invoiceNumber ? `Invoice ${latest.invoiceNumber}` : latest.fileName}` : 'Configure a template to import the first vendor invoice.'}</p>
+        </div>
+        <div className="vendor-invoice-panel-actions">
+          <button className="button primary compact" onClick={onImport} type="button"><Upload size={16} /> Import Invoice</button>
+          <button className="button secondary compact" onClick={onEditTemplates} type="button"><Pencil size={16} /> Edit Templates</button>
+        </div>
+      </div>
+      {latest ? (
+        <div className="vendor-invoice-current">
+          <div><span>Latest approved</span><strong>{formatDateTime(latest.importedAt)}</strong></div>
+          <div><span>Rows</span><strong>{formatCount(latest.rowCount)}</strong></div>
+          <div><span>Exceptions</span><strong>{formatCount(latest.exceptionRows)}</strong></div>
+          <div><span>Template</span><strong>{latest.templateName ?? 'Legacy import'}</strong></div>
+        </div>
+      ) : <div className="empty-state"><FileSpreadsheet size={20} /><strong>{loadState === 'loading' ? 'Loading invoice history' : 'No approved vendor invoices'}</strong><span>{message}</span></div>}
+      {imports.length > 0 ? (
+        <details className="vendor-invoice-history">
+          <summary><History size={16} /><strong>Invoice history</strong><span>{imports.length} immutable version{imports.length === 1 ? '' : 's'}</span><ChevronRight className="drawer-chevron" size={16} /></summary>
+          <div className="vendor-invoice-history-list">
+            {imports.map((item, index) => (
+              <div className="vendor-invoice-history-row" key={item.id}>
+                <span className={index === 0 ? 'status-pill success' : 'status-pill neutral'}>{index === 0 ? 'Active sync' : 'Previous'}</span>
+                <div><strong>{item.invoiceNumber ? `Invoice ${item.invoiceNumber}` : item.fileName}</strong><span>{item.fileName} · {formatDateTime(item.importedAt)}</span></div>
+                <div><strong>{formatCount(item.rowCount)} rows</strong><span>{formatCount(item.exceptionRows)} exceptions · {item.templateName ?? 'Legacy template'}</span></div>
+                {item.originalFileAvailable ? <a className="button ghost compact" href={`/api/invoice-imports/${encodeURIComponent(item.id)}/file`}><Download size={15} /> Original</a> : <span />}
+                <button className="button secondary compact" onClick={() => void onReviewImport(item)} type="button">{item.exceptionRows > 0 ? 'Review' : 'Open'}</button>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function InvoiceTemplateManagerModal(props: { integration?: Integration; integrations: Integration[]; onClose: () => void }) {
+  const { integration, integrations, onClose } = props;
+  const [templates, setTemplates] = useState<InvoiceImportTemplate[]>([]);
+  const [editingTemplate, setEditingTemplate] = useState<InvoiceImportTemplate | null | 'new'>(null);
+  const [message, setMessage] = useState('Loading invoice templates...');
+  const reload = async () => {
+    if (!integration) return;
+    try {
+      const next = await fetchInvoiceImportTemplates(integration.id);
+      setTemplates(next);
+      setMessage(next.length ? `${next.filter((item) => item.status === 'active').length} active template(s).` : 'No invoice templates configured.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to load invoice templates.'); }
+  };
+  useEffect(() => { void reload(); }, [integration?.id]);
+  if (!integration) return null;
+  if (editingTemplate) {
+    return <VendorInvoiceWizardModal
+      initialIntegrationId={integration.id}
+      initialTemplate={editingTemplate === 'new' ? undefined : editingTemplate}
+      integrations={integrations}
+      onClose={() => setEditingTemplate(null)}
+      onTemplateSaved={() => { setEditingTemplate(null); void reload(); }}
+      templateOnly
+    />;
+  }
+  const toggleArchive = async (template: InvoiceImportTemplate) => {
+    try { await setInvoiceImportTemplateArchivedRequest(template.id, template.status === 'active'); await reload(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to update template.'); }
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-labelledby="invoice-template-manager-title" className="modal-card invoice-template-modal" role="dialog">
+        <div className="surface-header"><div><span className="section-kicker">{integration.name}</span><h2 id="invoice-template-manager-title">Invoice import templates</h2></div><button className="icon-button" onClick={onClose} title="Close" type="button"><X size={18} /></button></div>
+        <div className="invoice-template-manager-body">
+          <div className="invoice-template-manager-toolbar"><p>{message}</p><button className="button primary compact" onClick={() => setEditingTemplate('new')} type="button"><Plus size={16} /> New template</button></div>
+          <div className="invoice-template-list">
+            {templates.map((template) => <div className="invoice-template-row" key={template.id}>
+              <span className={template.status === 'active' ? 'status-pill success' : 'status-pill neutral'}>{template.status}</span>
+              <div><strong>{template.name}</strong><span>{template.knownHeaders.length} known headers · version {template.version} · {template.signatures.length} signatures</span></div>
+              <button className="button secondary compact" disabled={template.status === 'archived'} onClick={() => setEditingTemplate(template)} type="button">Edit</button>
+              <button className="button ghost compact" onClick={() => void toggleArchive(template)} type="button">{template.status === 'active' ? 'Archive' : 'Restore'}</button>
+            </div>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VendorInvoiceWizardModal(props: {
+  integrations: Integration[];
+  initialIntegrationId?: IntegrationId;
+  initialTemplate?: InvoiceImportTemplate;
+  templateOnly?: boolean;
+  onClose: () => void;
+  onApproved?: (invoiceImport: InvoiceImportSummary) => void;
+  onTemplateSaved?: (template: InvoiceImportTemplate) => void;
+}) {
+  const { integrations, initialIntegrationId, initialTemplate, templateOnly, onClose, onApproved, onTemplateSaved } = props;
+  const [templates, setTemplates] = useState<InvoiceImportTemplate[]>([]);
+  const [integrationId, setIntegrationId] = useState<IntegrationId | ''>(initialTemplate?.integrationId ?? initialIntegrationId ?? '');
+  const [templateId, setTemplateId] = useState(initialTemplate?.id ?? '');
+  const [templateName, setTemplateName] = useState(initialTemplate?.name ?? '');
+  const [file, setFile] = useState<File | null>(null);
+  const [table, setTable] = useState<ParsedImportTableFile | null>(null);
+  const [columnMap, setColumnMap] = useState<InvoiceTableColumnMap>(initialTemplate?.columnMap ?? {});
+  const [dataSourceKey, setDataSourceKey] = useState(initialTemplate?.dataSourceKey ?? '');
+  const [sourceType, setSourceType] = useState<IntegrationDataSourceType>(initialTemplate?.sourceType ?? 'invoice');
+  const [preview, setPreview] = useState<InvoiceImportPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(templateOnly ? 'Upload a short sample to configure the mapping.' : 'Select a vendor invoice file to begin.');
+  const selectedIntegration = integrations.find((item) => item.id === integrationId);
+  const selectedTemplate = templates.find((item) => item.id === templateId) ?? initialTemplate;
+  const activeTemplates = templates.filter((item) => item.status === 'active' && (!integrationId || item.integrationId === integrationId));
+  const dataSources = importableDataSources(selectedIntegration);
+  const selectedDataSource = dataSources.find((item) => item.key === dataSourceKey) ?? dataSources[0];
+  const requiredMapped = columnMapSatisfiesSourceType(sourceType, columnMap, { requiresCustomerMapping: selectedDataSource?.requiresCustomerMapping ?? true });
+
+  useEffect(() => {
+    void fetchInvoiceImportTemplates().then(setTemplates).catch((error) => setMessage(error instanceof Error ? error.message : 'Unable to load invoice templates.'));
+  }, []);
+  useEffect(() => {
+    if (initialTemplate) return;
+    const source = dataSources[0];
+    if (source) { setDataSourceKey(source.key); setSourceType(source.sourceType); }
+  }, [integrationId]);
+
+  const chooseTemplate = (id: string, available = templates) => {
+    setTemplateId(id);
+    const next = available.find((item) => item.id === id);
+    if (next) {
+      setIntegrationId(next.integrationId); setTemplateName(next.name); setDataSourceKey(next.dataSourceKey ?? ''); setSourceType(next.sourceType);
+      setColumnMap(table ? mergeInvoiceTableColumnMap(next.columnMap, table.headers, next.sourceType) : next.columnMap);
+    } else if (!initialTemplate) { setTemplateName(''); setColumnMap(table ? suggestInvoiceTableColumnMap(table.headers, sourceType) : {}); }
+  };
+
+  const chooseCandidate = (candidateId: string) => {
+    if (!table) return;
+    const candidate = table.candidates.find((item) => item.id === candidateId);
+    if (!candidate) return;
+    const next = { ...table, content: candidate.content, headers: candidate.headers, locator: candidate.locator };
+    setTable(next);
+    setColumnMap(selectedTemplate ? mergeInvoiceTableColumnMap(selectedTemplate.columnMap, candidate.headers, selectedTemplate.sourceType) : suggestInvoiceTableColumnMap(candidate.headers, sourceType));
+    setPreview(null);
+  };
+
+  const handleFile = async (nextFile: File | null) => {
+    if (!nextFile) return;
+    setBusy(true); setPreview(null); setMessage('Detecting the table and matching saved templates...');
+    try {
+      const parsed = await readImportTableFile(nextFile);
+      const scoped = initialIntegrationId ? templates.filter((item) => item.integrationId === initialIntegrationId) : templates;
+      const matched = autoSelectedInvoiceTemplate(matchInvoiceImportTemplates(scoped, parsed.headers));
+      setFile(nextFile); setTable(parsed);
+      if (matched) {
+        setIntegrationId(matched.integrationId); setTemplateId(matched.id); setTemplateName(matched.name);
+        setDataSourceKey(matched.dataSourceKey ?? ''); setSourceType(matched.sourceType);
+        setColumnMap(mergeInvoiceTableColumnMap(matched.columnMap, parsed.headers, matched.sourceType));
+        setMessage(`Matched ${matched.name}. Review the mapping before preview.`);
+      } else {
+        const target = initialTemplate ?? (initialIntegrationId ? templates.find((item) => item.integrationId === initialIntegrationId && item.status === 'active') : undefined);
+        if (target) chooseTemplate(target.id);
+        setColumnMap(target ? mergeInvoiceTableColumnMap(target.columnMap, parsed.headers, target.sourceType) : suggestInvoiceTableColumnMap(parsed.headers, sourceType));
+        setMessage(initialIntegrationId ? 'No unique template signature matched. Choose or create a template.' : 'Invoice type was not detected. Choose the integration and template.');
+      }
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to inspect this file.'); }
+    finally { setBusy(false); }
+  };
+
+  const draft = (): VendorInvoiceUploadDraft | null => file && table && integrationId ? {
+    file, table, integrationId, template: selectedTemplate, templateName: templateName.trim(), dataSourceKey: dataSourceKey || undefined, sourceType, columnMap,
+  } : null;
+  const runPreview = async () => {
+    const value = draft(); if (!value || !requiredMapped) return;
+    setBusy(true); setMessage('Building mapped invoice preview...');
+    try { const next = await vendorInvoicePreviewRequest(value); setPreview(next); setMessage(next.blockingErrors.length ? next.blockingErrors.join(' ') : 'Preview ready for approval.'); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to preview invoice.'); }
+    finally { setBusy(false); }
+  };
+  const approve = async () => {
+    const value = draft(); if (!value || !preview || preview.blockingErrors.length) return;
+    setBusy(true); setMessage('Saving the original file and approving vendor sync...');
+    try { const result = await approveVendorInvoiceRequest(value, preview); onApproved?.(result.import); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to approve invoice.'); setBusy(false); }
+  };
+  const saveTemplate = async () => {
+    if (!integrationId || !templateName.trim() || !requiredMapped) return;
+    setBusy(true);
+    try {
+      const saved = await saveInvoiceImportTemplateRequest({
+        ...selectedTemplate, id: selectedTemplate?.id, integrationId, name: templateName.trim(), dataSourceKey: dataSourceKey || undefined,
+        sourceType, columnMap, knownHeaders: mergeKnownHeaders(selectedTemplate?.knownHeaders, table?.headers, mappedColumnHeaders(columnMap)),
+      });
+      onTemplateSaved?.(saved);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to save template.'); setBusy(false); }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-labelledby="vendor-invoice-wizard-title" className="modal-card vendor-invoice-wizard" role="dialog">
+        <div className="surface-header"><div><span className="section-kicker">{templateOnly ? 'Invoice template' : 'Vendor invoice import'}</span><h2 id="vendor-invoice-wizard-title">{preview ? 'Approve invoice import' : templateOnly ? (initialTemplate ? 'Edit template' : 'New template') : 'Import vendor invoice'}</h2></div><button className="icon-button" disabled={busy} onClick={onClose} title="Close" type="button"><X size={18} /></button></div>
+        <div className="vendor-invoice-wizard-body">
+          {!preview ? <>
+            <div className="vendor-invoice-wizard-grid">
+              <label className="config-field"><span>Invoice or sample file</span><input accept=".csv,.json,.xls,.xlsx" disabled={busy} onChange={(event) => void handleFile(event.currentTarget.files?.[0] ?? null)} type="file" /></label>
+              <label className="config-field"><span>Integration *</span><select disabled={Boolean(initialIntegrationId || initialTemplate)} onChange={(event) => { setIntegrationId(event.target.value as IntegrationId | ''); setTemplateId(''); }} value={integrationId}><option value="">Choose integration</option>{integrations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="config-field"><span>Template</span><select onChange={(event) => chooseTemplate(event.target.value)} value={templateId}><option value="">Create new template</option>{activeTemplates.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="config-field"><span>Template name *</span><input disabled={Boolean(selectedTemplate)} onChange={(event) => setTemplateName(event.target.value)} placeholder="Monthly vendor invoice" value={templateName} /></label>
+              {dataSources.length > 0 ? <label className="config-field"><span>Data stream</span><select onChange={(event) => { const source = dataSources.find((item) => item.key === event.target.value); setDataSourceKey(event.target.value); if (source) setSourceType(source.sourceType); }} value={dataSourceKey}>{dataSources.map((source) => <option key={source.key} value={source.key}>{source.label}</option>)}</select></label> : null}
+              {table && table.candidates.length > 1 ? <label className="config-field"><span>Detected table</span><select onChange={(event) => chooseCandidate(event.target.value)} value={table.candidates.find((item) => item.locator === table.locator)?.id ?? table.candidates[0].id}>{table.candidates.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.rowCount} rows</option>)}</select></label> : null}
+            </div>
+            {table ? <div className="vendor-invoice-detection-summary"><FileSpreadsheet size={20} /><div><strong>{file?.name}</strong><span>{table.locator} · {table.headers.length} columns · {table.candidates[0]?.rowCount ?? 0} rows</span></div></div> : null}
+            {table ? <InvoiceColumnMapGrid columnMap={columnMap} headerOptions={columnMappingHeaderOptions(columnMap, table.headers, selectedTemplate?.knownHeaders)} onChange={(key, value) => setColumnMap((current) => updateInvoiceTableColumnMap(current, key, value))} requiresCustomerMapping={selectedDataSource?.requiresCustomerMapping ?? true} sourceType={sourceType} /> : null}
+          </> : <InvoiceApprovalPreview preview={preview} />}
+          <p className={preview?.blockingErrors.length ? 'invoice-action-message error' : 'invoice-action-message'}>{message}</p>
+        </div>
+        <div className="vendor-invoice-wizard-actions">
+          <button className="button secondary" disabled={busy} onClick={onClose} type="button">Cancel</button>
+          {templateOnly ? <button className="button primary" disabled={busy || !integrationId || !templateName.trim() || !requiredMapped} onClick={() => void saveTemplate()} type="button"><Save size={16} /> Save Template</button>
+            : preview ? <button className="button primary" disabled={busy || preview.blockingErrors.length > 0} onClick={() => void approve()} type="button"><Check size={16} /> {busy ? 'Importing...' : 'Approve / Import'}</button>
+            : <button className="button primary" disabled={busy || !draft() || !requiredMapped || (!selectedTemplate && !templateName.trim())} onClick={() => void runPreview()} type="button">Review Import <ChevronRight size={16} /></button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InvoiceApprovalPreview({ preview }: { preview: InvoiceImportPreview }) {
+  const columns = [...new Set(preview.sampleRows.flatMap((row) => Object.keys(row.values)))];
+  return <div className="invoice-approval-preview">
+    <div className="invoice-review-metrics">
+      <div className="metric-card"><span>Rows detected</span><strong>{formatCount(preview.rowCount)}</strong></div>
+      <div className="metric-card"><span>Valid rows</span><strong>{formatCount(preview.validRows)}</strong></div>
+      <div className="metric-card"><span>Mapping exceptions</span><strong>{formatCount(preview.exceptionRows)}</strong></div>
+      <div className="metric-card"><span>Source</span><strong>{preview.tableLocator}</strong></div>
+    </div>
+    {preview.warnings.length ? <div className="invoice-warning-list">{preview.warnings.map((warning) => <span key={warning}><Info size={14} /> {warning}</span>)}</div> : null}
+    <div className="invoice-approval-table-scroll"><table className="invoice-approval-table"><thead><tr><th>Row</th>{columns.map((column) => <th key={column}>{column}</th>)}<th>Validation</th></tr></thead><tbody>{preview.sampleRows.map((row) => <tr key={row.rowNumber}><td>{row.rowNumber}</td>{columns.map((column) => <td key={column}>{String(row.values[column] ?? '')}</td>)}<td>{row.warnings.join(', ') || 'Ready'}</td></tr>)}</tbody></table></div>
+    <span className="config-note">Showing the first {preview.sampleRows.length} mapped rows. The original file will be retained with this immutable version.</span>
+  </div>;
 }
 
 function vendorDatapointSourceLabel(sourceType: string) {
@@ -14371,18 +15234,25 @@ function CreateVendorDatapointModal(props: {
   const [description, setDescription] = useState('');
   const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>('');
   const [sourceType, setSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
+  const [dataSourceKey, setDataSourceKey] = useState('');
   const [syncMode, setSyncMode] = useState<ManualImportSyncMode>('full-vendor-sync');
   const [message, setMessage] = useState('Name this vendor datapoint and choose what the file contains.');
   const [saving, setSaving] = useState(false);
   const linkableIntegrations = integrations.filter(
     (integration) => integrationHasCapability(integration.id, 'mapping') && integration.id !== 'custom-table',
   );
+  const streamIntegration = integrations.find((integration) => integration.id === (linkedIntegrationId || 'custom-table'));
+  const compatibleStreams = streamIntegration?.dataSources.filter((source) => source.sourceType === sourceType) ?? [];
 
   useEffect(() => {
     if (sourceType === 'device-count' || sourceType === 'license-count') {
       setSyncMode('full-vendor-sync');
     }
   }, [sourceType]);
+
+  useEffect(() => {
+    setDataSourceKey((current) => compatibleStreams.some((source) => source.key === current) ? current : compatibleStreams[0]?.key ?? '');
+  }, [linkedIntegrationId, sourceType]);
 
   const submit = async () => {
     if (!displayName.trim()) {
@@ -14397,6 +15267,7 @@ function CreateVendorDatapointModal(props: {
         displayName: displayName.trim(),
         description: description.trim() || undefined,
         linkedIntegrationId: linkedIntegrationId || undefined,
+        dataSourceKey: dataSourceKey || undefined,
         sourceType,
         syncMode,
       });
@@ -14449,6 +15320,13 @@ function CreateVendorDatapointModal(props: {
               <option value="reseller-product-total">Reseller product totals</option>
             </select>
           </label>
+          <label className="config-field">
+            <span>Data stream</span>
+            <select disabled={compatibleStreams.length === 0} onChange={(event) => setDataSourceKey(event.target.value)} value={dataSourceKey}>
+              {compatibleStreams.length === 0 ? <option value="">Legacy / unassigned</option> : null}
+              {compatibleStreams.map((source) => <option key={source.key} value={source.key}>{source.label}</option>)}
+            </select>
+          </label>
           <div className="segmented-control invoice-source-toggle" role="group" aria-label="Vendor datapoint sync mode">
             <button className={syncMode === 'full-vendor-sync' ? 'active' : ''} onClick={() => setSyncMode('full-vendor-sync')} type="button">
               Full sync
@@ -14487,6 +15365,7 @@ function EditVendorDatapointModal(props: {
   const [displayName, setDisplayName] = useState(datapoint?.displayName ?? '');
   const [description, setDescription] = useState(datapoint?.description ?? '');
   const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>(datapoint?.linkedIntegrationId ?? '');
+  const [dataSourceKey, setDataSourceKey] = useState(datapoint?.dataSourceKey ?? '');
   const [sourceType, setSourceType] = useState<IntegrationDataSourceType>(
     (datapoint?.sourceType as IntegrationDataSourceType) ?? 'customer-product-breakdown',
   );
@@ -14501,6 +15380,8 @@ function EditVendorDatapointModal(props: {
   );
   const headerOptions = columnMappingHeaderOptions(columnMap, fileHeaders, knownHeaders);
   const mappingReady = columnMapSatisfiesSourceType(sourceType, columnMap);
+  const streamIntegration = integrations.find((integration) => integration.id === (linkedIntegrationId || 'custom-table'));
+  const compatibleStreams = streamIntegration?.dataSources.filter((source) => source.sourceType === sourceType) ?? [];
 
   useEffect(() => {
     if (!datapoint) {
@@ -14510,6 +15391,7 @@ function EditVendorDatapointModal(props: {
     setDisplayName(datapoint.displayName);
     setDescription(datapoint.description ?? '');
     setLinkedIntegrationId(datapoint.linkedIntegrationId ?? '');
+    setDataSourceKey(datapoint.dataSourceKey ?? '');
     setSourceType(datapoint.sourceType as IntegrationDataSourceType);
     setSyncMode(datapoint.syncMode);
     setColumnMap(datapoint.columnMap);
@@ -14517,6 +15399,13 @@ function EditVendorDatapointModal(props: {
     setFileHeaders([]);
     setMessage('Update datapoint settings and column mappings.');
   }, [datapoint?.id]);
+
+  useEffect(() => {
+    setDataSourceKey((current) => {
+      if (compatibleStreams.some((source) => source.key === current)) return current;
+      return compatibleStreams.length === 1 ? compatibleStreams[0].key : '';
+    });
+  }, [linkedIntegrationId, sourceType]);
 
   const handleSampleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.currentTarget.files?.[0] ?? null;
@@ -14564,6 +15453,7 @@ function EditVendorDatapointModal(props: {
         displayName: displayName.trim(),
         description: description.trim() || undefined,
         linkedIntegrationId: linkedIntegrationId || null,
+        dataSourceKey: dataSourceKey || null,
         sourceType,
         syncMode,
         columnMap,
@@ -14628,6 +15518,13 @@ function EditVendorDatapointModal(props: {
               <option value="invoice">Invoices</option>
               <option value="user-license-detail">User license detail</option>
               <option value="reseller-product-total">Reseller product totals</option>
+            </select>
+          </label>
+          <label className="config-field">
+            <span>Data stream</span>
+            <select disabled={saving || compatibleStreams.length === 0} onChange={(event) => setDataSourceKey(event.target.value)} value={dataSourceKey}>
+              <option value="">Legacy / unassigned</option>
+              {compatibleStreams.map((source) => <option key={source.key} value={source.key}>{source.label}</option>)}
             </select>
           </label>
           <div className="segmented-control invoice-source-toggle" role="group" aria-label="Vendor datapoint sync mode">
@@ -15268,21 +16165,31 @@ function VendorDatapointsView(props: {
 
 function IntegrationCard(props: {
   actionMessage?: string;
+  activeWorkflow?: IntegrationWorkflowTab;
   busyAction?: IntegrationActionKey | null;
+  children?: ReactNode;
   comingSoon?: boolean;
   integration: Integration;
-  onConfigure?: (integration: Integration) => void;
+  onConfigure?: () => void;
   onOpenMappings?: (integrationId: IntegrationId) => void;
   onSync?: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
-  onTest?: (integrationId: IntegrationId) => void;
+  onWorkflowChange?: (tab: IntegrationWorkflowTab) => void;
+  workflowTabs?: Array<{ id: IntegrationWorkflowTab; label: string }>;
 }) {
-  const { actionMessage, busyAction, comingSoon = false, integration, onConfigure, onOpenMappings, onSync, onTest } = props;
+  const {
+    actionMessage,
+    activeWorkflow,
+    busyAction,
+    children,
+    comingSoon = false,
+    integration,
+    onConfigure,
+    onOpenMappings,
+    onSync,
+    onWorkflowChange,
+    workflowTabs = [],
+  } = props;
   const displayName = comingSoon ? `${integration.name} (Coming Soon)` : integration.name;
-  const actionKeyPrefix = integration.id;
-  const microsoft365SyncBusy =
-    busyAction === `${actionKeyPrefix}:sync-users` || busyAction === `${actionKeyPrefix}:sync-licenses`;
-  const dattoSyncBusy =
-    busyAction === `${actionKeyPrefix}:sync-datto-saas` || busyAction === `${actionKeyPrefix}:sync-datto-saas-bcdr`;
 
   return (
     <article aria-disabled={comingSoon || undefined} className={comingSoon ? 'integration-card coming-soon' : 'integration-card'}>
@@ -15307,73 +16214,7 @@ function IntegrationCard(props: {
           </button>
         ) : (
           <>
-            {hasLiveIntegrationActions(integration.id) ? (
-              <>
-                {integration.id === 'microsoft-365' ? (
-                  <>
-                    <button
-                      className="button secondary compact"
-                      disabled={microsoft365SyncBusy}
-                      onClick={() => onSync?.(integration.id, 'users')}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      {busyAction === `${actionKeyPrefix}:sync-users` ? 'Syncing users' : 'Sync Users'}
-                    </button>
-                    <button
-                      className="button secondary compact"
-                      disabled={microsoft365SyncBusy}
-                      onClick={() => onSync?.(integration.id, 'licenses')}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      {busyAction === `${actionKeyPrefix}:sync-licenses` ? 'Syncing licenses' : 'Sync Licenses'}
-                    </button>
-                  </>
-                ) : integration.id === 'datto' ? (
-                  <>
-                    <button
-                      className="button secondary compact"
-                      disabled={dattoSyncBusy}
-                      onClick={() => onSync?.(integration.id, 'datto-saas-bcdr')}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      {busyAction === `${actionKeyPrefix}:sync-datto-saas-bcdr` ? 'Syncing SaaS + BCDR' : 'Sync SaaS + BCDR'}
-                    </button>
-                    <button
-                      className="button secondary compact"
-                      disabled={dattoSyncBusy}
-                      onClick={() => onSync?.(integration.id, 'datto-saas')}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      {busyAction === `${actionKeyPrefix}:sync-datto-saas` ? 'Syncing SaaS' : 'SaaS only'}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    className="button secondary compact"
-                    disabled={busyAction === `${actionKeyPrefix}:sync`}
-                    onClick={() => onSync?.(integration.id)}
-                    type="button"
-                  >
-                    <RefreshCcw size={16} />
-                    {busyAction === `${actionKeyPrefix}:sync` ? 'Syncing' : 'Sync now'}
-                  </button>
-                )}
-                <button
-                  className="button secondary compact"
-                  disabled={busyAction === `${actionKeyPrefix}:test`}
-                  onClick={() => onTest?.(integration.id)}
-                  type="button"
-                >
-                  <Plug size={16} />
-                  {busyAction === `${actionKeyPrefix}:test` ? 'Testing' : 'Test connection'}
-                </button>
-              </>
-            ) : null}
-            <button className="button secondary compact" onClick={() => onConfigure?.(integration)} type="button">
+            <button className="button secondary compact" onClick={onConfigure} type="button">
               <KeyRound size={16} />
               {integration.enabled ? 'Configure' : 'Configure to enable'}
             </button>
@@ -15387,9 +16228,50 @@ function IntegrationCard(props: {
         )}
       </div>
 
+      {workflowTabs.length > 0 ? (
+        <div className="integration-workflow-tabs" role="tablist" aria-label={`${integration.name} workflows`}>
+          {workflowTabs.map((tab) => (
+            <button
+              aria-selected={activeWorkflow === tab.id}
+              className={activeWorkflow === tab.id ? 'active' : ''}
+              key={tab.id}
+              onClick={() => onWorkflowChange?.(tab.id)}
+              role="tab"
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      ) : !comingSoon ? <p className="integration-no-workflows">No workflows enabled. Use Configure to enable one.</p> : null}
+
+      {activeWorkflow === 'api' ? (
+        <div className="integration-operation-list">
+          {integration.operations.map((operation) => {
+            const target = syncTargetForOperation(integration.id, operation.operationKey);
+            const actionKey = syncActionKey(integration.id, target);
+            const running = operation.status === 'running' || operation.status === 'queued' || busyAction === actionKey;
+            return (
+              <div className="integration-operation-row" key={operation.operationKey}>
+                <div>
+                  <strong>{operation.label}</strong>
+                  <span>{formatIntegrationOperationStatus(operation)}</span>
+                </div>
+                <span className={`integration-operation-state ${operation.status}`}>{operation.status === 'never' ? 'Never run' : operation.status}</span>
+                <button className="button secondary compact" disabled={running} onClick={() => onSync?.(integration.id, target)} type="button">
+                  <RefreshCcw className={running ? 'sync-button-spin' : undefined} size={16} />
+                  {running ? 'Syncing' : 'Sync now'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
       <p className={`config-note integration-action-message${actionMessage ? '' : ' is-empty'}`}>
         {actionMessage ?? '\u00a0'}
       </p>
+      {children ? <div className="integration-workflow-content">{children}</div> : null}
     </article>
   );
 }
@@ -15461,6 +16343,7 @@ function MappingSectionDrawer(props: {
 
 function MappingsView(props: {
   busyAction: string | null;
+  deviceMatchExclusions: DeviceMatchExclusion[];
   crossVendorBundleMessage: string;
   crossVendorBundles: CrossVendorProductBundle[];
   integrations: Integration[];
@@ -15490,6 +16373,7 @@ function MappingsView(props: {
     },
   ) => Promise<boolean>;
   onCrossVendorBundlesRefresh: () => Promise<CrossVendorProductBundle[]>;
+  onDeviceExclusionDeactivate: (exclusion: DeviceMatchExclusion) => Promise<void>;
   onIntegrationChange: (integrationId: VendorKey) => void;
   onProductTargetsSave: (
     integrationId: VendorKey,
@@ -15541,6 +16425,7 @@ function MappingsView(props: {
 }) {
   const {
     busyAction,
+    deviceMatchExclusions,
     crossVendorBundleMessage,
     crossVendorBundles,
     integrations,
@@ -15560,6 +16445,7 @@ function MappingsView(props: {
     onCrossVendorBundleDeactivate,
     onCrossVendorBundleSave,
     onCrossVendorBundlesRefresh,
+    onDeviceExclusionDeactivate,
     onIntegrationChange,
     onProductTargetsSave,
     onProductBundleDeactivate,
@@ -16810,6 +17696,38 @@ function MappingsView(props: {
             mappings={ncentralFilterMappings}
             onSave={onNcentralFilterMappingSave}
           />
+        </MappingSectionDrawer>
+      ) : null}
+
+      {selectedIntegrationId === 'ncentral' || selectedIntegrationId === 'sentinelone' ? (
+        <MappingSectionDrawer
+          defaultOpen={deviceMatchExclusions.length > 0}
+          meta="Auditor-approved device exceptions"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="device-exclusions"
+          status={`${deviceMatchExclusions.length.toLocaleString()} active`}
+          statusTone={deviceMatchExclusions.length > 0 ? 'needs-review' : 'approved'}
+          title="Device match exclusions"
+        >
+          <div className="work-surface device-exclusion-surface">
+            {deviceMatchExclusions.length === 0 ? (
+              <div className="empty-state"><Check size={20} /><strong>No active device exclusions.</strong></div>
+            ) : (
+              <div className="device-exclusion-list">
+                {deviceMatchExclusions.map((exclusion) => (
+                  <article className="device-exclusion-row" key={exclusion.id}>
+                    <div><strong>{exclusion.sourceDisplayName}</strong><span>{exclusion.sourceIdentity}</span></div>
+                    <div><strong>{exclusion.customerName ?? exclusion.customerId}</strong><span>Excluded from {deviceVendorLabel(exclusion.targetVendorId)}</span></div>
+                    <div><strong>{exclusion.reason}</strong><span>Approved by {exclusion.approvedBy} · {formatDateTime(exclusion.approvedAt)}</span></div>
+                    <button className="button secondary compact" disabled={busyAction === `device-exclusion:${exclusion.id}`} onClick={() => void onDeviceExclusionDeactivate(exclusion)} type="button">
+                      <Trash2 size={15} /> Remove
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
         </MappingSectionDrawer>
       ) : null}
 
@@ -20357,20 +21275,16 @@ function IntegrationModal(props: {
   integration: Integration;
   onClose: () => void;
   onSave: (payload: IntegrationSettingsPayload) => Promise<void>;
-  onTabChange: (tab: IntegrationTab) => void;
+  onTest: (integrationId: IntegrationId, payload?: IntegrationSettingsPayload) => Promise<void>;
   saving: boolean;
   saveMessage: string | null;
-  tab: IntegrationTab;
+  testing: boolean;
 }) {
-  const { integration, onClose, onSave, onTabChange, saving, saveMessage, tab } = props;
-  const tabLabels: Array<{ id: IntegrationTab; label: string }> = [
-    { id: 'api', label: 'API' },
-    { id: 'invoice', label: 'Invoice' },
-  ];
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    const formData = new FormData(event.currentTarget);
+  const { integration, onClose, onSave, onTest, saving, saveMessage, testing } = props;
+  const formRef = useRef<HTMLFormElement>(null);
+  const [dirty, setDirty] = useState(false);
+  const buildPayload = (form: HTMLFormElement): IntegrationSettingsPayload => {
+    const formData = new FormData(form);
     const requiredNonSecrets = integration.requiredNonSecrets.map((setting) => [
       setting.key,
       String(formData.get(`nonSecret:${setting.key}`) ?? '').trim(),
@@ -20381,19 +21295,25 @@ function IntegrationModal(props: {
         ? (formData.get(`nonSecret:${setting.key}`) === 'on' ? 'true' : 'false')
         : String(formData.get(`nonSecret:${setting.key}`) ?? '').trim(),
     ] as const);
-    const nonSecrets = Object.fromEntries([...requiredNonSecrets, ...optionalNonSecrets]);
     const secrets = Object.fromEntries(
       integration.requiredSecrets.map((setting) => [
         setting.key,
         String(formData.get(`secret:${setting.key}`) ?? '').trim(),
       ]),
     );
-
-    void onSave({
+    return {
       integrationId: integration.id,
-      nonSecrets,
+      nonSecrets: Object.fromEntries([...requiredNonSecrets, ...optionalNonSecrets]),
       secrets,
-    });
+    };
+  };
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void onSave(buildPayload(event.currentTarget));
+  };
+  const testConnection = () => {
+    if (!formRef.current) return;
+    void onTest(integration.id, dirty ? buildPayload(formRef.current) : undefined);
   };
 
   return (
@@ -20409,110 +21329,49 @@ function IntegrationModal(props: {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit}>
-          <div className="integration-tabs" role="tablist" aria-label="Integration settings">
-            {tabLabels.map((item) => (
-              <button
-                aria-selected={tab === item.id}
-                className={tab === item.id ? 'active' : ''}
-                key={item.id}
-                onClick={() => onTabChange(item.id)}
-                role="tab"
-                type="button"
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
+        <form onChange={() => setDirty(true)} onSubmit={handleSubmit} ref={formRef}>
           <div className="integration-modal-body">
-            {tab === 'api' && (
-              <>
-                {integration.requiredNonSecrets.length === 0 &&
-                integration.requiredSecrets.length === 0 &&
-                integration.optionalNonSecrets.length === 0 ? (
-                  <p className="config-note">This integration does not require API credentials.</p>
-                ) : null}
-                {integration.requiredNonSecrets.map((setting) => (
-                  <label className="config-field" key={setting.key}>
-                    <span>{setting.label}</span>
-                    <input
-                      defaultValue={
-                        integration.nonSecrets[setting.key] ??
-                        setting.defaultValue ??
-                        (setting.key === 'endpoint' ? integration.endpoint : '')
-                      }
-                      name={`nonSecret:${setting.key}`}
-                    />
-                  </label>
-                ))}
-                {integration.requiredSecrets.map((setting) => (
-                  <label className="config-field" key={setting.key}>
-                    <span>{setting.label}</span>
-                    <input name={`secret:${setting.key}`} placeholder="Leave blank to keep the existing Key Vault value" type="password" />
-                  </label>
-                ))}
-                {groupOptionalIntegrationSettings(integration.optionalNonSecrets).map(({ section, items }) => (
-                  <div className="integration-settings-section" key={section ?? 'general-optional-settings'}>
-                    {section ? <h3 className="integration-settings-section-title">{section}</h3> : null}
-                    {items.map((setting) =>
-                      setting.inputType === 'select' ? (
-                        <label className="config-field" key={setting.key}>
-                          <span>{setting.label}</span>
-                          <select
-                            defaultValue={optionalIntegrationSettingValue(integration, setting)}
-                            name={`nonSecret:${setting.key}`}
-                          >
-                            {(setting.options ?? []).map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                          {setting.description ? <small>{setting.description}</small> : null}
-                        </label>
-                      ) : (
-                        <label className="config-checkbox" key={setting.key}>
-                          <input
-                            defaultChecked={optionalIntegrationSettingValue(integration, setting) === 'true'}
-                            name={`nonSecret:${setting.key}`}
-                            type="checkbox"
-                          />
-                          <span>
-                            <strong>{setting.label}</strong>
-                            {setting.description ? <small>{setting.description}</small> : null}
-                          </span>
-                        </label>
-                      ),
-                    )}
-                  </div>
-                ))}
-                <p className="config-note">
-                  {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
-                    ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
-                    : 'All required settings are present. Blank secret fields keep the current Key Vault value.'}
-                </p>
-                <p className="config-note">
-                  Last sync {integration.lastSync ?? 'never'} / Records {integration.records ?? '0'}
-                </p>
-              </>
-            )}
-
-            {tab === 'invoice' && (
-              <div className="integration-invoice-settings">
-                <div>
-                  <FileSpreadsheet size={18} />
-                  <span>
-                    Invoice imports use CSV table mapping, customer mapping, and product mapping for this integration.
-                  </span>
-                </div>
-                <div className="scope-list capability-list">
-                  <span>{integrationHasCapability(integration.id, 'invoice-import') ? 'Invoice import enabled' : 'Invoice import unavailable'}</span>
-                  <span>{integrationHasCapability(integration.id, 'mapping') ? 'Customer/product mapping enabled' : 'Mapping unavailable'}</span>
+            {integration.requiredNonSecrets.map((setting) => (
+              <label className="config-field" key={setting.key}>
+                <span>{setting.label}</span>
+                <input
+                  defaultValue={integration.nonSecrets[setting.key] ?? setting.defaultValue ?? (setting.key === 'endpoint' ? integration.endpoint : '')}
+                  name={`nonSecret:${setting.key}`}
+                />
+              </label>
+            ))}
+            {integration.requiredSecrets.map((setting) => (
+              <label className="config-field" key={setting.key}>
+                <span>{setting.label}</span>
+                <input name={`secret:${setting.key}`} placeholder="Leave blank to keep saved value" type="password" />
+              </label>
+            ))}
+            {groupOptionalIntegrationSettings(integration.optionalNonSecrets).map(({ section, items }) => (
+              <div className="integration-settings-section" key={section ?? 'general-optional-settings'}>
+                {section ? <h3 className="integration-settings-section-title">{section}</h3> : null}
+                <div className="integration-settings-grid">
+                  {items.map((setting) => setting.inputType === 'select' ? (
+                    <label className={`config-field integration-setting-${setting.key}`} key={setting.key}>
+                      <span className="config-label">{setting.label}{setting.description ? <ConfigInfo text={setting.description} /> : null}</span>
+                      <select defaultValue={optionalIntegrationSettingValue(integration, setting)} name={`nonSecret:${setting.key}`}>
+                        {(setting.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className={`config-checkbox integration-setting-${setting.key}`} key={setting.key}>
+                      <input defaultChecked={optionalIntegrationSettingValue(integration, setting) === 'true'} name={`nonSecret:${setting.key}`} type="checkbox" />
+                      <span><strong>{setting.label}</strong></span>
+                      {setting.description ? <ConfigInfo text={setting.description} /> : null}
+                    </label>
+                  ))}
                 </div>
               </div>
-            )}
-
+            ))}
+            <p className="config-note integration-modal-summary">
+              {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
+                ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
+                : 'All required fields are present. Blank secret fields keep the saved Key Vault value.'}
+            </p>
           </div>
 
           {saveMessage ? (
@@ -20525,7 +21384,13 @@ function IntegrationModal(props: {
             <button className="button secondary" disabled={saving} onClick={onClose} type="button">
               Cancel
             </button>
-            <button className="button primary" disabled={saving || tab !== 'api'} type="submit">
+            {hasLiveIntegrationActions(integration.id) ? (
+              <button className="button secondary" disabled={saving || testing} onClick={testConnection} type="button">
+                <Plug size={17} />
+                {testing ? 'Testing API' : 'Test API'}
+              </button>
+            ) : null}
+            <button className="button primary" disabled={saving || testing} type="submit">
               {saving ? (
                 <>
                   <RefreshCcw size={17} />
@@ -20534,7 +21399,7 @@ function IntegrationModal(props: {
               ) : (
                 <>
                   <KeyRound size={17} />
-                  Save API settings
+                  Save settings
                 </>
               )}
             </button>
@@ -20542,6 +21407,30 @@ function IntegrationModal(props: {
         </form>
       </section>
     </div>
+  );
+}
+
+function syncTargetForOperation(integrationId: IntegrationId, operationKey: string): IntegrationSyncTarget | undefined {
+  if (integrationId === 'microsoft-365') return operationKey === 'm365-licenses' ? 'licenses' : 'users';
+  if (integrationId === 'datto') return operationKey === 'datto-bcdr' ? 'datto-bcdr' : 'datto-saas';
+  return undefined;
+}
+
+function formatIntegrationOperationStatus(operation: IntegrationSyncOperationStatus) {
+  if (operation.currentItem) return `Processing ${operation.currentItem}`;
+  if (operation.error) return operation.error;
+  if (operation.status === 'never') return 'No sync history yet';
+  const records = typeof operation.recordsWritten === 'number' ? `${operation.recordsWritten.toLocaleString()} records` : '';
+  const time = formatDateTime(operation.completedAt ?? operation.startedAt) ?? '';
+  return [time, records].filter(Boolean).join(' · ') || operation.status;
+}
+
+function ConfigInfo(props: { text: string }) {
+  return (
+    <span className="config-info" tabIndex={0} aria-label={props.text}>
+      <Info size={14} aria-hidden="true" />
+      <span className="config-info-popout" role="tooltip">{props.text}</span>
+    </span>
   );
 }
 
@@ -23500,6 +24389,7 @@ function ImportsView(props: {
     sourceType: IntegrationDataSourceType,
     importMode: InvoiceImportMode,
     syncMode: ManualImportSyncMode,
+    dataSourceKey?: string,
     linkedIntegrationId?: IntegrationId,
   ) => Promise<InvoiceImportSummary | null>;
   onUpload: (file: File, importMode: InvoiceImportMode) => Promise<InvoiceImportSummary | null>;
@@ -23781,6 +24671,7 @@ function InvoiceTableImportPanel(props: {
     sourceType: IntegrationDataSourceType,
     importMode: InvoiceImportMode,
     syncMode: ManualImportSyncMode,
+    dataSourceKey?: string,
     linkedIntegrationId?: IntegrationId,
   ) => Promise<InvoiceImportSummary | null>;
   integrations: Integration[];
@@ -23791,12 +24682,12 @@ function InvoiceTableImportPanel(props: {
   const [headers, setHeaders] = useState<string[]>([]);
   const [columnMap, setColumnMap] = useState<InvoiceTableColumnMap>({});
   const [sourceType, setSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
+  const [dataSourceKey, setDataSourceKey] = useState('');
   const [syncMode, setSyncMode] = useState<ManualImportSyncMode>('full-vendor-sync');
   const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>('');
   const [message, setMessage] = useState('Choose a CSV, JSON, XLS, or XLSX table to map columns.');
   const importDataSources = importableDataSources(selectedVendor);
-  const selectedDataSource =
-    importDataSources.find((source) => source.sourceType === sourceType) ?? importDataSources[0];
+  const selectedDataSource = importDataSources.find((source) => source.key === dataSourceKey) ?? importDataSources[0];
   const requiresCustomerMapping = selectedDataSource?.requiresCustomerMapping ?? true;
   const requiresSourceProductMapping = hasRequiredInvoiceSourceColumn(sourceType, columnMap);
   const requiredMapped = columnMapSatisfiesSourceType(sourceType, columnMap, { requiresCustomerMapping });
@@ -23815,8 +24706,9 @@ function InvoiceTableImportPanel(props: {
     : undefined;
 
   useEffect(() => {
-    const nextSource = importDataSources[0]?.sourceType ?? 'customer-product-breakdown';
-    setSourceType((current) => (importDataSources.some((source) => source.sourceType === current) ? current : nextSource));
+    const nextSource = importDataSources[0];
+    setDataSourceKey((current) => importDataSources.some((source) => source.key === current) ? current : nextSource?.key ?? '');
+    setSourceType(nextSource?.sourceType ?? 'customer-product-breakdown');
   }, [selectedVendor?.id]);
 
   useEffect(() => {
@@ -23876,6 +24768,7 @@ function InvoiceTableImportPanel(props: {
       sourceType,
       importMode,
       syncMode,
+      selectedDataSource?.key,
       linkedIntegrationId || undefined,
     );
     if (imported) {
@@ -23911,10 +24804,13 @@ function InvoiceTableImportPanel(props: {
           <div className="segmented-control invoice-source-toggle" role="group" aria-label="Invoice source type">
             {importDataSources.map((source) => (
               <button
-                className={sourceType === source.sourceType ? 'active' : ''}
+                className={selectedDataSource?.key === source.key ? 'active' : ''}
                 disabled={importing}
                 key={source.key}
-                onClick={() => setSourceType(source.sourceType)}
+                onClick={() => {
+                  setDataSourceKey(source.key);
+                  setSourceType(source.sourceType);
+                }}
                 title={source.description}
                 type="button"
               >
@@ -23983,6 +24879,8 @@ function InvoiceTableImportPanel(props: {
 type ParsedImportTableFile = {
   content: string;
   headers: string[];
+  locator: string;
+  candidates: InvoiceTableCandidate[];
 };
 
 async function readImportTableFile(file: File): Promise<ParsedImportTableFile> {
@@ -23995,32 +24893,97 @@ async function readImportTableFile(file: File): Promise<ParsedImportTableFile> {
     file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
   if (isWorkbook) {
-    const content = await spreadsheetFileToCsv(file);
-    return {
-      content,
-      headers: csvHeaders(content),
-    };
+    const candidates = workbookTableCandidates(await file.arrayBuffer());
+    const best = candidates[0];
+    if (!best) throw new Error('No table could be detected in this workbook.');
+    return { content: best.content, headers: best.headers, locator: best.locator, candidates };
   }
 
   if (isJson) {
     const content = await file.text();
-    const detectedCsv = jsonTableToCsv(content);
-    return {
-      content,
-      headers: csvHeaders(detectedCsv),
-    };
+    const candidates = jsonTableCandidates(content);
+    const best = candidates[0];
+    if (!best) throw new Error('The JSON file did not contain a table or record array.');
+    return { content: best.content, headers: best.headers, locator: best.locator, candidates };
   }
 
   const content = await file.text();
-  return {
-    content,
-    headers: csvHeaders(content),
-  };
+  const candidates = csvTableCandidates(content);
+  const best = candidates[0];
+  if (!best) throw new Error('No table header could be detected in this CSV file.');
+  return { content: best.content, headers: best.headers, locator: best.locator, candidates };
 }
 
 async function spreadsheetFileToCsv(file: File) {
   const rows = readWorkbookObjectRows(await file.arrayBuffer());
   return objectRowsToCsv(rows);
+}
+
+function workbookTableCandidates(buffer: ArrayBuffer): InvoiceTableCandidate[] {
+  return readWorkbookTableSheets(buffer)
+    .flatMap((sheet) => tableCandidatesFromRows(sheet.rows, `Worksheet: ${sheet.name}`))
+    .sort((left, right) => candidateScore(right) - candidateScore(left));
+}
+
+function csvTableCandidates(content: string) {
+  return tableCandidatesFromRows(parseCsvMatrix(content), 'CSV');
+}
+
+function tableCandidatesFromRows(rows: unknown[][], source: string): InvoiceTableCandidate[] {
+  const candidates: InvoiceTableCandidate[] = [];
+  const meaningful = rows.slice(0, 100);
+  for (let index = 0; index < meaningful.length; index += 1) {
+    const header = meaningful[index].map(tableCellToString).map((value) => value.trim());
+    const unique = new Set(header.filter(Boolean).map((value) => value.toLowerCase()));
+    const following = rows.slice(index + 1).filter((row) => row.some((value) => tableCellToString(value).trim())).slice(0, 5000);
+    if (unique.size < 2 || following.length === 0) continue;
+    const widthMatches = following.filter((row) => row.filter((value) => tableCellToString(value).trim()).length <= header.length + 2).length;
+    if (widthMatches / following.length < 0.7) continue;
+    const headers = header.map((value, column) => value || `Column ${column + 1}`);
+    const content = [headers, ...following].map((row) => headers.map((_, column) => csvCell(tableCellToString(row[column]))).join(',')).join('\n');
+    candidates.push({
+      id: `${source}:${index}`,
+      label: `${source}, header row ${index + 1}`,
+      locator: `${source}, header row ${index + 1}`,
+      headers,
+      rowCount: following.length,
+      content,
+      confidence: index === 0 ? 'high' : index < 10 ? 'medium' : 'low',
+    });
+  }
+  return candidates.sort((left, right) => candidateScore(right) - candidateScore(left)).slice(0, 8);
+}
+
+function candidateScore(candidate: InvoiceTableCandidate) {
+  const recognized = Object.keys(suggestInvoiceTableColumnMap(candidate.headers)).length;
+  return recognized * 100 + Math.min(candidate.rowCount, 100) - Number(candidate.locator.match(/row (\d+)/)?.[1] ?? 1);
+}
+
+function parseCsvMatrix(content: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  const text = content.replace(/^\uFEFF/, '');
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (quoted) {
+      if (char === '"' && next === '"') { field += '"'; index += 1; }
+      else if (char === '"') quoted = false;
+      else field += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ',') { row.push(field); field = ''; }
+    else if (char === '\r' || char === '\n') {
+      if (char === '\r' && next === '\n') index += 1;
+      row.push(field); field = '';
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+    } else field += char;
+  }
+  row.push(field);
+  if (row.some((value) => value.trim())) rows.push(row);
+  return rows;
 }
 
 function jsonTableToCsv(content: string) {
@@ -24045,6 +25008,49 @@ function jsonTableToCsv(content: string) {
 
   const objectRows = rows.filter(isImportObjectRow);
   return objectRowsToCsv(objectRows);
+}
+
+function jsonTableCandidates(content: string): InvoiceTableCandidate[] {
+  const parsed = JSON.parse(content) as unknown;
+  const found: Array<{ path: string; rows: unknown[] }> = [];
+  collectJsonTables(parsed, '$', found, 0);
+  return found.flatMap((item) => {
+    if (item.rows.length === 0) return [];
+    if (Array.isArray(item.rows[0])) {
+      return tableCandidatesFromRows(item.rows.filter(Array.isArray) as unknown[][], `JSON ${item.path}`);
+    }
+    const objects = item.rows.filter(isImportObjectRow).map((row) => flattenImportRow(row));
+    if (objects.length === 0) return [];
+    const contentValue = objectRowsToCsv(objects);
+    return [{
+      id: item.path,
+      label: `JSON records at ${item.path}`,
+      locator: `JSON path: ${item.path}`,
+      headers: csvHeaders(contentValue),
+      rowCount: objects.length,
+      content: contentValue,
+      confidence: 'high' as const,
+    }];
+  }).sort((left, right) => candidateScore(right) - candidateScore(left));
+}
+
+function collectJsonTables(value: unknown, path: string, found: Array<{ path: string; rows: unknown[] }>, depth: number) {
+  if (depth > 6) return;
+  if (Array.isArray(value)) {
+    if (value.length > 0 && (Array.isArray(value[0]) || isImportObjectRow(value[0]))) found.push({ path, rows: value });
+    return;
+  }
+  if (!isImportObjectRow(value)) return;
+  for (const [key, child] of Object.entries(value)) collectJsonTables(child, `${path}.${key}`, found, depth + 1);
+}
+
+function flattenImportRow(row: Record<string, unknown>, prefix = '', result: Record<string, unknown> = {}) {
+  for (const [key, value] of Object.entries(row)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (isImportObjectRow(value)) flattenImportRow(value, path, result);
+    else result[path] = value;
+  }
+  return result;
 }
 
 function jsonRowsFromValue(value: unknown): unknown[] {

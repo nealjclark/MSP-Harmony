@@ -10,6 +10,7 @@ import {
   type Queryable,
 } from './discrepancyReports';
 import type { AppRiverLicenseCleanupCandidate } from '../vendor/appriver/licenseCleanup';
+import { applyDeviceMatchExclusions } from '../mapping/deviceMatchExclusions';
 
 export type DiscrepancyAuditSummary = {
   id: string;
@@ -119,11 +120,11 @@ export async function getLatestDiscrepancyAuditReport(
 
   const summary = mapAuditSummaryRow(row);
   const state = await getDiscrepancyAuditState(database, options.comparisonId);
-  const mergedReport = await mergeDiscrepancyAuditExtras(
+  const mergedReport = await applyDeviceMatchExclusions(database, await mergeDiscrepancyAuditExtras(
     database,
     report,
     appRiverSyncRunId(row.source_snapshot),
-  );
+  ));
 
   return {
     ...applyDiscrepancyReportFilters(mergedReport, options),

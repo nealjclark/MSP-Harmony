@@ -47,6 +47,8 @@ const snapshots: Record<string, SnapshotFixture[]> = {
   ],
 };
 
+let activeExclusions: unknown[] = [];
+
 const database: Queryable = {
   async query<T = unknown>(sql: string, values?: unknown[]) {
     const vendorId = String(values?.[0] ?? '');
@@ -71,6 +73,10 @@ const database: Queryable = {
       return {
         rows: (snapshots[vendorId] ?? []) as T[],
       };
+    }
+
+    if (sql.includes('from vendor_device_match_exclusions')) {
+      return { rows: activeExclusions as T[] };
     }
 
     return { rows: [] as T[] };
@@ -119,7 +125,49 @@ async function run() {
   assert.equal(filtered.rows.every((row) => row.basis === 'device'), true);
   assert.equal(filtered.rows.some((row) => row.status === 'matched'), false);
 
+  activeExclusions = [
+    exclusion('exclude-ncentral', 'ncentral', 'sentinelone', 'laptop-02', 'LAPTOP-02'),
+    exclusion('exclude-sentinel', 'sentinelone', 'ncentral', 'server-03', 'SERVER-03'),
+  ];
+  const excluded = await getDiscrepancyReport(database, {
+    comparisonId: 'ncentral-sentinelone-devices',
+    includeMatched: true,
+    now: '2026-06-29T10:30:00.000Z',
+  });
+  assert.equal(excluded.rows[0]?.status, 'matched');
+  assert.equal(excluded.rows[0]?.leftCount, 1);
+  assert.equal(excluded.rows[0]?.rightCount, 1);
+  assert.deepEqual(excluded.rows[0]?.missingFromLeft, []);
+  assert.deepEqual(excluded.rows[0]?.missingFromRight, []);
+
+  const excludedHidden = await getDiscrepancyReport(database, {
+    comparisonId: 'ncentral-sentinelone-devices',
+    includeMatched: false,
+    now: '2026-06-29T10:30:00.000Z',
+  });
+  assert.equal(excludedHidden.rows.length, 0);
+
   console.log('discrepancy report tests passed');
+}
+
+function exclusion(id: string, sourceVendorId: string, targetVendorId: string, identity: string, displayName: string) {
+  return {
+    id,
+    comparison_id: 'ncentral-sentinelone-devices',
+    source_vendor_id: sourceVendorId,
+    target_vendor_id: targetVendorId,
+    customer_id: customerA,
+    customer_name: 'Mapped Client',
+    source_item_id: null,
+    source_identity: identity,
+    source_display_name: displayName,
+    reason: 'Approved test exception',
+    active: true,
+    approved_by: 'auditor@example.com',
+    approved_at: new Date('2026-06-29T10:15:00Z'),
+    created_at: new Date('2026-06-29T10:15:00Z'),
+    updated_at: new Date('2026-06-29T10:15:00Z'),
+  };
 }
 
 run().catch((error: unknown) => {

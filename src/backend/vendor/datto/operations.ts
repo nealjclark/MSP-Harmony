@@ -128,15 +128,19 @@ export async function syncDattoUsageSnapshots(input: {
   seatPageSize?: number;
   seatMaxPages?: number;
   includeBcdr?: boolean;
+  dataset?: 'bcdr' | 'saas';
   now?: string;
 }): Promise<DattoUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings(dattoIntegrationId);
   assertDattoReady(settings);
-  const includeBcdr = input.includeBcdr === true;
+  const includeBcdr = input.dataset ? input.dataset === 'bcdr' : input.includeBcdr === true;
+  const includeSaas = input.dataset !== 'bcdr';
 
   const observedAt = input.now ?? new Date().toISOString();
-  const syncRunId = await startDattoSyncRun(input.pool);
+  const operationKey = input.dataset === 'bcdr' ? 'datto-bcdr' : input.dataset === 'saas' ? 'datto-saas' : 'usage-snapshots';
+  const dataSourceKey = input.dataset === 'bcdr' ? 'datto-bcdr-agents' : input.dataset === 'saas' ? 'datto-saas-seats' : undefined;
+  const syncRunId = await startDattoSyncRun(input.pool, operationKey, dataSourceKey);
   const client = input.client ?? createDattoClient(settings);
 
   try {
@@ -144,12 +148,14 @@ export async function syncDattoUsageSnapshots(input: {
       loadDattoAccountMappings(input.pool),
       loadDattoProductMappings(input.pool),
       includeBcdr ? client.listBcdrProtectedAgents({ pageSize: input.pageSize, maxPages: input.maxPages }) : Promise.resolve([]),
-      client.listSaasUsageSummaries({
-        pageSize: input.pageSize,
-        maxPages: input.maxPages,
-        seatPageSize: input.seatPageSize,
-        seatMaxPages: input.seatMaxPages,
-      }),
+      includeSaas
+        ? client.listSaasUsageSummaries({
+            pageSize: input.pageSize,
+            maxPages: input.maxPages,
+            seatPageSize: input.seatPageSize,
+            seatMaxPages: input.seatMaxPages,
+          })
+        : Promise.resolve([]),
     ]);
 
     let recordsWritten = 0;
@@ -355,12 +361,12 @@ async function loadDattoAccountMappings(database: Queryable) {
   );
 }
 
-async function startDattoSyncRun(database: Queryable) {
+async function startDattoSyncRun(database: Queryable, operationKey: string, dataSourceKey?: string) {
   const result = await database.query<{ id: string }>(
     `insert into sync_runs (integration_id, status, metadata)
      values ($1, 'running', $2::jsonb)
      returning id`,
-    [dattoIntegrationId, JSON.stringify({ entity: 'usage-snapshots' })],
+    [dattoIntegrationId, JSON.stringify({ entity: 'usage-snapshots', operationKey, dataSourceKey })],
   );
   const syncRunId = result.rows[0]?.id;
 

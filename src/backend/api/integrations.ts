@@ -8,6 +8,41 @@ import {
 } from '../../shared/integrationSettings';
 import { createIntegrationSettingsProvider, type IntegrationSettingsMetadataReader } from '../config/settingsProvider';
 
+export type IntegrationSyncOperationStatus = {
+  operationKey: string;
+  label: string;
+  dataSourceKey?: string;
+  status: string;
+  startedAt: string;
+  completedAt?: string;
+  recordsRead?: number;
+  recordsWritten?: number;
+  error?: string;
+  currentItem?: string;
+};
+
+export type IntegrationSyncJob = {
+  id: string;
+  integrationId: IntegrationId;
+  integrationName: string;
+  operationKey: string;
+  operationLabel: string;
+  status: 'queued' | 'running' | 'complete' | 'failed';
+  requestedBy: string;
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  syncRunId?: string;
+  error?: string;
+  progress?: {
+    completed: number;
+    total: number;
+    failed: number;
+    currentItem?: string;
+    unitLabel: string;
+  };
+};
+
 export type IntegrationOperationalStatus = {
   lastSyncAt?: string;
   lastSyncCompletedAt?: string;
@@ -16,6 +51,16 @@ export type IntegrationOperationalStatus = {
   lastSyncRecordsWritten?: number;
   lastSyncError?: string;
   storedRecordCount?: number;
+  syncProgress?: {
+    totalCustomers: number;
+    processedCustomers: number;
+    completedCustomers: number;
+    failedCustomers: number;
+    queuedCustomers: number;
+    processingCustomers: number;
+    currentCustomerName?: string;
+  };
+  operations?: IntegrationSyncOperationStatus[];
 };
 
 export type IntegrationOperationalStatusReader = {
