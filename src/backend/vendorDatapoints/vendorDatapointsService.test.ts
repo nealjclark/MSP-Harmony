@@ -21,6 +21,10 @@ async function run() {
   const database = {
     query: async <T = unknown>(sql: string, values?: unknown[]) => {
       if (sql.includes('insert into vendor_datapoints')) {
+        assert.match(
+          sql.replace(/\s+/g, ' '),
+          /values \(\$1, \$2, \$3, \$4, \$5, \$6::jsonb, \$7::jsonb, \$8, \$9\)/,
+        );
         datapoints.push({
           id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
           display_name: values?.[0],
@@ -31,6 +35,7 @@ async function run() {
           column_map: values?.[5],
           known_headers: values?.[6],
           default_import_mode: values?.[7],
+          data_source_key: values?.[8],
           active: true,
           last_imported_at: null,
           last_import_file_name: null,

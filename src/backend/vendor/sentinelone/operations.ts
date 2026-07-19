@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import { sqlLatestReconcilableSyncRunIdExpression } from '../../shared/reconcilableSyncRuns';
 import {
   SentinelOneClient,
@@ -108,6 +109,7 @@ export async function syncSentinelOneUsageSnapshots(input: {
   pageSize?: number;
   maxPages?: number;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<SentinelOneUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('sentinelone');
@@ -134,7 +136,14 @@ export async function syncSentinelOneUsageSnapshots(input: {
     let serverSnapshots = 0;
     let workstationSnapshots = 0;
 
-    for (const agent of agents) {
+    await input.onProgress?.({ completed: 0, total: agents.length, unitLabel: 'agents' });
+    for (const [agentIndex, agent] of agents.entries()) {
+      await input.onProgress?.({
+        completed: agentIndex,
+        total: agents.length,
+        currentItem: agent.siteName ?? agent.accountName ?? agent.computerName,
+        unitLabel: 'agents',
+      });
       const apiProductKey = productKeyForAgent(agent);
       if (!apiProductKey) {
         skippedSnapshots += 1;
@@ -182,6 +191,7 @@ export async function syncSentinelOneUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
+    await input.onProgress?.({ completed: agents.length, total: agents.length, unitLabel: 'agents' });
     await completeSentinelOneSyncRun(input.pool, syncRunId, agents.length, recordsWritten, {
       mappedSnapshots,
       unmappedSnapshots,

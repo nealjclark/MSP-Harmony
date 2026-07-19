@@ -22,11 +22,14 @@ import { reconcileSeparateVendorUsage } from './reconciliationSeparateMode';
 const zeroUsd: MoneyAmount = { amount: 0, currency: 'USD' };
 
 export function reconcileVendorUsage(request: ReconcileVendorUsageRequest): ReconciliationResult {
-  const separateResult =
-    request.reconcileMode === 'separate-multiple-products' ? reconcileSeparateVendorUsage(request) : undefined;
-  const lines = separateResult
-    ? [...separateResult.lines, ...reconcileUnmappedSnapshots(request)]
-    : [...request.rules.flatMap((rule) => reconcileRule(request, rule)), ...reconcileUnmappedSnapshots(request)];
+  const separateRules = request.rules.filter((rule) => !rule.allowance && !rule.addOn);
+  const allowanceRules = request.rules.filter((rule) => rule.allowance || rule.addOn);
+  const separateResult = reconcileSeparateVendorUsage({ ...request, rules: separateRules });
+  const lines = [
+    ...separateResult.lines,
+    ...allowanceRules.flatMap((rule) => reconcileRule(request, rule)),
+    ...reconcileUnmappedSnapshots(request),
+  ];
 
   const totals = lines.reduce(
     (summary, line) => {
@@ -154,7 +157,13 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     const snapshots = groupedSnapshots.get(agreementKey) ?? [];
     const proposedBaseQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     const relevantAdditions = groupedRelevantAdditions.get(agreementKey) ?? [];
-    const baseAdditions = findAdditions(relevantAdditions, clientId, agreementId, targetProductCodes(rule));
+    const matchingBaseAdditions = findAdditions(
+      relevantAdditions,
+      clientId,
+      agreementId,
+      targetProductCodes(rule),
+    );
+    const baseAdditions = selectSingleAddition(matchingBaseAdditions, proposedBaseQuantity, rule.productCode);
     if (rule.requiresExistingAgreementProduct && baseAdditions.length === 0) {
       return;
     }
@@ -162,16 +171,21 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
     const baseDelta = proposedBaseQuantity - baseAgreementQuantity;
 
     if (snapshots.length > 0 || baseAdditions.length > 0) {
-      const unitPrice = unitPriceForImpact(baseAdditions, rule.productCode, rule.unitPrice);
+      const assignedAddition = baseAdditions[0];
+      const productCode = assignedAddition?.productCode ?? rule.productCode;
+      const productName = assignedAddition?.productName ?? rule.productName;
+      const unitPrice = unitPriceForImpact(baseAdditions, productCode, rule.unitPrice);
 
       lines.push({
-        id: `${agreementKey}|${rule.productCode}|base`,
+        id: `${agreementKey}|${productCode}|base`,
         vendorId: request.vendorId,
         clientId,
         agreementId,
-        productCode: rule.productCode,
-        productName: rule.productName,
+        productCode,
+        productName,
         vendorProductKey: ruleVendorProductKey(rule),
+        connectWiseAdditionId: assignedAddition?.connectWiseAdditionId ?? assignedAddition?.id,
+        matchedAdditionIds: baseAdditions.map((addition) => addition.connectWiseAdditionId ?? addition.id),
         lineType: 'base-count',
         ruleId: rule.id,
         sourceQuantity: proposedBaseQuantity,
@@ -194,12 +208,28 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
           { label: 'Rule', value: rule.notes },
         ],
       });
+
+      lines.push(
+        ...matchingBaseAdditions
+          .filter((addition) => addition !== assignedAddition)
+          .map((addition) => unassignedAdditionLine(request, rule, clientId, agreementId, addition)),
+      );
     }
 
     if (rule.allowance?.kind === 'included' && rule.addOn) {
       const measuredUsage = sumMetric(snapshots, rule.addOn.metric);
       const proposedAddOnQuantity = calculateAddOnQuantity(snapshots, rule.allowance.metric, rule.allowance.includedQuantity, rule.allowance.scope, rule.addOn.incrementQuantity, rule.addOn.roundOverage);
-      const addOnAdditions = findAdditions(relevantAdditions, clientId, agreementId, targetProductCodes(rule.addOn));
+      const matchingAddOnAdditions = findAdditions(
+        relevantAdditions,
+        clientId,
+        agreementId,
+        targetProductCodes(rule.addOn),
+      );
+      const addOnAdditions = selectSingleAddition(
+        matchingAddOnAdditions,
+        proposedAddOnQuantity,
+        rule.addOn.productCode,
+      );
       const agreementQuantity = sumAdditions(addOnAdditions);
       const delta = proposedAddOnQuantity - agreementQuantity;
       const unitPrice = unitPriceForImpact(addOnAdditions, rule.addOn.productCode, rule.addOn.unitPrice);
@@ -240,10 +270,83 @@ function reconcileRule(request: ReconcileVendorUsageRequest, rule: QuantityRule)
           ...(unitPrice ? [{ label: 'Unit price', value: unitPrice.amount }] : []),
         ],
       });
+
+      lines.push(
+        ...matchingAddOnAdditions
+          .filter((addition) => addition !== addOnAdditions[0])
+          .map((addition) => unassignedAdditionLine(request, rule, clientId, agreementId, addition)),
+      );
     }
   });
 
   return lines;
+}
+
+function unassignedAdditionLine(
+  request: ReconcileVendorUsageRequest,
+  rule: QuantityRule,
+  clientId: string,
+  agreementId: string,
+  addition: AgreementAddition,
+): ReconciliationLine {
+  const unitPrice = addition.unitPrice ?? rule.unitPrice;
+  return {
+    id: `${clientId}|${agreementId}|${addition.connectWiseAdditionId ?? addition.id}|unassigned-addition`,
+    vendorId: request.vendorId,
+    clientId,
+    agreementId,
+    productCode: addition.productCode,
+    productName: addition.productName,
+    vendorProductKey: ruleVendorProductKey(rule),
+    connectWiseAdditionId: addition.connectWiseAdditionId ?? addition.id,
+    matchedAdditionIds: [addition.connectWiseAdditionId ?? addition.id],
+    lineType: 'base-count',
+    ruleId: rule.id,
+    sourceQuantity: 0,
+    agreementQuantity: addition.quantity,
+    proposedQuantity: 0,
+    delta: -addition.quantity,
+    unit: rule.billableUnit,
+    unitPrice,
+    financialImpact: calculateImpact(-addition.quantity, unitPrice),
+    status: 'needs-review',
+    writeAction: 'review-required',
+    reason: `${addition.productName} is an additional ConnectWise agreement addition with no separately assigned vendor count.`,
+    evidence: [
+      { label: 'Matched agreement additions', value: 1 },
+      { label: 'Assigned ConnectWise addition', value: addition.connectWiseAdditionId ?? addition.id },
+      { label: 'Rule', value: rule.notes },
+    ],
+  };
+}
+
+function selectSingleAddition(
+  additions: AgreementAddition[],
+  proposedQuantity: number,
+  preferredProductCode: string,
+) {
+  if (additions.length <= 1) {
+    return additions;
+  }
+
+  const preferredCode = normalizeProductCode(preferredProductCode);
+  const ranked = [...additions].sort((left, right) => {
+    const leftExact = left.quantity === proposedQuantity ? 0 : 1;
+    const rightExact = right.quantity === proposedQuantity ? 0 : 1;
+    if (leftExact !== rightExact) return leftExact - rightExact;
+
+    const leftDistance = Math.abs(left.quantity - proposedQuantity);
+    const rightDistance = Math.abs(right.quantity - proposedQuantity);
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+
+    const leftPreferred = normalizeProductCode(left.productCode) === preferredCode ? 0 : 1;
+    const rightPreferred = normalizeProductCode(right.productCode) === preferredCode ? 0 : 1;
+    if (leftPreferred !== rightPreferred) return leftPreferred - rightPreferred;
+
+    return (left.connectWiseAdditionId ?? left.id).localeCompare(right.connectWiseAdditionId ?? right.id);
+  });
+
+  return ranked.slice(0, 1);
 }
 
 function calculateAddOnQuantity(

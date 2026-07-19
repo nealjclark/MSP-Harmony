@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import { sqlLatestReconcilableSyncRunIdExpression } from '../../shared/reconcilableSyncRuns';
 import {
   HuntressApiError,
@@ -142,6 +143,7 @@ export async function syncHuntressUsageSnapshots(input: {
   pageSize?: number;
   maxPages?: number;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<HuntressUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings(huntressIntegrationId);
@@ -176,7 +178,19 @@ export async function syncHuntressUsageSnapshots(input: {
     let skippedSnapshots = 0;
     const productSnapshots: Record<string, number> = {};
 
-    for (const snapshot of snapshots) {
+    await input.onProgress?.({ completed: 0, total: snapshots.length, unitLabel: 'customer products' });
+    for (const [snapshotIndex, snapshot] of snapshots.entries()) {
+      const customerName = typeof snapshot.dimensions.customerName === 'string'
+        ? snapshot.dimensions.customerName
+        : typeof snapshot.dimensions.huntressOrganizationName === 'string'
+          ? snapshot.dimensions.huntressOrganizationName
+          : snapshot.externalAccountId;
+      await input.onProgress?.({
+        completed: snapshotIndex,
+        total: snapshots.length,
+        currentItem: customerName,
+        unitLabel: 'customer products',
+      });
       if (snapshot.quantity <= 0) {
         skippedSnapshots += 1;
         continue;
@@ -200,6 +214,7 @@ export async function syncHuntressUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
+    await input.onProgress?.({ completed: snapshots.length, total: snapshots.length, unitLabel: 'customer products' });
     const recordsRead = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     await completeHuntressSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
       entity: 'usage-snapshots',

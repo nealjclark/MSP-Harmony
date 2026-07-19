@@ -163,10 +163,12 @@ async function run() {
     reviewedBy: 'reviewer@example.com',
   });
 
-  assert.equal(accountQueries.length, 1);
+  assert.equal(accountQueries.length, 2);
   assert.match(accountQueries[0]?.sql ?? '', /case when \$10::text is null/);
   assert.equal(accountQueries[0]?.values?.[9], 'reviewer@example.com');
   assert.equal(accountQueries[0]?.values?.[11], true);
+  assert.match(accountQueries[1]?.sql ?? '', /update vendor_usage_snapshots/);
+  assert.deepEqual(accountQueries[1]?.values, ['cove', '2379363']);
 
   await updateAccountMapping(accountDatabase, 'cove', '2379364', {
     status: 'approved',
@@ -175,10 +177,11 @@ async function run() {
     reviewedBy: 'reviewer@example.com',
   });
 
-  assert.equal(accountQueries.length, 2);
-  assert.equal(accountQueries[1]?.values?.[3], 'customer-2');
-  assert.equal(accountQueries[1]?.values?.[4], null);
-  assert.equal(accountQueries[1]?.values?.[11], true);
+  assert.equal(accountQueries.length, 4);
+  assert.equal(accountQueries[2]?.values?.[3], 'customer-2');
+  assert.equal(accountQueries[2]?.values?.[4], null);
+  assert.equal(accountQueries[2]?.values?.[11], true);
+  assert.deepEqual(accountQueries[3]?.values, ['cove', '2379364']);
 
   const workflow = mappingWorkflowDatabase([
     {

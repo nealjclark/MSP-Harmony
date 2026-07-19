@@ -91,6 +91,10 @@ export async function updateIntegrationSettings(
     }
   }
 
+  const availableKeyVaultSecrets = Array.from(
+    new Set([...(request.existingKeyVaultSecretNames ?? []), ...writtenKeyVaultSecretNames]),
+  );
+
   if (repository) {
     await repository.saveNonSecrets({
       integrationId: definition.integrationId,
@@ -99,14 +103,11 @@ export async function updateIntegrationSettings(
       endpoint: request.nonSecrets.endpoint ?? definition.endpoint,
       syncFrequency: definition.syncFrequency,
       nonSecrets: request.nonSecrets,
-      requiredKeyVaultSecrets: definition.requiredSecrets.map((setting) => setting.keyVaultSecretName),
+      requiredKeyVaultSecrets: availableKeyVaultSecrets,
       updatedBy: request.actor,
     });
   }
 
-  const availableKeyVaultSecrets = Array.from(
-    new Set([...(request.existingKeyVaultSecretNames ?? []), ...writtenKeyVaultSecretNames]),
-  );
   const validation = validateIntegrationSettings(definition, {
     integrationId: definition.integrationId,
     nonSecrets: request.nonSecrets,

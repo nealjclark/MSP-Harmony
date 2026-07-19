@@ -642,6 +642,99 @@ async function run() {
   assert.equal(genericDetails?.rows[0]?.Quantity, 3);
   assert.equal(genericDetails?.rows[0]?.RawPayload, null);
 
+  const manualVendorId = 'datapoint:297596da-b22e-4009-b87e-4f3beac60ebc' as const;
+  assert.equal(isRawSyncIntegrationId(manualVendorId), true);
+  assert.equal(isRawSyncIntegrationId('datapoint:not-a-uuid'), false);
+
+  const manualDatabase = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from sync_runs') && sql.includes('where integration_id = $1')) {
+        assert.equal(values?.[0], manualVendorId);
+        return {
+          rows: [{
+            id: 'barracuda-import-1',
+            started_at: new Date('2026-07-17T12:00:00Z'),
+            completed_at: new Date('2026-07-17T12:01:00Z'),
+            status: 'complete',
+            records_read: 1,
+            records_written: 1,
+            error_message: null,
+            metadata: { entity: 'invoice-import' },
+          }] as T[],
+        };
+      }
+
+      if (sql.includes('from sync_runs') && sql.includes('where id = $1')) {
+        assert.deepEqual(values, ['barracuda-import-1', manualVendorId]);
+        return {
+          rows: [{
+            id: 'barracuda-import-1',
+            started_at: new Date('2026-07-17T12:00:00Z'),
+            completed_at: new Date('2026-07-17T12:01:00Z'),
+            status: 'complete',
+            records_read: 1,
+            records_written: 1,
+            error_message: null,
+            metadata: { entity: 'invoice-import' },
+          }] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_usage_snapshots')) {
+        assert.deepEqual(values, ['barracuda-import-1', manualVendorId]);
+        return {
+          rows: [{
+            customer_id: 'customer-1',
+            customer_name: 'Absolute Electrical',
+            agreement_name: 'Managed Services',
+            external_account_id: 'absolute-electrical',
+            vendor_product_key: 'managed-endpoint-protection',
+            product_code: 'MEP',
+            product_name: 'Managed Endpoint Protection',
+            quantity: 18,
+            observed_at: new Date('2026-07-17T12:00:00Z'),
+            dimensions: { sourceType: 'invoice' },
+            raw_payload: {
+              'Customer Name': 'Absolute Electrical',
+              Product: 'Managed Endpoint Protection',
+              Count: 18,
+              'Unused Column': 'not shown',
+            },
+          }] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_datapoints')) {
+        assert.deepEqual(values, ['297596da-b22e-4009-b87e-4f3beac60ebc']);
+        return {
+          rows: [{
+            column_map: {
+              externalAccountName: 'Customer Name',
+              productName: 'Product',
+              quantity: 'Count',
+            },
+          }] as T[],
+        };
+      }
+
+      throw new Error(`Unexpected manual report query: ${sql}`);
+    },
+  };
+
+  const manualRuns = await listRawSyncRuns(manualDatabase, manualVendorId);
+  assert.equal(manualRuns[0]?.id, 'barracuda-import-1');
+
+  const manualDetails = await getRawSyncDetails(manualDatabase, manualVendorId, 'barracuda-import-1');
+  assert.deepEqual(
+    manualDetails?.columns,
+    ['Customer', 'Agreement', 'Customer Name', 'Product', 'Count', 'Mapped', 'ObservedAt'],
+  );
+  assert.equal(manualDetails?.rows[0]?.Customer, 'Absolute Electrical');
+  assert.equal(manualDetails?.rows[0]?.['Customer Name'], 'Absolute Electrical');
+  assert.equal(manualDetails?.rows[0]?.Product, 'Managed Endpoint Protection');
+  assert.equal(manualDetails?.rows[0]?.Count, 18);
+  assert.equal(manualDetails?.columns.includes('Unused Column'), false);
+
   console.log('raw sync report tests passed');
 }
 

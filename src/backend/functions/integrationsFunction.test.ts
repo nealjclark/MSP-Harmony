@@ -33,6 +33,10 @@ const envKeys = [
   'OPENTEXT_APPRIVER_REFRESH_TOKEN_CACHE_PATH',
   'SENTINELONE_ENDPOINT',
   'SENTINELONE_API_TOKEN',
+  'PROOFPOINT_ENDPOINT',
+  'PROOFPOINT_ORGANIZATION_DOMAIN',
+  'PROOFPOINT_USERNAME',
+  'PROOFPOINT_PASSWORD',
   'HUNTRESS_ENDPOINT',
   'HUNTRESS_API_KEY',
   'HUNTRESS_API_SECRET',
@@ -53,7 +57,7 @@ async function run() {
   }
 
   try {
-    const unsupportedTestResponse = await testIntegrationHttp(
+    const proofpointTestResponse = await testIntegrationHttp(
       {
         params: { integrationId: 'proofpoint' },
         headers: adminHeaders,
@@ -61,7 +65,15 @@ async function run() {
       { log() {} } as never,
     );
 
-    assert.equal(unsupportedTestResponse.status, 501);
+    assert.equal(proofpointTestResponse.status, 400);
+    assert.match(
+      String((proofpointTestResponse.jsonBody as { error?: string }).error),
+      /Proofpoint Essentials settings|Proofpoint Essentials stack URL|organization domain/i,
+    );
+    assert.doesNotMatch(
+      String((proofpointTestResponse.jsonBody as { error?: string }).error),
+      /not implemented/i,
+    );
 
     const sentinelOneTestResponse = await testIntegrationHttp(
       {

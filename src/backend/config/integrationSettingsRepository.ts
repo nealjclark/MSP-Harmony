@@ -55,6 +55,11 @@ type IntegrationSyncJobRow = {
   completed_at: Date | string | null;
   sync_run_id: string | null;
   error_message: string | null;
+  progress_completed: number | null;
+  progress_total: number | null;
+  progress_failed: number;
+  progress_current_item: string | null;
+  progress_unit_label: string | null;
 };
 
 export type SaveIntegrationTestResultInput = {
@@ -109,6 +114,22 @@ export class PostgresIntegrationSettingsRepository
     );
   }
 
+  async updateSyncJobProgress(jobId: string, progress: {
+    completed: number;
+    total: number;
+    failed?: number;
+    currentItem?: string;
+    unitLabel: string;
+  }) {
+    await this.database.query(
+      `update integration_sync_jobs
+       set progress_completed = $2, progress_total = $3, progress_failed = $4,
+           progress_current_item = $5, progress_unit_label = $6, updated_at = now()
+       where id = $1::uuid and status in ('queued', 'running')`,
+      [jobId, progress.completed, progress.total, progress.failed ?? 0, progress.currentItem ?? null, progress.unitLabel],
+    );
+  }
+
   async completeSyncJob(jobId: string, syncRunId?: string) {
     await this.database.query(
       `update integration_sync_jobs
@@ -132,7 +153,8 @@ export class PostgresIntegrationSettingsRepository
   async listRecentSyncJobs(limit = 20): Promise<IntegrationSyncJob[]> {
     const result = await this.database.query<IntegrationSyncJobRow>(
       `select id, integration_id, operation_key, operation_label, status, requested_by, requested_at,
-              started_at, completed_at, sync_run_id, error_message
+              started_at, completed_at, sync_run_id, error_message, progress_completed, progress_total,
+              progress_failed, progress_current_item, progress_unit_label
        from integration_sync_jobs
        where status in ('queued', 'running') or requested_at >= now() - interval '24 hours'
        order by requested_at desc
@@ -141,7 +163,16 @@ export class PostgresIntegrationSettingsRepository
     );
 
     return Promise.all(result.rows.map(async (row) => {
-      let progress: IntegrationSyncJob['progress'];
+      let progress: IntegrationSyncJob['progress'] =
+        row.progress_total != null && row.progress_completed != null && row.progress_unit_label
+          ? {
+              completed: row.progress_completed,
+              total: row.progress_total,
+              failed: row.progress_failed,
+              currentItem: row.progress_current_item ?? undefined,
+              unitLabel: row.progress_unit_label,
+            }
+          : undefined;
       if (row.integration_id === 'opentext-appriver' && row.sync_run_id) {
         const appRiver = await this.loadAppRiverSyncProgress(row.sync_run_id);
         if (appRiver) {
@@ -340,6 +371,7 @@ export class PostgresIntegrationSettingsRepository
       `select id, started_at, completed_at, status, records_read, records_written, error_message
        from sync_runs
        where integration_id = $1
+         and ($1 <> 'connectwise' or coalesce(metadata->>'entity', '') <> 'companies')
        order by started_at desc
        limit 1`,
       [integrationId],
@@ -385,6 +417,7 @@ export class PostgresIntegrationSettingsRepository
          error_message
        from sync_runs
        where integration_id = any($1::text[])
+         and (integration_id <> 'connectwise' or coalesce(metadata->>'entity', '') <> 'companies')
        order by integration_id, started_at desc`,
       [integrationIds],
     );
@@ -477,13 +510,10 @@ export class PostgresIntegrationSettingsRepository
     for (const row of result.rows) {
       const metadata = recordFromJson(row.metadata);
       const operationKey = String(metadata.operationKey ?? metadata.entity ?? 'legacy');
-      // Microsoft 365 originally used one combined `license-snapshots` operation.
-      // Keep those rows available to reports and reconciliation, but do not expose
-      // the retired operation as a third, actionable API sync in Integrations.
-      if (row.integration_id === 'microsoft-365' && operationKey === 'license-snapshots') {
-        continue;
-      }
       const definition = listIntegrationApiOperations(row.integration_id).find((item) => item.key === operationKey);
+      // Historical sync runs remain available to reports and audit history, but
+      // only operations in the current registry are actionable in Integrations.
+      if (!definition) continue;
       const dataSourceKey = typeof metadata.dataSourceKey === 'string' ? metadata.dataSourceKey : definition?.dataSourceKey;
       const currentItem = row.integration_id === 'opentext-appriver' && row.status !== 'complete' && row.status !== 'failed'
         ? (await this.loadAppRiverSyncProgress(row.id))?.currentCustomerName

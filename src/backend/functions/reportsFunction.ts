@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { listIntegrationSettingsDefinitions } from '../../shared/integrationSettings';
+import { isVendorDatapointId } from '../../shared/vendorDatapoints';
 import { getAgreementReportDetails, listAgreementReportSyncRuns } from '../reports/agreementReports';
 import {
   getChangeReport,
@@ -320,7 +321,7 @@ export async function generateChangeReportHttp(
   const comparisons: ChangeReportComparisonInput[] = [];
   for (const [index, comparison] of bodyComparisons.entries()) {
     const vendorId = comparison.vendorId;
-    if (!isRawSyncIntegrationId(vendorId) || vendorId === 'connectwise') {
+    if (!isRawSyncIntegrationId(vendorId) || vendorId === 'connectwise' || isVendorDatapointId(vendorId)) {
       return jsonResponse(400, {
         error: `Change report row ${index + 1} requires a supported vendor integration.`,
       });

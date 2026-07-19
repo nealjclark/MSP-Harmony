@@ -74,10 +74,9 @@ export function buildSentinelOneRuleSet(
             ? undefined
             : { sentinelOneMachineType: mapping.vendorProductKey.replace('sentinelone-', '') },
           unitPrice: mapping.unitPrice,
-          requiresExistingAgreementProduct: !manualDeviceKey,
           notes: manualDeviceKey
             ? `${mapping.productName} is counted from imported device rows with approved product mappings.`
-            : `${mapping.productName} is counted from synced SentinelOne agents when the agreement already has this product.`,
+            : `${mapping.productName} is counted from synced SentinelOne agents.`,
         };
       }),
   };

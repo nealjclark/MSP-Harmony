@@ -4,6 +4,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import {
   Microsoft365Client,
   microsoft365CredentialsFromSettings,
@@ -184,6 +185,7 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
   pageSize?: number;
   maxPages?: number;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<Microsoft365UserLicenseSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('microsoft-365');
@@ -213,7 +215,15 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
     const productSnapshots: Record<string, number> = {};
     const failedTenantDetails: TenantSyncError[] = [];
 
-    for (const tenant of tenants) {
+    await input.onProgress?.({ completed: 0, total: tenants.length, unitLabel: 'tenants' });
+    for (const [tenantIndex, tenant] of tenants.entries()) {
+      await input.onProgress?.({
+        completed: tenantIndex,
+        total: tenants.length,
+        failed: failedTenantDetails.length,
+        currentItem: tenant.displayName ?? tenant.defaultDomainName ?? tenant.tenantId,
+        unitLabel: 'tenants',
+      });
       let users: Microsoft365CustomerUser[] = [];
       let subscribedSkuMap = new Map<string, Microsoft365SubscribedSku>();
       let subscribedSkus: Microsoft365SubscribedSku[] = [];
@@ -284,6 +294,12 @@ export async function syncMicrosoft365UserLicenseSnapshots(input: {
       }
     }
 
+    await input.onProgress?.({
+      completed: tenants.length,
+      total: tenants.length,
+      failed: failedTenantDetails.length,
+      unitLabel: 'tenants',
+    });
     await completeMicrosoft365SyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
       entity: microsoft365UserSyncEntity,
       dataset: 'users',
@@ -322,6 +338,7 @@ export async function syncMicrosoft365ProductSubscriptionSnapshots(input: {
   provider?: IntegrationSettingsProvider;
   client?: Microsoft365LicenseClient;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<Microsoft365ProductSubscriptionSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('microsoft-365');
@@ -342,7 +359,15 @@ export async function syncMicrosoft365ProductSubscriptionSnapshots(input: {
     const failedTenantDetails: TenantSyncError[] = [];
     const failedProductSubscriptionDetails: TenantSyncError[] = [];
 
-    for (const tenant of tenants) {
+    await input.onProgress?.({ completed: 0, total: tenants.length, unitLabel: 'tenants' });
+    for (const [tenantIndex, tenant] of tenants.entries()) {
+      await input.onProgress?.({
+        completed: tenantIndex,
+        total: tenants.length,
+        failed: failedTenantDetails.length,
+        currentItem: tenant.displayName ?? tenant.defaultDomainName ?? tenant.tenantId,
+        unitLabel: 'tenants',
+      });
       let subscribedSkus: Microsoft365SubscribedSku[] = [];
       let companySubscriptions: Microsoft365CompanySubscription[] = [];
 
@@ -385,6 +410,12 @@ export async function syncMicrosoft365ProductSubscriptionSnapshots(input: {
       }
     }
 
+    await input.onProgress?.({
+      completed: tenants.length,
+      total: tenants.length,
+      failed: failedTenantDetails.length,
+      unitLabel: 'tenants',
+    });
     await completeMicrosoft365SyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
       entity: microsoft365LicenseSyncEntity,
       dataset: 'licenses',

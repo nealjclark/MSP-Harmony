@@ -8,6 +8,7 @@ import {
   integrationHasAnyCapability,
   integrationHasCapability,
   integrationIdsWithCapability,
+  listIntegrationApiOperations,
   integrationPsaAgreementReconcileMode,
   doNotSuggestNewAdditionsSettingKey,
   psaAgreementReconcileModeSettingKey,
@@ -42,7 +43,7 @@ const missingPrivateKey = validateIntegrationSettings(connectWise, {
   availableKeyVaultSecrets: ['mspharmony-connectwise-public-key'],
 });
 
-assert.equal(missingPrivateKey.configuredStatus, 'degraded');
+assert.equal(missingPrivateKey.configuredStatus, 'not-configured');
 assert.deepEqual(
   missingPrivateKey.missingSecrets.map((secret) => secret.keyVaultSecretName),
   ['mspharmony-connectwise-private-key'],
@@ -51,9 +52,32 @@ assert.deepEqual(
 const proofpoint = getIntegrationSettingsDefinition('proofpoint');
 assert.ok(proofpoint);
 
+const cavelo = getIntegrationSettingsDefinition('cavelo');
+assert.ok(cavelo);
+assert.equal(integrationHasCapability('cavelo', 'live-api'), true);
+assert.equal(integrationHasCapability('cavelo', 'invoice-import'), true);
+assert.equal(cavelo.requiredSecrets[0]?.keyVaultSecretName, 'mspharmony-cavelo-api-key');
+assert.equal(
+  validateIntegrationSettings(cavelo, {
+    integrationId: 'cavelo',
+    nonSecrets: { endpoint: 'https://api.prod.cavelodata.com/v1' },
+    availableKeyVaultSecrets: [],
+  }).configuredStatus,
+  'not-configured',
+);
+
 const emptyProofpoint = validateIntegrationSettings(proofpoint);
 assert.equal(emptyProofpoint.configuredStatus, 'not-configured');
 assert.equal(emptyProofpoint.missingSecrets.length, 2);
+assert.equal(emptyProofpoint.missingNonSecrets.length, 2);
+assert.equal(integrationHasCapability('proofpoint', 'live-api'), true);
+assert.deepEqual(listIntegrationApiOperations('proofpoint').map((operation) => operation.key), ['usage-snapshots']);
+assert.equal(
+  proofpoint.requiredNonSecrets.find((setting) => setting.key === 'organizationDomain')?.label,
+  'Partner Domain (or UUID)',
+);
+assert.equal(proofpoint.requiredSecrets.length, 2);
+assert.equal(proofpoint.optionalNonSecrets?.find((setting) => setting.key === 'additionalEndpoints')?.inputType, 'textarea');
 
 const registryValidation = validateIntegrationRegistry([
   {
@@ -158,6 +182,7 @@ assert.deepEqual(connectedWisePay.missingNonSecrets, []);
 assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
   'cove',
   'ncentral',
+  'cavelo',
   'sentinelone',
   'proofpoint',
   'datto',

@@ -21,6 +21,8 @@ import {
 } from './runtime';
 import { CoveApiError } from '../vendor/cove/client';
 import { syncCoveUsageSnapshots, testCoveConnection } from '../vendor/cove/operations';
+import { CaveloApiError } from '../vendor/cavelo/client';
+import { syncCaveloUsageSnapshots, testCaveloConnection } from '../vendor/cavelo/operations';
 import { DattoApiError } from '../vendor/datto/client';
 import { syncDattoUsageSnapshots, testDattoConnection } from '../vendor/datto/operations';
 import { NcentralApiError } from '../vendor/ncentral/client';
@@ -39,9 +41,12 @@ import {
 } from '../vendor/microsoft365/operations';
 import { SentinelOneApiError } from '../vendor/sentinelone/client';
 import { syncSentinelOneUsageSnapshots, testSentinelOneConnection } from '../vendor/sentinelone/operations';
+import { ProofpointApiError } from '../vendor/proofpoint/client';
+import { syncProofpointUsageSnapshots, testProofpointConnection } from '../vendor/proofpoint/operations';
 import { HuntressApiError } from '../vendor/huntress/client';
 import { syncHuntressUsageSnapshots, testHuntressConnection } from '../vendor/huntress/operations';
 import { requireRole } from './auth';
+import type { SyncProgressReporter } from '../shared/syncProgress';
 
 loadDotEnv({ override: false });
 
@@ -67,10 +72,12 @@ type SyncableIntegrationId = Extract<
   | 'connectwise'
   | 'cove'
   | 'ncentral'
+  | 'cavelo'
   | 'datto'
   | 'opentext-appriver'
   | 'microsoft-365'
   | 'sentinelone'
+  | 'proofpoint'
   | 'huntress'
 >;
 
@@ -143,10 +150,12 @@ export async function testIntegrationHttp(
     integrationId !== 'connectwise' &&
     integrationId !== 'cove' &&
     integrationId !== 'ncentral' &&
+    integrationId !== 'cavelo' &&
     integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
     integrationId !== 'microsoft-365' &&
     integrationId !== 'sentinelone' &&
+    integrationId !== 'proofpoint' &&
     integrationId !== 'huntress'
   ) {
     return jsonResponse(501, {
@@ -276,6 +285,33 @@ export async function testIntegrationHttp(
       });
     }
 
+    if (integrationId === 'proofpoint') {
+      const result = await testProofpointConnection({ provider });
+      await saveTestResult('success');
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        stackCount: result.stackCount,
+        stacks: result.stacks,
+        organizationCount: result.organizationCount,
+        firstOrganizationUserCount: result.firstOrganizationUserCount,
+        sampleOrganizations: result.sampleOrganizations,
+      });
+    }
+
+    if (integrationId === 'cavelo') {
+      const result = await testCaveloConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        organizationCount: result.organizationCount,
+        sampleOrganizations: result.sampleOrganizations,
+      });
+    }
+
     if (integrationId === 'huntress') {
       const result = await testHuntressConnection({ provider });
 
@@ -330,10 +366,12 @@ export async function syncIntegrationHttp(
     integrationId !== 'connectwise' &&
     integrationId !== 'cove' &&
     integrationId !== 'ncentral' &&
+    integrationId !== 'cavelo' &&
     integrationId !== 'datto' &&
     integrationId !== 'opentext-appriver' &&
     integrationId !== 'microsoft-365' &&
     integrationId !== 'sentinelone' &&
+    integrationId !== 'proofpoint' &&
     integrationId !== 'huntress'
   ) {
     return jsonResponse(501, {
@@ -411,6 +449,7 @@ export async function processIntegrationSyncQueueMessage(
   if (!repositoryContext.pool || !repositoryContext.repository) {
     throw new Error(`${integrationDisplayName(parsed.integrationId)} queued sync needs PostgreSQL settings before it can process.`);
   }
+  const syncJobRepository = repositoryContext.repository;
 
   const provider = createIntegrationSettingsProvider({
     loadLocalEnv: true,
@@ -418,6 +457,13 @@ export async function processIntegrationSyncQueueMessage(
   });
 
   let syncRunId: string | undefined;
+  let lastProgressUpdateAt = 0;
+  const onProgress: SyncProgressReporter = async (progress) => {
+    const now = Date.now();
+    if (progress.completed !== 0 && progress.completed !== progress.total && now - lastProgressUpdateAt < 750) return;
+    lastProgressUpdateAt = now;
+    await syncJobRepository.updateSyncJobProgress(parsed.jobId, progress);
+  };
   try {
     await repositoryContext.repository.markSyncJobRunning(parsed.jobId);
     const settings = await provider.getIntegrationSettings(parsed.integrationId);
@@ -436,6 +482,7 @@ export async function processIntegrationSyncQueueMessage(
         provider,
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -449,6 +496,7 @@ export async function processIntegrationSyncQueueMessage(
         provider,
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -462,6 +510,7 @@ export async function processIntegrationSyncQueueMessage(
         provider,
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -479,6 +528,7 @@ export async function processIntegrationSyncQueueMessage(
         seatMaxPages: parsed.seatMaxPages,
         includeBcdr: parsed.includeBcdr,
         dataset: parsed.operationKey === 'datto-bcdr' ? 'bcdr' : parsed.operationKey === 'datto-saas' ? 'saas' : undefined,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -513,10 +563,31 @@ export async function processIntegrationSyncQueueMessage(
         provider,
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
       context.log(`SentinelOne queued sync ${syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'proofpoint') {
+      const result = await syncProofpointUsageSnapshots({ pool: repositoryContext.pool, provider, onProgress });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Proofpoint Essentials queued sync ${syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'cavelo') {
+      const result = await syncCaveloUsageSnapshots({
+        pool: repositoryContext.pool,
+        provider,
+        onProgress,
+      });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Cavelo queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -526,6 +597,7 @@ export async function processIntegrationSyncQueueMessage(
         provider,
         pageSize: parsed.pageSize,
         maxPages: parsed.maxPages,
+        onProgress,
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -543,12 +615,14 @@ export async function processIntegrationSyncQueueMessage(
         ? await syncMicrosoft365ProductSubscriptionSnapshots({
             pool: repositoryContext.pool,
             provider,
+            onProgress,
           })
         : await syncMicrosoft365UserLicenseSnapshots({
             pool: repositoryContext.pool,
             provider,
             pageSize: parsed.pageSize,
             maxPages: parsed.maxPages,
+            onProgress,
           });
     syncRunId = result.syncRunId;
     await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
@@ -702,6 +776,20 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof ProofpointApiError) {
+    return jsonResponse(error.status ? 502 : 400, {
+      error: error.message || fallback,
+      status: error.status,
+    });
+  }
+
+  if (error instanceof CaveloApiError) {
+    return jsonResponse(error.status ? 502 : 400, {
+      error: error.message || fallback,
+      status: error.status,
+    });
+  }
+
   if (error instanceof HuntressApiError) {
     return jsonResponse(error.status ? 502 : 400, {
       error: error.message || fallback,
@@ -717,10 +805,12 @@ function integrationErrorResponse(error: unknown, fallback: string) {
 function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'cove') return 'Cove';
   if (integrationId === 'ncentral') return 'N-central';
+  if (integrationId === 'cavelo') return 'Cavelo';
   if (integrationId === 'datto') return 'Datto Backup';
   if (integrationId === 'opentext-appriver') return 'AppRiver - OpenText';
   if (integrationId === 'microsoft-365') return 'Microsoft 365';
   if (integrationId === 'sentinelone') return 'SentinelOne';
+  if (integrationId === 'proofpoint') return 'Proofpoint Essentials';
   if (integrationId === 'huntress') return 'Huntress';
   return 'ConnectWise';
 }
@@ -845,6 +935,20 @@ function buildIntegrationSyncQueueMessage(
     };
   }
 
+  if (integrationId === 'proofpoint') {
+    return { integrationId, requestedBy, requestedAt };
+  }
+
+  if (integrationId === 'cavelo') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      pageSize: safePositiveInteger(body.pageSize, 100),
+      maxPages: safePositiveInteger(body.maxPages, 100),
+    };
+  }
+
   if (integrationId === 'huntress') {
     return {
       integrationId,
@@ -893,10 +997,12 @@ function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage |
     parsed.integrationId !== 'connectwise' &&
     parsed.integrationId !== 'cove' &&
     parsed.integrationId !== 'ncentral' &&
+    parsed.integrationId !== 'cavelo' &&
     parsed.integrationId !== 'datto' &&
     parsed.integrationId !== 'opentext-appriver' &&
     parsed.integrationId !== 'microsoft-365' &&
     parsed.integrationId !== 'sentinelone' &&
+    parsed.integrationId !== 'proofpoint' &&
     parsed.integrationId !== 'huntress'
   ) {
     throw new Error('Integration sync queue message has an unsupported integrationId.');

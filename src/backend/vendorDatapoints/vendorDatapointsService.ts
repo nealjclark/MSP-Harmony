@@ -109,7 +109,7 @@ export async function createVendorDatapoint(
        default_import_mode,
        data_source_key
      )
-     values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
+     values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
      returning id,
                display_name,
                description,

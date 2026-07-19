@@ -48,6 +48,23 @@ async function run() {
   assert.deepEqual(result.savedNonSecretKeys, ['endpoint', 'companyId', 'clientId']);
   assert.equal(savedNonSecrets.length, 1);
 
+  const partialProofpointResult = await updateIntegrationSettings(
+    {
+      integrationId: 'proofpoint',
+      actor: 'neal@bmbsolutions.com',
+      role: 'Admin',
+      nonSecrets: {
+        endpoint: 'https://us2.proofpointessentials.com',
+        organizationDomain: 'partner.example',
+      },
+      secrets: { username: 'proofpoint-admin' },
+    },
+    secretWriter,
+    repository,
+  );
+  assert.equal(partialProofpointResult.validation.configuredStatus, 'not-configured');
+  assert.deepEqual(savedNonSecrets[1]?.requiredKeyVaultSecrets, ['mspharmony-proofpoint-username']);
+
   const microsoftResult = await updateIntegrationSettings(
     {
       integrationId: 'microsoft-365',
@@ -65,7 +82,7 @@ async function run() {
     repository,
   );
   assert.equal(microsoftResult.savedNonSecretKeys.includes('detailOnlySync'), true);
-  assert.equal(savedNonSecrets[1]?.nonSecrets && (savedNonSecrets[1].nonSecrets as Record<string, string>).detailOnlySync, 'false');
+  assert.equal(savedNonSecrets[2]?.nonSecrets && (savedNonSecrets[2].nonSecrets as Record<string, string>).detailOnlySync, 'false');
 
   await assert.rejects(
     () =>

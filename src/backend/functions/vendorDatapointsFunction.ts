@@ -18,6 +18,7 @@ type CreateVendorDatapointBody = {
   displayName?: string;
   description?: string;
   linkedIntegrationId?: string;
+  dataSourceKey?: string;
   sourceType?: string;
   syncMode?: string;
   columnMap?: InvoiceTableColumnMap;
@@ -98,6 +99,7 @@ export async function createVendorDatapointHttp(
         displayName: body.displayName,
         description: body.description,
         linkedIntegrationId: parseIntegrationId(body.linkedIntegrationId),
+        dataSourceKey: parseDataSourceKey(body.dataSourceKey),
         sourceType: body.sourceType,
         syncMode: parseSyncMode(body.syncMode),
         columnMap: body.columnMap,
@@ -186,6 +188,10 @@ export async function updateVendorDatapointHttp(
           : body.linkedIntegrationId
             ? parseIntegrationId(body.linkedIntegrationId)
             : null,
+      dataSourceKey:
+        body.dataSourceKey === undefined
+          ? undefined
+          : parseDataSourceKey(body.dataSourceKey) ?? null,
       sourceType: body.sourceType,
       syncMode: body.syncMode ? parseSyncMode(body.syncMode) : undefined,
       columnMap: body.columnMap,
@@ -295,6 +301,10 @@ app.http('importVendorDatapoint', {
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {
   return value && getIntegrationSettingsDefinition(value as IntegrationId) ? (value as IntegrationId) : undefined;
+}
+
+function parseDataSourceKey(value: string | undefined) {
+  return typeof value === 'string' ? value.trim() || undefined : undefined;
 }
 
 function parseSyncMode(value: string | undefined): ManualImportSyncMode | undefined {

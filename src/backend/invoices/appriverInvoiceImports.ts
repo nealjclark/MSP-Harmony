@@ -2401,7 +2401,7 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: Ve
        and invoice_line_items.vendor_id = $3
        and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
        and (
-         coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count')
+         coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count', 'invoice')
          or coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
        )`,
     [syncRunId, importId, vendorId],
@@ -2417,7 +2417,7 @@ async function syncInvoiceImportUsageSnapshots(database: Queryable, vendorId: Ve
               where invoice_line_items.invoice_import_id = invoice_imports.id
                 and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
                 and (
-                  coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count')
+                  coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') in ('device-count', 'license-count', 'invoice')
                   or coalesce(invoice_line_items.charge_type, 'Renewal') = 'Renewal'
                 )
             ),

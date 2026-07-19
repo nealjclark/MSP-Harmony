@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import {
   DattoClient,
   dattoCredentialsFromSettings,
@@ -130,6 +131,7 @@ export async function syncDattoUsageSnapshots(input: {
   includeBcdr?: boolean;
   dataset?: 'bcdr' | 'saas';
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<DattoUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings(dattoIntegrationId);
@@ -163,8 +165,17 @@ export async function syncDattoUsageSnapshots(input: {
     let unmappedSnapshots = 0;
     let skippedSnapshots = 0;
     const productSnapshots: Record<string, number> = {};
+    const outerLoopTotal = bcdrAgents.length + saasSummaries.length;
+    const progressUnitLabel = includeBcdr && includeSaas ? 'items' : includeBcdr ? 'agents' : 'customer products';
 
-    for (const agent of bcdrAgents) {
+    await input.onProgress?.({ completed: 0, total: outerLoopTotal, unitLabel: progressUnitLabel });
+    for (const [agentIndex, agent] of bcdrAgents.entries()) {
+      await input.onProgress?.({
+        completed: agentIndex,
+        total: outerLoopTotal,
+        currentItem: agent.customerName ?? agent.agentName ?? agent.deviceHostname,
+        unitLabel: progressUnitLabel,
+      });
       const vendorProductKey = 'datto-bcdr-agent';
       const productMapping = productMappings[vendorProductKey];
       const externalAccountId = externalAccountIdForBcdrAgent(agent);
@@ -199,7 +210,13 @@ export async function syncDattoUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
-    for (const summary of saasSummaries) {
+    for (const [summaryIndex, summary] of saasSummaries.entries()) {
+      await input.onProgress?.({
+        completed: bcdrAgents.length + summaryIndex,
+        total: outerLoopTotal,
+        currentItem: summary.customerName ?? summary.domain,
+        unitLabel: progressUnitLabel,
+      });
       if (!isDattoProductMappingKey(summary.productKey) || summary.quantity <= 0) {
         skippedSnapshots += 1;
         continue;
@@ -241,6 +258,7 @@ export async function syncDattoUsageSnapshots(input: {
     const saasSeatQuantityRead = saasSummaries.reduce((total, summary) => total + summary.quantity, 0);
     const recordsRead = bcdrAgents.length + saasSeatQuantityRead;
 
+    await input.onProgress?.({ completed: outerLoopTotal, total: outerLoopTotal, unitLabel: progressUnitLabel });
     await completeDattoSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
       entity: 'usage-snapshots',
       bcdrAgentsRead: bcdrAgents.length,

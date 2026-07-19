@@ -3,6 +3,7 @@ export type IntegrationId =
   | 'wisepay'
   | 'cove'
   | 'ncentral'
+  | 'cavelo'
   | 'sentinelone'
   | 'proofpoint'
   | 'datto'
@@ -24,7 +25,7 @@ export type IntegrationDataSourceType =
   | 'device-count'
   | 'invoice'
   | 'license-count';
-export type IntegrationNonSecretInputType = 'text' | 'checkbox' | 'select';
+export type IntegrationNonSecretInputType = 'text' | 'textarea' | 'checkbox' | 'select';
 export type IntegrationSyncFrequency = 'hourly' | 'daily' | 'weekly' | 'manual';
 export type IntegrationTestResult = 'success' | 'failure' | 'untested';
 export type PsaAgreementReconcileMode = 'merge-multiple-products' | 'separate-multiple-products';
@@ -93,7 +94,9 @@ const integrationApiOperations: Partial<Record<IntegrationId, IntegrationApiOper
   connectwise: [{ key: 'agreement-report', label: 'Agreement report' }],
   cove: [{ key: 'usage-snapshots', label: 'Protected systems', dataSourceKey: 'cove-protected-systems' }],
   ncentral: [{ key: 'usage-snapshots', label: 'Filter and device counts', dataSourceKey: 'ncentral-device-filters' }],
+  cavelo: [{ key: 'usage-snapshots', label: 'Organization agent counts', dataSourceKey: 'cavelo-organization-agents' }],
   sentinelone: [{ key: 'usage-snapshots', label: 'Site and agent counts', dataSourceKey: 'sentinelone-sites' }],
+  proofpoint: [{ key: 'usage-snapshots', label: 'Customer user counts', dataSourceKey: 'proofpoint-domains' }],
   datto: [
     { key: 'datto-bcdr', label: 'BCDR protected agents', dataSourceKey: 'datto-bcdr-agents' },
     { key: 'datto-saas', label: 'SaaS Protection seats', dataSourceKey: 'datto-saas-seats' },
@@ -158,7 +161,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     authMode: 'api-key',
     capabilities: ['payment-link'],
     dataSources: [],
-    description: 'API key used to generate WisePay payment links for ConnectWise invoice notifications.',
+    description: 'Uses the configured WisePay URL and API key to construct PayNow links for ConnectWise invoice notifications.',
     endpoint: 'https://secure2.wise-sync.com',
     requiredSecrets: [secret('apiKey', 'API Key', 'mspharmony-wisepay-api-key', 'WISEPAY_API_KEY')],
     requiredNonSecrets: [
@@ -229,6 +232,35 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     webhookSupported: false,
   },
   {
+    integrationId: 'cavelo',
+    displayName: 'Cavelo',
+    category: 'Security',
+    authMode: 'api-key',
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'cavelo-organization-agents',
+        'Organization agent counts',
+        'customer-product-breakdown',
+        ['live-api', 'csv', 'excel'],
+        true,
+        false,
+        'Active, inactive, and total Cavelo endpoint agent counts by organization.',
+      ),
+      resellerInvoiceTotals(),
+    ],
+    description: 'Endpoint security agent counts and invoice imports by Cavelo organization.',
+    endpoint: 'https://api.prod.cavelodata.com/v1',
+    requiredSecrets: [secret('apiKey', 'API Key', 'mspharmony-cavelo-api-key', 'CAVELO_API_KEY')],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'API Endpoint', 'CAVELO_ENDPOINT', 'https://api.prod.cavelodata.com/v1'),
+    ],
+    optionalNonSecrets: mappingIntegrationOptions('CAVELO'),
+    scopes: ['organizations.read', 'agents.read'],
+    syncFrequency: 'daily',
+    webhookSupported: false,
+  },
+  {
     integrationId: 'sentinelone',
     displayName: 'SentinelOne',
     category: 'Security',
@@ -260,27 +292,41 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Proofpoint Essentials',
     category: 'Email Security',
     authMode: 'basic',
-    capabilities: ['mapping', 'invoice-import'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
     dataSources: [
       dataSource(
         'proofpoint-domains',
-        'Domain user counts',
+        'Customer user counts',
         'customer-product-breakdown',
-        ['csv', 'excel'],
+        ['live-api', 'csv', 'excel'],
         true,
         false,
-        'Customer domain-level email security seat counts from invoice tables or exports.',
+        'Active billable email security users by customer with all associated domains combined.',
       ),
       resellerInvoiceTotals(),
     ],
-    description: 'Email security seat counts by customer domain.',
-    endpoint: 'https://api.proofpointessentials.com',
+    description: 'Email security seat counts by customer domain from Proofpoint Essentials v1.',
+    endpoint: '',
     requiredSecrets: [
       secret('username', 'Username', 'mspharmony-proofpoint-username', 'PROOFPOINT_USERNAME'),
       secret('password', 'Password', 'mspharmony-proofpoint-password', 'PROOFPOINT_PASSWORD'),
     ],
-    requiredNonSecrets: [nonSecret('endpoint', 'API Endpoint', 'PROOFPOINT_ENDPOINT', 'https://api.proofpointessentials.com')],
-    optionalNonSecrets: mappingIntegrationOptions('PROOFPOINT'),
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Proofpoint Stack URL', 'PROOFPOINT_ENDPOINT'),
+      nonSecret('organizationDomain', 'Partner Domain (or UUID)', 'PROOFPOINT_ORGANIZATION_DOMAIN'),
+    ],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'additionalEndpoints',
+        'Additional Proofpoint Stacks',
+        'PROOFPOINT_ADDITIONAL_ENDPOINTS',
+        undefined,
+        'textarea',
+        'One per line as Stack URL | Partner Domain or UUID. The saved Key Vault username and password are reused for every stack.',
+        'Additional Proofpoint stacks',
+      ),
+      ...mappingIntegrationOptions('PROOFPOINT'),
+    ],
     scopes: ['domains.read', 'users.read'],
     syncFrequency: 'daily',
     webhookSupported: false,
@@ -907,7 +953,7 @@ function statusForValidation(
   const missingCount = missingSecretCount + missingNonSecretCount;
 
   if (missingCount > 0) {
-    return missingCount >= 2 ? 'not-configured' : 'degraded';
+    return 'not-configured';
   }
 
   return lastTestResult === 'failure' ? 'degraded' : 'connected';

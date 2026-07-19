@@ -61,7 +61,6 @@ export function buildAppRiverRuleSet(
           appRiverBundleKey: bundle.bundleKey,
         },
         unitPrice: bundle.unitPrice,
-        requiresExistingAgreementProduct: true,
         notes: `${bundle.bundleName} uses the largest license count across its AppRiver component products.`,
       })),
     ],

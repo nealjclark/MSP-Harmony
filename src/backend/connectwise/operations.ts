@@ -4,6 +4,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../config/settingsProvider';
+import type { SyncProgressReporter } from '../shared/syncProgress';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings, type ConnectWiseCompany } from './client';
 import type { ConnectWiseAgreement, ConnectWiseAgreementAddition } from './client';
 
@@ -126,6 +127,7 @@ export async function syncConnectWiseAgreementReport(input: {
   provider?: IntegrationSettingsProvider;
   pageSize?: number;
   maxPages?: number;
+  onProgress?: SyncProgressReporter;
 }): Promise<ConnectWiseAgreementReportSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('connectwise');
@@ -183,7 +185,14 @@ export async function syncConnectWiseAgreementReport(input: {
       }
     }
 
-    for (const agreement of agreements) {
+    await input.onProgress?.({ completed: 0, total: agreements.length, unitLabel: 'agreements' });
+    for (const [agreementIndex, agreement] of agreements.entries()) {
+      await input.onProgress?.({
+        completed: agreementIndex,
+        total: agreements.length,
+        currentItem: agreement.name ?? `Agreement ${agreement.id}`,
+        unitLabel: 'agreements',
+      });
       const customerId = await ensureAgreementCustomer(input.pool, agreement, customerIdsByConnectWiseId);
       const agreementId = await upsertAgreement(input.pool, agreement, customerId);
       agreementsWritten += 1;
@@ -221,6 +230,7 @@ export async function syncConnectWiseAgreementReport(input: {
       }
     }
 
+    await input.onProgress?.({ completed: agreements.length, total: agreements.length, unitLabel: 'agreements' });
     await completeSyncRun(input.pool, syncRunId, additionsRead, additionsWritten, {
       customersRead: companies.length,
       customersWritten,

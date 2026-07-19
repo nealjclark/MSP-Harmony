@@ -411,9 +411,20 @@ CREATE TABLE IF NOT EXISTS integration_sync_jobs (
   completed_at timestamptz,
   sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
   error_message text,
+  progress_completed integer,
+  progress_total integer,
+  progress_failed integer NOT NULL DEFAULT 0,
+  progress_current_item text,
+  progress_unit_label text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE integration_sync_jobs ADD COLUMN IF NOT EXISTS progress_completed integer;
+ALTER TABLE integration_sync_jobs ADD COLUMN IF NOT EXISTS progress_total integer;
+ALTER TABLE integration_sync_jobs ADD COLUMN IF NOT EXISTS progress_failed integer NOT NULL DEFAULT 0;
+ALTER TABLE integration_sync_jobs ADD COLUMN IF NOT EXISTS progress_current_item text;
+ALTER TABLE integration_sync_jobs ADD COLUMN IF NOT EXISTS progress_unit_label text;
 
 CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_activity
   ON integration_sync_jobs(status, requested_at DESC);

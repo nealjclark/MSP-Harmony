@@ -24,6 +24,7 @@ import { loadMicrosoft365RuleSet } from '../vendor/microsoft365/operations';
 import { loadAppRiverRuleSet } from '../vendor/appriver/operations';
 import { loadSentinelOneRuleSet } from '../vendor/sentinelone/operations';
 import { loadHuntressRuleSet } from '../vendor/huntress/operations';
+import { loadCaveloRuleSet } from '../vendor/cavelo/operations';
 import {
   listProductBundles,
   listCrossVendorProductBundles,
@@ -308,10 +309,7 @@ export async function reconcileVendorFromDatabase(
     ),
   ];
   const reconcileMode = await loadVendorReconcileMode(database, vendorId);
-  const additionPins =
-    reconcileMode === 'separate-multiple-products'
-      ? await loadAdditionPins(database, vendorId, agreementIds)
-      : [];
+  const additionPins = await loadAdditionPins(database, vendorId, agreementIds);
   const snapshots = [
     ...applyProductBundles(
       billableSnapshots,
@@ -897,6 +895,10 @@ async function loadRuleSet(database: Queryable, vendorId: string): Promise<Vendo
     return loadNcentralRuleSet(database);
   }
 
+  if (vendorId === 'cavelo') {
+    return loadCaveloRuleSet(database);
+  }
+
   if (vendorId === 'datto') {
     return loadDattoRuleSet(database);
   }
@@ -940,23 +942,31 @@ async function loadMappedInvoiceRuleSet(database: Queryable, vendorId: string): 
     [vendorId],
   );
   const displayName = getIntegrationSettingsDefinition(vendorId as IntegrationId)?.displayName ?? vendorId;
-  const rules = result.rows.map((row) => ({
-    id: `${vendorId}:${row.vendor_product_key}:${row.connectwise_product_code}:invoice-count`,
-    vendorId,
-    vendorProductKey: row.vendor_product_key,
-    productCode: row.connectwise_product_code,
-    productName: row.connectwise_product_name,
-    sourceMetric: 'snapshot-count' as const,
-    billableUnit: billableUnitForVendorProductKey(row.vendor_product_key),
-    unitPrice:
-      row.unit_price === null
-        ? undefined
-        : {
-            amount: numericValue(row.unit_price),
-            currency: 'USD' as const,
-          },
-    notes: `${displayName} mapped quantity for ${row.connectwise_product_name}.`,
-  }));
+  const rowsByProduct = new Map<string, GenericRuleMappingRow[]>();
+  for (const row of result.rows) {
+    rowsByProduct.set(row.vendor_product_key, [...(rowsByProduct.get(row.vendor_product_key) ?? []), row]);
+  }
+  const rules = [...rowsByProduct.entries()].map(([vendorProductKey, rows]) => {
+    const primary = rows[0]!;
+    return {
+      id: `${vendorId}:${vendorProductKey}:mapped-count`,
+      vendorId,
+      vendorProductKey,
+      productCode: primary.connectwise_product_code,
+      targetProductCodes: [...new Set(rows.map((row) => row.connectwise_product_code))],
+      productName: primary.connectwise_product_name,
+      sourceMetric: 'snapshot-count' as const,
+      billableUnit: billableUnitForVendorProductKey(vendorProductKey),
+      unitPrice:
+        primary.unit_price === null
+          ? undefined
+          : {
+              amount: numericValue(primary.unit_price),
+              currency: 'USD' as const,
+            },
+      notes: `${displayName} mapped quantity for ${primary.connectwise_product_name}.`,
+    };
+  });
 
   return {
     vendorId,
@@ -1334,13 +1344,15 @@ async function loadLinkedCountContext(
       // catalog code (e.g. device:server + device:workstation → Managed Endpoint Protection)
       // keep their own linked counts.
       const lineKey = linkedLineKey(total.customerId, total.agreementId, sourceVendorProductKey);
-      countsByLineKey.set(lineKey, {
+      const linkedCount = {
         ruleId: rule.id,
         ruleName: rule.ruleName,
         sourceVendorProductKey,
         quantity: total.quantity,
         sources,
-      });
+      };
+      countsByLineKey.set(lineKey, linkedCount);
+      countsByLineKey.set(linkedRuleLineKey(total.customerId, total.agreementId, targetRule.id), linkedCount);
       anchorSnapshots.push({
         id: `linked:${rule.id}:${total.customerId}:${total.agreementId}:${sourceVendorProductKey}`,
         vendorId,
@@ -1352,6 +1364,7 @@ async function loadLinkedCountContext(
         quantity: 0,
         observedAt: total.observedAt ?? new Date(0).toISOString(),
         dimensions: {
+          ...(targetRule.dimensions ?? {}),
           linkedCountAnchor: true,
           linkedCountRuleId: rule.id,
           linkedCountRuleName: rule.ruleName,
@@ -1926,15 +1939,25 @@ function linkedCountForLine(
   countsByLineKey: Map<string, ReconciliationLinkedCount>,
 ) {
   const vendorProductKey = line.vendorProductKey?.trim();
-  if (!vendorProductKey) {
-    return undefined;
+  if (vendorProductKey) {
+    const directMatch = countsByLineKey.get(linkedLineKey(line.clientId, line.agreementId, vendorProductKey));
+    if (directMatch) {
+      return directMatch;
+    }
   }
 
-  return countsByLineKey.get(linkedLineKey(line.clientId, line.agreementId, vendorProductKey));
+  // Separate-mode reconciliation can merge related product rules that share a
+  // single ConnectWise catalog item. Those merged lines intentionally omit the
+  // vendor product key, so fall back to the selected reconciliation rule.
+  return countsByLineKey.get(linkedRuleLineKey(line.clientId, line.agreementId, line.ruleId));
 }
 
 function linkedLineKey(customerId: string, agreementId: string, vendorProductKey: string) {
   return `${customerId}|${agreementId}|${canonicalVendorProductKey(vendorProductKey).trim().toLowerCase()}`;
+}
+
+function linkedRuleLineKey(customerId: string, agreementId: string, ruleId: string) {
+  return `${customerId}|${agreementId}|rule:${ruleId}`;
 }
 
 function canonicalVendorProductKey(value: string) {
@@ -1958,6 +1981,13 @@ function integrationDisplayName(integrationId: VendorKey) {
 }
 
 async function loadVendorReconcileMode(database: Queryable, vendorId: string) {
+  // A manual integration can map several imported SKUs to one ConnectWise product/addition.
+  // Use addition-aware grouping so those source quantities are combined instead of emitting
+  // duplicate lines that each compare against the same agreement addition.
+  if (isVendorDatapointId(vendorId)) {
+    return 'separate-multiple-products';
+  }
+
   const nonSecrets = await loadVendorNonSecrets(database, vendorId);
 
   return integrationPsaAgreementReconcileMode(

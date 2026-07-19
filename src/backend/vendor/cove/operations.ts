@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import { CoveClient, coveCredentialsFromSettings, type CoveDeviceStatistic, type CoveLoginResult } from './client';
 import {
   buildCoveRuleSet,
@@ -91,6 +92,7 @@ export async function syncCoveUsageSnapshots(input: {
   pageSize?: number;
   maxPages?: number;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<CoveUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('cove');
@@ -117,7 +119,14 @@ export async function syncCoveUsageSnapshots(input: {
     let serverSnapshots = 0;
     let workstationSnapshots = 0;
 
-    for (const device of devices) {
+    await input.onProgress?.({ completed: 0, total: devices.length, unitLabel: 'devices' });
+    for (const [deviceIndex, device] of devices.entries()) {
+      await input.onProgress?.({
+        completed: deviceIndex,
+        total: devices.length,
+        currentItem: device.customerName ?? device.computerName,
+        unitLabel: 'devices',
+      });
       const productKey = productKeyForDevice(device);
       if (!productKey) {
         skippedSnapshots += 1;
@@ -154,6 +163,7 @@ export async function syncCoveUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
+    await input.onProgress?.({ completed: devices.length, total: devices.length, unitLabel: 'devices' });
     await completeCoveSyncRun(input.pool, syncRunId, devices.length, recordsWritten, {
       entity: 'usage-snapshots',
       mappedSnapshots,

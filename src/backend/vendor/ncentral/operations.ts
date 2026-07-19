@@ -3,6 +3,7 @@ import {
   type IntegrationRuntimeSettings,
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
+import type { SyncProgressReporter } from '../../shared/syncProgress';
 import { NcentralClient, ncentralCredentialsFromSettings, type NcentralDeviceFilter, type NcentralDeviceSummary } from './client';
 import {
   ensureDefaultNcentralFilterMappings,
@@ -117,6 +118,7 @@ export async function syncNcentralUsageSnapshots(input: {
   detailConcurrency?: number;
   enrichDetails?: boolean;
   now?: string;
+  onProgress?: SyncProgressReporter;
 }): Promise<NcentralUsageSnapshotSyncResult> {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
   const settings = await provider.getIntegrationSettings('ncentral');
@@ -139,7 +141,8 @@ export async function syncNcentralUsageSnapshots(input: {
       pageSize: input.pageSize,
       maxPages: input.maxPages,
     });
-    const allDevices = [...aggregatedDevices.values()].map((entry) => entry.device);
+    const aggregatedDeviceList = [...aggregatedDevices.values()];
+    const allDevices = aggregatedDeviceList.map((entry) => entry.device);
     const detailMap =
       input.enrichDetails === false || !client.enrichDevicesWithDetails
         ? new Map<number, NcentralDeviceSummary & { lastApplianceCheckinTime?: string }>()
@@ -153,7 +156,14 @@ export async function syncNcentralUsageSnapshots(input: {
     const productSnapshots: Record<string, number> = {};
     const overlayMatches: Record<string, number> = {};
 
-    for (const aggregated of aggregatedDevices.values()) {
+    await input.onProgress?.({ completed: 0, total: aggregatedDeviceList.length, unitLabel: 'devices' });
+    for (const [deviceIndex, aggregated] of aggregatedDeviceList.entries()) {
+      await input.onProgress?.({
+        completed: deviceIndex,
+        total: aggregatedDeviceList.length,
+        currentItem: aggregated.device.customerName ?? aggregated.device.longName,
+        unitLabel: 'devices',
+      });
       const primaryProductMapping = choosePrimaryProductMapping(aggregated.productMappings);
       if (!primaryProductMapping?.vendorProductKey || !isNcentralProductMappingKey(primaryProductMapping.vendorProductKey)) {
         skippedSnapshots += 1;
@@ -199,6 +209,7 @@ export async function syncNcentralUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
+    await input.onProgress?.({ completed: aggregatedDeviceList.length, total: aggregatedDeviceList.length, unitLabel: 'devices' });
     await completeNcentralSyncRun(input.pool, syncRunId, aggregatedDevices.size, recordsWritten, {
       entity: 'usage-snapshots',
       mappedSnapshots,

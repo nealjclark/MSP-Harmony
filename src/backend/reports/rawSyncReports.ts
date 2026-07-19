@@ -1,8 +1,12 @@
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
+import {
+  isVendorDatapointId,
+  type VendorDatapointId,
+} from '../../shared/vendorDatapoints';
 import type { Queryable } from './agreementReports';
 import { getAgreementReportDetails, listAgreementReportSyncRuns, type AgreementReportSyncRun } from './agreementReports';
 
-export type RawSyncIntegrationId = IntegrationId;
+export type RawSyncIntegrationId = IntegrationId | VendorDatapointId;
 export type RawSyncDataset = 'users' | 'licenses';
 
 export type RawSyncRun = AgreementReportSyncRun;
@@ -1244,12 +1248,21 @@ function mapNcentralSnapshotRow(
 }
 
 export function isRawSyncIntegrationId(value: string | undefined): value is RawSyncIntegrationId {
-  return typeof value === 'string' && Boolean(getIntegrationSettingsDefinition(value as IntegrationId));
+  return typeof value === 'string' && (
+    Boolean(getIntegrationSettingsDefinition(value as IntegrationId)) || isUuidVendorDatapointId(value)
+  );
+}
+
+function isUuidVendorDatapointId(value: string) {
+  if (!isVendorDatapointId(value)) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.slice('datapoint:'.length),
+  );
 }
 
 async function getGenericRawSyncDetails(
   database: Queryable,
-  integrationId: IntegrationId,
+  integrationId: RawSyncIntegrationId,
   syncRunId: string,
   options: RawSyncDetailsOptions = {},
 ): Promise<RawSyncDetails | undefined> {
@@ -1311,16 +1324,23 @@ async function getGenericRawSyncDetails(
               mapped_snapshots.product_name`,
     [syncRunId, integrationId],
   );
+  const mappedImportColumns = isVendorDatapointId(integrationId)
+    ? await loadVendorDatapointPreviewColumns(database, integrationId)
+    : [];
   const rows = detailResult.rows.map((row) =>
     mapGenericSnapshotRow(row, {
       includeRawPayload: options.includeRawPayload === true,
+      mappedImportColumns,
     }),
   );
+  const columns = mappedImportColumns.length > 0
+    ? uniqueStrings(['Customer', 'Agreement', ...mappedImportColumns, 'Mapped', 'ObservedAt'])
+    : [...genericRawSyncColumns];
 
   return {
     integrationId,
     syncRun: mapSyncRun(syncRunRow),
-    columns: genericRawSyncColumns,
+    columns,
     rows,
     summary: {
       rowCount: rows.length,
@@ -1333,7 +1353,7 @@ async function getGenericRawSyncDetails(
 
 function mapGenericSnapshotRow(
   row: GenericSnapshotRow,
-  options: { includeRawPayload?: boolean } = {},
+  options: { includeRawPayload?: boolean; mappedImportColumns?: string[] } = {},
 ): RawSyncDetail {
   const dimensions = recordFromJson(row.dimensions);
   const rawPayload = recordFromJson(row.raw_payload);
@@ -1341,10 +1361,15 @@ function mapGenericSnapshotRow(
   const rawString = (key: string) => stringValue(rawPayload[key]);
   const dimensionString = (key: string) => stringValue(dimensions[key]) ?? rawString(key);
 
+  const mappedImportValues = Object.fromEntries(
+    (options.mappedImportColumns ?? []).map((column) => [column, rawSyncDetailValue(rawPayload[column])]),
+  );
+
   return {
     CustomerId: row.customer_id,
     Customer: row.customer_name,
     Agreement: row.agreement_name,
+    ...mappedImportValues,
     SourceType: dimensionString('sourceType'),
     SyncMode: dimensionString('syncMode'),
     ExternalAccountName: dimensionString('externalAccountName'),
@@ -1369,6 +1394,62 @@ function mapGenericSnapshotRow(
     ObservedAt: isoDate(row.observed_at) ?? null,
     RawPayload: includeRawPayload ? compactJson(row.raw_payload) : null,
   };
+}
+
+const vendorDatapointColumnMapOrder = [
+  'externalAccountId',
+  'externalAccountName',
+  'productCode',
+  'productName',
+  'quantity',
+  'invoiceNumber',
+  'invoiceDate',
+  'chargeType',
+  'term',
+  'billingFrequency',
+  'billingPeriodStart',
+  'billingPeriodEnd',
+  'deviceId',
+  'deviceName',
+  'deviceType',
+  'deviceClass',
+  'lastCheckIn',
+  'licenseId',
+  'licenseName',
+  'userPrincipalName',
+  'email',
+  'primaryDomain',
+] as const;
+
+async function loadVendorDatapointPreviewColumns(database: Queryable, vendorId: VendorDatapointId) {
+  const datapointId = vendorId.slice('datapoint:'.length);
+  const result = await database.query<{ column_map: unknown }>(
+    `select column_map
+       from vendor_datapoints
+      where id = $1::uuid
+        and active = true
+      limit 1`,
+    [datapointId],
+  );
+  const columnMap = recordFromJson(result.rows[0]?.column_map);
+
+  return uniqueStrings(
+    vendorDatapointColumnMapOrder
+      .map((key) => stringValue(columnMap[key]))
+      .filter((column): column is string => Boolean(column && !column.startsWith('__'))),
+  );
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
+}
+
+function rawSyncDetailValue(value: unknown): RawSyncDetail[string] {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
+    return value;
+  }
+
+  return typeof value === 'undefined' ? null : compactJson(value);
 }
 
 async function getCoveRawSyncDetails(

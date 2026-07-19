@@ -13,7 +13,7 @@ assert.equal(deviceRules.length, 1);
 const deviceRule = deviceRules.find((rule) => rule.vendorProductKey === 'device:workstation');
 assert.equal(deviceRule?.billableUnit, 'workstation');
 assert.equal(deviceRule?.dimensions, undefined);
-assert.equal(deviceRule?.requiresExistingAgreementProduct, false);
+assert.equal(deviceRule?.requiresExistingAgreementProduct, undefined);
 assert.equal(
   deviceRules.some((rule) => rule.vendorProductKey === 'sentinelone-server'),
   false,
@@ -25,5 +25,6 @@ assert.equal(
   apiOnlyRules.every((rule) => rule.vendorProductKey?.startsWith('sentinelone-')),
   true,
 );
+assert.equal(apiOnlyRules.every((rule) => rule.requiresExistingAgreementProduct === undefined), true);
 
 console.log('sentinelone rules tests passed');

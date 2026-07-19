@@ -154,7 +154,7 @@ function reconcileRuleFamily(input: {
         snapshots: mergedSnapshots,
         matchedAdditions,
         assignedAddition: matchedAdditions[0],
-        merged: true,
+        merged: input.familyRules.length > 1,
       }),
     ].filter((line): line is ReconciliationLine => Boolean(line));
   }
@@ -471,7 +471,19 @@ function buildLine(input: {
     return undefined;
   }
 
-  const vendorProductKey = input.merged ? undefined : ruleVendorProductKey(input.rule);
+  const liveVendorProductKeys = [
+    ...new Set(
+      input.snapshots
+        .filter((snapshot) => snapshot.dimensions.linkedCountAnchor !== true)
+        .map((snapshot) => snapshot.vendorProductKey)
+        .filter((key): key is string => Boolean(key)),
+    ),
+  ];
+  const vendorProductKey = input.merged
+    ? liveVendorProductKeys.length === 1
+      ? liveVendorProductKeys[0]
+      : undefined
+    : ruleVendorProductKey(input.rule);
   const assignedAddition = input.assignedAddition ?? input.matchedAdditions[0];
   const connectWiseAdditionId = assignedAddition?.connectWiseAdditionId ?? assignedAddition?.id;
   const unitPrice =

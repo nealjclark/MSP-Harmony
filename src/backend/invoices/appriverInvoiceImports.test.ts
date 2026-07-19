@@ -735,6 +735,14 @@ async function run() {
   assert.equal(customPayload.deviceCategory, 'device:virtual-server');
   assert.equal(customSyncQueries.some((query) => query.sql.includes("'detailOnlySync'")), true);
   assert.equal(customSyncQueries.some((query) => query.sql.includes("'manual-info-only'")), true);
+  assert.equal(
+    customSyncQueries.some(
+      (query) =>
+        query.sql.includes('insert into vendor_usage_snapshots') &&
+        query.sql.includes("('device-count', 'license-count', 'invoice')"),
+    ),
+    true,
+  );
 
   await importMappedInvoiceTableCsv(customDatabase, {
     vendorId: 'custom-table',

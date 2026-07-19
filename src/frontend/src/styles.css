@@ -212,7 +212,8 @@ button {
   backdrop-filter: blur(14px);
   position: sticky;
   top: 0;
-  z-index: 3;
+  /* Keep global controls, including the sync tracker, above page-level sticky headers. */
+  z-index: 10;
 }
 
 .title-block {
@@ -5838,6 +5839,14 @@ h2 {
   align-items: start;
 }
 
+.vendor-datapoints-view.single-integration .vendor-datapoints-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.vendor-datapoints-view.single-integration .vendor-datapoints-sidebar {
+  display: none;
+}
+
 .vendor-datapoints-sidebar .surface-header {
   padding: 16px 18px 12px;
   border-bottom: 0;
@@ -6184,6 +6193,20 @@ h2 {
   display: contents;
 }
 
+.integration-card.payment-link-card {
+  grid-template-areas: "main pad purpose purpose purpose actions";
+  min-height: 0;
+  padding-block: 12px;
+}
+
+.integration-purpose {
+  grid-area: purpose;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
 .integration-sync-progress {
   width: 100%;
   height: 8px;
@@ -6382,6 +6405,92 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
+.compact-manual-imports {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.compact-manual-imports-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 2px 0 4px;
+}
+
+.compact-manual-imports-header > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.compact-manual-imports-header strong {
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.compact-manual-imports-header span,
+.compact-manual-import-name span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-manual-import-list {
+  display: grid;
+  gap: 6px;
+}
+
+.compact-manual-import-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfa;
+}
+
+.compact-manual-import-name {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.compact-manual-import-name strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.compact-manual-import-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.compact-manual-import-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.compact-manual-import-message {
+  margin: 0;
+  color: #294766;
+  font-size: 0.8rem;
+}
+
 .integration-modal {
   width: min(820px, 100%);
   max-height: min(92dvh, 860px);
@@ -6462,7 +6571,8 @@ h2 {
 }
 
 .config-field input,
-.config-field select {
+.config-field select,
+.config-field textarea {
   width: 100%;
   min-height: 36px;
   padding: 0 11px;
@@ -6474,8 +6584,15 @@ h2 {
   font: inherit;
 }
 
+.config-field textarea {
+  min-height: 92px;
+  padding: 9px 11px;
+  resize: vertical;
+}
+
 .config-field input:focus,
-.config-field select:focus {
+.config-field select:focus,
+.config-field textarea:focus {
   border-color: var(--teal);
   box-shadow: 0 0 0 3px rgba(13, 143, 128, 0.12);
 }
@@ -8356,6 +8473,12 @@ h2 {
     align-items: center;
   }
 
+  .integration-card.payment-link-card {
+    grid-template-areas:
+      "main actions"
+      "purpose purpose";
+  }
+
   .integration-stats .integration-stat:nth-child(1),
   .integration-stats .integration-stat:nth-child(2) {
     justify-self: start;
@@ -8573,6 +8696,25 @@ h2 {
       "operations"
       "message"
       "workspace";
+  }
+
+  .integration-card.payment-link-card {
+    grid-template-areas:
+      "main"
+      "purpose"
+      "actions";
+  }
+
+  .compact-manual-import-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .compact-manual-import-row > .integration-operation-state {
+    display: none;
+  }
+
+  .compact-manual-import-actions {
+    justify-content: flex-start;
   }
 
   .integration-operation-row,

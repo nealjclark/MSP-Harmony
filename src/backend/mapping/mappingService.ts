@@ -3645,6 +3645,32 @@ async function upsertAccountMapping(
       input.status === 'approved',
     ],
   );
+
+  if (input.status === 'approved') {
+    await applyApprovedAccountMappingToSnapshots(database, input.vendorId, input.externalAccountId);
+  }
+}
+
+async function applyApprovedAccountMappingToSnapshots(
+  database: Queryable,
+  vendorId: VendorKey,
+  externalAccountId: string,
+) {
+  await database.query(
+    `update vendor_usage_snapshots
+     set customer_id = vendor_account_mappings.customer_id,
+         agreement_id = vendor_account_mappings.agreement_id
+     from vendor_account_mappings
+     where vendor_usage_snapshots.vendor_id = $1
+       and vendor_usage_snapshots.external_account_id = $2
+       and vendor_account_mappings.vendor_id = $1
+       and vendor_account_mappings.external_account_id = $2
+       and vendor_account_mappings.active = true
+       and vendor_account_mappings.mapping_status = 'approved'
+       and (vendor_usage_snapshots.customer_id is distinct from vendor_account_mappings.customer_id
+         or vendor_usage_snapshots.agreement_id is distinct from vendor_account_mappings.agreement_id)`,
+    [vendorId, externalAccountId],
+  );
 }
 
 async function loadExternalAccountName(database: Queryable, vendorId: VendorKey, externalAccountId: string) {

@@ -31,6 +31,7 @@ import {
   Save,
   Search,
   Settings,
+  Settings2,
   SlidersHorizontal,
   Trash2,
   Upload,
@@ -459,7 +460,7 @@ type HuntressMappingDataset = 'edr' | 'itdr' | 'sat' | 'siem' | 'ispm' | 'siem-e
 type RawSyncRow = Record<string, string | number | boolean | null>;
 
 type RawSyncDetailsResponse = {
-  integrationId: IntegrationId;
+  integrationId: VendorKey;
   dataset?: RawSyncDataset;
   syncRun: RawSyncRun;
   columns: string[];
@@ -474,7 +475,7 @@ type RawSyncDetailsResponse = {
 
 type RawSyncRunsResponse = {
   reportType: ReportSection;
-  integrationId: IntegrationId;
+  integrationId: VendorKey;
   dataset?: RawSyncDataset;
   runs: RawSyncRun[];
 };
@@ -1523,7 +1524,7 @@ type AgreementAdditionsSelection = {
 
 type VendorDataSelection = {
   customer: string;
-  vendorId: IntegrationId;
+  vendorId: VendorKey;
   vendor: string;
   status: 'loading' | 'ready' | 'failed';
   syncSummary?: string;
@@ -2282,6 +2283,10 @@ function isActiveApiIntegration(integration: Integration) {
     return false;
   }
 
+  if (integrationHasCapability(integration.id, 'payment-link')) {
+    return true;
+  }
+
   if (hasLiveIntegrationActions(integration.id)) {
     return true;
   }
@@ -2926,7 +2931,7 @@ function formatDateOnly(value?: string) {
   });
 }
 
-function rawSyncDatasetForVendorData(integrationId: IntegrationId): RawSyncDataset | undefined {
+function rawSyncDatasetForVendorData(integrationId: VendorKey): RawSyncDataset | undefined {
   return integrationId === 'microsoft-365' ? 'users' : undefined;
 }
 
@@ -3934,7 +3939,7 @@ async function updateManagedUserRequest(
   return body as unknown as { user: ManagedAppUser };
 }
 
-async function fetchRawSyncRuns(integrationId: IntegrationId, dataset?: RawSyncDataset) {
+async function fetchRawSyncRuns(integrationId: VendorKey, dataset?: RawSyncDataset) {
   const params = new URLSearchParams({
     integrationId,
   });
@@ -5696,6 +5701,11 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
     return `Connection OK. N-central returned ${filterCount} filters.`;
   }
 
+  if (integrationId === 'cavelo') {
+    const organizationCount = numberField(body, 'organizationCount')?.toLocaleString() ?? '0';
+    return `Connection OK. Cavelo returned ${organizationCount} organizations.`;
+  }
+
   if (integrationId === 'datto') {
     const bcdrAgentCount = numberField(body, 'bcdrAgentCount')?.toLocaleString() ?? '0';
     const saasDomainCount = numberField(body, 'saasDomainCount')?.toLocaleString() ?? '0';
@@ -5717,6 +5727,13 @@ function formatIntegrationTestSuccess(integrationId: IntegrationId, body: Record
     const siteCount = numberField(body, 'siteCount')?.toLocaleString() ?? '0';
     const accountCount = numberField(body, 'accountCount')?.toLocaleString() ?? '0';
     return `Connection OK. SentinelOne returned ${accountCount} accounts and ${siteCount} sites.`;
+  }
+
+  if (integrationId === 'proofpoint') {
+    const stackCount = numberField(body, 'stackCount')?.toLocaleString() ?? '1';
+    const organizationCount = numberField(body, 'organizationCount')?.toLocaleString() ?? '0';
+    const firstOrganizationUserCount = numberField(body, 'firstOrganizationUserCount')?.toLocaleString() ?? '0';
+    return `Connection OK. Proofpoint returned ${organizationCount} organizations across ${stackCount} stacks and ${firstOrganizationUserCount} users for the first organization.`;
   }
 
   if (integrationId === 'huntress') {
@@ -5824,8 +5841,10 @@ function numberField(record: Record<string, unknown>, key: string) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function reconcileIssuesFromRun(run: ReconciliationRunResponse): ReconcileIssue[] {
-  const sourceName = reconciliationSourceName(run.vendorId);
+function reconcileIssuesFromRun(
+  run: ReconciliationRunResponse,
+  sourceName = reconciliationSourceName(run.vendorId),
+): ReconcileIssue[] {
   return run.lines.map((line) => {
     const customer = line.customerName ?? `Customer ${shortId(line.clientId)}`;
     const agreement = line.agreementName ?? `Agreement ${shortId(line.agreementId)}`;
@@ -6097,7 +6116,7 @@ function App() {
   const [vendorDatapoints, setVendorDatapoints] = useState<VendorDatapointRecord[]>([]);
   const [vendorDatapointLoadState, setVendorDatapointLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [vendorDatapointMessage, setVendorDatapointMessage] = useState('Saved vendor datapoints with reusable column maps.');
-  const [showCreateVendorDatapoint, setShowCreateVendorDatapoint] = useState(false);
+  const [createVendorDatapointTarget, setCreateVendorDatapointTarget] = useState<IntegrationId | 'standalone' | null>(null);
   const [editingVendorDatapointId, setEditingVendorDatapointId] = useState<string | null>(null);
   const [selectedVendorDatapointId, setSelectedVendorDatapointId] = useState<string | null>(null);
   const [integrationActionMessages, setIntegrationActionMessages] = useState<Partial<Record<IntegrationId, string>>>({});
@@ -6315,7 +6334,7 @@ function App() {
     const datapoint = await createVendorDatapointRequest(payload);
     setVendorDatapoints((current) => [...current, datapoint].sort((left, right) => left.displayName.localeCompare(right.displayName)));
     setSelectedVendorDatapointId(datapoint.id);
-    setShowCreateVendorDatapoint(false);
+    setCreateVendorDatapointTarget(null);
     setVendorDatapointMessage(`Created ${datapoint.displayName}. Upload a file to save its column map.`);
     return datapoint;
   };
@@ -7507,7 +7526,7 @@ function App() {
 
   const loadCustomerVendorData = async (
     client: ClientGroup,
-    vendorId: IntegrationId,
+    vendorId: VendorKey,
     vendor: string,
   ): Promise<VendorDataSelection> => {
     const dataset = rawSyncDatasetForVendorData(vendorId);
@@ -7522,7 +7541,7 @@ function App() {
     }
 
     if (!syncRunId) {
-      throw new Error(`No completed ${integrationName(vendorId)} raw sync is available yet.`);
+      throw new Error(`No completed ${vendorDisplayName(vendorId, vendorDatapoints)} raw sync is available yet.`);
     }
 
     const details = await fetchRawSyncDetails(vendorId, syncRunId, dataset, {
@@ -7720,7 +7739,7 @@ function App() {
 
     try {
       const run = await fetchReconciliationRun(vendorId);
-      const nextIssues = reconcileIssuesFromRun(run);
+      const nextIssues = reconcileIssuesFromRun(run, sourceName);
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
         [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
@@ -7807,7 +7826,9 @@ function App() {
 
     try {
       const runs = await Promise.all(uniqueVendorIds.map((vendorId) => fetchReconciliationRun(vendorId)));
-      const nextIssues = runs.flatMap(reconcileIssuesFromRun);
+      const nextIssues = runs.flatMap((run) =>
+        reconcileIssuesFromRun(run, vendorDisplayName(run.vendorId, vendorDatapoints)),
+      );
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
         [...nextReviewIssues].sort(compareIssuesByCustomer)[0] ?? [...nextIssues].sort(compareIssuesByCustomer)[0];
@@ -8083,7 +8104,9 @@ function App() {
   const invoiceImportIntegrations = useMemo(
     () =>
       sortIntegrationsForDisplay(
-        integrations.filter((integration) => integrationHasCapability(integration.id, 'invoice-import')),
+        integrations.filter(
+          (integration) => integration.id !== 'custom-table' && integrationHasCapability(integration.id, 'invoice-import'),
+        ),
       ),
     [integrations],
   );
@@ -8452,7 +8475,14 @@ function App() {
       const createdNumbers = result.tickets.map((ticket) => ticket.connectWiseTicketNumber).join(', ');
       const failureText =
         result.failures.length > 0
-          ? ` Some vendors failed: ${result.failures.map((failure) => `${failure.vendorId} (${failure.error})`).join('; ')}`
+          ? ` Some vendors failed: ${result.failures
+              .map((failure) => {
+                const name = isVendorKey(failure.vendorId)
+                  ? vendorDisplayName(failure.vendorId, vendorDatapoints)
+                  : failure.vendorId;
+                return `${name} (${failure.error})`;
+              })
+              .join('; ')}`
           : '';
       window.alert(
         result.tickets.length > 0
@@ -9673,7 +9703,10 @@ function App() {
                           {job.progress ? (
                             <div className="sync-tracker-progress">
                               <div className="sync-tracker-progress-label">
-                                <span>{job.progress.completed.toLocaleString()} of {job.progress.total.toLocaleString()} {job.progress.unitLabel}</span>
+                                <span>
+                                  {job.progress.completed.toLocaleString()} of {job.progress.total.toLocaleString()} {job.progress.unitLabel}
+                                  {' · '}{Math.max(0, job.progress.total - job.progress.completed).toLocaleString()} remaining
+                                </span>
                                 <strong>{syncJobProgressPercent(job.progress.completed, job.progress.total)}%</strong>
                               </div>
                               <div className="sync-tracker-progress-rail" aria-hidden="true">
@@ -9905,7 +9938,7 @@ function App() {
               vendorDatapointLoadState={vendorDatapointLoadState}
               vendorDatapointMessage={vendorDatapointMessage}
               selectedVendorDatapointId={selectedVendorDatapointId}
-              onCreateVendorDatapoint={() => setShowCreateVendorDatapoint(true)}
+              onCreateVendorDatapoint={(integrationId) => setCreateVendorDatapointTarget(integrationId ?? 'standalone')}
               onEditVendorDatapoint={setEditingVendorDatapointId}
               onSelectVendorDatapoint={setSelectedVendorDatapointId}
               onImportVendorDatapoint={importVendorDatapoint}
@@ -9914,10 +9947,12 @@ function App() {
               onUpdateVendorDatapoint={updateVendorDatapoint}
             />
           )}
-          {showCreateVendorDatapoint ? (
+          {createVendorDatapointTarget ? (
             <CreateVendorDatapointModal
               integrations={integrations}
-              onClose={() => setShowCreateVendorDatapoint(false)}
+              initialLinkedIntegrationId={createVendorDatapointTarget === 'standalone' ? undefined : createVendorDatapointTarget}
+              manualIntegrationOnly={createVendorDatapointTarget === 'standalone'}
+              onClose={() => setCreateVendorDatapointTarget(null)}
               onCreate={createVendorDatapoint}
             />
           ) : null}
@@ -11172,6 +11207,7 @@ function formatAppRiverSyncProgress(status: RuntimeIntegrationSummary['operation
   if (!progress) {
     return 'Queued AppRiver sync. Waiting for the background worker to gather customers.';
   }
+
   const count = `${progress.processedCustomers.toLocaleString()} / ${progress.totalCustomers.toLocaleString()}`;
   if (status?.lastSyncStatus === 'complete') {
     return `AppRiver sync complete. Progress: ${count}${progress.failedCustomers > 0 ? ` · ${progress.failedCustomers.toLocaleString()} failed` : ''}.`;
@@ -12463,7 +12499,7 @@ function ReconcileView(props: {
   needsReviewOnly: boolean;
   onCountSourceSelect: (issueId: string, countSource: ReconciliationCountSource) => void;
   onExportReport: () => Promise<void>;
-  onLoadVendorData: (client: ClientGroup, vendorId: IntegrationId, vendor: string) => Promise<VendorDataSelection>;
+  onLoadVendorData: (client: ClientGroup, vendorId: VendorKey, vendor: string) => Promise<VendorDataSelection>;
   onManualOverride: (issue: ReconcileIssue) => void;
   onOpenAgreementAdditions: (client: ClientGroup) => void;
   onOpenTicket: (client: ClientGroup) => void;
@@ -12586,7 +12622,7 @@ function ReconcileView(props: {
     if (step.label === 'Unresolved exposure') return { ...step, value: formatCurrency(totalExposure) };
     return step;
   });
-  const openVendorData = async (client: ClientGroup, vendorId: IntegrationId, vendor: string) => {
+  const openVendorData = async (client: ClientGroup, vendorId: VendorKey, vendor: string) => {
     setVendorDataSelection({
       customer: client.customer,
       vendorId,
@@ -12902,9 +12938,9 @@ function ReconcileView(props: {
                                 ) : null}
                                 <button
                                   className="vendor-data-link"
-                                  disabled={!vendorId || !isRegistryIntegrationId(vendorId)}
+                                  disabled={!vendorId || vendorId === crossVendorBundlesVendorId}
                                   onClick={() => {
-                                    if (vendorId && isRegistryIntegrationId(vendorId)) {
+                                    if (vendorId && vendorId !== crossVendorBundlesVendorId) {
                                       void openVendorData(client, vendorId, vendor);
                                     }
                                   }}
@@ -14643,7 +14679,7 @@ function IntegrationsView(props: {
   vendorDatapointLoadState: 'idle' | 'loading' | 'ready' | 'failed';
   vendorDatapointMessage: string;
   selectedVendorDatapointId: string | null;
-  onCreateVendorDatapoint: () => void;
+  onCreateVendorDatapoint: (linkedIntegrationId?: IntegrationId) => void;
   onEditVendorDatapoint: (datapointId: string) => void;
   onSelectVendorDatapoint: (datapointId: string | null) => void;
   onImportVendorDatapoint: (
@@ -14709,16 +14745,21 @@ function IntegrationsView(props: {
   const [workflowTabByIntegration, setWorkflowTabByIntegration] = useState<Partial<Record<IntegrationId, IntegrationWorkflowTab>>>({});
   const [invoiceWizardIntegrationId, setInvoiceWizardIntegrationId] = useState<IntegrationId | '' | null>(null);
   const [templateManagerIntegrationId, setTemplateManagerIntegrationId] = useState<IntegrationId | null>(null);
-  const connectedCount = integrations.filter((integration) => integration.status === 'connected').length;
-  const degradedCount = integrations.filter((integration) => integration.status === 'degraded').length;
+  const catalogIntegrations = integrations.filter((integration) => integration.id !== 'custom-table');
+  const manualIntegrations = vendorDatapoints
+    .filter((datapoint) => datapoint.active && !datapoint.linkedIntegrationId)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+  const connectedCount = catalogIntegrations.filter((integration) => integration.status === 'connected').length
+    + manualIntegrations.filter((datapoint) => Object.keys(datapoint.columnMap).length > 0).length;
+  const degradedCount = catalogIntegrations.filter((integration) => integration.status === 'degraded').length;
   const activeIntegrations = sortIntegrationsForDisplay(
-    integrations.filter((integration) => isActiveApiIntegration(integration)),
+    catalogIntegrations.filter((integration) => isActiveApiIntegration(integration)),
   );
   const availableIntegrations = sortIntegrationsForDisplay(
-    integrations.filter((integration) => isImplementedIntegration(integration.id) && !isActiveApiIntegration(integration)),
+    catalogIntegrations.filter((integration) => isImplementedIntegration(integration.id) && !isActiveApiIntegration(integration)),
   );
   const comingSoonIntegrations = sortIntegrationsForDisplay(
-    integrations.filter((integration) => !isImplementedIntegration(integration.id)),
+    catalogIntegrations.filter((integration) => !isImplementedIntegration(integration.id)),
   );
   const renderIntegrationPanel = (integration: Integration, comingSoon = false) => {
     const scopedDatapoints = vendorDatapoints.filter((datapoint) =>
@@ -14736,10 +14777,12 @@ function IntegrationsView(props: {
       enableInvoiceImportSettingKey,
       scopedImports.length > 0,
     );
+    const hasManualImports =
+      (integrationHasCapability(integration.id, 'mapping') && manualEnabled) ||
+      (integrationHasCapability(integration.id, 'invoice-import') && invoiceEnabled);
     const workflowTabs = comingSoon ? [] : [
       ...(hasLiveIntegrationActions(integration.id) && apiEnabled ? [{ id: 'api' as const, label: 'API Sync' }] : []),
-      ...(integrationHasCapability(integration.id, 'mapping') && manualEnabled ? [{ id: 'manual' as const, label: 'Manual Detail Imports' }] : []),
-      ...(integrationHasCapability(integration.id, 'invoice-import') && invoiceEnabled ? [{ id: 'invoice' as const, label: 'Invoice Import' }] : []),
+      ...(hasManualImports ? [{ id: 'manual' as const, label: 'Manual Imports' }] : []),
     ];
     const requestedTab = workflowTabByIntegration[integration.id];
     const activeWorkflow = workflowTabs.some((item) => item.id === requestedTab) ? requestedTab : workflowTabs[0]?.id;
@@ -14775,36 +14818,61 @@ function IntegrationsView(props: {
         onSync={onSync}
         onWorkflowChange={(tab) => {
           setWorkflowTabByIntegration((current) => ({ ...current, [integration.id]: tab }));
-          if (tab === 'invoice') onInvoiceIntegrationChange(integration.id);
+          if (tab === 'manual' && invoiceEnabled) onInvoiceIntegrationChange(integration.id);
         }}
         workflowTabs={workflowTabs}
       >
         {activeWorkflow === 'manual' ? (
-          <VendorDatapointsView
+          <CompactManualImportsPanel
             datapoints={scopedDatapoints}
-            integrations={[integration]}
-            loadState={vendorDatapointLoadState}
-            message={vendorDatapointMessage}
-            onCreate={onCreateVendorDatapoint}
-            onEdit={onEditVendorDatapoint}
-            onImport={onImportVendorDatapoint}
-            onOpenMappings={(vendorId) => onOpenMappings(vendorId)}
-            onSaveMapping={onSaveVendorDatapointMapping}
-            onDeleteImport={onDeleteDatapointImport}
-            onSelect={onSelectVendorDatapoint}
-            selectedDatapoint={selectedVendorDatapoint}
-          />
-        ) : activeWorkflow === 'invoice' ? (
-          <VendorInvoiceIntegrationPanel
-            imports={scopedImports}
             integration={integration}
-            loadState={invoiceLoadState}
-            message={invoiceMessage}
-            onEditTemplates={() => setTemplateManagerIntegrationId(integration.id)}
-            onImport={() => setInvoiceWizardIntegrationId(integration.id)}
-            onReviewImport={onInvoiceReviewImport}
+            invoiceEnabled={invoiceEnabled}
+            invoiceImports={scopedImports}
+            onCreate={() => onCreateVendorDatapoint(integration.id)}
+            onConfigureDatapoint={onEditVendorDatapoint}
+            onConfigureInvoices={() => setTemplateManagerIntegrationId(integration.id)}
+            onImport={onImportVendorDatapoint}
+            onImportInvoice={() => setInvoiceWizardIntegrationId(integration.id)}
           />
         ) : null}
+      </IntegrationCard>
+    );
+  };
+  const renderManualIntegrationPanel = (datapoint: VendorDatapointRecord) => {
+    const customTable = integrations.find((integration) => integration.id === 'custom-table');
+    if (!customTable) return null;
+    const hasSavedMapping = Object.keys(datapoint.columnMap).length > 0;
+    const manualIntegration: Integration = {
+      ...customTable,
+      name: datapoint.displayName,
+      category: 'Manual import',
+      description: datapoint.description ?? 'Persistent file import with a reusable column map.',
+      status: hasSavedMapping ? 'connected' : 'not-configured',
+      lastSync: formatDateTime(datapoint.lastImportedAt),
+      records: datapoint.lastImportRowCount?.toLocaleString(),
+      enabled: true,
+    };
+
+    return (
+      <IntegrationCard
+        activeWorkflow="manual"
+        integration={manualIntegration}
+        key={datapoint.vendorId}
+        mappingVendorId={datapoint.vendorId}
+        onConfigure={() => onEditVendorDatapoint(datapoint.id)}
+        onOpenMappings={onOpenMappings}
+        workflowTabs={[{ id: 'manual', label: 'Manual Imports' }]}
+      >
+        <CompactManualImportsPanel
+          datapoints={[datapoint]}
+          integration={manualIntegration}
+          invoiceEnabled={false}
+          invoiceImports={[]}
+          onConfigureDatapoint={onEditVendorDatapoint}
+          onConfigureInvoices={() => undefined}
+          onImport={onImportVendorDatapoint}
+          onImportInvoice={() => undefined}
+        />
       </IntegrationCard>
     );
   };
@@ -14820,9 +14888,9 @@ function IntegrationsView(props: {
         <div className="integrations-live-meta">
           <span>{connectedCount} connected</span>
           <span>{degradedCount} degraded</span>
-          <button className="button primary compact" onClick={() => setInvoiceWizardIntegrationId('')} type="button">
-            <Upload size={16} />
-            Import vendor invoice
+          <button className="button primary compact" onClick={() => onCreateVendorDatapoint()} type="button">
+            <Plus size={16} />
+            Create New
           </button>
           <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
             <RefreshCcw size={16} />
@@ -14832,6 +14900,7 @@ function IntegrationsView(props: {
       </div>
 
       <div className="integration-list" aria-label="Enabled integrations">
+        {manualIntegrations.map((datapoint) => renderManualIntegrationPanel(datapoint))}
         {activeIntegrations.map((integration) => renderIntegrationPanel(integration))}
       </div>
 
@@ -14884,6 +14953,158 @@ function IntegrationsView(props: {
           onClose={() => setTemplateManagerIntegrationId(null)}
         />
       ) : null}
+    </section>
+  );
+}
+
+function CompactManualImportsPanel(props: {
+  datapoints: VendorDatapointRecord[];
+  integration: Integration;
+  invoiceEnabled: boolean;
+  invoiceImports: InvoiceImportSummary[];
+  onCreate?: () => void;
+  onConfigureDatapoint: (datapointId: string) => void;
+  onConfigureInvoices: () => void;
+  onImport: (
+    datapoint: VendorDatapointRecord,
+    file: File,
+    columnMap: InvoiceTableColumnMap,
+    persistColumnMap: boolean,
+  ) => Promise<{ datapoint: VendorDatapointRecord; import: InvoiceImportSummary }>;
+  onImportInvoice: () => void;
+}) {
+  const {
+    datapoints,
+    integration,
+    invoiceEnabled,
+    invoiceImports,
+    onCreate,
+    onConfigureDatapoint,
+    onConfigureInvoices,
+    onImport,
+    onImportInvoice,
+  } = props;
+  const [busyDatapointId, setBusyDatapointId] = useState<string | null>(null);
+  const [message, setMessage] = useState<string>('');
+  const hasInvoiceDatapoint = datapoints.some((datapoint) =>
+    datapoint.sourceType === 'invoice' || datapoint.sourceType === 'reseller-product-total',
+  );
+  const showManagedInvoice = invoiceEnabled && !hasInvoiceDatapoint;
+  const latestInvoice = invoiceImports[0];
+
+  const importDatapointFile = async (datapoint: VendorDatapointRecord, file: File) => {
+    if (Object.keys(datapoint.columnMap).length === 0) {
+      setMessage(`${vendorDatapointSourceLabel(datapoint.sourceType)} needs a saved column map before importing.`);
+      onConfigureDatapoint(datapoint.id);
+      return;
+    }
+
+    setBusyDatapointId(datapoint.id);
+    setMessage(`Importing ${file.name}...`);
+    try {
+      const table = await readImportTableFile(file);
+      const columnMap = mergeInvoiceTableColumnMap(datapoint.columnMap, table.headers, datapoint.sourceType);
+      if (!columnMapSatisfiesSourceType(datapoint.sourceType, columnMap)) {
+        setMessage(`The columns in ${file.name} no longer match the saved configuration.`);
+        onConfigureDatapoint(datapoint.id);
+        return;
+      }
+      const result = await onImport(datapoint, file, columnMap, false);
+      setMessage(
+        `Imported ${result.import.rowCount.toLocaleString()} row${result.import.rowCount === 1 ? '' : 's'} from ${file.name}.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to import this file.');
+    } finally {
+      setBusyDatapointId(null);
+    }
+  };
+
+  return (
+    <section className="compact-manual-imports" aria-label={`${integration.name} manual import sources`}>
+      <div className="compact-manual-imports-header">
+        <div>
+          <strong>Import sources</strong>
+          <span>Import a file or open Configuration for mappings, columns, and other details.</span>
+        </div>
+        {onCreate ? (
+          <button className="button secondary compact" onClick={onCreate} type="button">
+            <Plus size={15} /> Add source
+          </button>
+        ) : null}
+      </div>
+
+      <div className="compact-manual-import-list">
+        {datapoints.map((datapoint) => {
+          const configured = Object.keys(datapoint.columnMap).length > 0;
+          const importing = busyDatapointId === datapoint.id;
+          return (
+            <div className="compact-manual-import-row" key={datapoint.id}>
+              <div className="compact-manual-import-name">
+                <strong>{vendorDatapointSourceLabel(datapoint.sourceType)}</strong>
+                <span>
+                  {datapoint.displayName}
+                  {datapoint.lastImportedAt ? ` · ${formatDateTime(datapoint.lastImportedAt)}` : ' · Never imported'}
+                  {typeof datapoint.lastImportRowCount === 'number' ? ` · ${datapoint.lastImportRowCount.toLocaleString()} rows` : ''}
+                </span>
+              </div>
+              <span className={configured ? 'integration-operation-state completed' : 'integration-operation-state never'}>
+                {configured ? 'Configured' : 'Needs setup'}
+              </span>
+              <div className="compact-manual-import-actions">
+                <button className="button secondary compact" onClick={() => onConfigureDatapoint(datapoint.id)} type="button">
+                  <Settings2 size={15} /> Configuration
+                </button>
+                <label className={importing ? 'button primary compact file-upload-button disabled' : 'button primary compact file-upload-button'}>
+                  <Upload size={15} /> {importing ? 'Importing' : 'Import'}
+                  <input
+                    accept=".csv,.json,.xls,.xlsx,text/csv,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    disabled={importing}
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = '';
+                      if (file) void importDatapointFile(datapoint, file);
+                    }}
+                    type="file"
+                  />
+                </label>
+              </div>
+            </div>
+          );
+        })}
+
+        {showManagedInvoice ? (
+          <div className="compact-manual-import-row">
+            <div className="compact-manual-import-name">
+              <strong>Invoices</strong>
+              <span>
+                {latestInvoice
+                  ? `${latestInvoice.templateName ?? 'Saved template'} · ${formatDateTime(latestInvoice.importedAt)} · ${latestInvoice.rowCount.toLocaleString()} rows`
+                  : 'Template-based invoice import · Never imported'}
+              </span>
+            </div>
+            <span className={latestInvoice ? 'integration-operation-state completed' : 'integration-operation-state never'}>
+              {latestInvoice ? 'Configured' : 'Ready to set up'}
+            </span>
+            <div className="compact-manual-import-actions">
+              <button className="button secondary compact" onClick={onConfigureInvoices} type="button">
+                <Settings2 size={15} /> Configuration
+              </button>
+              <button className="button primary compact" onClick={onImportInvoice} type="button">
+                <Upload size={15} /> Import
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {datapoints.length === 0 && !showManagedInvoice ? (
+          <div className="compact-manual-import-empty">
+            <span>No manual import sources are configured.</span>
+            {onCreate ? <button className="button secondary compact" onClick={onCreate} type="button">Add source</button> : null}
+          </div>
+        ) : null}
+      </div>
+      {message ? <p className="compact-manual-import-message">{message}</p> : null}
     </section>
   );
 }
@@ -15226,17 +15447,29 @@ function InvoiceColumnMapGrid(props: {
 
 function CreateVendorDatapointModal(props: {
   integrations: Integration[];
+  initialLinkedIntegrationId?: IntegrationId;
+  manualIntegrationOnly?: boolean;
   onClose: () => void;
   onCreate: (payload: CreateVendorDatapointInput) => Promise<VendorDatapointRecord>;
 }) {
-  const { integrations, onClose, onCreate } = props;
+  const {
+    integrations,
+    initialLinkedIntegrationId,
+    manualIntegrationOnly = false,
+    onClose,
+    onCreate,
+  } = props;
   const [displayName, setDisplayName] = useState('');
   const [description, setDescription] = useState('');
-  const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>('');
+  const [linkedIntegrationId, setLinkedIntegrationId] = useState<IntegrationId | ''>(initialLinkedIntegrationId ?? '');
   const [sourceType, setSourceType] = useState<IntegrationDataSourceType>('customer-product-breakdown');
   const [dataSourceKey, setDataSourceKey] = useState('');
   const [syncMode, setSyncMode] = useState<ManualImportSyncMode>('full-vendor-sync');
-  const [message, setMessage] = useState('Name this vendor datapoint and choose what the file contains.');
+  const [message, setMessage] = useState(
+    manualIntegrationOnly
+      ? 'Name the vendor and choose the type of file you will import each month.'
+      : 'Name this vendor datapoint and choose what the file contains.',
+  );
   const [saving, setSaving] = useState(false);
   const linkableIntegrations = integrations.filter(
     (integration) => integrationHasCapability(integration.id, 'mapping') && integration.id !== 'custom-table',
@@ -15256,17 +15489,17 @@ function CreateVendorDatapointModal(props: {
 
   const submit = async () => {
     if (!displayName.trim()) {
-      setMessage('Enter a display name for this vendor datapoint.');
+      setMessage(manualIntegrationOnly ? 'Enter an integration name.' : 'Enter a display name for this vendor datapoint.');
       return;
     }
 
     setSaving(true);
-    setMessage('Creating vendor datapoint...');
+    setMessage(manualIntegrationOnly ? 'Creating manual integration...' : 'Creating vendor datapoint...');
     try {
       await onCreate({
         displayName: displayName.trim(),
         description: description.trim() || undefined,
-        linkedIntegrationId: linkedIntegrationId || undefined,
+        linkedIntegrationId: manualIntegrationOnly ? undefined : linkedIntegrationId || undefined,
         dataSourceKey: dataSourceKey || undefined,
         sourceType,
         syncMode,
@@ -15282,8 +15515,10 @@ function CreateVendorDatapointModal(props: {
       <div aria-labelledby="create-vendor-datapoint-title" className="modal-card integration-modal" role="dialog">
         <div className="surface-header">
           <div>
-            <span className="section-kicker">Vendor datapoint</span>
-            <h2 id="create-vendor-datapoint-title">Create vendor datapoint</h2>
+            <span className="section-kicker">{manualIntegrationOnly ? 'Manual imports' : 'Vendor datapoint'}</span>
+            <h2 id="create-vendor-datapoint-title">
+              {manualIntegrationOnly ? 'Create manual integration' : 'Create vendor datapoint'}
+            </h2>
           </div>
           <button className="icon-button" onClick={onClose} title="Close" type="button">
             <X size={18} />
@@ -15291,24 +15526,26 @@ function CreateVendorDatapointModal(props: {
         </div>
         <div className="integration-modal-body">
           <label className="config-field">
-            <span>Display name *</span>
+            <span>{manualIntegrationOnly ? 'Integration name *' : 'Display name *'}</span>
             <input onChange={(event) => setDisplayName(event.target.value)} value={displayName} />
           </label>
           <label className="config-field">
             <span>Description</span>
             <input onChange={(event) => setDescription(event.target.value)} value={description} />
           </label>
-          <label className="config-field">
-            <span>Linked integration</span>
-            <select onChange={(event) => setLinkedIntegrationId(event.target.value as IntegrationId | '')} value={linkedIntegrationId}>
-              <option value="">Standalone vendor datapoint</option>
-              {linkableIntegrations.map((integration) => (
-                <option key={integration.id} value={integration.id}>
-                  {integration.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {!manualIntegrationOnly ? (
+            <label className="config-field">
+              <span>Linked integration</span>
+              <select onChange={(event) => setLinkedIntegrationId(event.target.value as IntegrationId | '')} value={linkedIntegrationId}>
+                <option value="">Standalone vendor datapoint</option>
+                {linkableIntegrations.map((integration) => (
+                  <option key={integration.id} value={integration.id}>
+                    {integration.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="config-field">
             <span>Source type *</span>
             <select onChange={(event) => setSourceType(event.target.value as IntegrationDataSourceType)} value={sourceType}>
@@ -15320,13 +15557,15 @@ function CreateVendorDatapointModal(props: {
               <option value="reseller-product-total">Reseller product totals</option>
             </select>
           </label>
-          <label className="config-field">
-            <span>Data stream</span>
-            <select disabled={compatibleStreams.length === 0} onChange={(event) => setDataSourceKey(event.target.value)} value={dataSourceKey}>
-              {compatibleStreams.length === 0 ? <option value="">Legacy / unassigned</option> : null}
-              {compatibleStreams.map((source) => <option key={source.key} value={source.key}>{source.label}</option>)}
-            </select>
-          </label>
+          {!manualIntegrationOnly ? (
+            <label className="config-field">
+              <span>Data stream</span>
+              <select disabled={compatibleStreams.length === 0} onChange={(event) => setDataSourceKey(event.target.value)} value={dataSourceKey}>
+                {compatibleStreams.length === 0 ? <option value="">Legacy / unassigned</option> : null}
+                {compatibleStreams.map((source) => <option key={source.key} value={source.key}>{source.label}</option>)}
+              </select>
+            </label>
+          ) : null}
           <div className="segmented-control invoice-source-toggle" role="group" aria-label="Vendor datapoint sync mode">
             <button className={syncMode === 'full-vendor-sync' ? 'active' : ''} onClick={() => setSyncMode('full-vendor-sync')} type="button">
               Full sync
@@ -15622,6 +15861,7 @@ function VendorDatapointsView(props: {
   onDeleteImport: (datapoint: VendorDatapointRecord, invoiceImport: InvoiceImportSummary) => Promise<void>;
   onSelect: (datapointId: string | null) => void;
   selectedDatapoint?: VendorDatapointRecord;
+  singleIntegration?: boolean;
 }) {
   const {
     datapoints,
@@ -15635,6 +15875,7 @@ function VendorDatapointsView(props: {
     onDeleteImport,
     onSelect,
     selectedDatapoint,
+    singleIntegration = false,
   } = props;
   const [importing, setImporting] = useState(false);
   const [savingMapping, setSavingMapping] = useState(false);
@@ -15859,7 +16100,7 @@ function VendorDatapointsView(props: {
   const pendingDatapoint = pendingDatapointId ? datapoints.find((item) => item.id === pendingDatapointId) : undefined;
 
   return (
-    <section className="vendor-datapoints-view">
+    <section className={singleIntegration ? 'vendor-datapoints-view single-integration' : 'vendor-datapoints-view'}>
       <div className="vendor-datapoints-layout">
         <aside className="vendor-datapoints-sidebar work-surface">
           <div className="surface-header vendor-datapoints-sidebar-header">
@@ -16170,8 +16411,9 @@ function IntegrationCard(props: {
   children?: ReactNode;
   comingSoon?: boolean;
   integration: Integration;
+  mappingVendorId?: VendorKey;
   onConfigure?: () => void;
-  onOpenMappings?: (integrationId: IntegrationId) => void;
+  onOpenMappings?: (integrationId: VendorKey) => void;
   onSync?: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
   onWorkflowChange?: (tab: IntegrationWorkflowTab) => void;
   workflowTabs?: Array<{ id: IntegrationWorkflowTab; label: string }>;
@@ -16183,6 +16425,7 @@ function IntegrationCard(props: {
     children,
     comingSoon = false,
     integration,
+    mappingVendorId,
     onConfigure,
     onOpenMappings,
     onSync,
@@ -16190,9 +16433,19 @@ function IntegrationCard(props: {
     workflowTabs = [],
   } = props;
   const displayName = comingSoon ? `${integration.name} (Coming Soon)` : integration.name;
+  const paymentLinkOnly =
+    integrationHasCapability(integration.id, 'payment-link') &&
+    !integrationHasCapability(integration.id, 'live-api') &&
+    !integrationHasCapability(integration.id, 'mapping') &&
+    !integrationHasCapability(integration.id, 'invoice-import');
+  const cardClassName = [
+    'integration-card',
+    comingSoon ? 'coming-soon' : '',
+    paymentLinkOnly ? 'payment-link-card' : '',
+  ].filter(Boolean).join(' ');
 
   return (
-    <article aria-disabled={comingSoon || undefined} className={comingSoon ? 'integration-card coming-soon' : 'integration-card'}>
+    <article aria-disabled={comingSoon || undefined} className={cardClassName}>
       <div className="integration-main">
         <div className="integration-title-row">
           <h2>{displayName}</h2>
@@ -16202,10 +16455,14 @@ function IntegrationCard(props: {
         </div>
       </div>
 
-      <div className="integration-stats" aria-label={`${integration.name} integration status`}>
-        <IntegrationStat label="Last sync" value={comingSoon ? 'Unavailable' : integration.lastSync ?? 'Never'} />
-        <IntegrationStat label="Records" value={comingSoon ? '0' : integration.records ?? '0'} />
-      </div>
+      {!paymentLinkOnly ? (
+        <div className="integration-stats" aria-label={`${integration.name} integration status`}>
+          <IntegrationStat label="Last sync" value={comingSoon ? 'Unavailable' : integration.lastSync ?? 'Never'} />
+          <IntegrationStat label="Records" value={comingSoon ? '0' : integration.records ?? '0'} />
+        </div>
+      ) : null}
+
+      {paymentLinkOnly ? <p className="integration-purpose">{integration.description}</p> : null}
 
       <div className="integration-actions">
         {comingSoon ? (
@@ -16218,8 +16475,8 @@ function IntegrationCard(props: {
               <KeyRound size={16} />
               {integration.enabled ? 'Configure' : 'Configure to enable'}
             </button>
-            {hasAnyMappingWorkspace(integration.id) ? (
-              <button className="button secondary compact" onClick={() => onOpenMappings?.(integration.id)} type="button">
+            {hasAnyMappingWorkspace(mappingVendorId ?? integration.id) ? (
+              <button className="button secondary compact" onClick={() => onOpenMappings?.(mappingVendorId ?? integration.id)} type="button">
                 <Link2 size={16} />
                 Mapping
               </button>
@@ -16243,7 +16500,7 @@ function IntegrationCard(props: {
             </button>
           ))}
         </div>
-      ) : !comingSoon ? <p className="integration-no-workflows">No workflows enabled. Use Configure to enable one.</p> : null}
+      ) : !comingSoon && !paymentLinkOnly ? <p className="integration-no-workflows">No workflows enabled. Use Configure to enable one.</p> : null}
 
       {activeWorkflow === 'api' ? (
         <div className="integration-operation-list">
@@ -16268,9 +16525,7 @@ function IntegrationCard(props: {
         </div>
       ) : null}
 
-      <p className={`config-note integration-action-message${actionMessage ? '' : ' is-empty'}`}>
-        {actionMessage ?? '\u00a0'}
-      </p>
+      {actionMessage ? <p className="config-note integration-action-message">{actionMessage}</p> : null}
       {children ? <div className="integration-workflow-content">{children}</div> : null}
     </article>
   );
@@ -16557,7 +16812,7 @@ function MappingsView(props: {
   const [overrideHostname, setOverrideHostname] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
   const selectedIntegration = integrations.find((integration) => integration.id === selectedIntegrationId);
-  const selectedIntegrationName = selectedIntegration?.name ?? selectedIntegrationId;
+  const selectedIntegrationName = vendorDisplayName(selectedIntegrationId, vendorDatapoints);
   const doNotSuggestNewAdditions = selectedIntegration
     ? integrationDoNotSuggestNewAdditions(selectedIntegration.nonSecrets, {
         optionalNonSecrets: selectedIntegration.optionalNonSecrets,
@@ -21356,6 +21611,22 @@ function IntegrationModal(props: {
                       <select defaultValue={optionalIntegrationSettingValue(integration, setting)} name={`nonSecret:${setting.key}`}>
                         {(setting.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
+                    </label>
+                  ) : setting.inputType === 'text' || setting.inputType === 'textarea' ? (
+                    <label className={`config-field integration-setting-${setting.key}`} key={setting.key}>
+                      <span className="config-label">{setting.label}{setting.description ? <ConfigInfo text={setting.description} /> : null}</span>
+                      {setting.inputType === 'textarea' ? (
+                        <textarea
+                          defaultValue={optionalIntegrationSettingValue(integration, setting)}
+                          name={`nonSecret:${setting.key}`}
+                          rows={4}
+                        />
+                      ) : (
+                        <input
+                          defaultValue={optionalIntegrationSettingValue(integration, setting)}
+                          name={`nonSecret:${setting.key}`}
+                        />
+                      )}
                     </label>
                   ) : (
                     <label className={`config-checkbox integration-setting-${setting.key}`} key={setting.key}>

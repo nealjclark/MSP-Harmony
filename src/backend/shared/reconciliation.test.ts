@@ -67,6 +67,79 @@ assert.equal(ncentralWorkstationLine?.writeAction, 'update-addition');
 assert.equal(ncentralWorkstationLine?.sourceQuantity, 2);
 assert.equal(ncentralWorkstationLine?.agreementQuantity, 1);
 
+const caveloAliasRule = {
+  id: 'cavelo:cavelo-agent:device-count',
+  vendorId: 'cavelo',
+  vendorProductKey: 'cavelo-agent',
+  productCode: 'BMB Vulnerability Monitoring',
+  targetProductCodes: [
+    'BMB Vulnerability Monitoring',
+    'BMB Vulnerability Scan',
+    'Vulnerability Management',
+  ],
+  productName: 'BMB Vulnerability Monitoring',
+  sourceMetric: 'snapshot-count' as const,
+  billableUnit: 'device' as const,
+  notes: 'Cavelo aliases identify one existing ConnectWise addition.',
+};
+const caveloSnapshot: UsageSnapshot = {
+  id: 'cavelo-device-1',
+  vendorId: 'cavelo',
+  clientId: 'cavelo-client',
+  agreementId: 'cavelo-agreement',
+  vendorProductKey: 'cavelo-agent',
+  productCode: 'BMB Vulnerability Monitoring',
+  productName: 'BMB Vulnerability Monitoring',
+  quantity: 12,
+  observedAt: '2026-07-18T00:00:00.000Z',
+  dimensions: {},
+};
+const caveloAliasResult = reconcileVendorUsage({
+  vendorId: 'cavelo',
+  rules: [caveloAliasRule],
+  snapshots: [caveloSnapshot],
+  agreementAdditions: [
+    {
+      id: 'cavelo-primary-addition',
+      connectWiseAdditionId: '8101',
+      clientId: 'cavelo-client',
+      agreementId: 'cavelo-agreement',
+      productCode: 'BMB Vulnerability Monitoring',
+      productName: 'BMB Vulnerability Monitoring',
+      quantity: 4,
+    },
+    {
+      id: 'cavelo-customer-alias-addition',
+      connectWiseAdditionId: '8102',
+      clientId: 'cavelo-client',
+      agreementId: 'cavelo-agreement',
+      productCode: 'Vulnerability Management',
+      productName: 'Vulnerability Management',
+      quantity: 12,
+    },
+  ],
+});
+assert.equal(caveloAliasResult.lines.length, 2);
+const caveloAssignedAlias = caveloAliasResult.lines.find((line) => line.connectWiseAdditionId === '8102');
+const caveloDuplicateAddition = caveloAliasResult.lines.find((line) => line.connectWiseAdditionId === '8101');
+assert.equal(caveloAssignedAlias?.productCode, 'Vulnerability Management');
+assert.equal(caveloAssignedAlias?.vendorProductKey, 'cavelo-agent');
+assert.equal(caveloAssignedAlias?.agreementQuantity, 12);
+assert.equal(caveloAssignedAlias?.status, 'matched');
+assert.equal(caveloDuplicateAddition?.sourceQuantity, 0);
+assert.equal(caveloDuplicateAddition?.writeAction, 'review-required');
+
+const caveloMissingAdditionResult = reconcileVendorUsage({
+  vendorId: 'cavelo',
+  rules: [caveloAliasRule],
+  snapshots: [caveloSnapshot],
+  agreementAdditions: [],
+});
+assert.equal(caveloMissingAdditionResult.lines.length, 1);
+assert.equal(caveloMissingAdditionResult.lines[0]?.productCode, 'BMB Vulnerability Monitoring');
+assert.equal(caveloMissingAdditionResult.lines[0]?.vendorProductKey, 'cavelo-agent');
+assert.equal(caveloMissingAdditionResult.lines[0]?.writeAction, 'create-addition');
+
 const unmappedAppRiverResult = reconcileVendorUsage({
   vendorId: 'opentext-appriver',
   rules: [],
@@ -160,6 +233,83 @@ assert.equal(linkedAnchorLine?.sourceQuantity, 11);
 assert.equal(linkedAnchorLine?.delta, -1);
 assert.equal(linkedAnchorResult.lines.some((line) => line.lineType === 'unmapped-vendor'), false);
 assert.equal(linkedAnchorResult.totals.unmapped, 0);
+
+const linkedSharedTargetResult = reconcileVendorUsage({
+  vendorId: 'proofpoint',
+  rules: [
+    {
+      id: 'proofpoint:basic:mapped-count',
+      vendorId: 'proofpoint',
+      vendorProductKey: 'basic',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      sourceMetric: 'snapshot-count',
+      billableUnit: 'license',
+      notes: 'Proofpoint Basic mapping.',
+    },
+    {
+      id: 'proofpoint:business_plus:mapped-count',
+      vendorId: 'proofpoint',
+      vendorProductKey: 'business_plus',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      sourceMetric: 'snapshot-count',
+      billableUnit: 'license',
+      notes: 'Proofpoint Business+ mapping.',
+    },
+  ],
+  snapshots: [
+    {
+      id: 'proofpoint-business-live',
+      vendorId: 'proofpoint',
+      clientId: 'aps-pension',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'business_plus',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      quantity: 13,
+      observedAt: '2026-07-19T12:00:00Z',
+      dimensions: {},
+    },
+    {
+      id: 'proofpoint-basic-linked-anchor',
+      vendorId: 'proofpoint',
+      clientId: 'aps-pension',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'basic',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      quantity: 0,
+      observedAt: '2026-07-19T12:00:00Z',
+      dimensions: { linkedCountAnchor: true },
+    },
+    {
+      id: 'proofpoint-business-linked-anchor',
+      vendorId: 'proofpoint',
+      clientId: 'aps-pension',
+      agreementId: 'monthly-services',
+      vendorProductKey: 'business_plus',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      quantity: 0,
+      observedAt: '2026-07-19T12:00:00Z',
+      dimensions: { linkedCountAnchor: true },
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'proofpoint-business-addition',
+      clientId: 'aps-pension',
+      agreementId: 'monthly-services',
+      productCode: 'Proofpoint Business+',
+      productName: 'Proofpoint Business+',
+      quantity: 14,
+    },
+  ],
+});
+const linkedSharedTargetLine = linkedSharedTargetResult.lines.find((line) => line.productCode === 'Proofpoint Business+');
+assert.equal(linkedSharedTargetLine?.sourceQuantity, 13);
+assert.equal(linkedSharedTargetLine?.vendorProductKey, 'business_plus');
 
 const sentinelRules = [
   {
@@ -432,11 +582,10 @@ const apsPensionMergeResult = reconcileVendorUsage({
     },
   ],
 });
-assert.equal(apsPensionMergeResult.lines.filter((line) => line.lineType === 'base-count').length, 2);
-assert.ok(apsPensionMergeResult.lines.some((line) => line.productName === 'Server Mgmt&Automation'));
-assert.ok(
-  apsPensionMergeResult.lines.some((line) => line.productName === 'Server Management & Automation Solution'),
-);
+assert.equal(apsPensionMergeResult.lines.filter((line) => line.lineType === 'base-count').length, 1);
+assert.equal(apsPensionMergeResult.lines[0]?.productCode, 'BMB Preferred Server Care');
+assert.equal(apsPensionMergeResult.lines[0]?.sourceQuantity, 2);
+assert.equal(apsPensionMergeResult.lines[0]?.connectWiseAdditionId, '9001');
 
 const apsPensionSeparateResult = reconcileVendorUsage({
   vendorId: 'ncentral',

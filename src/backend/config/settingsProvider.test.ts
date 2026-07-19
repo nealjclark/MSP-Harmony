@@ -110,7 +110,7 @@ async function run() {
   const missingPrivateKey = await keyVaultProvider.getIntegrationSettings('connectwise');
   assert.equal(missingPrivateKey.secretSource, 'key-vault');
   assert.equal(missingPrivateKey.keyVaultUrl, 'https://mspharmony-dev.vault.azure.net/');
-  assert.equal(missingPrivateKey.validation.configuredStatus, 'degraded');
+  assert.equal(missingPrivateKey.validation.configuredStatus, 'not-configured');
   assert.deepEqual(
     missingPrivateKey.validation.missingSecrets.map((secret) => secret.keyVaultSecretName),
     ['mspharmony-connectwise-private-key'],

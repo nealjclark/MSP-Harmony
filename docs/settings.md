@@ -26,6 +26,7 @@ Use these Key Vault secret names for the first implementation pass:
 | ConnectWise Manage | `mspharmony-connectwise-public-key`, `mspharmony-connectwise-private-key` |
 | WisePay | `mspharmony-wisepay-api-key` |
 | Cove Data Protection | `mspharmony-cove-username`, `mspharmony-cove-password` |
+| Cavelo | `mspharmony-cavelo-api-key` |
 | SentinelOne | `mspharmony-sentinelone-api-token` |
 | Proofpoint Essentials | `mspharmony-proofpoint-username`, `mspharmony-proofpoint-password` |
 | Datto Backup | `mspharmony-datto-api-key`, `mspharmony-datto-api-secret` |
@@ -43,8 +44,9 @@ Use these Key Vault secret names for the first implementation pass:
 | ConnectWise Manage | `endpoint`, `companyId`, `clientId` |
 | WisePay | `endpoint` |
 | Cove Data Protection | `endpoint`, `partnerName` |
+| Cavelo | `endpoint` |
 | SentinelOne | `endpoint` |
-| Proofpoint Essentials | `endpoint` |
+| Proofpoint Essentials | `endpoint`, `organizationDomain`; optional `additionalEndpoints` lines use `Stack URL | Partner Domain or UUID` and reuse the same credentials |
 | Datto Backup | `endpoint` |
 | Microsoft 365 | `endpoint`, `clientId`, `tenantId` |
 | AppRiver - OpenText | `endpoint`, `clientId` |
@@ -193,6 +195,12 @@ The Datto Backup integration covers Kaseya Datto BCDR and SaaS Protection under 
 Completed syncs store SaaS product-line summaries and optional BCDR protected agents in `vendor_usage_snapshots` with `vendor_id = 'datto'`. Default product keys are `datto-bcdr-agent`, `datto-saas-office365-icr`, `datto-saas-office365-tbr`, `datto-saas-googleapps-icr`, and `datto-saas-googleapps-tbr`; unknown Datto product/retention pairs become dynamic `datto-saas-{productType}-{retentionType}` keys for product mapping review.
 
 Datto SaaS external account IDs include the Datto account/domain key and product key, so a customer can map Office 365 ICR, Office 365 TBR, and Google Workspace product lines to different ConnectWise agreements when needed.
+
+## Cavelo Notes
+
+The Cavelo integration uses `X-API-Key` authentication against `CAVELO_ENDPOINT`, which defaults to `https://api.prod.cavelodata.com/v1`. Connection tests read `/organizations`; live syncs read `/organizations` and `/organizations/{organizationUuid}/agents`.
+
+Each completed sync stores one `vendor_usage_snapshots` row per active agent with vendor product key `cavelo-agent` and quantity `1`. An agent is active when it is enabled and its latest heartbeat is within the last 30 days. Organization identifiers and agent details are retained in dimensions and raw payloads; inactive totals are retained in sync metadata. Cavelo CSV/Excel invoices use the shared invoice preview, template, and approval workflow.
 
 ## Email Communication (Microsoft Graph)
 

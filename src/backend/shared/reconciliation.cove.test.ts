@@ -84,7 +84,7 @@ const alternateProductResult = reconcileVendorUsage({
       : addition,
   ),
 });
-const alternateProductServer = alternateProductResult.lines.find((line) => line.productCode === 'COVE-SERVER' && line.lineType === 'base-count');
+const alternateProductServer = alternateProductResult.lines.find((line) => line.productCode === 'ALT-COVE-SERVER' && line.lineType === 'base-count');
 assert.equal(alternateProductServer?.status, 'matched');
 assert.equal(alternateProductServer?.agreementQuantity, 2);
 
