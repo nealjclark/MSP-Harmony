@@ -1,4 +1,4 @@
-import { LoaderCircle, LogIn, LogOut, ShieldCheck } from 'lucide-react';
+import { Layers3, LoaderCircle, LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
@@ -171,7 +171,9 @@ export default function AccessGate({ children }: AccessGateProps) {
     <div className="access-gate">
       <div className="access-gate-card">
         <div className="access-gate-brand">
-          <span className="access-gate-mark">MH</span>
+          <div className="brand-mark" aria-hidden="true">
+            <Layers3 size={24} />
+          </div>
           <div>
             <p className="access-gate-kicker">MSP Harmony</p>
             <h1>Confirming your access</h1>

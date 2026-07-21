@@ -111,6 +111,7 @@ export type QueueAppRiverLicenseCleanupResult = {
   requested: number;
   queued: number;
   skipped: number;
+  matched: number;
   missing: number;
   duplicates: number;
 };
@@ -437,6 +438,7 @@ export async function queueAppRiverLicenseCleanupActions(
     chargeEvents: input.chargeEvents,
     now,
   });
+  const syncRunId = report.syncRun?.id;
   const candidatesById = new Map(report.rows.map((row) => [row.id, row]));
   const chargeIndex = buildChargeIncreaseIndex(input.chargeEvents ?? [], now, defaultWindowDays);
   const batchId = await createCleanupBatch(database, {
@@ -447,8 +449,30 @@ export async function queueAppRiverLicenseCleanupActions(
 
   let queued = 0;
   let skipped = 0;
+  let matched = 0;
   let missing = 0;
   let duplicates = 0;
+
+  if (!syncRunId) {
+    missing = uniqueRowIds.length;
+    skipped = missing;
+    await updateCleanupBatchAfterQueue(database, batchId, {
+      status: 'skipped',
+      queued: 0,
+      skipped,
+      now,
+    });
+    return {
+      batchId,
+      status: 'skipped',
+      requested: uniqueRowIds.length,
+      queued: 0,
+      skipped,
+      matched: 0,
+      missing,
+      duplicates: 0,
+    };
+  }
 
   for (const rowId of uniqueRowIds) {
     const candidate = candidatesById.get(rowId);
@@ -471,23 +495,50 @@ export async function queueAppRiverLicenseCleanupActions(
       continue;
     }
 
-    if (liveCandidate.skipReason || liveCandidate.proposedReduction <= 0) {
+    if (liveCandidate.skipReason) {
       skipped += 1;
       continue;
     }
 
+    // Live already matched: record a completed action and refresh the snapshot row.
+    if (liveCandidate.unassignedLicenses <= 0 || liveCandidate.proposedReduction <= 0) {
+      await insertMatchedCompleteAction(database, batchId, candidate, liveCandidate, now, syncRunId);
+      await upsertSubscriptionRefresh(database, {
+        actor: input.actor,
+        syncRunId,
+        candidate: {
+          ...liveCandidate,
+          proposedReduction: 0,
+          proposedQuantity: liveCandidate.totalLicenses,
+          refresh: {
+            syncRunId,
+            initialTotalLicenses: candidate.refresh?.initialTotalLicenses ?? candidate.totalLicenses,
+            initialAssignedLicenses: candidate.refresh?.initialAssignedLicenses ?? candidate.assignedLicenses,
+            initialUnassignedLicenses: candidate.refresh?.initialUnassignedLicenses ?? candidate.unassignedLicenses,
+            refreshedAt: now,
+            quantitySource: 'subscription',
+          },
+        },
+        now,
+      });
+      matched += 1;
+      continue;
+    }
+
     const requestedQuantity = input.requestedQuantities?.[rowId];
+    // Prefer an explicit quantity when still valid against live counts; otherwise
+    // decrease by whatever unassigned remains live (bulk approve path).
     const queuedCandidate =
       typeof requestedQuantity === 'number'
-        ? candidateWithRequestedQuantity(liveCandidate, requestedQuantity)
+        ? candidateWithRequestedQuantity(liveCandidate, requestedQuantity) ?? liveCandidate
         : liveCandidate;
-    if (!queuedCandidate) {
+    if (!queuedCandidate || queuedCandidate.proposedReduction <= 0) {
       skipped += 1;
       continue;
     }
 
     try {
-      await insertCleanupAction(database, batchId, queuedCandidate, now);
+      await insertCleanupAction(database, batchId, queuedCandidate, now, syncRunId);
       queued += 1;
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -500,7 +551,7 @@ export async function queueAppRiverLicenseCleanupActions(
 
   skipped += missing + duplicates;
   await updateCleanupBatchAfterQueue(database, batchId, {
-    status: queued > 0 ? 'queued' : 'skipped',
+    status: queued > 0 ? 'queued' : matched > 0 ? 'complete' : 'skipped',
     queued,
     skipped,
     now,
@@ -514,17 +565,20 @@ export async function queueAppRiverLicenseCleanupActions(
     payload: {
       requested: uniqueRowIds.length,
       queued,
+      matched,
       missing,
       duplicates,
+      syncRunId,
     },
   });
 
   return {
     batchId,
-    status: queued > 0 ? 'queued' : 'skipped',
+    status: queued > 0 ? 'queued' : matched > 0 ? 'complete' : 'skipped',
     requested: uniqueRowIds.length,
     queued,
     skipped,
+    matched,
     missing,
     duplicates,
   };
@@ -644,6 +698,14 @@ export async function queueAppRiverLicenseCleanupPreview(
     throw new Error('The requested decrease must leave a count below the refreshed total and at or above assigned usage.');
   }
 
+  const syncRun =
+    (queuedCandidate.refresh?.syncRunId
+      ? { id: queuedCandidate.refresh.syncRunId }
+      : undefined) ?? (await loadLatestAppRiverSyncRun(database));
+  if (!syncRun) {
+    throw new Error('AppRiver license cleanup requires a completed subscription snapshot before decreases can be queued.');
+  }
+
   const existing = await findActiveCleanupAction(
     database,
     queuedCandidate.externalCustomerId,
@@ -660,7 +722,7 @@ export async function queueAppRiverLicenseCleanupPreview(
     duplicates = 1;
   } else {
     try {
-      await insertCleanupAction(database, batchId, queuedCandidate, now);
+      await insertCleanupAction(database, batchId, queuedCandidate, now, syncRun.id);
       queued = 1;
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -691,6 +753,7 @@ export async function queueAppRiverLicenseCleanupPreview(
     requested: 1,
     queued,
     skipped,
+    matched: 0,
     missing: 0,
     duplicates,
   };
@@ -703,9 +766,15 @@ export async function listAppRiverLicenseCleanupActions(
   } = {},
 ): Promise<AppRiverLicenseCleanupActionsReport> {
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 200), 500));
+  const syncRun = await loadLatestAppRiverSyncRun(database);
+  if (!syncRun) {
+    return { actions: [] };
+  }
+
   const result = await database.query<CleanupActionSummaryRow>(
     `${cleanupActionSummarySelectSql()}
      where appriver_license_cleanup_actions.dismissed_at is null
+       and appriver_license_cleanup_actions.sync_run_id = $2::uuid
      order by
        case appriver_license_cleanup_actions.status
          when 'queued' then 0
@@ -718,7 +787,7 @@ export async function listAppRiverLicenseCleanupActions(
        end,
        appriver_license_cleanup_actions.created_at desc
      limit $1`,
-    [limit],
+    [limit, syncRun.id],
   );
 
   return {
@@ -1180,6 +1249,7 @@ async function loadLatestAppRiverSnapshotRows(database: Queryable, syncRunId: st
        from appriver_license_cleanup_actions
        where appriver_license_cleanup_actions.external_customer_id = mapped_snapshots.external_account_id
          and appriver_license_cleanup_actions.subscription_key = mapped_snapshots.dimensions->>'subscriptionKey'
+         and appriver_license_cleanup_actions.sync_run_id = $2::uuid
          and appriver_license_cleanup_actions.status = any($3::text[])
        order by created_at desc
        limit 1
@@ -1189,6 +1259,7 @@ async function loadLatestAppRiverSnapshotRows(database: Queryable, syncRunId: st
        from appriver_license_cleanup_actions
        where appriver_license_cleanup_actions.external_customer_id = mapped_snapshots.external_account_id
          and appriver_license_cleanup_actions.subscription_key = mapped_snapshots.dimensions->>'subscriptionKey'
+         and appriver_license_cleanup_actions.sync_run_id = $2::uuid
        order by created_at desc
        limit 1
      ) latest_action on true
@@ -1214,13 +1285,40 @@ function sourceFromSnapshotRow(row: SnapshotRow, syncRun: AppRiverLicenseCleanup
     integerValue(row.quantity) ||
     integerValue(dimensions.totalLicenses);
   const aggregateTotalLicenses = integerValue(dimensions.totalLicenses);
-  const totalLicenses = refreshedCandidate
+  let totalLicenses = refreshedCandidate
     ? refreshedSubscriptionQuantity(refreshedCandidate, snapshotQuantity, aggregateTotalLicenses)
     : snapshotQuantity;
   const reportedUnassignedLicenses = refreshedCandidate?.unassignedLicenses ?? integerValue(dimensions.unassignedLicenses);
-  const unassignedLicenses = Math.min(reportedUnassignedLicenses, totalLicenses);
-  const assignedLicenses = Math.max(totalLicenses - unassignedLicenses, 0);
+  let unassignedLicenses = Math.min(reportedUnassignedLicenses, totalLicenses);
+  let assignedLicenses = Math.max(totalLicenses - unassignedLicenses, 0);
   const subscriptionKey = stringValue(dimensions.subscriptionKey) ?? row.id;
+  const latestAction = row.latest_action_id
+    ? {
+        id: row.latest_action_id,
+        status: row.latest_action_status ?? 'queued',
+        requestedQuantity: integerValue(row.latest_requested_quantity),
+        requestedReduction: integerValue(row.latest_requested_reduction),
+        finalQuantity: optionalInteger(row.latest_final_quantity),
+        errorMessage: stringValue(row.latest_error_message),
+        createdAt: isoDate(row.latest_created_at) ?? new Date(0).toISOString(),
+        completedAt: isoDate(row.latest_completed_at),
+        updatedAt: isoDate(row.latest_updated_at),
+      }
+    : undefined;
+
+  // When no live refresh exists, apply a verified decrease's final quantity so
+  // residual unassigned can be re-evaluated against today's eligibility windows.
+  if (
+    !refreshedCandidate &&
+    latestAction?.status === 'verified' &&
+    typeof latestAction.finalQuantity === 'number' &&
+    latestAction.finalQuantity > 0 &&
+    latestAction.finalQuantity < totalLicenses
+  ) {
+    totalLicenses = latestAction.finalQuantity;
+    unassignedLicenses = Math.min(Math.max(totalLicenses - assignedLicenses, 0), totalLicenses);
+    assignedLicenses = Math.max(totalLicenses - unassignedLicenses, 0);
+  }
 
   return {
     id: `appriver-license-cleanup:${row.external_account_id}:${subscriptionKey}`,
@@ -1261,19 +1359,7 @@ function sourceFromSnapshotRow(row: SnapshotRow, syncRun: AppRiverLicenseCleanup
           createdAt: isoDate(row.pending_created_at) ?? new Date(0).toISOString(),
         }
       : undefined,
-    latestAction: row.latest_action_id
-      ? {
-          id: row.latest_action_id,
-          status: row.latest_action_status ?? 'queued',
-          requestedQuantity: integerValue(row.latest_requested_quantity),
-          requestedReduction: integerValue(row.latest_requested_reduction),
-          finalQuantity: optionalInteger(row.latest_final_quantity),
-          errorMessage: stringValue(row.latest_error_message),
-          createdAt: isoDate(row.latest_created_at) ?? new Date(0).toISOString(),
-          completedAt: isoDate(row.latest_completed_at),
-          updatedAt: isoDate(row.latest_updated_at),
-        }
-      : undefined,
+    latestAction,
     refresh: refreshedCandidate?.refresh,
   };
 }
@@ -1549,7 +1635,7 @@ function candidateFromSource(
   const recentIncrease = recentIncreaseFor(chargeIndex, source.customerName, source.productName ?? source.productCode ?? source.subscriptionKey, source.totalLicenses);
   const hasRenewal = renewal.isRecent;
   const hasRecentOrder = recentIncrease.availableLicensesToReduce > 0;
-  if (source.latestAction?.status === 'verified') {
+  if (source.latestAction?.status === 'verified' && source.unassignedLicenses <= 0) {
     return actionResultCandidate(source, renewal, recentIncrease);
   }
   if (source.unassignedLicenses <= 0 && source.refresh) {
@@ -1578,7 +1664,7 @@ function candidateFromSource(
       : source.unassignedLicenses;
   const proposedReduction = Math.min(rawMaxReduction, Math.max(source.totalLicenses - 1, 0));
   if (proposedReduction <= 0) {
-    return undefined;
+    return source.latestAction ? actionResultCandidate(source, renewal, recentIncrease) : undefined;
   }
 
   return {
@@ -1891,10 +1977,12 @@ async function insertCleanupAction(
   batchId: string,
   candidate: AppRiverLicenseCleanupCandidate,
   now: string,
+  syncRunId: string,
 ) {
   await database.query(
     `insert into appriver_license_cleanup_actions (
        batch_id,
+       sync_run_id,
        customer_id,
        customer_name,
        external_customer_id,
@@ -1921,12 +2009,13 @@ async function insertCleanupAction(
        updated_at
      )
      values (
-       $1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, 'queued',
-       $10, $11, $12, $13, $14, $15, $16, $17::timestamptz, $18::date, $19::date,
-       $20::timestamptz, $20::timestamptz + interval '24 hours', $21::jsonb, $20::timestamptz, $20::timestamptz
+       $1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, 'queued',
+       $11, $12, $13, $14, $15, $16, $17, $18::timestamptz, $19::date, $20::date,
+       $21::timestamptz, $21::timestamptz + interval '24 hours', $22::jsonb, $21::timestamptz, $21::timestamptz
      )`,
     [
       batchId,
+      syncRunId,
       candidate.customerId ?? null,
       candidate.customerName,
       candidate.externalCustomerId,
@@ -1951,6 +2040,88 @@ async function insertCleanupAction(
   );
 }
 
+async function insertMatchedCompleteAction(
+  database: Queryable,
+  batchId: string,
+  snapshotCandidate: AppRiverLicenseCleanupCandidate,
+  liveCandidate: AppRiverLicenseCleanupCandidate,
+  now: string,
+  syncRunId: string,
+) {
+  await database.query(
+    `insert into appriver_license_cleanup_actions (
+       batch_id,
+       sync_run_id,
+       customer_id,
+       customer_name,
+       external_customer_id,
+       vendor_product_key,
+       product_code,
+       product_name,
+       subscription_key,
+       domain,
+       status,
+       current_total_licenses,
+       current_assigned_licenses,
+       current_unassigned_licenses,
+       requested_reduction,
+       requested_quantity,
+       live_total_licenses,
+       live_assigned_licenses,
+       live_unassigned_licenses,
+       final_quantity,
+       eligibility_reason,
+       renewal_window,
+       effective_date,
+       commitment_end_date,
+       previous_commitment_end_date,
+       next_check_at,
+       accepted_at,
+       verified_at,
+       started_at,
+       completed_at,
+       expires_at,
+       request_payload,
+       response_payload,
+       created_at,
+       updated_at
+     )
+     values (
+       $1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, 'verified',
+       $11, $12, $13, 0, $14,
+       $14, $15, 0, $14,
+       $16, $17, $18::timestamptz, $19::date, $20::date,
+       $21::timestamptz, $21::timestamptz, $21::timestamptz, $21::timestamptz, $21::timestamptz,
+       $21::timestamptz + interval '24 hours', $22::jsonb, $23::jsonb, $21::timestamptz, $21::timestamptz
+     )`,
+    [
+      batchId,
+      syncRunId,
+      liveCandidate.customerId ?? snapshotCandidate.customerId ?? null,
+      liveCandidate.customerName,
+      liveCandidate.externalCustomerId,
+      liveCandidate.vendorProductKey ?? null,
+      liveCandidate.productCode,
+      liveCandidate.productName,
+      liveCandidate.subscriptionKey,
+      liveCandidate.domain ?? null,
+      snapshotCandidate.totalLicenses,
+      snapshotCandidate.assignedLicenses ?? null,
+      snapshotCandidate.unassignedLicenses,
+      liveCandidate.totalLicenses,
+      liveCandidate.assignedLicenses ?? liveCandidate.totalLicenses,
+      liveCandidate.eligibilityReason,
+      liveCandidate.renewalWindow ?? null,
+      liveCandidate.effectiveDate ?? null,
+      liveCandidate.commitmentEndDate ?? null,
+      liveCandidate.previousCommitmentEndDate ?? null,
+      now,
+      JSON.stringify(snapshotCandidate),
+      JSON.stringify({ matchedAtQueue: true, liveCandidate }),
+    ],
+  );
+}
+
 async function updateCleanupBatchAfterQueue(
   database: Queryable,
   batchId: string,
@@ -1966,7 +2137,7 @@ async function updateCleanupBatchAfterQueue(
      set status = $2,
          queued_count = $3,
          skipped_count = $4,
-         completed_at = case when $2 = 'skipped' then $5::timestamptz else completed_at end,
+         completed_at = case when $2 in ('skipped', 'complete') then $5::timestamptz else completed_at end,
          updated_at = $5::timestamptz
      where id = $1::uuid`,
     [batchId, input.status, input.queued, input.skipped, input.now],

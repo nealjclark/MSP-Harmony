@@ -14,17 +14,19 @@ import {
   listCustomerLicenseReportCustomers,
 } from '../reports/customerLicenseReports';
 import {
+  getLatestDiscrepancyAuditReport,
+  getLiveDiscrepancyReport,
+  isLiveDiscrepancyComparison,
+  listDiscrepancyAuditStates,
+  runAndSaveDiscrepancyAudit,
+} from '../reports/discrepancyAudits';
+import {
   discrepancyComparisonDefinitions,
   getDiscrepancyReport,
   isDiscrepancyBasis,
   isDiscrepancyComparisonId,
   isDiscrepancySeverity,
 } from '../reports/discrepancyReports';
-import {
-  getLatestDiscrepancyAuditReport,
-  listDiscrepancyAuditStates,
-  runAndSaveDiscrepancyAudit,
-} from '../reports/discrepancyAudits';
 import { getProductProfitabilityReport, type ProductProfitabilityReport } from '../reports/productProfitabilityReports';
 import {
   getSavedProductProfitabilityReport,
@@ -665,14 +667,20 @@ export async function getDiscrepancyReportHttp(
         ? await loadAppRiverChargeEventsForReport(repositoryContext)
         : undefined;
 
-    return jsonResponse(200, await getDiscrepancyReport(repositoryContext.pool, {
+    const reportOptions = {
       comparisonId,
       customerId,
       basis: isDiscrepancyBasis(basis) ? basis : undefined,
       severity: isDiscrepancySeverity(severity) ? severity : undefined,
       includeMatched,
       appRiverChargeEvents,
-    }));
+    };
+
+    if (isLiveDiscrepancyComparison(comparisonId)) {
+      return jsonResponse(200, await getLiveDiscrepancyReport(repositoryContext.pool, reportOptions));
+    }
+
+    return jsonResponse(200, await getDiscrepancyReport(repositoryContext.pool, reportOptions));
   } catch (error) {
     if (error instanceof AppRiverApiError) {
       return jsonResponse(502, {

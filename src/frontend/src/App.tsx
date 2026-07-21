@@ -947,6 +947,7 @@ type DiscrepancyAuditState = {
   latestAudit?: DiscrepancyAuditSummary;
   hasNewerSnapshot: boolean;
   canRun: boolean;
+  liveMode?: boolean;
 };
 
 type DiscrepancyReportResponse = {
@@ -954,7 +955,7 @@ type DiscrepancyReportResponse = {
   generatedAt: string;
   audit?: DiscrepancyAuditSummary;
   auditState?: DiscrepancyAuditState;
-  auditMode?: 'saved' | 'new';
+  auditMode?: 'saved' | 'new' | 'live';
   filters: {
     customerId?: string;
     basis?: DiscrepancyBasis;
@@ -4196,6 +4197,7 @@ async function queueAppRiverLicenseCleanupActions(
     batchId: string;
     queued: number;
     skipped: number;
+    matched?: number;
     missing: number;
     duplicates: number;
   };
@@ -6680,6 +6682,11 @@ function App() {
     setAppRiverCleanupQueueMessage('');
   };
 
+  const isLiveDiscrepancyPair = (pairId: string) =>
+    pairId === 'appriver-license-cleanup' ||
+    discrepancyComparisonPairs.find((pair) => pair.id === pairId)?.comparisonType === 'license-cleanup' ||
+    discrepancyAuditStates.find((state) => state.comparisonId === pairId)?.liveMode === true;
+
   const updateDiscrepancyAuditState = (auditState?: DiscrepancyAuditState) => {
     if (!auditState) {
       return;
@@ -6689,6 +6696,78 @@ function App() {
       const others = current.filter((state) => state.comparisonId !== auditState.comparisonId);
       return [...others, auditState];
     });
+  };
+
+  const loadLiveDiscrepancyReport = async (
+    pairId = selectedDiscrepancyPairId,
+    options: {
+      auditStates?: DiscrepancyAuditState[];
+      includeMatched?: boolean;
+      preserveCleanupMessage?: boolean;
+      silent?: boolean;
+    } = {},
+  ) => {
+    if (!pairId) {
+      setDiscrepancyLoadState('idle');
+      setDiscrepancyMessage('Select an audit comparison.');
+      return null;
+    }
+
+    if (!options.silent) {
+      setDiscrepancyLoadState('loading');
+      setDiscrepancyMessage('Loading live AppRiver license cleanup...');
+    }
+    if (!options.preserveCleanupMessage) {
+      setAppRiverCleanupQueueState('idle');
+      setAppRiverCleanupQueueMessage('');
+    }
+
+    try {
+      const report = await fetchDiscrepancyReport({
+        comparisonId: pairId,
+        includeMatched: options.includeMatched ?? includeMatchedDiscrepancies,
+      });
+      setDiscrepancyReport(report);
+      updateDiscrepancyAuditState(report.auditState);
+      setDiscrepancyLoadState('ready');
+      if (!options.silent) {
+        const snapshotLabel = formatDateOnly(report.auditState?.currentSourceSnapshot.latestCompletedAt) ?? 'current snapshot';
+        setDiscrepancyMessage(
+          report.rows.length > 0
+            ? `Loaded live cleanup for ${snapshotLabel}: ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
+            : `Live cleanup has no rows for the current filters (${snapshotLabel}).`,
+        );
+      }
+      return report;
+    } catch (error) {
+      if (!options.silent) {
+        setDiscrepancyReport(null);
+      }
+      setDiscrepancyLoadState('failed');
+      setDiscrepancyMessage(error instanceof Error ? error.message : 'Unable to load live AppRiver license cleanup.');
+      return null;
+    }
+  };
+
+  const loadDiscrepancyComparison = async (
+    pairId = selectedDiscrepancyPairId,
+    options: {
+      auditStates?: DiscrepancyAuditState[];
+      includeMatched?: boolean;
+      preserveCleanupMessage?: boolean;
+      silent?: boolean;
+    } = {},
+  ) => {
+    if (!pairId) {
+      resetDiscrepancyRun('Select an audit comparison.');
+      return null;
+    }
+
+    if (isLiveDiscrepancyPair(pairId) || options.auditStates?.find((state) => state.comparisonId === pairId)?.liveMode) {
+      return loadLiveDiscrepancyReport(pairId, options);
+    }
+
+    return loadLatestDiscrepancyAudit(pairId, options);
   };
 
   const loadDiscrepancyComparisons = async () => {
@@ -6709,14 +6788,14 @@ function App() {
       }
 
       const nextAuditState = auditStates.find((state) => state.comparisonId === nextPairId);
-      if (nextAuditState?.latestAudit) {
+      if (!nextPairId) {
+        resetDiscrepancyRun('Select an audit comparison.');
+      } else if (nextAuditState?.liveMode || nextPairId === 'appriver-license-cleanup') {
+        await loadLiveDiscrepancyReport(nextPairId, { auditStates });
+      } else if (nextAuditState?.latestAudit) {
         await loadLatestDiscrepancyAudit(nextPairId, { auditStates });
       } else {
-        resetDiscrepancyRun(
-          nextPairId
-            ? 'No saved audit for this snapshot yet. Run the audit to save the comparison.'
-            : 'Select an audit comparison.',
-        );
+        resetDiscrepancyRun('No saved audit for this snapshot yet. Run the audit to save the comparison.');
       }
       return response;
     } catch (error) {
@@ -6838,13 +6917,14 @@ function App() {
 
     try {
       const result = await queueAppRiverLicenseCleanupActions(rowIds, requestedQuantities, previewId);
+      const matched = result.matched ?? 0;
       const nextQueueMessage =
-        result.queued > 0
-          ? `Queued ${result.queued.toLocaleString()} actions. ${result.skipped.toLocaleString()} skipped.`
+        result.queued > 0 || matched > 0
+          ? `Queued ${result.queued.toLocaleString()} actions${matched > 0 ? `, marked ${matched.toLocaleString()} matched complete` : ''}. ${result.skipped.toLocaleString()} skipped.`
           : `No actions queued. ${result.skipped.toLocaleString()} skipped.`;
       setAppRiverCleanupQueueState('queued');
       setAppRiverCleanupQueueMessage(nextQueueMessage);
-      await loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+      await loadDiscrepancyComparison(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
       setAppRiverCleanupQueueState('queued');
       setAppRiverCleanupQueueMessage(nextQueueMessage);
       return result;
@@ -6883,7 +6963,7 @@ function App() {
       await Promise.all([
         loadAppRiverCleanupActions(),
         selectedDiscrepancyPairId
-          ? loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
+          ? loadDiscrepancyComparison(selectedDiscrepancyPairId, {
               includeMatched: includeMatchedDiscrepancies,
               preserveCleanupMessage: true,
               silent: true,
@@ -6911,7 +6991,7 @@ function App() {
       );
       await loadAppRiverCleanupActions();
       if (selectedDiscrepancyPairId === 'appriver-license-cleanup') {
-        await loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+        await loadDiscrepancyComparison(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
       }
       return result;
     } catch (error) {
@@ -7998,7 +8078,7 @@ function App() {
     }
 
     const timer = window.setInterval(() => {
-      void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, { preserveCleanupMessage: true });
+      void loadDiscrepancyComparison(selectedDiscrepancyPairId, { preserveCleanupMessage: true, silent: true });
     }, 60_000);
 
     return () => {
@@ -9665,8 +9745,8 @@ function App() {
       <div className="app-main">
         <header className="topbar">
           <div className="title-block">
-            <span className="section-kicker">Vendor API, invoice tables, and ConnectWise additions</span>
-            <h1>{view === 'reconcile' ? 'Reconciliation command center' : pageTitle(view, settingsSection)}</h1>
+            <span className="section-kicker">{pageKicker(view, settingsSection)}</span>
+            <h1>{pageTitle(view, settingsSection)}</h1>
           </div>
           <div className="top-actions">
             {showSyncTracker ? (
@@ -9852,13 +9932,14 @@ function App() {
               includeMatched={includeMatchedDiscrepancies}
               loadMessage={discrepancyMessage}
               loadState={discrepancyLoadState}
+              onBulkCleanupApprove={(rowIds) => queueAppRiverCleanupRows(rowIds)}
               onCleanupAction={setAppRiverCleanupConfirmationRow}
               onCleanupActionsOpen={openAppRiverCleanupActionsModal}
               onCleanupRefresh={refreshAppRiverCleanupDashboard}
               onIncludeMatchedChange={(value) => {
                 setIncludeMatchedDiscrepancies(value);
-                if (selectedDiscrepancyPairId && discrepancyReport?.audit) {
-                  void loadLatestDiscrepancyAudit(selectedDiscrepancyPairId, {
+                if (selectedDiscrepancyPairId && (discrepancyReport?.audit || discrepancyReport?.auditMode === 'live')) {
+                  void loadDiscrepancyComparison(selectedDiscrepancyPairId, {
                     includeMatched: value,
                     preserveCleanupMessage: true,
                     silent: true,
@@ -9871,14 +9952,14 @@ function App() {
                 setSelectedDiscrepancyPairId(pairId);
                 rememberSelectedDiscrepancyAudit(pairId);
                 const auditState = discrepancyAuditStates.find((state) => state.comparisonId === pairId);
-                if (auditState?.latestAudit) {
+                if (!pairId) {
+                  resetDiscrepancyRun('Select an audit comparison.');
+                } else if (auditState?.liveMode || pairId === 'appriver-license-cleanup') {
+                  void loadLiveDiscrepancyReport(pairId, { auditStates: discrepancyAuditStates });
+                } else if (auditState?.latestAudit) {
                   void loadLatestDiscrepancyAudit(pairId, { auditStates: discrepancyAuditStates });
                 } else {
-                  resetDiscrepancyRun(
-                    pairId
-                      ? 'No saved audit for this snapshot yet. Run the audit to save the comparison.'
-                      : 'Select an audit comparison.',
-                  );
+                  resetDiscrepancyRun('No saved audit for this snapshot yet. Run the audit to save the comparison.');
                 }
               }}
               onRun={loadDiscrepancyReport}
@@ -10374,17 +10455,17 @@ function App() {
 function pageTitle(view: View, settingsSection: SettingsSection = defaultSettingsSection) {
   switch (view) {
     case 'discrepancies':
-      return 'Discrepancy dashboard';
+      return 'Discrepancies';
     case 'integrations':
       return 'Integrations';
     case 'mappings':
       return 'Mappings';
     case 'reports':
-      return 'Reporting';
+      return 'Reports';
     case 'invoices':
       return 'Invoices';
     case 'agreements':
-      return 'Agreement workspace';
+      return 'Agreements';
     case 'settings':
       if (settingsSection === 'audit-logs') {
         return 'Audit logs';
@@ -10397,7 +10478,37 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
       }
       return 'User management';
     default:
-      return 'Reconciliation command center';
+      return 'Reconciliation';
+  }
+}
+
+function pageKicker(view: View, settingsSection: SettingsSection = defaultSettingsSection) {
+  switch (view) {
+    case 'discrepancies':
+      return 'Vendor vs agreement differences';
+    case 'integrations':
+      return 'Sync sources and credentials';
+    case 'mappings':
+      return 'Customers, products, and bundles';
+    case 'reports':
+      return 'Operational reporting';
+    case 'invoices':
+      return 'Overdue and vendor invoice review';
+    case 'agreements':
+      return 'Agreement additions and overrides';
+    case 'settings':
+      if (settingsSection === 'audit-logs') {
+        return 'Security and change history';
+      }
+      if (settingsSection === 'integrations') {
+        return 'Integration configuration';
+      }
+      if (settingsSection === 'email-communication') {
+        return 'Billing email delivery';
+      }
+      return 'Roles and account access';
+    default:
+      return 'Vendor usage and ConnectWise additions';
   }
 }
 
@@ -10410,6 +10521,7 @@ function DiscrepancyDashboardView(props: {
   includeMatched: boolean;
   loadMessage: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onBulkCleanupApprove: (rowIds: string[]) => Promise<{ queued: number; skipped: number; matched?: number } | null>;
   onCleanupAction: (row: DiscrepancyRow) => void;
   onCleanupActionsOpen: () => void;
   onCleanupRefresh: () => Promise<void>;
@@ -10432,6 +10544,7 @@ function DiscrepancyDashboardView(props: {
     includeMatched,
     loadMessage,
     loadState,
+    onBulkCleanupApprove,
     onCleanupAction,
     onCleanupActionsOpen,
     onCleanupRefresh,
@@ -10445,16 +10558,56 @@ function DiscrepancyDashboardView(props: {
     selectedAuditState,
     selectedComparison,
   } = props;
-  const rows = report?.rows ?? [];
-  const groupedRows = useMemo(() => groupDiscrepancyRowsByCustomer(rows), [rows]);
-  const pairOptions = comparisonPairs;
+  const [selectedCleanupRowIds, setSelectedCleanupRowIds] = useState<string[]>([]);
+  const [ignoredCleanupRowIds, setIgnoredCleanupRowIds] = useState<string[]>([]);
+  const [showBulkApproveModal, setShowBulkApproveModal] = useState(false);
+  const snapshotIgnoreKey = report?.auditState?.currentSourceKey ?? report?.audit?.sourceKey ?? pairFilter;
+
+  useEffect(() => {
+    setSelectedCleanupRowIds([]);
+    if (!snapshotIgnoreKey) {
+      setIgnoredCleanupRowIds([]);
+      return;
+    }
+    try {
+      const raw = window.sessionStorage.getItem(`appriver-cleanup-ignored:${snapshotIgnoreKey}`);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+      setIgnoredCleanupRowIds(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      setIgnoredCleanupRowIds([]);
+    }
+  }, [snapshotIgnoreKey]);
+
+  const persistIgnoredCleanupRows = (rowIds: string[]) => {
+    setIgnoredCleanupRowIds(rowIds);
+    if (!snapshotIgnoreKey) return;
+    window.sessionStorage.setItem(`appriver-cleanup-ignored:${snapshotIgnoreKey}`, JSON.stringify(rowIds));
+  };
+
   const reportComparison = selectedComparison ?? report?.comparisonPairs[0];
   const isLicenseCleanup = reportComparison?.comparisonType === 'license-cleanup';
+  const rows = useMemo(
+    () =>
+      isLicenseCleanup
+        ? (report?.rows ?? []).filter((row) => !ignoredCleanupRowIds.includes(row.id))
+        : (report?.rows ?? []),
+    [ignoredCleanupRowIds, isLicenseCleanup, report?.rows],
+  );
+  const groupedRows = useMemo(() => groupDiscrepancyRowsByCustomer(rows), [rows]);
+  const pairOptions = comparisonPairs;
   const auditState = report?.auditState ?? selectedAuditState;
   const latestAudit = report?.audit ?? auditState?.latestAudit;
-  const showRunButton = Boolean(pairFilter && (!latestAudit || auditState?.hasNewerSnapshot));
+  const isLiveComparison = Boolean(
+    isLicenseCleanup || report?.auditMode === 'live' || auditState?.liveMode,
+  );
+  const showRunButton = Boolean(
+    pairFilter && !isLiveComparison && (!latestAudit || auditState?.hasNewerSnapshot),
+  );
   const auditGeneratedLabel = latestAudit ? formatDateTime(latestAudit.generatedAt) : undefined;
-  const actionableCleanupRows = useMemo(() => rows.filter(isAppRiverCleanupActionable), [rows]);
+  const selectedCleanupRows = useMemo(
+    () => rows.filter((row) => selectedCleanupRowIds.includes(row.id) && isAppRiverCleanupActionable(row)),
+    [rows, selectedCleanupRowIds],
+  );
   const cleanupSummary = useMemo(
     () =>
       rows.reduce(
@@ -10514,8 +10667,11 @@ function DiscrepancyDashboardView(props: {
               ))}
             </select>
           </label>
-          {auditState?.hasNewerSnapshot ? <span className="discrepancy-audit-chip changed">New snapshot available</span> : null}
-          {latestAudit && !auditState?.hasNewerSnapshot ? (
+          {isLiveComparison ? <span className="discrepancy-audit-chip">Live · today</span> : null}
+          {!isLiveComparison && auditState?.hasNewerSnapshot ? (
+            <span className="discrepancy-audit-chip changed">New snapshot available</span>
+          ) : null}
+          {!isLiveComparison && latestAudit && !auditState?.hasNewerSnapshot ? (
             <span className="discrepancy-audit-chip">Saved {auditGeneratedLabel ?? 'audit'}</span>
           ) : null}
           {showRunButton ? (
@@ -10572,6 +10728,30 @@ function DiscrepancyDashboardView(props: {
             <h2>{rows.length.toLocaleString()} comparison rows</h2>
           </div>
           <div className="surface-header-actions discrepancy-table-header-actions">
+            {isLicenseCleanup && selectedCleanupRows.length > 0 ? (
+              <>
+                <button
+                  className="button primary compact"
+                  disabled={!canQueueCleanupActions || cleanupQueueState === 'queueing'}
+                  onClick={() => setShowBulkApproveModal(true)}
+                  type="button"
+                >
+                  Approve Selected
+                </button>
+                <button
+                  className="button secondary compact"
+                  disabled={cleanupQueueState === 'queueing'}
+                  onClick={() => {
+                    const nextIgnored = [...new Set([...ignoredCleanupRowIds, ...selectedCleanupRows.map((row) => row.id)])];
+                    persistIgnoredCleanupRows(nextIgnored);
+                    setSelectedCleanupRowIds([]);
+                  }}
+                  type="button"
+                >
+                  Ignore Selected
+                </button>
+              </>
+            ) : null}
             <label className="switch-control customer-license-toggle">
               <input
                 checked={includeMatched}
@@ -10594,6 +10774,9 @@ function DiscrepancyDashboardView(props: {
             ) : null}
           </div>
         </div>
+        {isLicenseCleanup && cleanupQueueMessage ? (
+          <p className="cleanup-queue-message">{cleanupQueueMessage}</p>
+        ) : null}
 
         {comparisonLoadState === 'loading' ? (
           <div className="empty-state report-empty">
@@ -10634,54 +10817,82 @@ function DiscrepancyDashboardView(props: {
         ) : null}
 
         {isLicenseCleanup
-          ? groupedRows.map(([customerName, customerRows]) => (
+          ? groupedRows.map(([customerName, customerRows]) => {
+              const customerActionableRows = customerRows.filter(isAppRiverCleanupActionable);
+              const customerSelectedCount = customerActionableRows.filter((row) => selectedCleanupRowIds.includes(row.id)).length;
+              const allCustomerSelected =
+                customerActionableRows.length > 0 && customerSelectedCount === customerActionableRows.length;
+              return (
               <section className="discrepancy-customer-group" key={customerName}>
                 <div className="discrepancy-customer-header">
-                  <strong>{customerName}</strong>
+                  <label className="cleanup-customer-select">
+                    <input
+                      checked={allCustomerSelected}
+                      disabled={customerActionableRows.length === 0 || cleanupQueueState === 'queueing'}
+                      onChange={() => {
+                        const customerIds = customerActionableRows.map((row) => row.id);
+                        setSelectedCleanupRowIds((current) => {
+                          if (allCustomerSelected) {
+                            return current.filter((id) => !customerIds.includes(id));
+                          }
+                          return [...new Set([...current, ...customerIds])];
+                        });
+                      }}
+                      type="checkbox"
+                    />
+                    <strong>{customerName}</strong>
+                  </label>
                   <span>{customerRows.length.toLocaleString()} cleanup rows</span>
                 </div>
                 <div className="discrepancy-table-scroll">
                   <table className="discrepancy-table cleanup-table">
                     <colgroup>
-                      <col className="cleanup-col-action" />
+                      <col className="cleanup-col-select" />
                       <col className="cleanup-col-product" />
                       <col className="cleanup-col-counts" />
                       <col className="cleanup-col-proposed" />
                       <col className="cleanup-col-eligibility" />
                       <col className="cleanup-col-commitment" />
                       <col className="cleanup-col-result" />
-                      <col className="cleanup-col-details" />
+                      <col className="cleanup-col-actions" />
                     </colgroup>
                     <thead>
                       <tr>
-                        <th>Action</th>
+                        <th aria-label="Select" />
                         <th>Product</th>
                         <th>Counts</th>
                         <th>Proposed</th>
                         <th>Eligibility</th>
                         <th>Commitment</th>
                         <th>Result</th>
-                        <th>Details</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {customerRows.map((row) => {
                         const cleanup = row.cleanup;
                         const actionable = isAppRiverCleanupActionable(row);
+                        const selected = selectedCleanupRowIds.includes(row.id);
+                        const appRiverHref = cleanup?.externalCustomerId
+                          ? appRiverCustomerSubscriptionsUrl(cleanup.externalCustomerId)
+                          : undefined;
                         return (
-                          <tr key={row.id}>
-                            <td className="cleanup-action-cell">
+                          <tr key={row.id} className={selected ? 'cleanup-row-selected' : undefined}>
+                            <td className="cleanup-select-cell">
                               {actionable ? (
-                                <button
-                                  className="button primary compact icon-button-text"
-                                  disabled={!canQueueCleanupActions || cleanupQueueState === 'queueing'}
-                                  onClick={() => onCleanupAction(row)}
-                                  title="Decrease count now"
-                                  type="button"
-                                >
-                                  <ArrowDown size={15} />
-                                  Decrease
-                                </button>
+                                <input
+                                  aria-label={`Select ${cleanup?.productName ?? row.productFamily}`}
+                                  checked={selected}
+                                  disabled={cleanupQueueState === 'queueing'}
+                                  onChange={() => {
+                                    setSelectedCleanupRowIds((current) =>
+                                      current.includes(row.id)
+                                        ? current.filter((id) => id !== row.id)
+                                        : [...current, row.id],
+                                    );
+                                  }}
+                                  type="checkbox"
+                                />
                               ) : null}
                             </td>
                             <td>
@@ -10717,11 +10928,40 @@ function DiscrepancyDashboardView(props: {
                               <span className={`status-pill ${cleanupResultStatusClass(row)}`}>{cleanupActionResultLabel(cleanup)}</span>
                               <span>{cleanupActionDetailLabel(cleanup)}</span>
                             </td>
-                            <td>
-                              <button className="button secondary compact" onClick={() => onRowSelect(row)} type="button">
-                                <Database size={15} />
-                                Details
-                              </button>
+                            <td className="cleanup-action-cell">
+                              <div className="cleanup-row-actions">
+                                {actionable ? (
+                                  <button
+                                    className="button primary compact icon-only-button"
+                                    disabled={!canQueueCleanupActions || cleanupQueueState === 'queueing'}
+                                    onClick={() => onCleanupAction(row)}
+                                    title="Decrease"
+                                    type="button"
+                                  >
+                                    <ArrowDown size={15} />
+                                  </button>
+                                ) : null}
+                                {appRiverHref ? (
+                                  <a
+                                    className="button secondary compact icon-only-button"
+                                    href={appRiverHref}
+                                    rel="noreferrer"
+                                    target="_blank"
+                                    title="Open customer in AppRiver"
+                                  >
+                                    <ExternalLink size={15} />
+                                  </a>
+                                ) : (
+                                  <button
+                                    className="button secondary compact icon-only-button"
+                                    onClick={() => onRowSelect(row)}
+                                    title="Details"
+                                    type="button"
+                                  >
+                                    <Info size={15} />
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -10730,7 +10970,8 @@ function DiscrepancyDashboardView(props: {
                   </table>
                 </div>
               </section>
-            ))
+              );
+            })
           : groupedRows.map(([customerName, customerRows]) => (
               <section className="discrepancy-customer-group" key={customerName}>
                 <div className="discrepancy-customer-header">
@@ -10801,6 +11042,21 @@ function DiscrepancyDashboardView(props: {
               </section>
             ))}
       </section>
+      {showBulkApproveModal ? (
+        <AppRiverBulkApproveModal
+          onClose={() => setShowBulkApproveModal(false)}
+          onConfirm={async (rowIds) => {
+            const result = await onBulkCleanupApprove(rowIds);
+            if (result) {
+              setSelectedCleanupRowIds((current) => current.filter((id) => !rowIds.includes(id)));
+              setShowBulkApproveModal(false);
+            }
+            return result;
+          }}
+          rows={selectedCleanupRows}
+          submitting={cleanupQueueState === 'queueing'}
+        />
+      ) : null}
     </section>
   );
 }
@@ -11035,6 +11291,130 @@ function DiscrepancyDetailModal(props: {
   );
 }
 
+function appRiverCustomerSubscriptionsUrl(externalCustomerId: string) {
+  return `https://cp.appriver.com/PP/CustomerDetails.aspx#!/customer/${encodeURIComponent(externalCustomerId)}/subscriptions`;
+}
+
+function requiresAppRiverManualCancel(cleanup?: AppRiverLicenseCleanupDetails) {
+  if (!cleanup) return false;
+  if (cleanup.proposedQuantity <= 0) return true;
+  return (cleanup.assignedLicenses ?? 0) === 0 && cleanup.unassignedLicenses > 0;
+}
+
+function truncateCleanupProductName(value: string, max = 42) {
+  const trimmed = value.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max - 1)}…`;
+}
+
+function AppRiverBulkApproveModal(props: {
+  rows: DiscrepancyRow[];
+  submitting: boolean;
+  onClose: () => void;
+  onConfirm: (rowIds: string[]) => Promise<{ queued: number; skipped: number; matched?: number } | null>;
+}) {
+  const { rows, submitting, onClose, onConfirm } = props;
+  const [message, setMessage] = useState('');
+  const queueableRows = rows.filter((row) => row.cleanup && !requiresAppRiverManualCancel(row.cleanup));
+  const manualCancelRows = rows.filter((row) => row.cleanup && requiresAppRiverManualCancel(row.cleanup));
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="cleanup-bulk-approve-modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-bulk-approve-title">
+        <div className="modal-header cleanup-bulk-approve-header">
+          <div>
+            <h2 id="cleanup-bulk-approve-title">
+              <ArrowDown size={18} />
+              Approve selected decreases
+            </h2>
+            <p>
+              {queueableRows.length.toLocaleString()} to queue
+              {manualCancelRows.length > 0 ? ` · ${manualCancelRows.length.toLocaleString()} manual cancel` : ''}
+            </p>
+          </div>
+          <button className="modal-close" disabled={submitting} onClick={onClose} title="Close" type="button">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="cleanup-bulk-approve-body">
+          <table className="cleanup-bulk-approve-table">
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>License</th>
+                <th>Count</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const cleanup = row.cleanup;
+                if (!cleanup) return null;
+                const manualCancel = requiresAppRiverManualCancel(cleanup);
+                const href = cleanup.externalCustomerId
+                  ? appRiverCustomerSubscriptionsUrl(cleanup.externalCustomerId)
+                  : undefined;
+                return (
+                  <tr key={row.id} className={manualCancel ? 'cleanup-bulk-row-skip' : undefined}>
+                    <td title={row.customer.customerName}>{truncateCleanupProductName(row.customer.customerName, 28)}</td>
+                    <td title={cleanup.productName}>{truncateCleanupProductName(cleanup.productName)}</td>
+                    <td className="cleanup-bulk-count">
+                      <span>{cleanup.totalLicenses.toLocaleString()}</span>
+                      <span aria-hidden="true">→</span>
+                      <strong>{manualCancel ? '0' : cleanup.proposedQuantity.toLocaleString()}</strong>
+                    </td>
+                    <td>
+                      {manualCancel ? (
+                        <span className="cleanup-bulk-skip-note">
+                          Manual cancel in AppRiver · skipped
+                          {href ? (
+                            <a href={href} rel="noreferrer" target="_blank">
+                              Open
+                              <ExternalLink size={12} />
+                            </a>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="cleanup-bulk-ok-note">Queue decrease</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {message ? <p className="cleanup-bulk-approve-message">{message}</p> : null}
+        </div>
+
+        <div className="cleanup-bulk-approve-footer">
+          <button className="button secondary" disabled={submitting} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button
+            className="button primary"
+            disabled={submitting || queueableRows.length === 0}
+            onClick={() => {
+              setMessage('Queueing selected decreases. Live counts will be checked as each item is queued...');
+              void onConfirm(queueableRows.map((row) => row.id)).then((result) => {
+                if (!result) {
+                  setMessage('Nothing was queued. Review the page message and try again.');
+                }
+              });
+            }}
+            type="button"
+          >
+            <ArrowDown size={16} />
+            {submitting
+              ? 'Queueing...'
+              : `Approve ${queueableRows.length.toLocaleString()}${manualCancelRows.length > 0 ? ` · skip ${manualCancelRows.length}` : ''}`}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AppRiverCleanupConfirmationModal(props: {
   row: DiscrepancyRow;
   onClose: () => void;
@@ -11163,7 +11543,7 @@ function AppRiverCleanupConfirmationModal(props: {
           {row.cleanup?.externalCustomerId ? (
             <a
               className="button secondary cleanup-confirmation-manage-link"
-              href={`https://cp.appriver.com/PP/CustomerDetails.aspx#!/customer/${encodeURIComponent(row.cleanup.externalCustomerId)}/subscriptions`}
+              href={appRiverCustomerSubscriptionsUrl(row.cleanup.externalCustomerId)}
               rel="noreferrer"
               target="_blank"
             >
@@ -15197,6 +15577,13 @@ function InvoiceTemplateManagerModal(props: { integration?: Integration; integra
         <div className="invoice-template-manager-body">
           <div className="invoice-template-manager-toolbar"><p>{message}</p><button className="button primary compact" onClick={() => setEditingTemplate('new')} type="button"><Plus size={16} /> New template</button></div>
           <div className="invoice-template-list">
+            {templates.length === 0 ? (
+              <div className="empty-state">
+                <FileSpreadsheet size={20} />
+                <strong>No invoice templates yet.</strong>
+                <span>Create a template from a sample invoice so future imports can auto-match columns.</span>
+              </div>
+            ) : null}
             {templates.map((template) => <div className="invoice-template-row" key={template.id}>
               <span className={template.status === 'active' ? 'status-pill success' : 'status-pill neutral'}>{template.status}</span>
               <div><strong>{template.name}</strong><span>{template.knownHeaders.length} known headers · version {template.version} · {template.signatures.length} signatures</span></div>
@@ -15315,7 +15702,12 @@ function VendorInvoiceWizardModal(props: {
         sourceType, columnMap, knownHeaders: mergeKnownHeaders(selectedTemplate?.knownHeaders, table?.headers, mappedColumnHeaders(columnMap)),
       });
       onTemplateSaved?.(saved);
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to save template.'); setBusy(false); }
+      setMessage(`Saved template ${saved.name}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to save template.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -25933,6 +26325,14 @@ function AgreementsView(props: {
   );
 }
 
+type AuditLogTab = 'sync-runs' | 'user-actions' | 'approval-batches';
+
+const auditLogTabs: Array<{ id: AuditLogTab; label: string; kicker: string; title: string }> = [
+  { id: 'sync-runs', label: 'Sync runs', kicker: 'Source activity', title: 'Integration sync history' },
+  { id: 'user-actions', label: 'User actions', kicker: 'Immutable history', title: 'User and system actions' },
+  { id: 'approval-batches', label: 'Approval batches', kicker: 'Approval ledger', title: 'ConnectWise write batches' },
+];
+
 function auditStatusLabel(status: string) {
   if (status === 'partial') return 'Needs review';
   if (status === 'written') return 'Updated';
@@ -25962,6 +26362,7 @@ function buildAuditExportRows(events: AuditEventRecord[]) {
     Occurred: formatDateTime(event.occurredAt) ?? event.occurredAt,
     Actor: event.actor,
     Action: event.eventLabel,
+    Integration: auditEventIntegrationName(event),
     Title: event.summary.title,
     Detail: event.summary.subtitle,
     Status: auditStatusLabel(event.summary.status),
@@ -25971,36 +26372,93 @@ function buildAuditExportRows(events: AuditEventRecord[]) {
   }));
 }
 
+function auditEventIntegrationId(event: AuditEventRecord): string | undefined {
+  const payloadIntegrationId =
+    typeof event.payload.integrationId === 'string' ? event.payload.integrationId.trim() : '';
+  if (payloadIntegrationId) {
+    return payloadIntegrationId;
+  }
+
+  if (event.eventType === 'integration.settings.updated' && event.entityId.trim()) {
+    return event.entityId.trim();
+  }
+
+  if (
+    event.eventType.startsWith('reconciliation.connectwise.') ||
+    event.eventType.startsWith('connectwise.')
+  ) {
+    return 'connectwise';
+  }
+
+  return undefined;
+}
+
+function auditEventIntegrationName(event: AuditEventRecord): string {
+  const integrationId = auditEventIntegrationId(event);
+  if (!integrationId) {
+    return '—';
+  }
+
+  return integrationName(integrationId as IntegrationId);
+}
+
+function uniqueSortedValues(values: string[]) {
+  return Array.from(new Set(values.filter((value) => value.trim().length > 0))).sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+
+function matchesAuditSearch(haystack: string, query: string) {
+  if (!query) {
+    return true;
+  }
+
+  return haystack.toLowerCase().includes(query.toLowerCase());
+}
+
 function AuditView() {
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [message, setMessage] = useState('Loading audit history...');
+  const [activeTab, setActiveTab] = useState<AuditLogTab>('user-actions');
   const [syncRuns, setSyncRuns] = useState<AuditSyncRun[]>([]);
   const [events, setEvents] = useState<AuditEventRecord[]>([]);
   const [batches, setBatches] = useState<AuditBatchRecord[]>([]);
-  const [batchView, setBatchView] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [actorFilter, setActorFilter] = useState('all');
+  const [integrationFilter, setIntegrationFilter] = useState('all');
+  const [actionFilter, setActionFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
   const [exporting, setExporting] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<AuditEventRecord | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<AuditBatchDetail | null>(null);
   const [detailLoadState, setDetailLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [detailMessage, setDetailMessage] = useState('');
 
+  const activeTabMeta = auditLogTabs.find((tab) => tab.id === activeTab) ?? auditLogTabs[1];
+
+  const clearFilters = () => {
+    setSearchQuery('');
+    setActorFilter('all');
+    setIntegrationFilter('all');
+    setActionFilter('all');
+    setStatusFilter('all');
+    setSourceFilter('all');
+  };
+
   const refreshAudit = async () => {
     setLoadState('loading');
     setMessage('Loading audit history...');
 
     try {
-      const [syncResult, eventResult] = await Promise.all([
+      const [syncResult, timelineResult, batchResult] = await Promise.all([
         fetchAuditSyncRuns(),
-        fetchAuditEvents(batchView ? 'batch' : 'timeline'),
+        fetchAuditEvents('timeline'),
+        fetchAuditEvents('batch'),
       ]);
       setSyncRuns(syncResult.runs);
-      if (eventResult.view === 'batch') {
-        setBatches(eventResult.batches);
-        setEvents([]);
-      } else {
-        setEvents(eventResult.events);
-        setBatches([]);
-      }
+      setEvents(timelineResult.view === 'timeline' ? timelineResult.events : []);
+      setBatches(batchResult.view === 'batch' ? batchResult.batches : []);
       setLoadState('ready');
       setMessage('Audit history loaded.');
     } catch (error) {
@@ -26011,7 +26469,151 @@ function AuditView() {
 
   useEffect(() => {
     void refreshAudit();
-  }, [batchView]);
+  }, []);
+
+  const syncIntegrationOptions = useMemo(
+    () =>
+      uniqueSortedValues(syncRuns.map((run) => run.integrationName)).map((name) => ({
+        value: name,
+        label: name,
+      })),
+    [syncRuns],
+  );
+  const syncStatusOptions = useMemo(
+    () => uniqueSortedValues(syncRuns.map((run) => run.status)),
+    [syncRuns],
+  );
+  const syncSourceOptions = useMemo(
+    () => uniqueSortedValues(syncRuns.map((run) => run.sourceLabel ?? '')),
+    [syncRuns],
+  );
+
+  const eventActorOptions = useMemo(() => uniqueSortedValues(events.map((event) => event.actor)), [events]);
+  const eventIntegrationOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const event of events) {
+      const integrationId = auditEventIntegrationId(event);
+      if (!integrationId) {
+        continue;
+      }
+      options.set(integrationId, auditEventIntegrationName(event));
+    }
+    return Array.from(options.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [events]);
+  const eventActionOptions = useMemo(
+    () => uniqueSortedValues(events.map((event) => event.eventLabel)),
+    [events],
+  );
+  const eventStatusOptions = useMemo(
+    () => uniqueSortedValues(events.map((event) => event.summary.status)),
+    [events],
+  );
+
+  const batchActorOptions = useMemo(() => uniqueSortedValues(batches.map((batch) => batch.actor)), [batches]);
+  const batchStatusOptions = useMemo(
+    () => uniqueSortedValues(batches.map((batch) => batch.status)),
+    [batches],
+  );
+
+  const filteredSyncRuns = useMemo(() => {
+    const query = searchQuery.trim();
+    return syncRuns.filter((run) => {
+      if (integrationFilter !== 'all' && run.integrationName !== integrationFilter) {
+        return false;
+      }
+      if (statusFilter !== 'all' && run.status !== statusFilter) {
+        return false;
+      }
+      if (sourceFilter !== 'all' && (run.sourceLabel ?? '') !== sourceFilter) {
+        return false;
+      }
+      return matchesAuditSearch(
+        [
+          run.integrationName,
+          run.sourceLabel ?? '',
+          run.status,
+          run.errorMessage ?? '',
+          String(run.recordsRead),
+          String(run.recordsWritten),
+          formatDateTime(run.completedAt ?? run.startedAt) ?? '',
+        ].join(' '),
+        query,
+      );
+    });
+  }, [integrationFilter, searchQuery, sourceFilter, statusFilter, syncRuns]);
+
+  const filteredEvents = useMemo(() => {
+    const query = searchQuery.trim();
+    return events.filter((event) => {
+      if (actorFilter !== 'all' && event.actor !== actorFilter) {
+        return false;
+      }
+      if (integrationFilter !== 'all' && auditEventIntegrationId(event) !== integrationFilter) {
+        return false;
+      }
+      if (actionFilter !== 'all' && event.eventLabel !== actionFilter) {
+        return false;
+      }
+      if (statusFilter !== 'all' && event.summary.status !== statusFilter) {
+        return false;
+      }
+      return matchesAuditSearch(
+        [
+          event.actor,
+          event.eventLabel,
+          event.summary.title,
+          event.summary.subtitle,
+          auditEventIntegrationName(event),
+          event.entityType,
+          event.entityId,
+          event.summary.status,
+          formatDateTime(event.occurredAt) ?? '',
+        ].join(' '),
+        query,
+      );
+    });
+  }, [actionFilter, actorFilter, events, integrationFilter, searchQuery, statusFilter]);
+
+  const filteredBatches = useMemo(() => {
+    const query = searchQuery.trim();
+    return batches.filter((batch) => {
+      if (actorFilter !== 'all' && batch.actor !== actorFilter) {
+        return false;
+      }
+      if (statusFilter !== 'all' && batch.status !== statusFilter) {
+        return false;
+      }
+      return matchesAuditSearch(
+        [
+          batch.actor,
+          batch.status,
+          String(batch.updateCount),
+          String(batch.written),
+          String(batch.failed),
+          String(batch.discarded),
+          formatDateTime(batch.occurredAt) ?? '',
+        ].join(' '),
+        query,
+      );
+    });
+  }, [actorFilter, batches, searchQuery, statusFilter]);
+
+  const activeFilterCount =
+    (searchQuery.trim() ? 1 : 0) +
+    (actorFilter !== 'all' ? 1 : 0) +
+    (integrationFilter !== 'all' ? 1 : 0) +
+    (actionFilter !== 'all' ? 1 : 0) +
+    (statusFilter !== 'all' ? 1 : 0) +
+    (sourceFilter !== 'all' ? 1 : 0);
+
+  const visibleCount =
+    activeTab === 'sync-runs'
+      ? filteredSyncRuns.length
+      : activeTab === 'user-actions'
+        ? filteredEvents.length
+        : filteredBatches.length;
 
   const openEventDetail = async (event: AuditEventRecord) => {
     setSelectedEvent(event);
@@ -26068,10 +26670,13 @@ function AuditView() {
   const exportAuditTrail = async () => {
     setExporting(true);
     try {
-      const timelineResult = await fetchAuditEvents('timeline');
-      const exportEvents = events.length > 0 ? events : timelineResult.view === 'timeline' ? timelineResult.events : [];
+      const exportEvents = activeFilterCount > 0 ? filteredEvents : events;
       if (exportEvents.length === 0) {
-        throw new Error('There is no audit history to export yet.');
+        throw new Error(
+          activeFilterCount > 0
+            ? 'No matching audit events to export with the current filters.'
+            : 'There is no audit history to export yet.',
+        );
       }
 
       exportExcelFile(`audit-trail-${exportFileDate()}.xlsx`, buildAuditExportRows(exportEvents));
@@ -26093,7 +26698,8 @@ function AuditView() {
         </div>
         <div className="integrations-live-meta">
           <span>{syncRuns.length.toLocaleString()} sync runs</span>
-          <span>{(batchView ? batches.length : events.length).toLocaleString()} {batchView ? 'batches' : 'events'}</span>
+          <span>{events.length.toLocaleString()} actions</span>
+          <span>{batches.length.toLocaleString()} batches</span>
           <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void refreshAudit()} type="button">
             <RefreshCcw size={16} />
             Refresh
@@ -26101,123 +26707,418 @@ function AuditView() {
         </div>
       </div>
 
-      <section className="view-grid audit-view">
-        <div className="work-surface">
-          <div className="surface-header">
-            <div>
-              <span className="section-kicker">Sync runs</span>
-              <h2>Source activity</h2>
-            </div>
+      <section className="work-surface audit-workspace">
+        <div className="surface-header">
+          <div>
+            <span className="section-kicker">{activeTabMeta.kicker}</span>
+            <h2>{activeTabMeta.title}</h2>
+          </div>
+          <div className="audit-header-actions">
+            <span className="audit-result-count">
+              {visibleCount.toLocaleString()} shown
+              {activeFilterCount > 0 ? ` · ${activeFilterCount} filter${activeFilterCount === 1 ? '' : 's'}` : ''}
+            </span>
             <button
-              className="icon-button"
-              disabled={exporting || loadState === 'loading'}
+              className="button secondary compact"
+              disabled={exporting || loadState === 'loading' || events.length === 0}
               onClick={() => void exportAuditTrail()}
-              title="Export audit trail"
               type="button"
             >
-              <Download size={18} />
+              <Download size={16} />
+              Export
             </button>
           </div>
-          {syncRuns.length === 0 ? (
+        </div>
+
+        <div className="audit-toolbar" aria-label="Audit log controls">
+          <div className="segmented-control audit-tab-control" role="tablist" aria-label="Audit log types">
+            {auditLogTabs.map((tab) => (
+              <button
+                aria-selected={activeTab === tab.id}
+                className={activeTab === tab.id ? 'active' : ''}
+                key={tab.id}
+                onClick={() => {
+                  if (tab.id === activeTab) {
+                    return;
+                  }
+                  clearFilters();
+                  setActiveTab(tab.id);
+                }}
+                role="tab"
+                type="button"
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="audit-filter-panel" aria-label="Audit filters">
+          <label className="config-field audit-filter-search">
+            <span>Search</span>
+            <div className="search-field audit-search-field">
+              <Search size={16} />
+              <input
+                aria-label="Search audit logs"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder={
+                  activeTab === 'sync-runs'
+                    ? 'Search integration, source, status…'
+                    : activeTab === 'user-actions'
+                      ? 'Search user, action, target, detail…'
+                      : 'Search user, status, counts…'
+                }
+                type="search"
+                value={searchQuery}
+              />
+            </div>
+          </label>
+
+          {activeTab === 'sync-runs' ? (
+            <>
+              <label className="config-field">
+                <span>Integration</span>
+                <select onChange={(event) => setIntegrationFilter(event.target.value)} value={integrationFilter}>
+                  <option value="all">All integrations</option>
+                  {syncIntegrationOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Source</span>
+                <select onChange={(event) => setSourceFilter(event.target.value)} value={sourceFilter}>
+                  <option value="all">All sources</option>
+                  {syncSourceOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Status</span>
+                <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+                  <option value="all">All statuses</option>
+                  {syncStatusOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {auditStatusLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+
+          {activeTab === 'user-actions' ? (
+            <>
+              <label className="config-field">
+                <span>User</span>
+                <select onChange={(event) => setActorFilter(event.target.value)} value={actorFilter}>
+                  <option value="all">All users</option>
+                  {eventActorOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Integration</span>
+                <select onChange={(event) => setIntegrationFilter(event.target.value)} value={integrationFilter}>
+                  <option value="all">All integrations</option>
+                  {eventIntegrationOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Action</span>
+                <select onChange={(event) => setActionFilter(event.target.value)} value={actionFilter}>
+                  <option value="all">All actions</option>
+                  {eventActionOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Status</span>
+                <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+                  <option value="all">All statuses</option>
+                  {eventStatusOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {auditStatusLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+
+          {activeTab === 'approval-batches' ? (
+            <>
+              <label className="config-field">
+                <span>User</span>
+                <select onChange={(event) => setActorFilter(event.target.value)} value={actorFilter}>
+                  <option value="all">All users</option>
+                  {batchActorOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="config-field">
+                <span>Status</span>
+                <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+                  <option value="all">All statuses</option>
+                  {batchStatusOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {auditStatusLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+
+          <button
+            className="button secondary compact audit-clear-filters"
+            disabled={activeFilterCount === 0}
+            onClick={clearFilters}
+            type="button"
+          >
+            <Filter size={15} />
+            Clear
+          </button>
+        </div>
+
+        {activeTab === 'sync-runs' ? (
+          syncRuns.length === 0 ? (
             <div className="empty-state audit-empty-state">
               <Database size={20} />
               <strong>No sync runs recorded yet.</strong>
               <span>Completed vendor and ConnectWise syncs will appear here.</span>
             </div>
+          ) : filteredSyncRuns.length === 0 ? (
+            <div className="empty-state audit-empty-state">
+              <Search size={20} />
+              <strong>No sync runs match the current filters.</strong>
+              <span>Adjust or clear filters to see more results.</span>
+            </div>
           ) : (
-            <div className="sync-list">
-              {syncRuns.map((run) => (
-                <div className="sync-row" key={run.id}>
-                  <Zap size={17} />
-                  <div>
-                    <strong>{run.integrationName}</strong>
-                    <span>{formatDateTime(run.completedAt ?? run.startedAt) ?? 'Unknown time'}</span>
-                  </div>
-                  <span>
-                    {run.recordsWritten.toLocaleString()} written
-                    {run.sourceLabel ? ` · ${run.sourceLabel}` : ''}
-                  </span>
-                  <span className={`status-pill ${auditStatusClass(run.status)}`}>{auditStatusLabel(run.status)}</span>
-                </div>
-              ))}
+            <div className="audit-table-scroll">
+              <table className="audit-table audit-sync-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <span className="audit-table-heading-label">When</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Integration</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Source</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Read</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Written</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Status</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Error</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredSyncRuns.map((run) => (
+                    <tr key={run.id} title={run.errorMessage || undefined}>
+                      <td>{formatDateTime(run.completedAt ?? run.startedAt) ?? 'Unknown time'}</td>
+                      <td>
+                        <strong>{run.integrationName}</strong>
+                      </td>
+                      <td>{run.sourceLabel || '—'}</td>
+                      <td>{run.recordsRead.toLocaleString()}</td>
+                      <td>{run.recordsWritten.toLocaleString()}</td>
+                      <td>
+                        <span className={`status-pill ${auditStatusClass(run.status)}`}>
+                          {auditStatusLabel(run.status)}
+                        </span>
+                      </td>
+                      <td>{run.errorMessage || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          )}
-        </div>
+          )
+        ) : null}
 
-        <div className="work-surface">
-          <div className="surface-header">
-            <div>
-              <span className="section-kicker">Approval ledger</span>
-              <h2>Immutable history</h2>
-            </div>
-            <button
-              className={`button secondary compact${batchView ? ' active' : ''}`}
-              onClick={() => setBatchView((current) => !current)}
-              type="button"
-            >
-              <ListChecks size={17} />
-              {batchView ? 'Timeline view' : 'Batch view'}
-            </button>
-          </div>
-          {batchView ? (
-            batches.length === 0 ? (
-              <div className="empty-state audit-empty-state">
-                <History size={20} />
-                <strong>No approval batches recorded yet.</strong>
-                <span>Quantity approvals and ConnectWise writes will appear here.</span>
-              </div>
-            ) : (
-              <div className="timeline">
-                {batches.map((batch) => (
-                  <button
-                    className="timeline-row audit-row-button"
-                    key={batch.batchId}
-                    onClick={() => void openBatchDetail(batch)}
-                    type="button"
-                  >
-                    <span className={`timeline-marker ${auditStatusClass(batch.status)}`} />
-                    <div>
-                      <strong>{batch.actor}</strong>
-                      <span>
-                        {batch.written.toLocaleString()} written · {batch.failed.toLocaleString()} failed ·{' '}
-                        {batch.discarded.toLocaleString()} discarded
-                      </span>
-                    </div>
-                    <em>{formatDateTime(batch.occurredAt) ?? 'Unknown time'}</em>
-                    <span className={`status-pill ${auditStatusClass(batch.status)}`}>{auditStatusLabel(batch.status)}</span>
-                  </button>
-                ))}
-              </div>
-            )
-          ) : events.length === 0 ? (
+        {activeTab === 'user-actions' ? (
+          events.length === 0 ? (
             <div className="empty-state audit-empty-state">
               <History size={20} />
               <strong>No user actions recorded yet.</strong>
               <span>Approvals, quantity updates, settings changes, and invoice notices are tracked here.</span>
             </div>
-          ) : (
-            <div className="timeline">
-              {events.map((event) => (
-                <button
-                  className="timeline-row audit-row-button"
-                  key={event.id}
-                  onClick={() => void openEventDetail(event)}
-                  type="button"
-                >
-                  <span className={`timeline-marker ${auditStatusClass(event.summary.status)}`} />
-                  <div>
-                    <strong>{event.summary.title}</strong>
-                    <span>{event.summary.subtitle || event.eventLabel}</span>
-                  </div>
-                  <em>{formatDateTime(event.occurredAt) ?? 'Unknown time'}</em>
-                  <span className={`status-pill ${auditStatusClass(event.summary.status)}`}>
-                    {auditStatusLabel(event.summary.status)}
-                  </span>
-                </button>
-              ))}
+          ) : filteredEvents.length === 0 ? (
+            <div className="empty-state audit-empty-state">
+              <Search size={20} />
+              <strong>No user actions match the current filters.</strong>
+              <span>Try another user, integration, or action filter.</span>
             </div>
-          )}
-        </div>
+          ) : (
+            <div className="audit-table-scroll">
+              <table className="audit-table audit-events-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <span className="audit-table-heading-label">When</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">User</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Action</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Integration</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Target</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Detail</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Status</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEvents.map((event) => (
+                    <tr
+                      className="audit-table-row-button"
+                      key={event.id}
+                      onClick={() => void openEventDetail(event)}
+                      onKeyDown={(keyboardEvent) => {
+                        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+                          keyboardEvent.preventDefault();
+                          void openEventDetail(event);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      title="View event details"
+                    >
+                      <td>{formatDateTime(event.occurredAt) ?? 'Unknown time'}</td>
+                      <td>
+                        <strong>{event.actor}</strong>
+                      </td>
+                      <td>{event.eventLabel}</td>
+                      <td>{auditEventIntegrationName(event)}</td>
+                      <td>{event.summary.title || '—'}</td>
+                      <td>{event.summary.subtitle || '—'}</td>
+                      <td>
+                        <span className={`status-pill ${auditStatusClass(event.summary.status)}`}>
+                          {auditStatusLabel(event.summary.status)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
+
+        {activeTab === 'approval-batches' ? (
+          batches.length === 0 ? (
+            <div className="empty-state audit-empty-state">
+              <ListChecks size={20} />
+              <strong>No approval batches recorded yet.</strong>
+              <span>Quantity approvals and ConnectWise writes will appear here.</span>
+            </div>
+          ) : filteredBatches.length === 0 ? (
+            <div className="empty-state audit-empty-state">
+              <Search size={20} />
+              <strong>No approval batches match the current filters.</strong>
+              <span>Adjust the user or status filter to see more results.</span>
+            </div>
+          ) : (
+            <div className="audit-table-scroll">
+              <table className="audit-table audit-batches-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <span className="audit-table-heading-label">When</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">User</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Updates</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Written</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Failed</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Discarded</span>
+                    </th>
+                    <th>
+                      <span className="audit-table-heading-label">Status</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredBatches.map((batch) => (
+                    <tr
+                      className="audit-table-row-button"
+                      key={batch.batchId}
+                      onClick={() => void openBatchDetail(batch)}
+                      onKeyDown={(keyboardEvent) => {
+                        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+                          keyboardEvent.preventDefault();
+                          void openBatchDetail(batch);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      title="View batch details"
+                    >
+                      <td>{formatDateTime(batch.occurredAt) ?? 'Unknown time'}</td>
+                      <td>
+                        <strong>{batch.actor}</strong>
+                      </td>
+                      <td>{batch.updateCount.toLocaleString()}</td>
+                      <td>{batch.written.toLocaleString()}</td>
+                      <td>{batch.failed.toLocaleString()}</td>
+                      <td>{batch.discarded.toLocaleString()}</td>
+                      <td>
+                        <span className={`status-pill ${auditStatusClass(batch.status)}`}>
+                          {auditStatusLabel(batch.status)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
       </section>
 
       {selectedEvent ? (

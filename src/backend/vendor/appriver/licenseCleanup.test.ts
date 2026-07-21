@@ -53,6 +53,7 @@ type SnapshotRow = {
 type CleanupAction = {
   id: string;
   batch_id: string;
+  sync_run_id?: string | null;
   customer_id: string | null;
   customer_name: string | null;
   external_customer_id: string;
@@ -165,9 +166,22 @@ class CleanupDatabase implements Queryable {
       const actionId = sql.includes('where appriver_license_cleanup_actions.id = $1::uuid')
         ? String(values?.[0] ?? '')
         : undefined;
+      const syncRunFilter =
+        !actionId && sql.includes('sync_run_id = $2::uuid') ? String(values?.[1] ?? '') : undefined;
       return {
         rows: this.actions
-          .filter((action) => (!actionId || action.id === actionId) && (actionId || !action.dismissed_at))
+          .filter((action) => {
+            if (actionId) {
+              return action.id === actionId;
+            }
+            if (action.dismissed_at) {
+              return false;
+            }
+            if (syncRunFilter && action.sync_run_id !== syncRunFilter) {
+              return false;
+            }
+            return true;
+          })
           .map((action) => ({
             id: action.id,
             batch_id: action.batch_id,
@@ -274,27 +288,28 @@ class CleanupDatabase implements Queryable {
       const action: CleanupAction = {
         id: `cccccccc-cccc-4ccc-8ccc-${String(this.actions.length + 1).padStart(12, '0')}`,
         batch_id: String(values?.[0]),
-        customer_id: values?.[1] ? String(values[1]) : null,
-        customer_name: values?.[2] ? String(values[2]) : null,
-        external_customer_id: String(values?.[3]),
-        vendor_product_key: values?.[4] ? String(values[4]) : null,
-        product_code: values?.[5] ? String(values[5]) : null,
-        product_name: String(values?.[6]),
-        subscription_key: String(values?.[7]),
-        domain: values?.[8] ? String(values[8]) : null,
+        sync_run_id: values?.[1] ? String(values[1]) : null,
+        customer_id: values?.[2] ? String(values[2]) : null,
+        customer_name: values?.[3] ? String(values[3]) : null,
+        external_customer_id: String(values?.[4]),
+        vendor_product_key: values?.[5] ? String(values[5]) : null,
+        product_code: values?.[6] ? String(values[6]) : null,
+        product_name: String(values?.[7]),
+        subscription_key: String(values?.[8]),
+        domain: values?.[9] ? String(values[9]) : null,
         status: 'queued',
-        current_total_licenses: Number(values?.[9]),
-        current_assigned_licenses: values?.[10] === null ? null : Number(values?.[10]),
-        current_unassigned_licenses: Number(values?.[11]),
-        requested_reduction: Number(values?.[12]),
-        requested_quantity: Number(values?.[13]),
+        current_total_licenses: Number(values?.[10]),
+        current_assigned_licenses: values?.[11] === null || values?.[11] === undefined ? null : Number(values?.[11]),
+        current_unassigned_licenses: Number(values?.[12]),
+        requested_reduction: Number(values?.[13]),
+        requested_quantity: Number(values?.[14]),
         attempts: 0,
         verification_attempts: 0,
-        next_check_at: String(values?.[19]),
-        expires_at: new Date(Date.parse(String(values?.[19])) + 24 * 60 * 60 * 1000).toISOString(),
-        created_at: String(values?.[19]),
-        updated_at: String(values?.[19]),
-        request_payload: JSON.parse(String(values?.[20] ?? '{}')) as Record<string, unknown>,
+        next_check_at: String(values?.[20]),
+        expires_at: new Date(Date.parse(String(values?.[20])) + 24 * 60 * 60 * 1000).toISOString(),
+        created_at: String(values?.[20]),
+        updated_at: String(values?.[20]),
+        request_payload: JSON.parse(String(values?.[21] ?? '{}')) as Record<string, unknown>,
       };
       this.actions.push(action);
       return { rows: [] as T[] };
@@ -426,6 +441,9 @@ class CleanupDatabase implements Queryable {
 
 async function run() {
   await testReportEligibility();
+  await testSameSnapshotLaterDayChangesEligibility();
+  await testVerifiedResidualRemainsEligible();
+  await testActionsPinnedToCurrentSnapshot();
   await testScheduledCancellationIsNotQueued();
   await testQueueDuplicatePrevention();
   await testQueueRefreshesLiveSubscriptionDetails();
@@ -725,6 +743,73 @@ async function testReportEligibility() {
   assert.equal(bySubscription.get('verified-result')?.totalLicenses, 7);
   assert.equal(bySubscription.get('verified-result')?.unassignedLicenses, 0);
   assert.equal(bySubscription.get('verified-result')?.proposedReduction, 0);
+}
+
+async function testSameSnapshotLaterDayChangesEligibility() {
+  const database = new CleanupDatabase([
+    snapshot('renewal-window', {
+      commitmentEndDate: '2026-07-14T00:00:00Z',
+      totalLicenses: 10,
+      assignedLicenses: 7,
+      unassignedLicenses: 3,
+    }),
+  ]);
+
+  const eligibleOnSnapshotDay = await listAppRiverLicenseCleanupCandidates(database, { now: '2026-07-15T12:00:00.000Z' });
+  assert.equal(eligibleOnSnapshotDay.rows[0]?.proposedReduction, 3);
+  assert.equal(eligibleOnSnapshotDay.rows[0]?.renewalWindow, 'Recent');
+
+  const outsideWindow = await listAppRiverLicenseCleanupCandidates(database, { now: '2026-07-25T12:00:00.000Z' });
+  assert.equal(outsideWindow.rows.length, 0);
+}
+
+async function testVerifiedResidualRemainsEligible() {
+  const database = new CleanupDatabase([
+    {
+      ...snapshot('residual', {
+        commitmentEndDate: '2026-07-14T00:00:00Z',
+        totalLicenses: 10,
+        assignedLicenses: 6,
+        unassignedLicenses: 4,
+      }),
+      latest_action_id: 'cccccccc-cccc-4ccc-8ccc-888888888888',
+      latest_action_status: 'verified',
+      latest_requested_quantity: 8,
+      latest_requested_reduction: 2,
+      latest_final_quantity: 8,
+      latest_created_at: '2026-07-15T12:05:00.000Z',
+      latest_completed_at: '2026-07-15T12:06:00.000Z',
+      latest_updated_at: '2026-07-15T12:06:00.000Z',
+    },
+  ]);
+
+  const report = await listAppRiverLicenseCleanupCandidates(database, { now });
+  assert.equal(report.rows.length, 1);
+  assert.equal(report.rows[0]?.totalLicenses, 8);
+  assert.equal(report.rows[0]?.unassignedLicenses, 2);
+  assert.equal(report.rows[0]?.proposedReduction, 2);
+  assert.equal(report.rows[0]?.latestAction?.status, 'verified');
+}
+
+async function testActionsPinnedToCurrentSnapshot() {
+  const database = new CleanupDatabase([
+    snapshot('decrease-now', { commitmentEndDate: '2026-07-14T00:00:00Z', totalLicenses: 10, assignedLicenses: 7, unassignedLicenses: 3 }),
+  ]);
+  const rowId = 'appriver-license-cleanup:cust-1:decrease-now';
+
+  await queueAppRiverLicenseCleanupActions(database, {
+    actor: 'license@example.com',
+    rowIds: [rowId],
+    now,
+  });
+  assert.equal(database.actions[0]?.sync_run_id, syncRunId);
+
+  const current = await listAppRiverLicenseCleanupActions(database);
+  assert.equal(current.actions.length, 1);
+
+  database.actions[0]!.sync_run_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  const afterNewSnapshot = await listAppRiverLicenseCleanupActions(database);
+  assert.equal(afterNewSnapshot.actions.length, 0);
 }
 
 async function testQueueDuplicatePrevention() {

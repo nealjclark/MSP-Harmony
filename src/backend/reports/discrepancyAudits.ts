@@ -32,6 +32,7 @@ export type DiscrepancyAuditState = {
   latestAudit?: DiscrepancyAuditSummary;
   hasNewerSnapshot: boolean;
   canRun: boolean;
+  liveMode: boolean;
 };
 
 export type DiscrepancyAuditReport = DiscrepancyReport & {
@@ -39,6 +40,17 @@ export type DiscrepancyAuditReport = DiscrepancyReport & {
   auditState: DiscrepancyAuditState;
   auditMode: 'saved' | 'new';
 };
+
+export type LiveDiscrepancyReport = DiscrepancyReport & {
+  auditState: DiscrepancyAuditState;
+  auditMode: 'live';
+};
+
+const liveDiscrepancyComparisonIds = new Set(['appriver-license-cleanup']);
+
+export function isLiveDiscrepancyComparison(comparisonId: string) {
+  return liveDiscrepancyComparisonIds.has(comparisonId);
+}
 
 type DiscrepancyAuditRow = {
   id: string;
@@ -88,8 +100,10 @@ export async function getDiscrepancyAuditState(
 ): Promise<DiscrepancyAuditState> {
   const currentSourceSnapshot = await getDiscrepancySourceSnapshot(database, comparisonId);
   const latestAudit = await loadLatestAuditSummary(database, comparisonId);
+  const liveMode = isLiveDiscrepancyComparison(comparisonId);
   const hasNewerSnapshot = Boolean(
-    latestAudit &&
+    !liveMode &&
+      latestAudit &&
       sourceSnapshotHasSyncRun(currentSourceSnapshot) &&
       latestAudit.sourceKey !== currentSourceSnapshot.sourceKey,
   );
@@ -100,7 +114,21 @@ export async function getDiscrepancyAuditState(
     currentSourceSnapshot,
     latestAudit,
     hasNewerSnapshot,
-    canRun: !latestAudit || hasNewerSnapshot,
+    canRun: liveMode ? false : !latestAudit || hasNewerSnapshot,
+    liveMode,
+  };
+}
+
+export async function getLiveDiscrepancyReport(
+  database: Queryable,
+  options: DiscrepancyReportOptions & { comparisonId: string },
+): Promise<LiveDiscrepancyReport> {
+  const report = await getDiscrepancyReport(database, options);
+  const auditState = await getDiscrepancyAuditState(database, options.comparisonId);
+  return {
+    ...report,
+    auditState,
+    auditMode: 'live',
   };
 }
 
@@ -351,6 +379,7 @@ async function mergeDiscrepancyAuditExtras(
        from appriver_license_cleanup_actions
        where external_customer_id = row_keys.external_customer_id
          and subscription_key = row_keys.subscription_key
+         and ($3::uuid is null or sync_run_id = $3::uuid)
          and status = any($2::text[])
        order by created_at desc
        limit 1
@@ -360,6 +389,7 @@ async function mergeDiscrepancyAuditExtras(
        from appriver_license_cleanup_actions
        where external_customer_id = row_keys.external_customer_id
          and subscription_key = row_keys.subscription_key
+         and ($3::uuid is null or sync_run_id = $3::uuid)
        order by created_at desc
        limit 1
      ) latest_action on true

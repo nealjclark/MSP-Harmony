@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   getDiscrepancyAuditState,
   getLatestDiscrepancyAuditReport,
+  getLiveDiscrepancyReport,
   runAndSaveDiscrepancyAudit,
 } from './discrepancyAudits';
 import type { DiscrepancyReport, Queryable } from './discrepancyReports';
@@ -132,11 +133,29 @@ class AuditDatabase implements Queryable {
 
 async function run() {
   await testRunAndDetectNewerSnapshot();
+  await testAppRiverUsesLiveMode();
   await testSavedAuditMergesCleanupActions();
   await testSavedAuditHidesPersistedMatchedRefresh();
   await testSavedAuditHidesHistoricalVerifiedAction();
 
   console.log('discrepancy audit tests passed');
+}
+
+async function testAppRiverUsesLiveMode() {
+  const database = new AuditDatabase();
+  const state = await getDiscrepancyAuditState(database, 'appriver-license-cleanup');
+  assert.equal(state.liveMode, true);
+  assert.equal(state.canRun, false);
+  assert.equal(state.hasNewerSnapshot, false);
+
+  const live = await getLiveDiscrepancyReport(database, {
+    comparisonId: 'appriver-license-cleanup',
+    includeMatched: true,
+    now,
+  });
+  assert.equal(live.auditMode, 'live');
+  assert.equal(live.auditState.liveMode, true);
+  assert.equal(live.auditState.canRun, false);
 }
 
 async function testSavedAuditHidesPersistedMatchedRefresh() {
@@ -272,6 +291,7 @@ async function testRunAndDetectNewerSnapshot() {
   const state = await getDiscrepancyAuditState(database, 'ncentral-sentinelone-devices');
   assert.equal(state.hasNewerSnapshot, true);
   assert.equal(state.canRun, true);
+  assert.equal(state.liveMode, false);
 }
 
 async function testSavedAuditMergesCleanupActions() {

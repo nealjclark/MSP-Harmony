@@ -359,6 +359,7 @@ CREATE TABLE IF NOT EXISTS appriver_license_cleanup_batches (
 CREATE TABLE IF NOT EXISTS appriver_license_cleanup_actions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   batch_id uuid NOT NULL REFERENCES appriver_license_cleanup_batches(id) ON DELETE CASCADE,
+  sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
   customer_id uuid REFERENCES customers(id),
   customer_name text,
   external_customer_id text NOT NULL,
@@ -753,6 +754,23 @@ ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_at timestamptz;
 ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_by text;
+ALTER TABLE appriver_license_cleanup_actions
+  ADD COLUMN IF NOT EXISTS sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_sync
+  ON appriver_license_cleanup_actions(sync_run_id, created_at DESC);
+UPDATE appriver_license_cleanup_actions
+SET sync_run_id = latest_sync.id,
+    updated_at = now()
+FROM (
+  select id
+  from sync_runs
+  where integration_id = 'opentext-appriver'
+    and status = 'complete'
+    and coalesce(metadata->>'entity', '') = 'subscription-snapshots'
+  order by completed_at desc nulls last, started_at desc
+  limit 1
+) latest_sync
+WHERE appriver_license_cleanup_actions.sync_run_id is null;
 UPDATE appriver_license_cleanup_actions
 SET status = CASE status
       WHEN 'processing' THEN 'running'
