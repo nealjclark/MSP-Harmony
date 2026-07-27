@@ -202,7 +202,7 @@ export type AzureBillingIngramReadiness = {
 };
 
 export type AzureBillingIngramChange = {
-  status: 'new' | 'removed' | 'changed';
+  status: 'new' | 'removed' | 'changed' | 'same';
   productCode: string;
   productName: string;
   subscriptionId?: string;
@@ -477,9 +477,6 @@ export function calculateAzureBillingResult(input: AzureBillingCalculationInput)
   const projectedCost = round(proposedQuantity * (proposedUnitCost ?? 0), cents);
   const projectedMargin = round(projectedRevenue - projectedCost, cents);
   if (combinedCost === 0) varianceFlags.push('zero-source-cost');
-  if (Math.abs(projectedCost - combinedCost) >= 0.02 && input.policyType === 'fixed-avd-per-user') {
-    varianceFlags.push('unit-cost-rounding-variance');
-  }
 
   return {
     selectedNerdioCountSource,
@@ -566,8 +563,9 @@ export function compareAzureBillingIngramLines(
   };
   const current = aggregate(currentItems);
   const previous = aggregate(previousItems);
+  const statusRank = { new: 0, changed: 1, removed: 2, same: 3 } as const;
   return [...new Set([...current.keys(), ...previous.keys()])]
-    .map((key): AzureBillingIngramChange | undefined => {
+    .map((key): AzureBillingIngramChange => {
       const currentItem = current.get(key);
       const previousItem = previous.get(key);
       const currentQuantity = currentItem?.quantity ?? 0;
@@ -576,9 +574,9 @@ export function compareAzureBillingIngramLines(
       const previousCost = previousItem?.cost ?? 0;
       const quantityChange = round(currentQuantity - previousQuantity, sourcePrecision);
       const costChange = round(currentCost - previousCost, sourcePrecision);
-      if (Math.abs(quantityChange) < 0.0001 && Math.abs(costChange) < 0.0001) return undefined;
+      const unchanged = Math.abs(quantityChange) < 0.0001 && Math.abs(costChange) < 0.0001;
       return {
-        status: !previousItem ? 'new' : !currentItem ? 'removed' : 'changed',
+        status: !previousItem ? 'new' : !currentItem ? 'removed' : unchanged ? 'same' : 'changed',
         productCode: currentItem?.productCode ?? previousItem?.productCode ?? '',
         productName: currentItem?.productName ?? previousItem?.productName ?? 'Ingram product',
         subscriptionId: currentItem?.subscriptionId ?? previousItem?.subscriptionId,
@@ -591,9 +589,9 @@ export function compareAzureBillingIngramLines(
         costChange,
       };
     })
-    .filter((item): item is AzureBillingIngramChange => Boolean(item))
     .sort((left, right) =>
-      Math.abs(right.costChange) - Math.abs(left.costChange)
+      statusRank[left.status] - statusRank[right.status]
+      || Math.abs(right.costChange) - Math.abs(left.costChange)
       || left.productName.localeCompare(right.productName));
 }
 
@@ -2939,7 +2937,7 @@ function mapResultRow(row: ResultRow, approvals: ApprovalRow[], billingMonth: st
     projectedMargin: numericValue(row.projected_margin),
     reviewerNote: row.reviewer_note ?? undefined,
     holdReason: row.hold_reason ?? undefined,
-    varianceFlags: asStringArray(row.variance_flags),
+    varianceFlags: asStringArray(row.variance_flags).filter((flag) => flag !== 'unit-cost-rounding-variance'),
     sourceEvidence: asRecord(row.source_evidence),
     connectWiseSnapshot: asRecord(row.connectwise_snapshot),
     ingramChanges: [],

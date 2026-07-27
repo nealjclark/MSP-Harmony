@@ -10703,6 +10703,11 @@ h2 {
   background: #e5f0f8;
 }
 
+.azure-billing-ingram-changes .status-chip.same {
+  color: #5a635c;
+  background: #eef1ef;
+}
+
 .azure-billing-ingram-changes .variance-negative {
   color: #9b3f2d;
   font-weight: 700;

@@ -762,7 +762,7 @@ type AzureBillingResult = {
   sourceEvidence: Record<string, unknown>;
   ingramComparisonMonth?: string;
   ingramChanges: Array<{
-    status: 'new' | 'removed' | 'changed';
+    status: 'new' | 'removed' | 'changed' | 'same';
     productCode: string;
     productName: string;
     subscriptionId?: string;
@@ -24687,29 +24687,52 @@ function AzureBillingClientReviewTable({
       {result.holdReason ? <p className="azure-billing-warning">Skipped this month: {result.holdReason}</p> : null}
 
       <details className="azure-billing-evidence">
-        <summary>Ingram changes and approval history</summary>
-        {result.ingramComparisonMonth ? (
+        <summary>Ingram Details</summary>
+        {result.ingramChanges.length ? (
           <section className="azure-billing-ingram-changes">
-            <h4>Ingram changes vs {result.ingramComparisonMonth}</h4>
-            {result.ingramChanges.length ? (
-              <div className="azure-billing-change-table">
-                <table className="data-table">
-                  <thead><tr><th>Change</th><th>Product</th><th>SKU</th><th>Previous qty</th><th>Current qty</th><th>Qty Δ</th><th>Unit cost</th><th>Previous cost</th><th>Current cost</th><th>Cost Δ</th></tr></thead>
-                  <tbody>{result.ingramChanges.map((change) => (
+            {result.ingramComparisonMonth ? (
+              <h4>Compared with {result.ingramComparisonMonth}</h4>
+            ) : (
+              <h4>Current Ingram line items</h4>
+            )}
+            <div className="azure-billing-change-table">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Product</th>
+                    <th>SKU</th>
+                    <th>Previous Qty</th>
+                    <th>Current Qty</th>
+                    <th>Qty Δ</th>
+                    <th>Unit Cost</th>
+                    <th>Previous Cost</th>
+                    <th>Current Cost</th>
+                    <th>Cost Δ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.ingramChanges.map((change) => (
                     <tr key={`${change.subscriptionId ?? ''}:${change.productCode}:${change.productName}`}>
                       <td><span className={`status-chip ${change.status}`}>{azureBillingStatusLabel(change.status)}</span></td>
-                      <td>{change.productName}</td><td>{change.productCode || '—'}</td>
-                      <td>{formatCount(change.previousQuantity)}</td><td>{formatCount(change.currentQuantity)}</td>
-                      <td>{formatSignedNumber(change.quantityChange)}</td><td>{formatOptionalCurrency(change.unitCost)}</td>
-                      <td>{formatCurrency(change.previousCost)}</td><td>{formatCurrency(change.currentCost)}</td>
+                      <td>{change.productName}</td>
+                      <td>{change.productCode || '—'}</td>
+                      <td>{formatCount(change.previousQuantity)}</td>
+                      <td>{formatCount(change.currentQuantity)}</td>
+                      <td>{formatSignedNumber(change.quantityChange)}</td>
+                      <td>{formatOptionalCurrency(change.unitCost)}</td>
+                      <td>{formatCurrency(change.previousCost)}</td>
+                      <td>{formatCurrency(change.currentCost)}</td>
                       <td>{formatSignedCurrency(change.costChange)}</td>
                     </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            ) : <p className="field-help">No Ingram product, quantity, or cost changes.</p>}
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
-        ) : null}
+        ) : (
+          <p className="field-help">No Ingram line items for this client.</p>
+        )}
         {result.approvals.map((approval) => (
           <p key={`${approval.reviewerEmail}:${approval.createdAt}`}>
             <strong>{approval.reviewerName}</strong> approved {formatDateTime(approval.createdAt)}
@@ -24727,15 +24750,6 @@ function AzureBillingClientReviewTable({
           type="button"
         >
           Reset to agreement default
-        </button>
-        <button
-          className="button secondary"
-          disabled={busy || result.status === 'released'}
-          onClick={() => void reviseBillingResult(result, 'previous-approved', runAction, onReload)}
-          title="Reuse the most recent released proposal for this agreement."
-          type="button"
-        >
-          Use previous approved total
         </button>
         <button
           className="button secondary"
