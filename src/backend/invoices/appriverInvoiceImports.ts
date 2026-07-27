@@ -2215,14 +2215,66 @@ function productKeyCandidates(
   term: string | undefined,
   billingFrequency: string | undefined,
 ) {
-  const candidates = [
-    productKey(productCode, term, billingFrequency),
-    productKey(productName, term, billingFrequency),
-    productCode,
-    productName,
-  ].filter((value): value is string => Boolean(value));
+  const pairs = termFrequencyCandidatePairs(term, billingFrequency);
+  const candidates: string[] = [];
+
+  // Prefer product name first so invoice keys match AppRiver SecureCloud API keys
+  // (for example "Microsoft 365 Business Premium|Annual|Monthly").
+  for (const [nextTerm, nextFrequency] of pairs) {
+    const nameKey = productKey(productName, nextTerm, nextFrequency);
+    if (nameKey) {
+      candidates.push(nameKey);
+    }
+  }
+  for (const [nextTerm, nextFrequency] of pairs) {
+    const codeKey = productKey(productCode, nextTerm, nextFrequency);
+    if (codeKey) {
+      candidates.push(codeKey);
+    }
+  }
+
+  const trimmedName = productName.trim();
+  const trimmedCode = productCode.trim();
+  if (trimmedName) {
+    candidates.push(trimmedName);
+  }
+  if (trimmedCode) {
+    candidates.push(trimmedCode);
+  }
 
   return [...new Set(candidates)];
+}
+
+function termFrequencyCandidatePairs(
+  term: string | undefined,
+  billingFrequency: string | undefined,
+): Array<[string | undefined, string | undefined]> {
+  const trimmedTerm = term?.trim() || undefined;
+  const trimmedFrequency = billingFrequency?.trim() || undefined;
+  const pairs: Array<[string | undefined, string | undefined]> = [];
+  const add = (nextTerm?: string, nextFrequency?: string) => {
+    if (pairs.some(([existingTerm, existingFrequency]) => existingTerm === nextTerm && existingFrequency === nextFrequency)) {
+      return;
+    }
+    pairs.push([nextTerm, nextFrequency]);
+  };
+
+  // Account History often labels annual-billed-monthly lines as Annual/Annual.
+  // SecureCloud API product keys use Annual|Monthly for those subscriptions.
+  if ((trimmedTerm ?? '').toLowerCase() === 'annual') {
+    add(trimmedTerm, 'Monthly');
+    add(trimmedTerm, 'Annual');
+    if (
+      trimmedFrequency &&
+      !['monthly', 'annual'].includes(trimmedFrequency.toLowerCase())
+    ) {
+      add(trimmedTerm, trimmedFrequency);
+    }
+  } else {
+    add(trimmedTerm, trimmedFrequency);
+  }
+
+  return pairs;
 }
 
 function productKey(product: string, term: string | undefined, billingFrequency: string | undefined) {

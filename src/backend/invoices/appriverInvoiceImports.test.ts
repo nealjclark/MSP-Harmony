@@ -302,6 +302,92 @@ async function run() {
   assert.equal(fallbackInsertedLines[2]?.values?.[3], agreementId);
   assert.equal(fallbackInsertedLines[2]?.values?.[10], 'CW-EXCHANGE-P1');
 
+  const annualInsertedLines: Array<{ sql: string; values?: unknown[] }> = [];
+  const annualCsv = [
+    'Customer Account Number,External Account Number,Company Name,Effective Date,Charge Type,Product,Product Code,Appriver Charge Name,Custom Charge Name,Previous Adjustment Qty,Post Adjustment Qty,Charge Qty,Rate,Months,Amount,Billed Amount,Primary Domain,Alias Domains,Term,Start,End,Invoice Date,Invoice Number,Group Name,External Id,Billing Frequency,Comments',
+    '774354,,"Licht & Company, Inc.",2026-Jun-22,Renewal,Microsoft 365 Business Premium,O365CSP-59,Licenses,,0,0,3,23.23,12,60.98,60.98,lichtandco.com,lichtandco.onmicrosoft.com,Annual,2026-Jun-22,2026-Jul-22,2026-Jul-21,4071457,,,Annual, Annual subscription billed Monthly - Invoice 8 of 12',
+  ].join('\n');
+  const annualDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from vendor_account_mappings')) {
+        return {
+          rows: [
+            {
+              external_account_id: '774354',
+              customer_id: customerId,
+              agreement_id: agreementId,
+              mapping_status: 'approved',
+              active: true,
+            },
+          ] as T[],
+        };
+      }
+      if (sql.includes('from vendor_product_mappings')) {
+        return {
+          rows: [
+            {
+              vendor_product_key: 'Microsoft 365 Business Premium|Annual|Monthly',
+              target_index: 0,
+              connectwise_product_code: 'CW-M365-BUSINESS-PREMIUM-AM',
+              connectwise_product_name: 'Microsoft 365 Business Premium AM',
+              unit_price: '23.23',
+            },
+          ] as T[],
+        };
+      }
+      if (sql.includes('from vendor_usage_snapshots')) {
+        return { rows: [] as T[] };
+      }
+      if (sql.includes('from target_names')) {
+        return { rows: [] as T[] };
+      }
+      if (sql.includes('insert into invoice_imports')) {
+        return { rows: [{ id: '88888888-8888-8888-8888-888888888888' }] as T[] };
+      }
+      if (sql.includes('insert into invoice_line_items')) {
+        annualInsertedLines.push({ sql, values });
+        return { rows: [] as T[] };
+      }
+      if (sql.includes('insert into sync_runs') && sql.includes('returning id')) {
+        return { rows: [{ id: '99999999-9999-9999-9999-999999999999' }] as T[] };
+      }
+      if (sql.includes('from invoice_imports') && sql.includes('where id = $1::uuid')) {
+        return {
+          rows: [
+            {
+              id: '88888888-8888-8888-8888-888888888888',
+              vendor_id: 'opentext-appriver',
+              file_name: 'AccountHistory-annual.csv',
+              invoice_number: '4071457',
+              imported_at: '2026-07-01T12:00:00Z',
+              invoice_date: '2026-07-21',
+              billing_period_start: '2026-06-22',
+              billing_period_end: '2026-07-22',
+              row_count: 1,
+              matched_rows: 1,
+              exception_rows: 0,
+              status: 'ready',
+            },
+          ] as T[],
+        };
+      }
+      return { rows: [] as T[] };
+    },
+  };
+  const annualImported = await importAppRiverInvoiceCsv(annualDatabase, {
+    fileName: 'AccountHistory-annual.csv',
+    content: annualCsv,
+  });
+  assert.equal(annualImported.matchedRows, 1);
+  assert.equal(annualImported.exceptionRows, 0);
+  assert.equal(annualInsertedLines[0]?.values?.[6], 'Microsoft 365 Business Premium|Annual|Monthly');
+  assert.equal(annualInsertedLines[0]?.values?.[10], 'CW-M365-BUSINESS-PREMIUM-AM');
+  assert.equal(
+    String(annualInsertedLines[0]?.values?.[7] ?? '').includes('Microsoft 365 Business Premium|Annual|Annual'),
+    true,
+  );
+  assert.equal(String(annualInsertedLines[0]?.values?.[7] ?? '').includes('O365CSP-59|Annual|Monthly'), true);
+
   const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, 'opentext-appriver', [
     {
       clientId: customerId,

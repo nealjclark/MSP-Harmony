@@ -1,0 +1,99 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "managedByTenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Entra tenant ID that hosts MSP Harmony."
+      }
+    },
+    "principalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Object ID of the MSP tenant security group that contains the MSP Harmony service principal."
+      }
+    },
+    "principalDisplayName": {
+      "type": "string",
+      "defaultValue": "MSP Harmony Azure Reporting",
+      "metadata": {
+        "description": "Friendly name shown in Azure Lighthouse delegations."
+      }
+    },
+    "includeResourceReader": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Also grant Reader for Resource Graph inventory and subscription metadata."
+      }
+    },
+    "includeMonitoringReader": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Also grant Monitoring Reader for a future Azure Monitor metrics integration."
+      }
+    }
+  },
+  "variables": {
+    "registrationDefinitionName": "[guid(parameters('managedByTenantId'), parameters('principalId'), 'msp-harmony-cost-management')]",
+    "registrationAssignmentName": "[guid(subscription().subscriptionId, variables('registrationDefinitionName'))]",
+    "costManagementAuthorization": [
+      {
+        "principalId": "[parameters('principalId')]",
+        "principalIdDisplayName": "[parameters('principalDisplayName')]",
+        "roleDefinitionId": "72fafb9e-0641-4937-9268-a91bfd8191a3"
+      }
+    ],
+    "readerAuthorization": [
+      {
+        "principalId": "[parameters('principalId')]",
+        "principalIdDisplayName": "[parameters('principalDisplayName')]",
+        "roleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+      }
+    ],
+    "monitoringAuthorization": [
+      {
+        "principalId": "[parameters('principalId')]",
+        "principalIdDisplayName": "[parameters('principalDisplayName')]",
+        "roleDefinitionId": "43d0d8ad-25c7-4714-9337-8ba259a9fe05"
+      }
+    ],
+    "authorizations": "[concat(variables('costManagementAuthorization'), if(parameters('includeResourceReader'), variables('readerAuthorization'), createArray()), if(parameters('includeMonitoringReader'), variables('monitoringAuthorization'), createArray()))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedServices/registrationDefinitions",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('registrationDefinitionName')]",
+      "properties": {
+        "registrationDefinitionName": "MSP Harmony Azure Reporting",
+        "description": "Delegates least-privilege Azure cost and utilization access to MSP Harmony.",
+        "managedByTenantId": "[parameters('managedByTenantId')]",
+        "authorizations": "[variables('authorizations')]"
+      }
+    },
+    {
+      "type": "Microsoft.ManagedServices/registrationAssignments",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('registrationAssignmentName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+      ],
+      "properties": {
+        "registrationDefinitionId": "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+      }
+    }
+  ],
+  "outputs": {
+    "registrationDefinitionId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+    },
+    "delegatedSubscriptionId": {
+      "type": "string",
+      "value": "[subscription().subscriptionId]"
+    }
+  }
+}

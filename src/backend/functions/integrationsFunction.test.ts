@@ -41,6 +41,12 @@ const envKeys = [
   'HUNTRESS_API_KEY',
   'HUNTRESS_API_SECRET',
   'HUNTRESS_PRODUCT_CLASSES',
+  'AZURE_ENDPOINT',
+  'AZURE_TENANT_ID',
+  'AZURE_CLIENT_ID',
+  'AZURE_CLIENT_SECRET',
+  'AZURE_SUBSCRIPTION_IDS',
+  'AZURE_LOOKBACK_DAYS',
 ] as const;
 
 async function run() {
@@ -122,6 +128,23 @@ async function run() {
     );
     assert.doesNotMatch(
       String((huntressTestResponse.jsonBody as { error?: string }).error),
+      /not implemented/i,
+    );
+
+    const azureTestResponse = await testIntegrationHttp(
+      {
+        params: { integrationId: 'microsoft-azure' },
+        headers: adminHeaders,
+      } as never,
+      { log() {} } as never,
+    );
+    assert.equal(azureTestResponse.status, 400);
+    assert.match(
+      String((azureTestResponse.jsonBody as { error?: string }).error),
+      /Microsoft Azure settings|Microsoft Azure test failed|Missing Microsoft Azure setting/i,
+    );
+    assert.doesNotMatch(
+      String((azureTestResponse.jsonBody as { error?: string }).error),
       /not implemented/i,
     );
 

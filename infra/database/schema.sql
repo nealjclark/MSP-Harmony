@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   aad_user_id text,
   email text NOT NULL,
   display_name text,
-  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'LicenseAdmin', 'Analyst')),
+  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst')),
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   last_seen_at timestamptz,
   created_by text,
@@ -750,6 +750,373 @@ CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_batch
   ON appriver_license_cleanup_actions(batch_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_appriver_subscription_refreshes_sync_row
   ON appriver_subscription_refreshes(sync_run_id, row_id);
+
+-- Azure Billing is intentionally separate from generic quantity reconciliation.
+-- It combines immutable Ingram, Nerdio, Azure, and ConnectWise evidence into an
+-- explicitly reviewed monthly price/cost write plan.
+CREATE TABLE IF NOT EXISTS azure_billing_policies (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  agreement_id uuid NOT NULL REFERENCES agreements(id),
+  connectwise_addition_id text NOT NULL,
+  policy_type text NOT NULL CHECK (
+    policy_type IN ('combined-avd-markup', 'ingram-subscription-markup', 'fixed-avd-per-user')
+  ),
+  display_name text NOT NULL,
+  ingram_subscription_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  nerdio_account_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  nerdio_billable_metrics jsonb NOT NULL DEFAULT '["avd", "cpc"]'::jsonb,
+  markup_rate numeric(10, 6),
+  effective_from date NOT NULL,
+  effective_to date,
+  assigned_reviewer_emails jsonb NOT NULL DEFAULT '[]'::jsonb,
+  active boolean NOT NULL DEFAULT true,
+  created_by text NOT NULL,
+  updated_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (effective_to IS NULL OR effective_to >= effective_from),
+  CHECK (markup_rate IS NULL OR markup_rate >= 0)
+);
+
+ALTER TABLE azure_billing_policies
+  ADD COLUMN IF NOT EXISTS ingram_customer_account_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE azure_billing_policies
+  ADD COLUMN IF NOT EXISTS ingram_product_codes jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE azure_billing_policies
+  ADD COLUMN IF NOT EXISTS ingram_product_families jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE azure_billing_policies
+  ADD COLUMN IF NOT EXISTS nerdio_quantity_addition_id text;
+
+CREATE TABLE IF NOT EXISTS azure_billing_settings (
+  settings_key text PRIMARY KEY DEFAULT 'default' CHECK (settings_key = 'default'),
+  approver_emails jsonb NOT NULL DEFAULT '[]'::jsonb,
+  updated_by text NOT NULL DEFAULT 'migration',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS azure_billing_client_exclusions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_type text NOT NULL CHECK (source_type IN ('ingram', 'nerdio')),
+  external_account_id text NOT NULL,
+  external_account_name text NOT NULL,
+  reason text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  ignored_by text NOT NULL,
+  ignored_at timestamptz NOT NULL DEFAULT now(),
+  restored_by text,
+  restored_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (source_type, external_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_billing_client_exclusions_active
+  ON azure_billing_client_exclusions(source_type, external_account_id)
+  WHERE active;
+
+INSERT INTO azure_billing_settings (settings_key, approver_emails, updated_by)
+VALUES (
+  'default',
+  coalesce(
+    (
+      select jsonb_agg(distinct lower(trim(reviewer.email)))
+      from azure_billing_policies policy
+      cross join lateral jsonb_array_elements_text(policy.assigned_reviewer_emails) reviewer(email)
+      where nullif(trim(reviewer.email), '') is not null
+        and exists (
+          select 1
+          from app_users users
+          where lower(users.email) = lower(trim(reviewer.email))
+            and users.status = 'active'
+            and users.role in ('Admin', 'Approver')
+        )
+    ),
+    '[]'::jsonb
+  ),
+  'migration'
+)
+ON CONFLICT (settings_key) DO NOTHING;
+
+UPDATE azure_billing_policies
+SET assigned_reviewer_emails = '[]'::jsonb
+WHERE assigned_reviewer_emails <> '[]'::jsonb;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_azure_billing_policy_effective_addition
+  ON azure_billing_policies(agreement_id, connectwise_addition_id, effective_from);
+CREATE INDEX IF NOT EXISTS idx_azure_billing_policy_active
+  ON azure_billing_policies(customer_id, agreement_id, effective_from, effective_to)
+  WHERE active;
+
+CREATE TABLE IF NOT EXISTS nerdio_invoice_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  external_invoice_id text NOT NULL,
+  invoice_number text,
+  billing_period_start date,
+  billing_period_end date,
+  account_id text,
+  account_name text NOT NULL,
+  item_number text,
+  item_type text,
+  metric text,
+  code text,
+  description text,
+  licenses numeric(18, 4) NOT NULL DEFAULT 0,
+  unit_price numeric(18, 4) NOT NULL DEFAULT 0,
+  value numeric(18, 4) NOT NULL DEFAULT 0,
+  currency text NOT NULL DEFAULT 'USD',
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ux_nerdio_invoice_item_sync UNIQUE (
+    sync_run_id, external_invoice_id, account_name, item_number, metric, code, value
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_nerdio_invoice_items_period
+  ON nerdio_invoice_items(billing_period_end, account_id, account_name);
+
+CREATE TABLE IF NOT EXISTS nerdio_live_usage_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  account_id text NOT NULL,
+  account_name text NOT NULL,
+  collected_at timestamptz NOT NULL,
+  avd_users numeric(18, 4) NOT NULL DEFAULT 0,
+  cpc_users numeric(18, 4) NOT NULL DEFAULT 0,
+  intune_users numeric(18, 4) NOT NULL DEFAULT 0,
+  monthly_active_users numeric(18, 4) NOT NULL DEFAULT 0,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (sync_run_id, account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nerdio_live_usage_account_latest
+  ON nerdio_live_usage_snapshots(account_id, collected_at DESC);
+
+CREATE TABLE IF NOT EXISTS ingram_report_archives (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  external_report_id text NOT NULL UNIQUE,
+  report_name text NOT NULL,
+  report_status text,
+  report_created_at timestamptz,
+  downloaded_at timestamptz NOT NULL DEFAULT now(),
+  file_sha256 text NOT NULL,
+  file_size bigint NOT NULL,
+  content_type text NOT NULL DEFAULT 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  blob_name text NOT NULL,
+  invoice_import_id uuid REFERENCES invoice_imports(id) ON DELETE SET NULL,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingram_report_archives_hash
+  ON ingram_report_archives(file_sha256);
+CREATE INDEX IF NOT EXISTS idx_ingram_report_archives_downloaded
+  ON ingram_report_archives(downloaded_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_billing_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  billing_month text NOT NULL,
+  status text NOT NULL DEFAULT 'draft' CHECK (
+    status IN ('draft', 'review', 'ready-for-billing', 'releasing', 'released', 'partial', 'blocked')
+  ),
+  ingram_invoice_import_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  nerdio_invoice_sync_run_id uuid REFERENCES sync_runs(id),
+  nerdio_live_sync_run_id uuid REFERENCES sync_runs(id),
+  azure_cost_sync_run_id uuid REFERENCES sync_runs(id),
+  connectwise_sync_run_id uuid REFERENCES sync_runs(id),
+  requested_by text NOT NULL,
+  shadow_accepted_by text,
+  shadow_accepted_at timestamptz,
+  shadow_acceptance_note text,
+  released_by text,
+  released_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (billing_month)
+);
+
+CREATE TABLE IF NOT EXISTS azure_billing_results (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  billing_run_id uuid NOT NULL REFERENCES azure_billing_runs(id) ON DELETE CASCADE,
+  policy_id uuid NOT NULL REFERENCES azure_billing_policies(id),
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  agreement_id uuid NOT NULL REFERENCES agreements(id),
+  connectwise_addition_id text NOT NULL,
+  policy_type text NOT NULL,
+  revision integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'needs-review' CHECK (
+    status IN ('needs-review', 'approved', 'held', 'released', 'failed', 'blocked')
+  ),
+  decision_type text NOT NULL DEFAULT 'policy' CHECK (
+    decision_type IN ('policy', 'previous-approved', 'manual')
+  ),
+  selected_nerdio_count_source text CHECK (
+    selected_nerdio_count_source IS NULL OR selected_nerdio_count_source IN ('invoice', 'live')
+  ),
+  invoice_nerdio_count numeric(18, 4) NOT NULL DEFAULT 0,
+  live_nerdio_count numeric(18, 4) NOT NULL DEFAULT 0,
+  selected_nerdio_count numeric(18, 4) NOT NULL DEFAULT 0,
+  ingram_cost numeric(18, 4) NOT NULL DEFAULT 0,
+  nerdio_cost numeric(18, 4) NOT NULL DEFAULT 0,
+  combined_cost numeric(18, 4) NOT NULL DEFAULT 0,
+  markup_rate numeric(10, 6),
+  current_quantity numeric(18, 4) NOT NULL DEFAULT 0,
+  proposed_quantity numeric(18, 4) NOT NULL DEFAULT 0,
+  current_unit_price numeric(18, 4),
+  proposed_unit_price numeric(18, 4),
+  current_unit_cost numeric(18, 4),
+  proposed_unit_cost numeric(18, 4),
+  previous_approved_quantity numeric(18, 4),
+  previous_approved_unit_price numeric(18, 4),
+  previous_approved_unit_cost numeric(18, 4),
+  external_pre_tax_override numeric(18, 4),
+  projected_revenue numeric(18, 4) NOT NULL DEFAULT 0,
+  projected_margin numeric(18, 4) NOT NULL DEFAULT 0,
+  reviewer_note text,
+  hold_reason text,
+  variance_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+  source_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  connectwise_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (billing_run_id, policy_id)
+);
+
+ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_accepted_by text;
+ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_accepted_at timestamptz;
+ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_acceptance_note text;
+ALTER TABLE azure_billing_results ADD COLUMN IF NOT EXISTS external_pre_tax_override numeric(18, 4);
+
+CREATE INDEX IF NOT EXISTS idx_azure_billing_results_queue
+  ON azure_billing_results(billing_run_id, status, customer_id);
+
+CREATE TABLE IF NOT EXISTS azure_billing_result_approvals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  billing_result_id uuid NOT NULL REFERENCES azure_billing_results(id) ON DELETE CASCADE,
+  revision integer NOT NULL,
+  reviewer_email text NOT NULL,
+  reviewer_name text NOT NULL,
+  decision text NOT NULL CHECK (decision IN ('approved', 'rejected')),
+  comment text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (billing_result_id, revision, reviewer_email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_billing_approvals_result
+  ON azure_billing_result_approvals(billing_result_id, revision, decision);
+
+-- Azure Billing now requires one approval from the globally configured approver list.
+UPDATE azure_billing_results results
+SET status = 'approved',
+    updated_at = now()
+WHERE results.status = 'needs-review'
+  AND EXISTS (
+    SELECT 1
+    FROM azure_billing_result_approvals approvals
+    WHERE approvals.billing_result_id = results.id
+      AND approvals.revision = results.revision
+      AND approvals.decision = 'approved'
+  );
+
+UPDATE azure_billing_runs runs
+SET status = 'ready-for-billing',
+    updated_at = now()
+WHERE runs.status = 'review'
+  AND EXISTS (
+    SELECT 1
+    FROM azure_billing_results results
+    WHERE results.billing_run_id = runs.id
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM azure_billing_results results
+    WHERE results.billing_run_id = runs.id
+      AND results.status = 'needs-review'
+  );
+
+UPDATE azure_billing_runs runs
+SET status = 'review',
+    updated_at = now()
+WHERE runs.status = 'ready-for-billing'
+  AND runs.released_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM azure_billing_results results
+    WHERE results.billing_run_id = runs.id
+  );
+
+CREATE TABLE IF NOT EXISTS azure_billing_release_batches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  billing_run_id uuid NOT NULL REFERENCES azure_billing_runs(id),
+  status text NOT NULL DEFAULT 'running' CHECK (
+    status IN ('running', 'released', 'partial', 'failed')
+  ),
+  released_by text NOT NULL,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz,
+  summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (billing_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS azure_billing_release_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  release_batch_id uuid NOT NULL REFERENCES azure_billing_release_batches(id) ON DELETE CASCADE,
+  billing_result_id uuid NOT NULL REFERENCES azure_billing_results(id),
+  status text NOT NULL DEFAULT 'pending' CHECK (
+    status IN ('pending', 'written', 'blocked', 'failed', 'skipped')
+  ),
+  request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  response_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error_message text,
+  written_at timestamptz,
+  UNIQUE (release_batch_id, billing_result_id)
+);
+
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS current_unit_price numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS proposed_unit_price numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS current_unit_cost numeric(18, 4);
+ALTER TABLE approval_batch_items ADD COLUMN IF NOT EXISTS proposed_unit_cost numeric(18, 4);
+
+CREATE TABLE IF NOT EXISTS azure_resource_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  subscription_id text NOT NULL,
+  resource_id text NOT NULL,
+  resource_name text NOT NULL,
+  resource_type text,
+  resource_group text,
+  location text,
+  power_state text,
+  tags jsonb NOT NULL DEFAULT '{}'::jsonb,
+  properties jsonb NOT NULL DEFAULT '{}'::jsonb,
+  observed_at timestamptz NOT NULL,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (sync_run_id, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_resource_snapshots_subscription
+  ON azure_resource_snapshots(subscription_id, resource_name, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_resource_metric_daily (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  resource_id text NOT NULL,
+  metric_date date NOT NULL,
+  metric_name text NOT NULL,
+  average_value numeric(18, 6),
+  maximum_value numeric(18, 6),
+  total_value numeric(18, 6),
+  unit text,
+  dimensions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (sync_run_id, resource_id, metric_date, metric_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_resource_metrics_lookup
+  ON azure_resource_metric_daily(resource_id, metric_date DESC, metric_name);
 ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_at timestamptz;
 ALTER TABLE appriver_license_cleanup_actions
@@ -794,7 +1161,7 @@ CREATE UNIQUE INDEX ux_appriver_license_cleanup_actions_active_subscription
 
 ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
 ALTER TABLE app_users
-  ADD CONSTRAINT app_users_role_check CHECK (role IN ('Admin', 'Approver', 'LicenseAdmin', 'Analyst'));
+  ADD CONSTRAINT app_users_role_check CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst'));
 
 ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS invoice_number text;
 CREATE TABLE IF NOT EXISTS invoice_line_items (

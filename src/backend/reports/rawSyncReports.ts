@@ -394,6 +394,24 @@ export const genericRawSyncColumns = [
   'RawPayload',
 ] as const;
 
+export const azureRawSyncColumns = [
+  'Customer',
+  'Agreement',
+  'SubscriptionName',
+  'SubscriptionId',
+  'UsageDate',
+  'ServiceName',
+  'ResourceGroup',
+  'ResourceId',
+  'ProductKey',
+  'Quantity',
+  'Cost',
+  'Currency',
+  'Mapped',
+  'ObservedAt',
+  'RawPayload',
+] as const;
+
 export async function listRawSyncRuns(
   database: Queryable,
   integrationId: RawSyncIntegrationId,
@@ -1335,7 +1353,9 @@ async function getGenericRawSyncDetails(
   );
   const columns = mappedImportColumns.length > 0
     ? uniqueStrings(['Customer', 'Agreement', ...mappedImportColumns, 'Mapped', 'ObservedAt'])
-    : [...genericRawSyncColumns];
+    : integrationId === 'microsoft-azure'
+      ? [...azureRawSyncColumns]
+      : [...genericRawSyncColumns];
 
   return {
     integrationId,
@@ -1389,6 +1409,14 @@ function mapGenericSnapshotRow(
     Email: dimensionString('email'),
     InvoiceFileName: dimensionString('invoiceFileName'),
     InvoiceNumber: dimensionString('invoiceNumber'),
+    SubscriptionName: dimensionString('subscriptionName'),
+    SubscriptionId: dimensionString('subscriptionId') ?? row.external_account_id,
+    UsageDate: dimensionString('usageDate'),
+    ServiceName: dimensionString('serviceName'),
+    ResourceGroup: dimensionString('resourceGroup'),
+    ResourceId: dimensionString('resourceId'),
+    Cost: numberValue(dimensions.cost) ?? 0,
+    Currency: dimensionString('currency'),
     ExternalAccountId: row.external_account_id,
     Mapped: Boolean(row.customer_name && row.agreement_name),
     ObservedAt: isoDate(row.observed_at) ?? null,

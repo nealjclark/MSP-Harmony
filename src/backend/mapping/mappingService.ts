@@ -3073,6 +3073,7 @@ async function listAccountMappings(database: Queryable, vendorId: VendorKey): Pr
          vendor_account_mappings.external_account_id
        )
      where vendor_account_mappings.vendor_id = $1
+       and vendor_account_mappings.mapping_source <> 'superseded-subscription-mapping'
        and ($1 <> 'datto' or source_account_names.external_account_id is not null)
      order by
        vendor_account_mappings.mapping_status,
@@ -3200,6 +3201,89 @@ async function listProductMappings(database: Queryable, vendorId: VendorKey): Pr
 }
 
 async function loadVendorAccountSources(database: Queryable, vendorId: VendorKey): Promise<VendorAccountSource[]> {
+  if (vendorId === 'nerdio') {
+    const result = await database.query<AccountSourceRow>(
+      `with latest_invoice_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'nerdio'
+           and status = 'complete'
+           and metadata->>'entity' = 'nerdio-invoices'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       ),
+       latest_live_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'nerdio'
+           and status = 'complete'
+           and metadata->>'entity' = 'nerdio-live-usage'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       ),
+       source_rows as (
+         select
+           account_id as external_account_id,
+           account_name as external_account_name,
+           count(*)::int as row_count,
+           coalesce(
+             jsonb_agg(
+               distinct 'nerdio-' || regexp_replace(lower(metric), '[^a-z0-9]+', '-', 'g')
+             ) filter (where nullif(metric, '') is not null),
+             '[]'::jsonb
+           ) as product_codes,
+           max(created_at) as last_seen_at
+         from nerdio_invoice_items
+         where sync_run_id = (select id from latest_invoice_sync)
+           and nullif(account_id, '') is not null
+         group by account_id, account_name
+         union all
+         select
+           account_id,
+           account_name,
+           1,
+           '[]'::jsonb,
+           collected_at
+         from nerdio_live_usage_snapshots
+         where sync_run_id = (select id from latest_live_sync)
+           and nullif(account_id, '') is not null
+       ),
+       account_rollup as (
+         select
+           external_account_id,
+           coalesce(max(nullif(external_account_name, '')), external_account_id) as external_account_name,
+           sum(row_count)::int as row_count,
+           max(last_seen_at) as last_seen_at
+         from source_rows
+         group by external_account_id
+       ),
+       product_rollup as (
+         select
+           external_account_id,
+           coalesce(jsonb_agg(distinct product_code), '[]'::jsonb) as product_codes
+         from source_rows
+         cross join lateral jsonb_array_elements_text(product_codes) products(product_code)
+         group by external_account_id
+       )
+       select
+         account_rollup.external_account_id,
+         account_rollup.external_account_name,
+         account_rollup.row_count,
+         coalesce(product_rollup.product_codes, '[]'::jsonb) as product_codes,
+         account_rollup.last_seen_at
+       from account_rollup
+       left join product_rollup using (external_account_id)
+       order by account_rollup.external_account_name`,
+    );
+    return result.rows.map((row) => ({
+      externalAccountId: row.external_account_id,
+      externalAccountName: row.external_account_name ?? row.external_account_id,
+      rowCount: integerValue(row.row_count),
+      productCodes: stringArray(row.product_codes),
+      lastSeenAt: isoDate(row.last_seen_at),
+    }));
+  }
+
   const result = await database.query<AccountSourceRow>(
     `with ${sqlLatestVendorUsageSyncRunCte()},
      ${sqlMicrosoft365AccountNameCtes()},
@@ -3338,6 +3422,72 @@ async function loadVendorProductSources(
   database: Queryable,
   vendorId: VendorKey,
 ): Promise<Array<{ vendorProductKey: string; vendorProductName: string; rowCount: number; customerCount: number }>> {
+  if (vendorId === 'nerdio') {
+    const result = await database.query<VendorProductSourceRow>(
+      `with latest_invoice_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'nerdio'
+           and status = 'complete'
+           and metadata->>'entity' = 'nerdio-invoices'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       ),
+       latest_live_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'nerdio'
+           and status = 'complete'
+           and metadata->>'entity' = 'nerdio-live-usage'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       ),
+       source_rows as (
+         select
+           'nerdio-' || regexp_replace(
+             lower(coalesce(nullif(metric, ''), nullif(code, ''), nullif(description, ''), 'invoice-charge')),
+             '[^a-z0-9]+',
+             '-',
+             'g'
+           ) as vendor_product_key,
+           coalesce(nullif(metric, ''), nullif(description, ''), nullif(code, ''), 'Nerdio invoice charge') as vendor_product_name,
+           account_id as external_account_id
+         from nerdio_invoice_items
+         where sync_run_id = (select id from latest_invoice_sync)
+           and nullif(account_id, '') is not null
+         union all
+         select products.vendor_product_key, products.vendor_product_name, usage.account_id
+         from nerdio_live_usage_snapshots usage
+         cross join lateral (
+           values
+             ('nerdio-avd', 'AVD users', usage.avd_users),
+             ('nerdio-cpc', 'Cloud PC users', usage.cpc_users),
+             ('nerdio-intune', 'Intune users', usage.intune_users),
+             ('nerdio-mau', 'Monthly active users', usage.monthly_active_users)
+         ) products(vendor_product_key, vendor_product_name, quantity)
+         where usage.sync_run_id = (select id from latest_live_sync)
+           and products.quantity > 0
+       )
+       select
+         vendor_product_key,
+         max(vendor_product_name) as vendor_product_name,
+         count(*)::int as row_count,
+         count(distinct external_account_id)::int as customer_count
+       from source_rows
+       group by vendor_product_key
+       order by vendor_product_name`,
+    );
+    return result.rows.map((row) => ({
+      vendorProductKey: row.vendor_product_key,
+      vendorProductName: nerdioProductDisplayName(
+        row.vendor_product_key,
+        row.vendor_product_name ?? row.vendor_product_key,
+      ),
+      rowCount: integerValue(row.row_count),
+      customerCount: integerValue(row.customer_count),
+    }));
+  }
+
   const result = await database.query<VendorProductSourceRow>(
     `with ${sqlLatestVendorUsageSyncRunCte()},
      latest_invoice_import as (
@@ -3399,6 +3549,14 @@ async function loadVendorProductSources(
     rowCount: integerValue(row.row_count),
     customerCount: integerValue(row.customer_count),
   }));
+}
+
+function nerdioProductDisplayName(key: string, fallback: string) {
+  if (key === 'nerdio-avd') return 'AVD users';
+  if (key === 'nerdio-cpc') return 'Windows 365 Cloud PC users';
+  if (key === 'nerdio-intune') return 'Intune users';
+  if (key === 'nerdio-mau') return 'Monthly active users';
+  return fallback;
 }
 
 async function loadConnectWiseCustomers(database: Queryable): Promise<ConnectWiseCustomerCandidate[]> {
@@ -3546,6 +3704,31 @@ async function loadExistingConnectWiseProductTarget(
 }
 
 async function countUnmappedSnapshots(database: Queryable, vendorId: VendorKey) {
+  if (vendorId === 'nerdio') {
+    const result = await database.query<{ count: string | number }>(
+      `with latest_invoice_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'nerdio'
+           and status = 'complete'
+           and metadata->>'entity' = 'nerdio-invoices'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       )
+       select count(*) as count
+       from nerdio_invoice_items items
+       left join vendor_account_mappings mappings
+         on mappings.vendor_id = 'nerdio'
+        and mappings.external_account_id = items.account_id
+        and mappings.active = true
+        and mappings.mapping_status = 'approved'
+       where items.sync_run_id = (select id from latest_invoice_sync)
+         and nullif(items.account_id, '') is not null
+         and mappings.id is null`,
+    );
+    return integerValue(result.rows[0]?.count);
+  }
+
   const result = await database.query<{ count: string | number }>(
     `with latest_invoice_import as (
        select id

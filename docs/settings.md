@@ -178,6 +178,73 @@ The application must have Microsoft Graph application permissions for `Directory
 
 Microsoft 365 product subscription snapshots are stored in `microsoft365_subscription_snapshots`. These rows are one per tenant SKU and include assigned, unassigned, enabled, suspended, warning, locked-out, total license counts, subscription IDs, commerce subscription IDs, trial status, and `nextLifecycleDateTime` when Graph returns it. Billing cadence fields such as monthly, annual, or annual billed monthly are nullable in v1 because Microsoft Graph does not return those fields from `/subscribedSkus` or `/directory/subscriptions`; raw Graph payloads are retained so a later Partner Center or invoice enrichment can backfill them.
 
+## Microsoft Azure Lighthouse and Cost Management
+
+The Microsoft Azure integration uses one app registration in the MSP managing tenant. Customer subscriptions are delegated to that tenant with Azure Lighthouse; MSP Harmony then discovers the delegated subscriptions through Azure Resource Manager and queries the Cost Management API for daily service/resource usage.
+
+### App settings
+
+- `AZURE_ENDPOINT`: normally `https://management.azure.com`
+- `AZURE_TENANT_ID`: MSP managing-tenant ID
+- `AZURE_CLIENT_ID`: app registration client ID
+- Key Vault secret `mspharmony-azure-client-secret` (or local `AZURE_CLIENT_SECRET`)
+- `AZURE_SUBSCRIPTION_IDS` (optional): comma- or line-separated allowlist; blank syncs every delegated subscription visible to the app
+- `AZURE_LOOKBACK_DAYS` (optional): defaults to 35 so late billing adjustments are refreshed
+
+## Ingram Micro Cloud
+
+The Ingram integration retrieves completed marketplace invoice reports and stores the original report identity, SHA-256 hash, invoice metadata, subscription ID, quantity, four-decimal unit cost, credits/adjustments, and extended cost.
+
+- `INGRAM_MICRO_ENDPOINT`: normally `https://api.cloud.im/marketplace/na`
+- `INGRAM_MICRO_API_USERNAME`
+- Key Vault secret `mspharmony-ingram-api-secret` (or local `INGRAM_MICRO_API_SECRET`)
+- Key Vault secret `mspharmony-ingram-subscription-key` (or local `INGRAM_MICRO_SUBSCRIPTION_KEY`)
+- `INGRAM_MICRO_MARKETPLACE`: defaults to `us`
+- `INGRAM_MICRO_REPORT_PREFIX`: defaults to `Every Invoice -`
+
+Reports are deduplicated by both Ingram report ID and downloaded file hash.
+
+## Nerdio Manager
+
+Nerdio invoice charges and live account usage are separate synchronization operations. Invoice value remains the cost source; live usage can only change the selected billable count.
+
+- `NERDIO_ENDPOINT`: Nerdio Manager application URL
+- `NERDIO_TENANT_ID`: Microsoft Entra tenant containing the API application
+- `NERDIO_CLIENT_ID`
+- Key Vault secret `mspharmony-nerdio-client-secret` (or local `NERDIO_CLIENT_SECRET`)
+- `NERDIO_API_SCOPE`: application API scope for the Nerdio REST client
+- `NERDIO_INVOICE_LOOKBACK_MONTHS`: defaults to `4`
+
+Use the Azure Billing workspace to map Ingram subscription IDs and Nerdio account IDs directly to a ConnectWise customer, agreement, and addition. Fuzzy or first-word customer matching is not used.
+
+The app does not need a credential in each customer tenant. Deploy [`../infra/azure/lighthouse-cost-management.json`](../infra/azure/lighthouse-cost-management.json) at each customer subscription. Supply the MSP tenant ID and the object ID of an MSP security group containing the Harmony service principal. The template always grants **Cost Management Reader**, grants **Reader** by default for subscription/resource inventory, and can optionally grant **Monitoring Reader** for future Azure Monitor metrics.
+
+Example deployment while signed into the customer tenant:
+
+```powershell
+az deployment sub create `
+  --location eastus `
+  --subscription <customer-subscription-id> `
+  --template-file infra/azure/lighthouse-cost-management.json `
+  --parameters managedByTenantId=<msp-tenant-id> principalId=<msp-security-group-object-id>
+```
+
+Run **Test** from the Microsoft Azure Configure modal after delegation. It should list the delegated subscriptions. Map each subscription ID to its ConnectWise customer/agreement, enable API Sync, then run **Cost and resource usage**. The sync stores daily rows in `vendor_usage_snapshots` with the subscription ID as `external_account_id`; cost, currency, service, resource ID, and usage date are stored in dimensions.
+
+### Ingram invoice cross-reference
+
+Ingram remains the cost-of-goods source. In the Azure invoice workflow, upload one representative Ingram CSV/Excel file and save a template with these semantic mappings:
+
+- customer account: Azure subscription ID
+- product: meter category, service name, or SKU
+- quantity: consumed quantity (use `1` for amount-only lines)
+- billed amount: Ingram extended line amount
+- invoice number/date and billing period fields when available
+
+The saved header signature is reused for later Ingram files. The Azure Utilization report compares the latest Cost Management sync's retail/pre-tax cost with the latest approved Azure invoice import by subscription ID. A nonzero variance is expected when Microsoft retail pricing differs from Ingram partner cost; the report is a cross-check, not an assertion that both totals must match.
+
+If Cost Management returns no rows even though the Lighthouse test sees the subscription, ask the indirect provider to enable the customer's CSP cost-visibility policy. Partner Center provider billing APIs are not required for this integration.
+
 ## AppRiver - OpenText SecureCloud Notes
 
 The AppRiver - OpenText integration uses the SecureCloud API at `https://unityapi.webrootcloudav.com`. Authentication refreshes an access token through `POST /auth/token` using Basic client credentials plus a refresh token. AppRiver rotates the refresh token on successful refresh, so production deployments should store `mspharmony-opentext-appriver-refresh-token` in Key Vault; the sync writes the rotated value back to that same secret before continuing.

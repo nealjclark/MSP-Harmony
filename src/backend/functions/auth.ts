@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { getDatabaseSettings } from '../database/config';
 import { getSharedDatabasePool } from '../database/pool';
 
-export type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
+export type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst';
 
 export type AuthPrincipal = {
   appUserId?: string;
@@ -22,11 +22,12 @@ type StaticWebAppsPrincipal = {
 const roleRank: Record<AppRole, number> = {
   Analyst: 1,
   LicenseAdmin: 1,
+  Billing: 1,
   Approver: 2,
   Admin: 3,
 };
 
-const appRoles: AppRole[] = ['Admin', 'Approver', 'LicenseAdmin', 'Analyst'];
+const appRoles: AppRole[] = ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst'];
 let authPool: Pool | undefined;
 let authPoolPromise: Promise<Pool> | undefined;
 

@@ -3,6 +3,7 @@ dist/
 build/
 .deploy/
 infra/azure/*.json
+!infra/azure/lighthouse-cost-management.json
 .env
 .env.*
 !.env.example

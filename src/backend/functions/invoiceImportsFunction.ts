@@ -100,13 +100,6 @@ export async function importAppRiverInvoiceHttp(
   const originResponse = requireMutatingRequestOrigin(request);
   if (originResponse) return originResponse;
 
-  if (request.params.vendorId !== 'opentext-appriver') {
-    return jsonResponse(400, {
-      error: `Invoice import is not available for integration "${request.params.vendorId ?? 'unknown'}".`,
-      supportedVendorIds: supportedInvoiceVendorIds,
-    });
-  }
-
   const bodyResult = await readJsonBody<InvoiceImportBody>(request, { limit: 'import', fallback: {} });
   if (!bodyResult.ok) return bodyResult.response;
   const body = bodyResult.body;
@@ -378,7 +371,8 @@ export async function deleteInvoiceImportHttp(
 app.http('importAppRiverInvoice', {
   methods: ['POST'],
   authLevel: 'anonymous',
-  route: 'invoice-imports/{vendorId}',
+  // Keep this literal so it does not shadow workflow routes like invoice-imports/preview|approve.
+  route: 'invoice-imports/opentext-appriver',
   handler: importAppRiverInvoiceHttp,
 });
 

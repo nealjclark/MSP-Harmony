@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   getIntegrationSettingsDefinition,
   getIntegrationDataSource,
+  getIntegrationDataSourceByKey,
   integrationDetailOnlySyncEnabled,
   integrationDataSourceRequiresCustomerMapping,
   integrationDoNotSuggestNewAdditions,
@@ -190,6 +191,7 @@ assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
   'opentext-appriver',
   'huntress',
   'microsoft-azure',
+  'ingram-micro',
   'pax8',
   'custom-table',
 ]);
@@ -206,6 +208,30 @@ assert.deepEqual(
 );
 assert.equal(huntress.optionalNonSecrets?.find((setting) => setting.key === 'productClasses')?.defaultValue, 'itdr');
 assert.equal(integrationDataSourceRequiresCustomerMapping('reseller-product-total'), false);
+
+const microsoftAzure = getIntegrationSettingsDefinition('microsoft-azure');
+assert.ok(microsoftAzure);
+assert.equal(integrationHasCapability('microsoft-azure', 'live-api'), true);
+assert.deepEqual(listIntegrationApiOperations('microsoft-azure').map((operation) => operation.key), ['azure-cost-usage']);
+assert.equal(microsoftAzure.requiredNonSecrets.some((setting) => setting.key === 'subscriptionId'), false);
+assert.equal(microsoftAzure.optionalNonSecrets?.find((setting) => setting.key === 'lookbackDays')?.defaultValue, '35');
+assert.equal(
+  getIntegrationDataSource('microsoft-azure', 'customer-product-breakdown')?.ingestionMethods.includes('live-api'),
+  true,
+);
+
+const ingramMicro = getIntegrationSettingsDefinition('ingram-micro');
+assert.ok(ingramMicro);
+assert.deepEqual(listIntegrationApiOperations('ingram-micro').map((operation) => operation.key), ['ingram-invoices']);
+assert.equal(getIntegrationDataSourceByKey('ingram-micro', 'ingram-azure-invoices')?.providesCosts, true);
+
+const nerdio = getIntegrationSettingsDefinition('nerdio');
+assert.ok(nerdio);
+assert.deepEqual(listIntegrationApiOperations('nerdio').map((operation) => operation.key), [
+  'nerdio-invoices',
+  'nerdio-live-usage',
+]);
+assert.equal(nerdio.optionalNonSecrets?.find((setting) => setting.key === 'invoiceLookbackMonths')?.defaultValue, '4');
 
 const datto = getIntegrationSettingsDefinition('datto');
 assert.ok(datto);

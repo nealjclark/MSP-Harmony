@@ -45,6 +45,12 @@ import { ProofpointApiError } from '../vendor/proofpoint/client';
 import { syncProofpointUsageSnapshots, testProofpointConnection } from '../vendor/proofpoint/operations';
 import { HuntressApiError } from '../vendor/huntress/client';
 import { syncHuntressUsageSnapshots, testHuntressConnection } from '../vendor/huntress/operations';
+import { AzureApiError } from '../vendor/azure/client';
+import { syncAzureCostUsage, testAzureConnection } from '../vendor/azure/operations';
+import { IngramApiError } from '../vendor/ingram/client';
+import { syncIngramInvoices, testIngramConnection } from '../vendor/ingram/operations';
+import { NerdioApiError } from '../vendor/nerdio/client';
+import { syncNerdioBilling, testNerdioConnection } from '../vendor/nerdio/operations';
 import { requireRole } from './auth';
 import type { SyncProgressReporter } from '../shared/syncProgress';
 
@@ -79,6 +85,9 @@ type SyncableIntegrationId = Extract<
   | 'sentinelone'
   | 'proofpoint'
   | 'huntress'
+  | 'microsoft-azure'
+  | 'ingram-micro'
+  | 'nerdio'
 >;
 
 type IntegrationSyncQueueMessage = SyncBody & {
@@ -156,7 +165,10 @@ export async function testIntegrationHttp(
     integrationId !== 'microsoft-365' &&
     integrationId !== 'sentinelone' &&
     integrationId !== 'proofpoint' &&
-    integrationId !== 'huntress'
+    integrationId !== 'huntress' &&
+    integrationId !== 'microsoft-azure' &&
+    integrationId !== 'ingram-micro' &&
+    integrationId !== 'nerdio'
   ) {
     return jsonResponse(501, {
       error: `Live test is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
@@ -329,6 +341,31 @@ export async function testIntegrationHttp(
       });
     }
 
+    if (integrationId === 'microsoft-azure') {
+      const result = await testAzureConnection({ provider });
+
+      await saveTestResult('success');
+
+      return jsonResponse(200, {
+        integrationId: result.integrationId,
+        testedAt: result.testedAt,
+        subscriptionCount: result.subscriptionCount,
+        sampleSubscriptions: result.sampleSubscriptions,
+      });
+    }
+
+    if (integrationId === 'ingram-micro') {
+      const result = await testIngramConnection({ provider });
+      await saveTestResult('success');
+      return jsonResponse(200, result);
+    }
+
+    if (integrationId === 'nerdio') {
+      const result = await testNerdioConnection({ provider });
+      await saveTestResult('success');
+      return jsonResponse(200, result);
+    }
+
     const result = await testMicrosoft365Connection({ provider, pool: repositoryContext.pool });
 
     await saveTestResult('success');
@@ -372,7 +409,10 @@ export async function syncIntegrationHttp(
     integrationId !== 'microsoft-365' &&
     integrationId !== 'sentinelone' &&
     integrationId !== 'proofpoint' &&
-    integrationId !== 'huntress'
+    integrationId !== 'huntress' &&
+    integrationId !== 'microsoft-azure' &&
+    integrationId !== 'ingram-micro' &&
+    integrationId !== 'nerdio'
   ) {
     return jsonResponse(501, {
       error: `Live sync is not implemented yet for integration "${integrationId ?? 'unknown'}".`,
@@ -605,6 +645,43 @@ export async function processIntegrationSyncQueueMessage(
       return;
     }
 
+    if (parsed.integrationId === 'microsoft-azure') {
+      const result = await syncAzureCostUsage({
+        pool: repositoryContext.pool,
+        provider,
+        onProgress,
+      });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Microsoft Azure queued sync ${syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'ingram-micro') {
+      const result = await syncIngramInvoices({
+        pool: repositoryContext.pool,
+        provider,
+        onProgress,
+      });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Ingram Micro queued sync ${syncRunId} completed.`);
+      return;
+    }
+
+    if (parsed.integrationId === 'nerdio') {
+      const result = await syncNerdioBilling({
+        pool: repositoryContext.pool,
+        provider,
+        operationKey: parsed.operationKey,
+        onProgress,
+      });
+      syncRunId = result.syncRunId;
+      await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
+      context.log(`Nerdio queued sync ${syncRunId} completed.`);
+      return;
+    }
+
     const dataset = parsed.operationKey === 'm365-licenses'
       ? 'licenses'
       : parsed.operationKey === 'm365-users'
@@ -797,6 +874,20 @@ function integrationErrorResponse(error: unknown, fallback: string) {
     });
   }
 
+  if (error instanceof AzureApiError) {
+    return jsonResponse(error.status ? 502 : 400, {
+      error: error.message || fallback,
+      status: error.status,
+    });
+  }
+
+  if (error instanceof IngramApiError || error instanceof NerdioApiError) {
+    return jsonResponse(error.status ? 502 : 400, {
+      error: error.message || fallback,
+      status: error.status,
+    });
+  }
+
   return jsonResponse(400, {
     error: error instanceof Error ? error.message : fallback,
   });
@@ -812,6 +903,9 @@ function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'sentinelone') return 'SentinelOne';
   if (integrationId === 'proofpoint') return 'Proofpoint Essentials';
   if (integrationId === 'huntress') return 'Huntress';
+  if (integrationId === 'microsoft-azure') return 'Microsoft Azure';
+  if (integrationId === 'ingram-micro') return 'Ingram Micro';
+  if (integrationId === 'nerdio') return 'Nerdio';
   return 'ConnectWise';
 }
 
@@ -959,6 +1053,15 @@ function buildIntegrationSyncQueueMessage(
     };
   }
 
+  if (integrationId === 'ingram-micro' || integrationId === 'nerdio' || integrationId === 'microsoft-azure') {
+    return {
+      integrationId,
+      requestedBy,
+      requestedAt,
+      ...(body.operationKey ? { operationKey: body.operationKey } : {}),
+    };
+  }
+
   return {
     integrationId,
     requestedBy,
@@ -1003,7 +1106,10 @@ function parseIntegrationSyncQueueMessage(message: IntegrationSyncQueueMessage |
     parsed.integrationId !== 'microsoft-365' &&
     parsed.integrationId !== 'sentinelone' &&
     parsed.integrationId !== 'proofpoint' &&
-    parsed.integrationId !== 'huntress'
+    parsed.integrationId !== 'huntress' &&
+    parsed.integrationId !== 'microsoft-azure' &&
+    parsed.integrationId !== 'ingram-micro' &&
+    parsed.integrationId !== 'nerdio'
   ) {
     throw new Error('Integration sync queue message has an unsupported integrationId.');
   }

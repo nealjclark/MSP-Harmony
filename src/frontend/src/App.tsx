@@ -146,9 +146,10 @@ import {
   type InvoiceNoticeType,
 } from '../../shared/communicationSettings';
 
-type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'invoices' | 'agreements' | 'settings';
+type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'azure-billing' | 'invoices' | 'agreements' | 'settings';
+type AzureBillingTab = 'runs' | 'review' | 'release' | 'utilization' | 'policies';
 type SettingsSection = 'user-management' | 'integrations' | 'email-communication' | 'audit-logs';
-type AppRole = 'Admin' | 'Approver' | 'LicenseAdmin' | 'Analyst';
+type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst';
 
 type AuthSessionResponse = {
   status: string;
@@ -176,7 +177,7 @@ type IssueStatus =
   | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationWorkflowTab = 'api' | 'manual' | 'invoice';
-type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'customer-license';
+type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'azure-utilization' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
@@ -623,6 +624,293 @@ type ProductProfitabilityReportResponse = {
     warning?: string;
   };
   integrations: ProductProfitabilityIntegrationSeries[];
+};
+
+type AzureUtilizationReportResponse = {
+  reportType: 'azure-utilization';
+  generatedAt: string;
+  syncRun?: {
+    id: string;
+    startedAt: string;
+    completedAt?: string;
+  };
+  invoice?: {
+    number?: string;
+    date?: string;
+  };
+  summary: {
+    subscriptionCount: number;
+    mappedSubscriptionCount: number;
+    retailCost: number;
+    ingramCost: number;
+    variance: number;
+    currency: string;
+  };
+  subscriptions: Array<{
+    subscriptionId: string;
+    subscriptionName?: string;
+    customerName?: string;
+    retailCost: number;
+    ingramCost: number;
+    variance: number;
+    currency: string;
+    services: Array<{
+      serviceName: string;
+      usageQuantity: number;
+      retailCost: number;
+    }>;
+    resources: Array<{
+      resourceId: string;
+      resourceName: string;
+      resourceGroup?: string;
+      serviceName: string;
+      dailyCosts: Array<{ date: string; retailCost: number; usageQuantity: number }>;
+      retailCost: number;
+      usageQuantity: number;
+      powerState?: string;
+      averageCpu?: number;
+      maximumCpu?: number;
+      availableMemoryBytes?: number;
+      activeSessions?: number;
+      disconnectedSessions?: number;
+    }>;
+  }>;
+};
+
+type AzureBillingRunSummary = {
+  id: string;
+  billingMonth: string;
+  status: string;
+  requestedBy: string;
+  shadowAcceptedBy?: string;
+  shadowAcceptedAt?: string;
+  releasedBy?: string;
+  releasedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  resultCount: number;
+  needsReviewCount: number;
+  approvedCount: number;
+  heldCount: number;
+  failedCount: number;
+  ingramCost: number;
+  nerdioCost: number;
+  combinedCost: number;
+  sourceCost: number;
+  billedTotal: number;
+  projectedRevenue: number;
+  projectedMargin: number;
+};
+
+type AzureBillingIngramReadiness = {
+  billingMonth: string;
+  expectedReleaseDate: string;
+  status: 'ready' | 'before-release' | 'due' | 'missing-history';
+  ready: boolean;
+  message: string;
+  invoiceImportId?: string;
+  invoiceDate?: string;
+  lineCount: number;
+  invoiceCost: number;
+};
+
+type AzureBillingApproval = {
+  reviewerEmail: string;
+  reviewerName: string;
+  decision: 'approved' | 'rejected';
+  comment?: string;
+  createdAt: string;
+};
+
+type AzureBillingResult = {
+  id: string;
+  customerName: string;
+  agreementName: string;
+  policyDisplayName: string;
+  policyType: 'combined-avd-markup' | 'ingram-subscription-markup' | 'fixed-avd-per-user';
+  revision: number;
+  status: string;
+  decisionType: 'policy' | 'previous-approved' | 'manual';
+  selectedNerdioCountSource?: 'invoice' | 'live';
+  invoiceNerdioCount: number;
+  liveNerdioCount?: number;
+  selectedNerdioCount: number;
+  ingramCost: number;
+  nerdioCost: number;
+  combinedCost: number;
+  markupRate?: number;
+  currentQuantity: number;
+  proposedQuantity: number;
+  currentUnitPrice?: number;
+  proposedUnitPrice?: number;
+  currentUnitCost?: number;
+  proposedUnitCost?: number;
+  nerdioQuantityAdditionId?: string;
+  nerdioQuantityCurrentQuantity?: number;
+  nerdioQuantityProposedQuantity?: number;
+  nerdioQuantityUnitPrice?: number;
+  nerdioQuantityUnitCost?: number;
+  externalPreTaxOverride?: number;
+  externalBeforeTax: number;
+  effectiveMarkupRate?: number;
+  projectedRevenue: number;
+  projectedMargin: number;
+  reviewerNote?: string;
+  holdReason?: string;
+  varianceFlags: string[];
+  approvals: AzureBillingApproval[];
+  sourceEvidence: Record<string, unknown>;
+  ingramComparisonMonth?: string;
+  ingramChanges: Array<{
+    status: 'new' | 'removed' | 'changed';
+    productCode: string;
+    productName: string;
+    subscriptionId?: string;
+    unitCost?: number;
+    previousQuantity: number;
+    currentQuantity: number;
+    quantityChange: number;
+    previousCost: number;
+    currentCost: number;
+    costChange: number;
+  }>;
+  history?: Array<{
+    billingMonth: string;
+    status: string;
+    quantity: number;
+    unitPrice?: number;
+    unitCost?: number;
+    invoiceNerdioCount: number;
+    liveNerdioCount?: number;
+    ingramCost: number;
+    nerdioCost: number;
+    combinedCost: number;
+    assignedMarkupRate?: number;
+    externalPreTaxOverride?: number;
+    effectiveMarkupRate?: number;
+    projectedRevenue: number;
+    projectedMargin: number;
+  }>;
+};
+
+type AzureBillingRunDetail = {
+  run: AzureBillingRunSummary;
+  results: AzureBillingResult[];
+};
+
+type AzureBillingPolicy = {
+  id: string;
+  customerId: string;
+  customerName?: string;
+  agreementId: string;
+  agreementName?: string;
+  connectWiseAdditionId: string;
+  nerdioQuantityAdditionId?: string;
+  policyType: AzureBillingResult['policyType'];
+  displayName: string;
+  ingramCustomerAccountIds: string[];
+  ingramProductCodes: string[];
+  ingramProductFamilies: Array<'azure-consumption' | 'windows-365'>;
+  ingramSubscriptionIds: string[];
+  nerdioAccountIds: string[];
+  nerdioBillableMetrics: string[];
+  markupRate?: number;
+  effectiveFrom: string;
+  effectiveTo?: string;
+  active: boolean;
+};
+
+type AzureBillingApprovalSettings = {
+  approverEmails: string[];
+  requiredApprovalCount: 1;
+  updatedBy: string;
+  updatedAt: string;
+  eligibleApprovers: Array<{
+    email: string;
+    displayName?: string;
+    role: 'Admin' | 'Approver';
+  }>;
+};
+
+type AzureBillingClientExclusion = {
+  id: string;
+  sourceType: 'ingram' | 'nerdio';
+  externalAccountId: string;
+  externalAccountName: string;
+  reason: string;
+  active: boolean;
+  ignoredBy: string;
+  ignoredAt: string;
+  restoredBy?: string;
+  restoredAt?: string;
+};
+
+type AzureBillingSourceCatalog = {
+  connectWiseCustomers: Array<{
+    customerId: string;
+    customerName: string;
+    connectWiseCompanyId: string;
+    agreements: Array<{
+      agreementId: string;
+      agreementName: string;
+      connectWiseAgreementId: string;
+      status: string;
+      additions: Array<{
+        connectWiseAdditionId: string;
+        productCode: string;
+        productName: string;
+        quantity: number;
+        unitPrice?: number;
+        unitCost?: number;
+      }>;
+    }>;
+  }>;
+  ingramCustomers: Array<{
+    customerAccountId: string;
+    customerName: string;
+    mappedCustomerId?: string;
+    mappedAgreementId?: string;
+    products: Array<{
+      productCode: string;
+      productName: string;
+      subscriptionIds: string[];
+      latestCost: number;
+      family?: 'azure-consumption' | 'windows-365';
+    }>;
+  }>;
+  nerdioAccounts: Array<{
+    accountId: string;
+    accountName: string;
+    mappedCustomerId?: string;
+    mappedAgreementId?: string;
+    metrics: string[];
+    latestBillingMonth?: string;
+    latestDirectCost: number;
+  }>;
+};
+
+type AzureBillingDetectedClient = {
+  key: string;
+  displayName: string;
+  status: 'configured' | 'mapped' | 'suggested' | 'partial' | 'conflict' | 'unmatched';
+  statusReason: string;
+  connectWiseCustomer?: AzureBillingSourceCatalog['connectWiseCustomers'][number];
+  ingramCustomer?: AzureBillingSourceCatalog['ingramCustomers'][number];
+  nerdioAccount?: AzureBillingSourceCatalog['nerdioAccounts'][number];
+  policy?: AzureBillingPolicy;
+};
+
+type AzureBillingReleaseHistory = {
+  id: string;
+  billingMonth: string;
+  status: string;
+  releasedBy: string;
+  startedAt: string;
+  completedAt?: string;
+  writtenCount: number;
+  blockedCount: number;
+  failedCount: number;
+  skippedCount: number;
 };
 
 type SavedProductProfitabilityReportSummary = {
@@ -2140,6 +2428,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'discrepancies', label: 'Discrepancies', icon: Link2 },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
+  { id: 'azure-billing', label: 'Azure Billing', icon: ClipboardCheck },
   { id: 'invoices', label: 'Invoices', icon: CircleDollarSign },
 ];
 
@@ -2156,6 +2445,7 @@ const viewPaths: Record<Exclude<View, 'settings'>, string> = {
   integrations: '/integrations',
   mappings: '/mappings',
   reports: '/reports',
+  'azure-billing': '/azure-billing',
   invoices: '/invoices',
   agreements: '/agreements',
 };
@@ -2210,6 +2500,12 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
     label: 'Product Profitability',
     enabled: true,
     description: 'Track net product profit by active integration across the last 12 months',
+  },
+  {
+    id: 'azure-utilization',
+    label: 'Azure Utilization',
+    enabled: true,
+    description: 'Compare Azure Cost Management usage with the latest Ingram invoice',
   },
   {
     id: 'customer-license',
@@ -2879,7 +3175,7 @@ function formatDateTime(value?: string) {
 }
 
 function formatMonthLabel(value: string, includeYear = false) {
-  const parsed = new Date(`${value}-01T00:00:00Z`);
+  const parsed = new Date(`${value}-01T12:00:00Z`);
   if (Number.isNaN(parsed.getTime())) {
     return value;
   }
@@ -3571,6 +3867,9 @@ function viewFromPath(pathname: string): View | null {
   if (settingsSectionFromPath(normalizedPath) || normalizedPath === '/settings' || normalizedPath === '/audit') {
     return 'settings';
   }
+  if (azureBillingTabFromPath(normalizedPath)) {
+    return 'azure-billing';
+  }
 
   const matchedEntry = Object.entries(viewPaths).find(([, path]) => path === normalizedPath);
   return matchedEntry ? (matchedEntry[0] as View) : normalizedPath === '/' ? defaultView : null;
@@ -3595,6 +3894,25 @@ function settingsSectionFromPath(pathname: string): SettingsSection | null {
 
 function normalizePathname(pathname: string) {
   return pathname.replace(/\/+$/, '') || '/';
+}
+
+const azureBillingTabPaths: Record<AzureBillingTab, string> = {
+  runs: '/azure-billing/Reports',
+  review: '/azure-billing/Review',
+  release: '/azure-billing/release',
+  utilization: '/azure-billing/costmanagement',
+  policies: '/azure-billing/PolicyMapping',
+};
+
+function azureBillingTabFromPath(pathname: string): AzureBillingTab | null {
+  const normalized = normalizePathname(pathname).toLowerCase();
+  if (normalized === '/azure-billing') return 'runs';
+  const entry = Object.entries(azureBillingTabPaths).find(([, path]) => path.toLowerCase() === normalized);
+  return entry?.[0] as AzureBillingTab | undefined ?? null;
+}
+
+function azureBillingPathForTab(tab: AzureBillingTab) {
+  return azureBillingTabPaths[tab];
 }
 
 function isView(value: string | null): value is View {
@@ -4024,6 +4342,17 @@ async function fetchProductProfitabilityReport() {
   }
 
   return body as unknown as ProductProfitabilityReportResponse;
+}
+
+async function fetchAzureUtilizationReport() {
+  const response = await fetch('/api/reports/azure-utilization');
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure utilization report load failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as AzureUtilizationReportResponse;
 }
 
 async function fetchSavedProductProfitabilityReports() {
@@ -6149,6 +6478,13 @@ function App() {
   const [productProfitabilityMessage, setProductProfitabilityMessage] = useState(
     'Click Generate to load net profit by mapped vendor.',
   );
+  const [azureUtilizationReport, setAzureUtilizationReport] =
+    useState<AzureUtilizationReportResponse | null>(null);
+  const [azureUtilizationLoadState, setAzureUtilizationLoadState] =
+    useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [azureUtilizationMessage, setAzureUtilizationMessage] = useState(
+    'Generate the report after an Azure cost sync or Ingram invoice import.',
+  );
   const [currentUserRoles, setCurrentUserRoles] = useState<AppRole[]>([]);
   const [discrepancyComparisonPairs, setDiscrepancyComparisonPairs] = useState<DiscrepancyComparisonPair[]>([]);
   const [discrepancyAuditStates, setDiscrepancyAuditStates] = useState<DiscrepancyAuditState[]>([]);
@@ -6669,6 +7005,28 @@ function App() {
       setProductProfitabilityReport(null);
       setProductProfitabilityLoadState('failed');
       setProductProfitabilityMessage(error instanceof Error ? error.message : 'Unable to generate product profitability.');
+      return null;
+    }
+  };
+
+  const loadAzureUtilizationReport = async () => {
+    setAzureUtilizationLoadState('loading');
+    setAzureUtilizationMessage('Loading Azure utilization and Ingram costs...');
+
+    try {
+      const report = await fetchAzureUtilizationReport();
+      setAzureUtilizationReport(report);
+      setAzureUtilizationLoadState('ready');
+      setAzureUtilizationMessage(
+        report.subscriptions.length > 0
+          ? `Loaded ${report.summary.subscriptionCount.toLocaleString()} Azure subscriptions from the latest cost sync.`
+          : 'No completed Azure Cost Management sync is available yet.',
+      );
+      return report;
+    } catch (error) {
+      setAzureUtilizationReport(null);
+      setAzureUtilizationLoadState('failed');
+      setAzureUtilizationMessage(error instanceof Error ? error.message : 'Unable to load Azure utilization.');
       return null;
     }
   };
@@ -9843,6 +10201,13 @@ function App() {
         </header>
 
         <main className={view === 'reconcile' ? 'content reconcile-content' : 'content'}>
+          {view === 'azure-billing' && (
+            <AzureBillingWorkspace
+              canAcceptShadow={currentUserRoles.includes('Admin')}
+              canManageApprovers={currentUserRoles.includes('Admin')}
+              canRelease={currentUserRoles.some((role) => role === 'Admin' || role === 'Billing')}
+            />
+          )}
           {view === 'reconcile' && (
             <ReconcileView
               approveClient={approveClient}
@@ -10171,6 +10536,14 @@ function App() {
               report={productProfitabilityReport}
             />
           )}
+          {view === 'reports' && reportSection === 'azure-utilization' && (
+            <AzureUtilizationReportView
+              loadMessage={azureUtilizationMessage}
+              loadState={azureUtilizationLoadState}
+              onRefresh={loadAzureUtilizationReport}
+              report={azureUtilizationReport}
+            />
+          )}
           {view === 'reports' && reportSection === 'customer-license' && (
             <CustomerLicenseReportView
               customers={customerLicenseCustomers}
@@ -10462,6 +10835,8 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
       return 'Mappings';
     case 'reports':
       return 'Reports';
+    case 'azure-billing':
+      return 'Azure Billing';
     case 'invoices':
       return 'Invoices';
     case 'agreements':
@@ -10492,6 +10867,8 @@ function pageKicker(view: View, settingsSection: SettingsSection = defaultSettin
       return 'Customers, products, and bundles';
     case 'reports':
       return 'Operational reporting';
+    case 'azure-billing':
+      return 'Monthly cost, review, approval, and release';
     case 'invoices':
       return 'Overdue and vendor invoice review';
     case 'agreements':
@@ -12531,7 +12908,7 @@ function SettingsEmailCommunicationView() {
 
 function SettingsView() {
   const [users, setUsers] = useState<ManagedAppUser[]>([]);
-  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'LicenseAdmin', 'Analyst']);
+  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst']);
   const [statuses, setStatuses] = useState<ManagedUserStatus[]>(['active', 'disabled']);
   const [drafts, setDrafts] = useState<Record<string, ManagedUserDraft>>({});
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
@@ -12550,7 +12927,7 @@ function SettingsView() {
 
   const applyUsersResponse = (response: ManagedUsersResponse) => {
     setUsers(response.users);
-    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'LicenseAdmin', 'Analyst']);
+    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst']);
     setStatuses(response.statuses.length > 0 ? response.statuses : ['active', 'disabled']);
     setDrafts(draftsFromUsers(response.users));
   };
@@ -22868,6 +23245,1979 @@ function CustomerLicenseReportView(props: {
             </div>
           </section>
         </section>
+      )}
+    </section>
+  );
+}
+
+function AzureBillingWorkspace({
+  canAcceptShadow,
+  canManageApprovers,
+  canRelease,
+}: {
+  canAcceptShadow: boolean;
+  canManageApprovers: boolean;
+  canRelease: boolean;
+}) {
+  const [tab, setTab] = useState<AzureBillingTab>(() => azureBillingTabFromPath(window.location.pathname) ?? 'runs');
+  const [runs, setRuns] = useState<AzureBillingRunSummary[]>([]);
+  const [detail, setDetail] = useState<AzureBillingRunDetail | null>(null);
+  const [policies, setPolicies] = useState<AzureBillingPolicy[]>([]);
+  const [approvalSettings, setApprovalSettings] = useState<AzureBillingApprovalSettings | null>(null);
+  const [approverDraft, setApproverDraft] = useState<string[]>([]);
+  const [clientExclusions, setClientExclusions] = useState<AzureBillingClientExclusion[]>([]);
+  const [showIgnoredClients, setShowIgnoredClients] = useState(false);
+  const [sources, setSources] = useState<AzureBillingSourceCatalog>({
+    connectWiseCustomers: [],
+    ingramCustomers: [],
+    nerdioAccounts: [],
+  });
+  const [releases, setReleases] = useState<AzureBillingReleaseHistory[]>([]);
+  const [utilization, setUtilization] = useState<AzureUtilizationReportResponse | null>(null);
+  const [billingMonth, setBillingMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [ingramReadiness, setIngramReadiness] = useState<AzureBillingIngramReadiness | null>(null);
+  const [message, setMessage] = useState('Loading Azure billing runs...');
+  const [busy, setBusy] = useState('');
+  const [policyCustomerSearch, setPolicyCustomerSearch] = useState('');
+  const [selectedDetectedClientKey, setSelectedDetectedClientKey] = useState('');
+  const [policyDraft, setPolicyDraft] = useState({
+    policyId: '',
+    customerId: '',
+    agreementId: '',
+    connectWiseAdditionId: '',
+    nerdioQuantityAdditionId: '',
+    displayName: 'Windows Virtual Desktop',
+    policyType: 'combined-avd-markup' as AzureBillingResult['policyType'],
+    ingramCustomerAccountIds: [] as string[],
+    ingramProductCodes: [] as string[],
+    ingramProductFamilies: ['azure-consumption', 'windows-365'] as Array<'azure-consumption' | 'windows-365'>,
+    nerdioAccountIds: [] as string[],
+    nerdioBillableMetrics: ['avd', 'cpc'] as string[],
+    markupPercent: '15',
+    effectiveFrom: new Date().toISOString().slice(0, 10),
+  });
+
+  const selectAzureBillingTab = (nextTab: AzureBillingTab) => {
+    setTab(nextTab);
+    const nextPath = azureBillingPathForTab(nextTab);
+    if (normalizePathname(window.location.pathname).toLowerCase() !== nextPath.toLowerCase()) {
+      window.history.pushState({ view: 'azure-billing', azureBillingTab: nextTab }, '', nextPath);
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => setTab(azureBillingTabFromPath(window.location.pathname) ?? 'runs');
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const loadRuns = async (preferredRunId?: string) => {
+    const response = await azureBillingJson<{ runs: AzureBillingRunSummary[] }>('/api/azure-billing/runs');
+    setRuns(response.runs);
+    const selected = preferredRunId ?? detail?.run.id ?? response.runs[0]?.id;
+    if (selected) {
+      const nextDetail = await azureBillingJson<AzureBillingRunDetail>(`/api/azure-billing/runs/${encodeURIComponent(selected)}`);
+      setDetail(nextDetail);
+    } else {
+      setDetail(null);
+    }
+    setMessage(response.runs.length ? 'Monthly billing evidence is ready for review.' : 'Create the first monthly Azure billing run.');
+  };
+
+  const loadPolicies = async () => {
+    const response = await azureBillingJson<{ policies: AzureBillingPolicy[] }>('/api/azure-billing/policies');
+    setPolicies(response.policies);
+  };
+
+  const loadApprovalSettings = async () => {
+    const response = await azureBillingJson<{ settings: AzureBillingApprovalSettings }>('/api/azure-billing/settings');
+    setApprovalSettings(response.settings);
+    setApproverDraft(response.settings.approverEmails);
+  };
+
+  const loadSources = async () => {
+    setSources(await azureBillingJson<AzureBillingSourceCatalog>('/api/azure-billing/sources'));
+  };
+
+  const loadClientExclusions = async () => {
+    const response = await azureBillingJson<{ exclusions: AzureBillingClientExclusion[] }>('/api/azure-billing/exclusions');
+    setClientExclusions(response.exclusions);
+  };
+
+  const loadReleases = async () => {
+    const response = await azureBillingJson<{ releases: AzureBillingReleaseHistory[] }>('/api/azure-billing/releases');
+    setReleases(response.releases);
+  };
+
+  const runAction = async (key: string, action: () => Promise<void>) => {
+    setBusy(key);
+    setMessage('Saving Azure billing changes...');
+    try {
+      await action();
+      setMessage('Azure billing workspace updated.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Azure billing action failed.');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  useEffect(() => {
+    void Promise.all([
+      loadRuns(),
+      loadPolicies(),
+      loadApprovalSettings(),
+      loadSources(),
+      loadClientExclusions(),
+      loadReleases(),
+    ]).catch((error) => {
+      setMessage(error instanceof Error ? error.message : 'Unable to load Azure billing.');
+    });
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'utilization' || utilization) return;
+    void fetchAzureUtilizationReport()
+      .then(setUtilization)
+      .catch((error) => setMessage(error instanceof Error ? error.message : 'Unable to load Azure utilization.'));
+  }, [tab, utilization]);
+
+  useEffect(() => {
+    let active = true;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(billingMonth)) {
+      setIngramReadiness(null);
+      return () => {
+        active = false;
+      };
+    }
+    setIngramReadiness(null);
+    void azureBillingJson<{ readiness: AzureBillingIngramReadiness }>(
+      `/api/azure-billing/ingram-readiness?billingMonth=${encodeURIComponent(billingMonth)}`,
+    )
+      .then((response) => {
+        if (active) setIngramReadiness(response.readiness);
+      })
+      .catch((error) => {
+        if (active) {
+          setMessage(error instanceof Error ? error.message : 'Unable to check the Ingram invoice status.');
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [billingMonth]);
+
+  const selectedRun = detail?.run;
+  const readyCount = detail?.results.filter((result) => result.status === 'approved' || result.status === 'held').length ?? 0;
+  const existingBillingMonthRun = runs.find((run) => run.billingMonth === billingMonth);
+  const billingMonthRunIsProtected = Boolean(
+    existingBillingMonthRun && ['releasing', 'released', 'partial'].includes(existingBillingMonthRun.status),
+  );
+  const activeClientExclusions = clientExclusions.filter((exclusion) => exclusion.active);
+  const activeBillingSources = filterAzureBillingSources(sources, activeClientExclusions, false);
+  const ignoredBillingSources = filterAzureBillingSources(sources, activeClientExclusions, true);
+  const detectedBillingClients = buildAzureBillingDetectedClients(activeBillingSources, policies);
+  const ignoredDetectedBillingClients = buildAzureBillingDetectedClients(ignoredBillingSources, policies);
+  const visibleDetectedBillingClients = showIgnoredClients
+    ? [...detectedBillingClients, ...ignoredDetectedBillingClients].sort((left, right) =>
+      left.displayName.localeCompare(right.displayName))
+    : detectedBillingClients;
+  const selectedDetectedClient = visibleDetectedBillingClients.find((client) => client.key === selectedDetectedClientKey);
+  const selectedPolicyCustomer = sources.connectWiseCustomers.find(
+    (customer) => customer.customerId === policyDraft.customerId,
+  );
+  const selectedPolicyAgreement = selectedPolicyCustomer?.agreements.find(
+    (agreement) => agreement.agreementId === policyDraft.agreementId,
+  );
+  const selectedPolicyAddition = selectedPolicyAgreement?.additions.find(
+    (addition) => addition.connectWiseAdditionId === policyDraft.connectWiseAdditionId,
+  );
+  const selectedNerdioQuantityAddition = selectedPolicyAgreement?.additions.find(
+    (addition) => addition.connectWiseAdditionId === policyDraft.nerdioQuantityAdditionId,
+  );
+  const visiblePolicyCustomers = sources.connectWiseCustomers.filter((customer) => {
+    const query = policyCustomerSearch.trim().toLowerCase();
+    return !query || customer.customerName.toLowerCase().includes(query);
+  });
+  const relevantIngramCustomers = selectedDetectedClient?.ingramCustomer
+    ? [selectedDetectedClient.ingramCustomer]
+    : billingSourceOptionsForCustomer(
+      sources.ingramCustomers,
+      policyDraft.customerId,
+      selectedPolicyCustomer?.customerName,
+    );
+  const relevantNerdioAccounts = selectedDetectedClient?.nerdioAccount
+    ? [selectedDetectedClient.nerdioAccount]
+    : billingSourceOptionsForCustomer(
+      sources.nerdioAccounts,
+      policyDraft.customerId,
+      selectedPolicyCustomer?.customerName,
+    );
+  const relevantNerdioMetrics = [...new Set(
+    relevantNerdioAccounts.flatMap((account) => account.metrics.map((metric) => metric.toLowerCase())),
+  )].sort();
+  const selectedIngramProducts = sources.ingramCustomers
+    .filter((customer) => policyDraft.ingramCustomerAccountIds.includes(customer.customerAccountId))
+    .flatMap((customer) => customer.products);
+
+  const choosePolicyCustomer = (
+    customerId: string,
+    preferredDetectedClient: AzureBillingDetectedClient | undefined = selectedDetectedClient,
+  ) => {
+    const customer = sources.connectWiseCustomers.find((item) => item.customerId === customerId);
+    if (!customer) {
+      setPolicyDraft((current) => ({
+        ...current,
+        policyId: '',
+        customerId: '',
+        agreementId: '',
+        connectWiseAdditionId: '',
+        nerdioQuantityAdditionId: '',
+        ingramCustomerAccountIds: [],
+        ingramProductCodes: [],
+        nerdioAccountIds: [],
+        nerdioBillableMetrics: ['avd', 'cpc'],
+      }));
+      return;
+    }
+    const ingramMatches = preferredDetectedClient?.ingramCustomer
+      ? [preferredDetectedClient.ingramCustomer]
+      : billingSourceOptionsForCustomer(sources.ingramCustomers, customerId, customer.customerName)
+        .filter((item) => item.mappedCustomerId === customerId || billingNamesMatch(item.customerName, customer.customerName));
+    const nerdioMatches = preferredDetectedClient?.nerdioAccount
+      ? [preferredDetectedClient.nerdioAccount]
+      : billingSourceOptionsForCustomer(sources.nerdioAccounts, customerId, customer.customerName)
+        .filter((item) => item.mappedCustomerId === customerId || billingNamesMatch(item.accountName, customer.customerName));
+    const mappedAgreementId = [...ingramMatches, ...nerdioMatches]
+      .map((item) => item.mappedAgreementId)
+      .find((agreementId) => customer.agreements.some((agreement) => agreement.agreementId === agreementId));
+    const agreement = customer.agreements.find((item) => item.agreementId === mappedAgreementId)
+      ?? customer.agreements.find((item) => /managed|avd|azure/i.test(item.agreementName))
+      ?? customer.agreements[0];
+    const addition = preferredAzureBillingAddition(agreement?.additions ?? []);
+    setPolicyDraft((current) => ({
+      ...current,
+      policyId: '',
+      customerId,
+      agreementId: agreement?.agreementId ?? '',
+      connectWiseAdditionId: addition?.connectWiseAdditionId ?? '',
+      nerdioQuantityAdditionId: current.policyType === 'fixed-avd-per-user'
+        ? preferredNerdioQuantityAddition(agreement?.additions ?? [])?.connectWiseAdditionId ?? ''
+        : '',
+      displayName: addition?.productName ?? current.displayName,
+      ingramCustomerAccountIds: ingramMatches.map((item) => item.customerAccountId),
+      ingramProductCodes: [],
+      nerdioAccountIds: nerdioMatches.map((item) => item.accountId),
+      nerdioBillableMetrics: defaultNerdioBillingMetrics(nerdioMatches),
+    }));
+  };
+
+  const beginDetectedClientSetup = (client: AzureBillingDetectedClient) => {
+    setSelectedDetectedClientKey(client.key);
+    setPolicyCustomerSearch(client.connectWiseCustomer?.customerName ?? '');
+    const existingPolicy = policies.find((policy) =>
+      (client.connectWiseCustomer && policy.customerId === client.connectWiseCustomer.customerId)
+      || (client.ingramCustomer && policy.ingramCustomerAccountIds.includes(client.ingramCustomer.customerAccountId))
+      || (client.nerdioAccount && policy.nerdioAccountIds.includes(client.nerdioAccount.accountId)));
+    if (existingPolicy) {
+      setPolicyDraft({
+        policyId: existingPolicy.id,
+        customerId: existingPolicy.customerId,
+        agreementId: existingPolicy.agreementId,
+        connectWiseAdditionId: existingPolicy.connectWiseAdditionId,
+        nerdioQuantityAdditionId: existingPolicy.nerdioQuantityAdditionId ?? '',
+        displayName: existingPolicy.displayName,
+        policyType: existingPolicy.policyType,
+        ingramCustomerAccountIds: existingPolicy.ingramCustomerAccountIds,
+        ingramProductCodes: existingPolicy.ingramProductCodes,
+        ingramProductFamilies: existingPolicy.ingramProductFamilies,
+        nerdioAccountIds: existingPolicy.nerdioAccountIds,
+        nerdioBillableMetrics: existingPolicy.nerdioBillableMetrics,
+        markupPercent: existingPolicy.markupRate === undefined
+          ? '15'
+          : String(existingPolicy.markupRate * 100),
+        effectiveFrom: existingPolicy.effectiveFrom,
+      });
+      return;
+    }
+    if (client.connectWiseCustomer) {
+      choosePolicyCustomer(client.connectWiseCustomer.customerId, client);
+      return;
+    }
+    setPolicyDraft((current) => ({
+      ...current,
+      policyId: '',
+      customerId: '',
+      agreementId: '',
+      connectWiseAdditionId: '',
+      nerdioQuantityAdditionId: '',
+      ingramCustomerAccountIds: client.ingramCustomer ? [client.ingramCustomer.customerAccountId] : [],
+      ingramProductCodes: [],
+      nerdioAccountIds: client.nerdioAccount ? [client.nerdioAccount.accountId] : [],
+      nerdioBillableMetrics: defaultNerdioBillingMetrics(client.nerdioAccount ? [client.nerdioAccount] : []),
+    }));
+  };
+
+  const ignoreDetectedClient = async (client: AzureBillingDetectedClient) => {
+    const sourceType = client.ingramCustomer ? 'ingram' : 'nerdio';
+    const source = sourceType === 'ingram'
+      ? {
+        externalAccountId: client.ingramCustomer?.customerAccountId ?? '',
+        externalAccountName: client.ingramCustomer?.customerName ?? '',
+      }
+      : {
+        externalAccountId: client.nerdioAccount?.accountId ?? '',
+        externalAccountName: client.nerdioAccount?.accountName ?? '',
+      };
+    const reason = window.prompt(
+      `Why should ${source.externalAccountName || client.displayName} be ignored in Azure Billing?`,
+      sourceType === 'ingram' ? 'One-time Ingram purchase' : 'Not billed through this Azure agreement',
+    )?.trim();
+    if (!reason) return;
+    await runAction(`ignore:${client.key}`, async () => {
+      const response = await azureBillingJson<{ exclusions: AzureBillingClientExclusion[] }>(
+        '/api/azure-billing/exclusions',
+        {
+          method: 'POST',
+          body: JSON.stringify({ sourceType, ...source, reason }),
+        },
+      );
+      setClientExclusions(response.exclusions);
+      setSelectedDetectedClientKey((current) => current === client.key ? '' : current);
+    });
+  };
+
+  const restoreDetectedClient = async (exclusion: AzureBillingClientExclusion) => {
+    await runAction(`restore:${exclusion.id}`, async () => {
+      const response = await azureBillingJson<{ exclusions: AzureBillingClientExclusion[] }>(
+        `/api/azure-billing/exclusions/${encodeURIComponent(exclusion.id)}/restore`,
+        { method: 'POST' },
+      );
+      setClientExclusions(response.exclusions);
+    });
+  };
+
+  return (
+    <section className="azure-billing-workspace" aria-label="Azure Billing workspace">
+      <div className="azure-billing-tabs" role="tablist" aria-label="Azure Billing sections">
+        {([
+          ['runs', 'Monthly runs'],
+          ['review', 'Client review'],
+          ['release', 'Billing release'],
+          ['utilization', 'Resource utilization'],
+          ['policies', 'Policies & mappings'],
+        ] as const).map(([id, label]) => (
+          <button
+            aria-selected={tab === id}
+            className={`${tab === id ? 'active' : ''}${id === 'policies' ? ' azure-billing-settings-tab' : ''}`.trim()}
+            key={id}
+            onClick={() => selectAzureBillingTab(id)}
+            role="tab"
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className={`inline-message${/failed|unable|requires|cannot/i.test(message) ? ' error' : ''}`}>{message}</p>
+
+      {tab === 'runs' ? (
+        <div className="azure-billing-runs-workspace">
+          <section className="work-surface azure-billing-run-create-card">
+            <header>
+              <div><h2>Azure Report</h2></div>
+            </header>
+            <div className="azure-billing-create">
+              <label>Billing month<input onChange={(event) => setBillingMonth(event.target.value)} type="month" value={billingMonth} /></label>
+              <button
+                className="button primary"
+                disabled={Boolean(busy) || billingMonthRunIsProtected}
+                onClick={() => void runAction('create', async () => {
+                  if (
+                    existingBillingMonthRun
+                    && !window.confirm(
+                      `Regenerate ${billingMonth}? This replaces the saved client results and removes its approvals, holds, and manual review changes. Released billing cannot be overwritten.`,
+                    )
+                  ) {
+                    return;
+                  }
+                  const created = await azureBillingJson<AzureBillingRunDetail>('/api/azure-billing/runs', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      billingMonth,
+                      overwriteExisting: Boolean(existingBillingMonthRun),
+                    }),
+                  });
+                  setDetail(created);
+                  await loadRuns(created.run.id);
+                  setTab('review');
+                })}
+                type="button"
+                title={billingMonthRunIsProtected ? 'This run has release activity and cannot be regenerated.' : undefined}
+              >
+                {existingBillingMonthRun ? <RefreshCcw size={17} /> : <Plus size={17} />}
+                {existingBillingMonthRun ? 'Regenerate run' : 'Create run'}
+              </button>
+            </div>
+            {ingramReadiness && !existingBillingMonthRun ? (
+              <div className={`azure-billing-ingram-readiness ${ingramReadiness.status}`}>
+                <strong>{ingramReadiness.ready ? 'Ingram invoice ready' : 'Ingram invoice not ready'}</strong>
+              </div>
+            ) : null}
+          </section>
+          <section className="work-surface azure-billing-runs-table-surface">
+            <header className="surface-header"><div><span className="section-kicker">12-month context</span><h2>Billing runs</h2></div></header>
+            <div className="azure-billing-runs-table-wrap">
+              <table className="data-table azure-billing-runs-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th># Approved</th>
+                    <th># Held</th>
+                    <th>Costs</th>
+                    <th>Billed</th>
+                    <th>Profit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.slice(0, 12).map((run) => (
+                    <tr className={selectedRun?.id === run.id ? 'selected' : ''} key={run.id}>
+                      <td>
+                        <button
+                          className="azure-billing-run-link"
+                          onClick={() => void runAction(`run:${run.id}`, async () => {
+                            setDetail(await azureBillingJson<AzureBillingRunDetail>(`/api/azure-billing/runs/${encodeURIComponent(run.id)}`));
+                            setTab('review');
+                          })}
+                          type="button"
+                        >
+                          {run.billingMonth}
+                        </button>
+                      </td>
+                      <td><span className={`status-chip ${run.status}`}>{azureBillingStatusLabel(run.status)}</span></td>
+                      <td>{formatCount(run.approvedCount)}</td>
+                      <td>{formatCount(run.heldCount)}</td>
+                      <td>{formatBillingCurrency(run.sourceCost ?? 0)}</td>
+                      <td>{formatBillingCurrency(run.billedTotal ?? 0)}</td>
+                      <td>{formatBillingCurrency((run.billedTotal ?? 0) - (run.sourceCost ?? 0))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!runs.length ? <div className="empty-state"><strong>No saved billing runs.</strong></div> : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {tab === 'review' ? (
+        <section className="work-surface">
+          <header className="surface-header azure-billing-review-header">
+            <div>
+              <span className="section-kicker">{selectedRun?.billingMonth ?? 'No run selected'}</span>
+              <h2>Client billing review</h2>
+              <p>{readyCount} of {detail?.results.length ?? 0} clients approved or held.</p>
+            </div>
+            {selectedRun ? (
+              <a className="button secondary" href={`/api/azure-billing/runs/${encodeURIComponent(selectedRun.id)}/export`}>
+                <Download size={17} /> Export Excel
+              </a>
+            ) : null}
+          </header>
+          {!detail ? <div className="empty-state"><strong>Select or create a monthly run.</strong></div> : (
+            <div className="azure-billing-client-list">
+              {detail.results.map((result) => (
+                <AzureBillingClientReviewTable
+                  approvalCount={approvalSettings?.requiredApprovalCount ?? 1}
+                  busy={Boolean(busy)}
+                  key={result.id}
+                  onReload={loadRuns}
+                  result={result}
+                  runAction={runAction}
+                  runMonth={detail.run.billingMonth}
+                />
+              ))}
+              {/*
+              {detail.results.map((result) => {
+                const approvalCount = result.approvals.filter((approval) => approval.decision === 'approved').length;
+                const ingramCostChange = result.ingramChanges.reduce((total, change) => total + change.costChange, 0);
+                return (
+                  <article className="azure-billing-client-card" key={result.id}>
+                    <header>
+                      <div>
+                        <span className={`status-chip ${result.status}`}>{azureBillingStatusLabel(result.status)}</span>
+                        <h3>{result.customerName}</h3>
+                        <p>{result.agreementName} · {result.policyDisplayName} · revision {result.revision}</p>
+                      </div>
+                      <strong>{approvalCount}/{approvalSettings?.requiredApprovalCount ?? 1} approval</strong>
+                    </header>
+                    <div className="azure-billing-metrics">
+                      <BillingMetric label="Ingram cost" value={formatCurrency(result.ingramCost)} />
+                      <BillingMetric label="Nerdio invoice cost" value={formatCurrency(result.nerdioCost)} />
+                      <BillingMetric label="Combined cost" value={formatCurrency(result.combinedCost)} />
+                      <BillingMetric label="Proposed revenue" value={formatCurrency(result.projectedRevenue)} />
+                      <BillingMetric label="Margin" value={formatCurrency(result.projectedMargin)} />
+                    </div>
+                    {result.policyType === 'fixed-avd-per-user' ? (
+                      <div className="azure-billing-count-choice">
+                        <span>Billable count</span>
+                        <button
+                          className={result.selectedNerdioCountSource === 'invoice' ? 'active' : ''}
+                          disabled={Boolean(busy)}
+                          onClick={() => void runAction(`count:${result.id}`, async () => {
+                            await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ decisionType: 'policy', selectedNerdioCountSource: 'invoice' }),
+                            });
+                            await loadRuns();
+                          })}
+                          type="button"
+                        >
+                          Prior invoice: {formatCount(result.invoiceNerdioCount)}
+                        </button>
+                        <button
+                          className={result.selectedNerdioCountSource === 'live' ? 'active' : ''}
+                          disabled={Boolean(busy)}
+                          onClick={() => void runAction(`count:${result.id}`, async () => {
+                            await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ decisionType: 'policy', selectedNerdioCountSource: 'live' }),
+                            });
+                            await loadRuns();
+                          })}
+                          type="button"
+                        >
+                          Current live: {formatCount(result.liveNerdioCount)}
+                        </button>
+                      </div>
+                    ) : null}
+                    <div className="azure-billing-proposal">
+                      <span>{result.nerdioQuantityAdditionId ? 'Azure cost quantity' : 'Quantity'} <strong>{formatCount(result.currentQuantity)} → {formatCount(result.proposedQuantity)}</strong></span>
+                      <span>Unit price <strong>{formatOptionalCurrency(result.currentUnitPrice)} → {formatOptionalCurrency(result.proposedUnitPrice)}</strong></span>
+                      <span>{result.nerdioQuantityAdditionId ? 'Azure cost' : 'Unit cost'} <strong>{formatOptionalCurrency(result.currentUnitCost)} → {formatOptionalCurrency(result.proposedUnitCost)}</strong></span>
+                      {result.markupRate !== undefined ? <span>Markup <strong>{(result.markupRate * 100).toFixed(2)}%</strong></span> : null}
+                    </div>
+                    {result.nerdioQuantityAdditionId ? (
+                      <div className="azure-billing-split-target">
+                        <span>Nerdio user-count addition</span>
+                        <strong>{formatCount(result.nerdioQuantityCurrentQuantity ?? 0)} → {formatCount(result.nerdioQuantityProposedQuantity ?? 0)} users</strong>
+                        <small>
+                          Preserved price {formatOptionalCurrency(result.nerdioQuantityUnitPrice)}
+                          {' · '}cost remains {formatOptionalCurrency(result.nerdioQuantityUnitCost)}
+                        </small>
+                      </div>
+                    ) : null}
+                    {result.ingramComparisonMonth && result.ingramChanges.length ? (
+                      <div className="azure-billing-ingram-summary">
+                        <div>
+                          <span>Ingram changes vs {result.ingramComparisonMonth}</span>
+                          <strong>{formatSignedCurrency(ingramCostChange)}</strong>
+                        </div>
+                        <small>
+                          {result.ingramChanges.length} changed product{result.ingramChanges.length === 1 ? '' : 's'}
+                          {' · '}{result.ingramChanges.filter((change) => change.status === 'new').length} new
+                          {' · '}{result.ingramChanges.filter((change) => change.status === 'removed').length} removed
+                        </small>
+                      </div>
+                    ) : null}
+                    {result.varianceFlags.length ? <p className="azure-billing-warning">{result.varianceFlags.join(' · ')}</p> : null}
+                    {result.holdReason ? <p className="azure-billing-warning">Hold: {result.holdReason}</p> : null}
+                    <details className="azure-billing-evidence">
+                      <summary>Source detail and reviewer decisions</summary>
+                      {result.history?.length ? (
+                        <table className="data-table">
+                          <thead><tr><th>Month</th><th>Status</th><th>Ingram</th><th>Nerdio</th><th>Total cost</th><th>Revenue</th><th>Margin</th><th>Quantity</th><th>Unit price</th><th>Unit cost</th></tr></thead>
+                          <tbody>{result.history.map((month) => (
+                            <tr key={month.billingMonth}>
+                              <td>{month.billingMonth}</td>
+                              <td>{azureBillingStatusLabel(month.status)}</td>
+                              <td>{formatCurrency(month.ingramCost)}</td>
+                              <td>{formatCurrency(month.nerdioCost)}</td>
+                              <td>{formatCurrency(month.combinedCost)}</td>
+                              <td>{formatCurrency(month.projectedRevenue)}</td>
+                              <td>{formatCurrency(month.projectedMargin)}</td>
+                              <td>{formatCount(month.quantity)}</td>
+                              <td>{formatOptionalCurrency(month.unitPrice)}</td>
+                              <td>{formatOptionalCurrency(month.unitCost)}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      ) : null}
+                      {result.ingramComparisonMonth ? (
+                        <section className="azure-billing-ingram-changes">
+                          <h4>Ingram changes vs {result.ingramComparisonMonth}</h4>
+                          {result.ingramChanges.length ? (
+                            <div className="azure-billing-change-table">
+                              <table className="data-table">
+                                <thead>
+                                  <tr>
+                                    <th>Change</th>
+                                    <th>Product</th>
+                                    <th>SKU</th>
+                                    <th>Previous qty</th>
+                                    <th>Current qty</th>
+                                    <th>Qty Δ</th>
+                                    <th>Unit cost</th>
+                                    <th>Previous cost</th>
+                                    <th>Current cost</th>
+                                    <th>Cost Δ</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {result.ingramChanges.map((change) => (
+                                    <tr key={`${change.subscriptionId ?? ''}:${change.productCode}:${change.productName}`}>
+                                      <td><span className={`status-chip ${change.status}`}>{azureBillingStatusLabel(change.status)}</span></td>
+                                      <td>{change.productName}</td>
+                                      <td>{change.productCode || '—'}</td>
+                                      <td>{formatCount(change.previousQuantity)}</td>
+                                      <td>{formatCount(change.currentQuantity)}</td>
+                                      <td>{formatSignedNumber(change.quantityChange)}</td>
+                                      <td>{formatOptionalCurrency(change.unitCost)}</td>
+                                      <td>{formatCurrency(change.previousCost)}</td>
+                                      <td>{formatCurrency(change.currentCost)}</td>
+                                      <td className={change.costChange > 0 ? 'variance-negative' : change.costChange < 0 ? 'variance-positive' : ''}>{formatSignedCurrency(change.costChange)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : <p className="field-help">No Ingram product, quantity, or cost changes.</p>}
+                        </section>
+                      ) : null}
+                      <pre>{JSON.stringify(result.sourceEvidence, null, 2)}</pre>
+                      {result.approvals.map((approval) => (
+                        <p key={`${approval.reviewerEmail}:${approval.createdAt}`}>
+                          <strong>{approval.reviewerName}</strong> approved {formatDateTime(approval.createdAt)}
+                          {approval.comment ? ` — ${approval.comment}` : ''}
+                        </p>
+                      ))}
+                    </details>
+                    <footer>
+                      <button className="button secondary" disabled={Boolean(busy)} onClick={() => void reviseBillingResult(result, 'policy', runAction, loadRuns)} type="button">Use policy</button>
+                      <button className="button secondary" disabled={Boolean(busy)} onClick={() => void reviseBillingResult(result, 'previous-approved', runAction, loadRuns)} type="button">Bill previous month</button>
+                      <button className="button secondary" disabled={Boolean(busy)} onClick={() => void manualBillingProposal(result, runAction, loadRuns)} type="button">Manual proposal</button>
+                      <button
+                        className="button secondary"
+                        disabled={Boolean(busy)}
+                        onClick={() => {
+                          const reason = window.prompt(`Hold reason for ${result.customerName}:`);
+                          if (!reason?.trim()) return;
+                          void runAction(`hold:${result.id}`, async () => {
+                            await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/hold`, {
+                              method: 'POST',
+                              body: JSON.stringify({ reason }),
+                            });
+                            await loadRuns();
+                          });
+                        }}
+                        type="button"
+                      >
+                        Hold
+                      </button>
+                      <button
+                        className="button primary"
+                        disabled={Boolean(busy) || ['approved', 'held', 'released'].includes(result.status)}
+                        onClick={() => void runAction(`approve:${result.id}`, async () => {
+                          await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/approve`, {
+                            method: 'POST',
+                            body: JSON.stringify({}),
+                          });
+                          await loadRuns();
+                        })}
+                        type="button"
+                      >
+                        <Check size={17} /> Approve revision
+                      </button>
+                    </footer>
+                  </article>
+                );
+              })}
+              */}
+              {!detail.results.length ? <div className="empty-state"><strong>No effective policies produced client results.</strong><p>Add policies and mappings, then create the run.</p></div> : null}
+            </div>
+          )}
+        </section>
+      ) : null}
+
+      {tab === 'policies' ? (
+        <div className="azure-billing-policies-workspace">
+          <section className="work-surface azure-billing-approval-settings">
+            <header className="surface-header">
+              <div>
+                <span className="section-kicker">Workspace setting</span>
+                <h2>Azure Billing approvers</h2>
+                <p>One approval from any selected member completes a client revision. This list applies to every agreement.</p>
+              </div>
+              <span className="azure-billing-approval-rule">1 approval required</span>
+            </header>
+            {approvalSettings ? (
+              <>
+                <div className="azure-billing-approver-list">
+                  {approvalSettings.eligibleApprovers.map((approver) => (
+                    <label key={approver.email}>
+                      <input
+                        checked={approverDraft.includes(approver.email)}
+                        disabled={!canManageApprovers || Boolean(busy)}
+                        onChange={() => setApproverDraft(toggleBillingValue(approverDraft, approver.email))}
+                        type="checkbox"
+                      />
+                      <span>
+                        <strong>{approver.displayName || approver.email}</strong>
+                        <small>{approver.email} · {approver.role}</small>
+                      </span>
+                    </label>
+                  ))}
+                  {!approvalSettings.eligibleApprovers.length ? (
+                    <p className="field-help">No active Admin or Approver users are available.</p>
+                  ) : null}
+                </div>
+                <div className="azure-billing-approver-actions">
+                  <small>Last updated {formatDateTime(approvalSettings.updatedAt)} by {approvalSettings.updatedBy}.</small>
+                  {canManageApprovers ? (
+                    <button
+                      className="button primary"
+                      disabled={Boolean(busy) || approverDraft.length === 0}
+                      onClick={() => void runAction('approvers', async () => {
+                        const response = await azureBillingJson<{ settings: AzureBillingApprovalSettings }>('/api/azure-billing/settings', {
+                          method: 'PUT',
+                          body: JSON.stringify({ approverEmails: approverDraft }),
+                        });
+                        setApprovalSettings(response.settings);
+                        setApproverDraft(response.settings.approverEmails);
+                      })}
+                      type="button"
+                    >
+                      <Save size={17} /> Save approvers
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : <p className="field-help">Loading Azure Billing approvers…</p>}
+          </section>
+          <div className="azure-billing-policy-layout">
+          <section className="work-surface azure-billing-policy-summary">
+            <header className="surface-header">
+              <div>
+                <span className="section-kicker">Detected coverage</span>
+                <h2>Azure clients</h2>
+                <p>Ingram Azure purchases and Nerdio accounts stay in this queue until configured or explicitly ignored.</p>
+              </div>
+              {ignoredDetectedBillingClients.length ? (
+                <button
+                  className="button ghost compact"
+                  onClick={() => setShowIgnoredClients((current) => !current)}
+                  type="button"
+                >
+                  {showIgnoredClients ? 'Hide ignored' : `Show ignored (${ignoredDetectedBillingClients.length})`}
+                </button>
+              ) : null}
+            </header>
+            <div className="azure-billing-coverage-counts">
+              <span><strong>{detectedBillingClients.length}</strong> detected</span>
+              <span><strong>{detectedBillingClients.filter((client) => client.status === 'configured').length}</strong> configured</span>
+              <span><strong>{detectedBillingClients.filter((client) => ['unmatched', 'partial', 'conflict'].includes(client.status)).length}</strong> need mapping</span>
+            </div>
+            <div className="azure-billing-detected-list">
+              {visibleDetectedBillingClients.map((client) => {
+                const exclusion = azureBillingClientExclusion(client, activeClientExclusions);
+                return (
+                  <article className={`azure-billing-detected-client${exclusion ? ' ignored' : ''}`} key={client.key}>
+                    <button
+                      className={`azure-billing-detected-client-main${selectedDetectedClientKey === client.key ? ' active' : ''}`}
+                      disabled={Boolean(exclusion)}
+                      onClick={() => beginDetectedClientSetup(client)}
+                      type="button"
+                    >
+                      <span className={`azure-billing-coverage-status ${exclusion ? 'ignored' : client.status}`}>
+                        {exclusion ? 'Ignored' : azureBillingCoverageStatusLabel(client.status)}
+                      </span>
+                      <strong>{client.displayName}</strong>
+                      {client.ingramCustomer ? <small>Ingram: {client.ingramCustomer.customerName}</small> : null}
+                      {client.nerdioAccount ? <small>Nerdio: {client.nerdioAccount.accountName}</small> : null}
+                      <small>{exclusion ? exclusion.reason : client.statusReason}</small>
+                    </button>
+                    {canManageApprovers && !client.policy ? (
+                      exclusion ? (
+                        <button
+                          className="button ghost compact azure-billing-detected-client-action"
+                          disabled={Boolean(busy)}
+                          onClick={() => void restoreDetectedClient(exclusion)}
+                          type="button"
+                        >
+                          Restore
+                        </button>
+                      ) : (
+                        <button
+                          className="button ghost compact azure-billing-detected-client-action"
+                          disabled={Boolean(busy)}
+                          onClick={() => void ignoreDetectedClient(client)}
+                          title={`Ignore the ${client.ingramCustomer ? 'Ingram' : 'Nerdio'} source for this client`}
+                          type="button"
+                        >
+                          Ignore
+                        </button>
+                      )
+                    ) : null}
+                  </article>
+                );
+              })}
+              {!visibleDetectedBillingClients.length ? (
+                <div className="empty-state">
+                  <strong>{ignoredDetectedBillingClients.length ? 'All detected clients are hidden.' : 'No Azure clients detected.'}</strong>
+                  <p>{ignoredDetectedBillingClients.length ? 'Use Show ignored to review or restore them.' : 'Synchronize Ingram invoices or Nerdio accounts to populate this queue.'}</p>
+                </div>
+              ) : null}
+            </div>
+            <div className="azure-billing-policy-list">
+              <h3>Configured policies</h3>
+              {policies.map((policy) => (
+                <article key={policy.id}>
+                  <span className={`status-chip ${policy.active ? 'approved' : 'held'}`}>{policy.active ? 'Active' : 'Inactive'}</span>
+                  <strong>{policy.customerName ?? policy.customerId}</strong>
+                  <span>{policy.agreementName} → {policy.displayName}</span>
+                  <small>{azureBillingPolicyLabel(policy.policyType)} · {policy.ingramProductFamilies.map(azureBillingProductFamilyLabel).join(' + ') || `${policy.ingramProductCodes.length} selected products`}</small>
+                  {policy.nerdioQuantityAdditionId ? (
+                    <small>
+                      Nerdio count → {azureBillingAdditionName(sources, policy.agreementId, policy.nerdioQuantityAdditionId)}
+                    </small>
+                  ) : null}
+                  <small>Effective {policy.effectiveFrom}{policy.markupRate !== undefined ? ` · ${(policy.markupRate * 100).toFixed(2)}% markup` : ''}</small>
+                </article>
+              ))}
+              {!policies.length ? <p className="field-help">No policies have been saved yet.</p> : null}
+            </div>
+          </section>
+          <form
+            className="work-surface azure-billing-policy-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runAction('policy', async () => {
+                const markupRate = Number(policyDraft.markupPercent) / 100;
+                await azureBillingJson('/api/azure-billing/policies', {
+                  method: 'PUT',
+                  body: JSON.stringify({
+                    id: policyDraft.policyId || undefined,
+                    customerId: policyDraft.customerId,
+                    agreementId: policyDraft.agreementId,
+                    connectWiseAdditionId: policyDraft.connectWiseAdditionId,
+                    nerdioQuantityAdditionId: policyDraft.policyType === 'fixed-avd-per-user'
+                      ? policyDraft.nerdioQuantityAdditionId || undefined
+                      : undefined,
+                    policyType: policyDraft.policyType,
+                    displayName: policyDraft.displayName,
+                    ingramCustomerAccountIds: policyDraft.ingramCustomerAccountIds,
+                    ingramProductCodes: policyDraft.ingramProductCodes,
+                    ingramProductFamilies: policyDraft.ingramProductFamilies,
+                    nerdioAccountIds: policyDraft.nerdioAccountIds,
+                    nerdioBillableMetrics: policyDraft.nerdioBillableMetrics,
+                    markupRate: policyDraft.policyType === 'fixed-avd-per-user' ? undefined : markupRate,
+                    effectiveFrom: policyDraft.effectiveFrom,
+                  }),
+                });
+                await loadPolicies();
+                await loadSources();
+              });
+            }}
+          >
+            <header className="surface-header"><div><span className="section-kicker">{policyDraft.policyId ? 'Edit saved policy' : 'Guided setup'}</span><h2>{policyDraft.policyId ? 'Update client billing policy' : 'Set up a client billing policy'}</h2><p>Choose names from synchronized ConnectWise and vendor data. Harmony keeps the underlying IDs out of the workflow.</p></div></header>
+
+            <section className="azure-billing-policy-step">
+              <header><span>1</span><div><h3>Client and agreement</h3><p>Start with the ConnectWise client, then confirm where the charge belongs.</p></div></header>
+              {selectedDetectedClient ? (
+                <div className={`azure-billing-detected-context ${selectedDetectedClient.status}`}>
+                  <strong>{selectedDetectedClient.displayName}</strong>
+                  <span>{selectedDetectedClient.statusReason}</span>
+                  <small>
+                    {selectedDetectedClient.ingramCustomer ? `Ingram: ${selectedDetectedClient.ingramCustomer.customerName}` : 'No Ingram Azure source'}
+                    {' · '}
+                    {selectedDetectedClient.nerdioAccount ? `Nerdio: ${selectedDetectedClient.nerdioAccount.accountName}` : 'No Nerdio source detected'}
+                  </small>
+                </div>
+              ) : null}
+              <label>
+                Find a client
+                <input
+                  onChange={(event) => setPolicyCustomerSearch(event.target.value)}
+                  placeholder="Type a client name"
+                  type="search"
+                  value={policyCustomerSearch}
+                />
+              </label>
+              <label>
+                Client
+                <select required value={policyDraft.customerId} onChange={(event) => choosePolicyCustomer(event.target.value)}>
+                  <option value="">Select a client…</option>
+                  {visiblePolicyCustomers.map((customer) => (
+                    <option key={customer.customerId} value={customer.customerId}>{customer.customerName}</option>
+                  ))}
+                </select>
+              </label>
+              {selectedPolicyCustomer ? (
+                <div className="azure-billing-choice-grid">
+                  <label>
+                    Agreement
+                    <select
+                      required
+                      value={policyDraft.agreementId}
+                      onChange={(event) => {
+                        const agreement = selectedPolicyCustomer.agreements.find((item) => item.agreementId === event.target.value);
+                        const addition = preferredAzureBillingAddition(agreement?.additions ?? []);
+                        setPolicyDraft({
+                          ...policyDraft,
+                          agreementId: agreement?.agreementId ?? '',
+                          connectWiseAdditionId: addition?.connectWiseAdditionId ?? '',
+                          nerdioQuantityAdditionId: '',
+                          displayName: addition?.productName ?? policyDraft.displayName,
+                        });
+                      }}
+                    >
+                      <option value="">Select an agreement…</option>
+                      {selectedPolicyCustomer.agreements.map((agreement) => (
+                        <option key={agreement.agreementId} value={agreement.agreementId}>{agreement.agreementName}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    {policyDraft.policyType === 'fixed-avd-per-user' ? 'Azure cost addition' : 'Agreement addition'}
+                    <select
+                      required
+                      value={policyDraft.connectWiseAdditionId}
+                      onChange={(event) => {
+                        const addition = selectedPolicyAgreement?.additions.find((item) => item.connectWiseAdditionId === event.target.value);
+                        setPolicyDraft({
+                          ...policyDraft,
+                          connectWiseAdditionId: event.target.value,
+                          displayName: addition?.productName ?? policyDraft.displayName,
+                        });
+                      }}
+                    >
+                      <option value="">Select an addition…</option>
+                      {selectedPolicyAgreement?.additions.map((addition) => (
+                        <option key={addition.connectWiseAdditionId} value={addition.connectWiseAdditionId}>{addition.productName} ({addition.productCode})</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+              {selectedPolicyAddition ? (
+                <div className="azure-billing-selected-addition">
+                  <strong>{selectedPolicyAddition.productName}</strong>
+                  <span>{selectedPolicyAgreement?.agreementName}</span>
+                  <small>Current quantity {formatCount(selectedPolicyAddition.quantity)} · price {formatOptionalCurrency(selectedPolicyAddition.unitPrice)} · cost {formatOptionalCurrency(selectedPolicyAddition.unitCost)}</small>
+                </div>
+              ) : selectedPolicyAgreement ? (
+                <p className="azure-billing-warning">This agreement has no active additions. Synchronize ConnectWise additions or select another agreement.</p>
+              ) : null}
+            </section>
+
+            <section className="azure-billing-policy-step">
+              <header><span>2</span><div><h3>Billing treatment</h3><p>Choose how the combined vendor cost becomes the ConnectWise charge.</p></div></header>
+              <div className="azure-billing-choice-grid">
+                <label>Billing method<select value={policyDraft.policyType} onChange={(event) => {
+                  const policyType = event.target.value as AzureBillingResult['policyType'];
+                  setPolicyDraft({
+                    ...policyDraft,
+                    policyType,
+                    nerdioQuantityAdditionId: policyType === 'fixed-avd-per-user'
+                      ? preferredNerdioQuantityAddition(selectedPolicyAgreement?.additions ?? [])?.connectWiseAdditionId ?? ''
+                      : '',
+                    ingramProductFamilies: policyType === 'ingram-subscription-markup'
+                      ? []
+                      : ['azure-consumption', 'windows-365'],
+                  });
+                }}><option value="combined-avd-markup">Combined AVD cost + markup</option><option value="ingram-subscription-markup">One Ingram product + markup</option><option value="fixed-avd-per-user">Fixed AVD price per user</option></select></label>
+                <label>Policy name<input required value={policyDraft.displayName} onChange={(event) => setPolicyDraft({ ...policyDraft, displayName: event.target.value })} /></label>
+              </div>
+              {policyDraft.policyType !== 'fixed-avd-per-user' ? <label>Protected markup %<input min="0" required step="0.01" type="number" value={policyDraft.markupPercent} onChange={(event) => setPolicyDraft({ ...policyDraft, markupPercent: event.target.value })} /></label> : null}
+            </section>
+
+            <section className="azure-billing-policy-step">
+              <header><span>3</span><div><h3>Vendor sources</h3><p>Only accounts that match the selected client are shown first. Selecting them also saves the reusable client mapping.</p></div></header>
+              <fieldset className="azure-billing-source-selector">
+                <legend>Ingram client</legend>
+                {relevantIngramCustomers.map((customer) => (
+                  <label key={customer.customerAccountId}>
+                    <input
+                      checked={policyDraft.ingramCustomerAccountIds.includes(customer.customerAccountId)}
+                      onChange={() => {
+                        setPolicyDraft({ ...policyDraft, ingramCustomerAccountIds: toggleBillingValue(policyDraft.ingramCustomerAccountIds, customer.customerAccountId) });
+                      }}
+                      type="checkbox"
+                    />
+                    <span><strong>{customer.customerName}</strong><small>{customer.products.length} current Microsoft products · {customer.mappedCustomerId === policyDraft.customerId ? 'mapped to this client' : 'selected by name'}</small></span>
+                  </label>
+                ))}
+                {!relevantIngramCustomers.length ? <p>No matching Ingram clients were found. Review the Ingram customer mapping before creating this policy.</p> : null}
+              </fieldset>
+
+              <fieldset className="azure-billing-source-selector">
+                <legend>Included Ingram product families</legend>
+                <p className="field-help">Future products matching these families are included automatically, even when their SKU variant or quantity changes.</p>
+                {([
+                  ['azure-consumption', 'Microsoft Azure consumption', 'Matches MS-AZR products and Azure consumption descriptions.'],
+                  ['windows-365', 'Windows 365 Cloud PCs', 'Matches the Windows 365 product family and Cloud PC descriptions.'],
+                ] as const).map(([family, label, description]) => (
+                  <label key={family}>
+                    <input
+                      checked={policyDraft.ingramProductFamilies.includes(family)}
+                      onChange={() => setPolicyDraft({
+                        ...policyDraft,
+                        ingramProductFamilies: toggleBillingValue(policyDraft.ingramProductFamilies, family),
+                      })}
+                      type="checkbox"
+                    />
+                    <span><strong>{label}</strong><small>{description}</small></span>
+                  </label>
+                ))}
+                {selectedIngramProducts.filter((product) => !product.family).length ? (
+                  <div className="azure-billing-unclassified">
+                    <strong>Products needing a billing decision</strong>
+                    {selectedIngramProducts.filter((product) => !product.family).map((product) => (
+                      <label key={product.productCode}>
+                        <input
+                          checked={policyDraft.ingramProductCodes.includes(product.productCode)}
+                          onChange={() => setPolicyDraft({ ...policyDraft, ingramProductCodes: toggleBillingValue(policyDraft.ingramProductCodes, product.productCode) })}
+                          type="checkbox"
+                        />
+                        <span><strong>{product.productName}</strong><small>{formatCurrency(product.latestCost)} latest invoice cost · include separately only when it belongs in this addition</small></span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </fieldset>
+
+              {policyDraft.policyType !== 'ingram-subscription-markup' ? (
+                <fieldset className="azure-billing-source-selector">
+                  <legend>Nerdio client</legend>
+                  {relevantNerdioAccounts.map((account) => (
+                    <label key={account.accountId}>
+                      <input
+                        checked={policyDraft.nerdioAccountIds.includes(account.accountId)}
+                        onChange={() => setPolicyDraft({ ...policyDraft, nerdioAccountIds: toggleBillingValue(policyDraft.nerdioAccountIds, account.accountId) })}
+                        type="checkbox"
+                      />
+                      <span>
+                        <strong>{account.accountName}</strong>
+                        <small>
+                          {formatCurrency(account.latestDirectCost)} {account.latestBillingMonth ? `${formatMonthLabel(account.latestBillingMonth, true)} invoice cost` : 'latest monthly invoice cost'}
+                          {' · '}
+                          {account.mappedCustomerId === policyDraft.customerId ? 'mapped to this client' : 'selected by name'}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+                  {!relevantNerdioAccounts.length ? <p>No matching Nerdio client was found. Review the Nerdio client mapping before creating this policy.</p> : null}
+                  {relevantNerdioMetrics.length ? (
+                    <div className="azure-billing-nerdio-products">
+                      <strong>Nerdio products used for billable count</strong>
+                      <p className="field-help">Select the Nerdio products that contribute users. Leave products unchecked to skip them for this client.</p>
+                      {relevantNerdioMetrics.map((metric) => (
+                        <label key={metric}>
+                          <input
+                            checked={policyDraft.nerdioBillableMetrics.includes(metric)}
+                            onChange={() => setPolicyDraft({
+                              ...policyDraft,
+                              nerdioBillableMetrics: toggleBillingValue(policyDraft.nerdioBillableMetrics, metric),
+                            })}
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong>{nerdioBillingMetricLabel(metric)}</strong>
+                            <small>Nerdio product: {metric}</small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                  {policyDraft.policyType === 'fixed-avd-per-user' && selectedPolicyAgreement ? (
+                    <div className="azure-billing-nerdio-target">
+                      <label>
+                        Nerdio product addition
+                        <select
+                          value={policyDraft.nerdioQuantityAdditionId}
+                          onChange={(event) => setPolicyDraft({
+                            ...policyDraft,
+                            nerdioQuantityAdditionId: event.target.value,
+                          })}
+                        >
+                          <option value="">No separate product mapping</option>
+                          {selectedPolicyAgreement.additions
+                            .filter((addition) => addition.connectWiseAdditionId !== policyDraft.connectWiseAdditionId)
+                            .map((addition) => (
+                              <option key={addition.connectWiseAdditionId} value={addition.connectWiseAdditionId}>
+                                {addition.productName} ({addition.productCode})
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <p className="field-help">
+                        Choose a separate product such as BMB - Labor when Nerdio controls its user quantity.
+                        Leave this blank to keep the existing one-addition behavior. The Azure cost stays on {selectedPolicyAddition?.productName ?? 'the Azure cost addition'}.
+                      </p>
+                      {selectedNerdioQuantityAddition ? (
+                        <div className="azure-billing-selected-addition">
+                          <strong>{selectedNerdioQuantityAddition.productName}</strong>
+                          <span>Nerdio count target</span>
+                          <small>
+                            Current quantity {formatCount(selectedNerdioQuantityAddition.quantity)}
+                            {' · '}price {formatOptionalCurrency(selectedNerdioQuantityAddition.unitPrice)}
+                            {' · '}cost {formatOptionalCurrency(selectedNerdioQuantityAddition.unitCost)}
+                          </small>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </fieldset>
+              ) : null}
+            </section>
+
+            <section className="azure-billing-policy-step">
+              <header><span>4</span><div><h3>Effective date</h3><p>Set when this contract rule begins. Approvers are managed once for the Azure Billing workspace.</p></div></header>
+              <label>Effective from<input required type="date" value={policyDraft.effectiveFrom} onChange={(event) => setPolicyDraft({ ...policyDraft, effectiveFrom: event.target.value })} /></label>
+            </section>
+
+            <div className="azure-billing-policy-actions">
+              <p>{selectedPolicyCustomer && selectedPolicyAgreement && selectedPolicyAddition
+                ? `${selectedPolicyCustomer.customerName} · ${selectedPolicyAgreement.agreementName} · ${selectedPolicyAddition.productName}`
+                : 'Complete the client, agreement, and addition selections to save.'}</p>
+              <button className="button primary" disabled={Boolean(busy) || !selectedPolicyAddition} type="submit"><Save size={17} /> {policyDraft.policyId ? 'Update client policy' : 'Save client policy'}</button>
+            </div>
+          </form>
+          </div>
+        </div>
+      ) : null}
+
+      {tab === 'release' ? (
+        <section className="work-surface azure-billing-release">
+          <header className="surface-header"><div><span className="section-kicker">Explicit Billing action</span><h2>Release to ConnectWise</h2></div></header>
+          <p>Harmony reloads every ConnectWise addition immediately before writing. Any unexpected quantity, price, or cost change blocks that client. Successful clients are recorded and will not be written twice when a partial batch is retried.</p>
+          {selectedRun ? (
+            <div className="azure-billing-release-summary">
+              <BillingMetric label="Run" value={selectedRun.billingMonth} />
+              <BillingMetric label="Status" value={azureBillingStatusLabel(selectedRun.status)} />
+              <BillingMetric label="Shadow cycle" value={selectedRun.shadowAcceptedAt ? `Accepted ${formatDateTime(selectedRun.shadowAcceptedAt)}` : 'Not accepted'} />
+              <BillingMetric label="Approved" value={String(selectedRun.approvedCount)} />
+              <BillingMetric label="Held" value={String(selectedRun.heldCount)} />
+              <BillingMetric label="Revenue" value={formatCurrency(selectedRun.projectedRevenue)} />
+            </div>
+          ) : null}
+          {selectedRun && !selectedRun.shadowAcceptedAt ? (
+            <button
+              className="button secondary"
+              disabled={!canAcceptShadow || !['ready-for-billing', 'partial'].includes(selectedRun.status) || Boolean(busy)}
+              onClick={() => {
+                const note = window.prompt('Document the accepted shadow reconciliation (workbook comparison and portfolio total):');
+                if (!note?.trim()) return;
+                void runAction('accept-shadow', async () => {
+                  await azureBillingJson(`/api/azure-billing/runs/${encodeURIComponent(selectedRun.id)}/accept-shadow`, {
+                    method: 'POST',
+                    body: JSON.stringify({ note }),
+                  });
+                  await loadRuns(selectedRun.id);
+                });
+              }}
+              type="button"
+            >
+              <BadgeCheck size={17} /> Accept shadow cycle
+            </button>
+          ) : null}
+          <button
+            className="button primary"
+            disabled={!canRelease || !selectedRun?.shadowAcceptedAt || !['ready-for-billing', 'partial'].includes(selectedRun.status) || Boolean(busy)}
+            onClick={() => {
+              if (!selectedRun || !window.confirm(`Release ${selectedRun.billingMonth} to ConnectWise? Tax remains controlled by ConnectWise.`)) return;
+              void runAction('release', async () => {
+                await azureBillingJson(`/api/azure-billing/runs/${encodeURIComponent(selectedRun.id)}/release`, {
+                  method: 'POST',
+                  body: JSON.stringify({}),
+                });
+                await loadRuns(selectedRun.id);
+                await loadReleases();
+              });
+            }}
+            type="button"
+          >
+            <Zap size={17} /> Release approved batch
+          </button>
+          {!canRelease ? <p className="field-help">An Admin/Billing operator must perform the release.</p> : null}
+          {selectedRun && !selectedRun.shadowAcceptedAt ? <p className="field-help">Release remains disabled until an Admin documents and accepts the shadow reconciliation.</p> : null}
+          <div className="azure-billing-policy-list">
+            <h3>Release history</h3>
+            {releases.map((release) => (
+              <article key={release.id}>
+                <span className={`status-chip ${release.status}`}>{azureBillingStatusLabel(release.status)}</span>
+                <strong>{release.billingMonth}</strong>
+                <span>{release.writtenCount} written · {release.blockedCount} blocked · {release.failedCount} failed · {release.skippedCount} held</span>
+                <small>{release.releasedBy} · {formatDateTime(release.completedAt ?? release.startedAt)}</small>
+              </article>
+            ))}
+            {!releases.length ? <p>No release batches yet.</p> : null}
+          </div>
+        </section>
+      ) : null}
+
+      {tab === 'utilization' ? (
+        <section className="work-surface">
+          <header className="surface-header"><div><span className="section-kicker">Azure Cost Management detail</span><h2>Resources and devices</h2></div></header>
+          {!utilization ? <div className="empty-state"><strong>Loading Azure resource cost detail...</strong></div> : (
+            <div className="azure-resource-table-wrap">
+              <table className="data-table azure-resource-table">
+                <thead><tr><th>Subscription</th><th>Resource/device</th><th>Resource group</th><th>Service</th><th>Power / activity</th><th>Usage</th><th>Cost</th></tr></thead>
+                <tbody>
+                  {utilization.subscriptions.flatMap((subscription) => subscription.resources.map((resource) => (
+                    <tr key={`${subscription.subscriptionId}:${resource.resourceId}`}>
+                      <td>{subscription.subscriptionName ?? subscription.subscriptionId}</td>
+                      <td><strong>{resource.resourceName}</strong><small>{resource.resourceId}</small></td>
+                      <td>{resource.resourceGroup ?? '—'}</td>
+                      <td>{resource.serviceName}</td>
+                      <td>
+                        {resource.powerState ?? (resource.activeSessions !== undefined ? `${formatCount(resource.activeSessions)} active sessions` : '—')}
+                        {resource.averageCpu !== undefined ? <small>CPU avg {resource.averageCpu.toFixed(1)}% · max {(resource.maximumCpu ?? 0).toFixed(1)}%</small> : null}
+                        {resource.availableMemoryBytes !== undefined ? <small>Available memory {(resource.availableMemoryBytes / 1073741824).toFixed(1)} GB</small> : null}
+                      </td>
+                      <td>{formatCount(resource.usageQuantity)}</td>
+                      <td>{formatCurrency(resource.retailCost)} {subscription.currency}</td>
+                    </tr>
+                  )))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : null}
+    </section>
+  );
+}
+
+function AzureBillingClientReviewTable({
+  approvalCount,
+  busy,
+  onReload,
+  result,
+  runAction,
+  runMonth,
+}: {
+  approvalCount: number;
+  busy: boolean;
+  onReload: () => Promise<void>;
+  result: AzureBillingResult;
+  runAction: (key: string, action: () => Promise<void>) => Promise<void>;
+  runMonth: string;
+}) {
+  const externalBeforeTax = result.externalBeforeTax ?? result.projectedRevenue;
+  const [externalDraft, setExternalDraft] = useState(externalBeforeTax.toFixed(2));
+  const [historyLimit, setHistoryLimit] = useState(4);
+  useEffect(() => setExternalDraft(externalBeforeTax.toFixed(2)), [result.id, result.revision, externalBeforeTax]);
+  useEffect(() => setHistoryLimit(4), [result.id]);
+
+  const policyCost = result.policyType === 'ingram-subscription-markup' ? result.ingramCost : result.combinedCost;
+  const policyDefault = result.policyType === 'fixed-avd-per-user'
+    ? result.selectedNerdioCount * (result.nerdioQuantityUnitPrice ?? result.currentUnitPrice ?? 0)
+    : policyCost * (1 + (result.markupRate ?? 0));
+  const approvedCount = result.approvals.filter((approval) => approval.decision === 'approved').length;
+  const history = [...(result.history ?? [])].sort((left, right) => right.billingMonth.localeCompare(left.billingMonth));
+  const visibleHistory = history.slice(0, historyLimit);
+
+  const saveExternalPreTax = async () => {
+    const value = Number(externalDraft);
+    if (!Number.isFinite(value) || value < 0) {
+      window.alert('External pre-tax must be zero or greater.');
+      return;
+    }
+    const isPolicyDefault = Math.abs(value - policyDefault) < 0.005;
+    const reviewerNote = isPolicyDefault
+      ? undefined
+      : window.prompt(`Reason for changing ${result.customerName}'s external pre-tax total:`);
+    if (!isPolicyDefault && !reviewerNote?.trim()) return;
+    await runAction(`external:${result.id}`, async () => {
+      await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          decisionType: 'policy',
+          selectedNerdioCountSource: result.selectedNerdioCountSource,
+          externalPreTaxOverride: isPolicyDefault ? null : value,
+          reviewerNote,
+        }),
+      });
+      await onReload();
+    });
+  };
+
+  const chooseCount = async (source: 'invoice' | 'live') => {
+    await runAction(`count:${result.id}`, async () => {
+      await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          decisionType: 'policy',
+          selectedNerdioCountSource: source,
+        }),
+      });
+      await onReload();
+    });
+  };
+
+  return (
+    <article className="azure-billing-client-table-card">
+      <header className="azure-billing-client-table-heading">
+        <div>
+          <span className={`status-chip ${result.status}`}>{azureBillingStatusLabel(result.status)}</span>
+          <h3>{result.customerName}</h3>
+          <p>{result.agreementName} · {result.policyDisplayName} · revision {result.revision}</p>
+        </div>
+        <div className="azure-billing-client-approval">
+          <strong>{approvedCount}/{approvalCount} approval</strong>
+          {result.externalPreTaxOverride !== undefined ? <span>External total overridden</span> : <span>Agreement default</span>}
+        </div>
+      </header>
+
+      <div className="azure-billing-client-matrix-wrap">
+        <table className="azure-billing-client-matrix">
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Invoice Users</th>
+              <th>Live Users</th>
+              <th>External Pre-Tax</th>
+              <th>Ingram</th>
+              <th>Nerdio</th>
+              <th>Internal Total</th>
+              <th>Mark-up</th>
+              <th>Gross</th>
+              <th>Margin %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleHistory.map((month, index) => {
+              const isCurrent = month.billingMonth === runMonth;
+              const previousMonth = history[index + 1];
+              const marginPercent = month.projectedRevenue > 0
+                ? month.projectedMargin / month.projectedRevenue
+                : undefined;
+              return (
+                <tr className={isCurrent ? 'current' : ''} key={month.billingMonth}>
+                  <th scope="row">{month.billingMonth}{isCurrent ? <span>Current</span> : null}</th>
+                  <td>{formatCount(month.invoiceNerdioCount ?? 0)}</td>
+                  <td>{month.liveNerdioCount === undefined ? '—' : formatCount(month.liveNerdioCount)}</td>
+                  <td className={month.externalPreTaxOverride !== undefined ? 'overridden' : ''}>
+                    {isCurrent ? (
+                      <div className="azure-billing-external-editor">
+                        <span>$</span>
+                        <input
+                          aria-label={`${result.customerName} external pre-tax`}
+                          disabled={busy || result.status === 'released'}
+                          min="0"
+                          onChange={(event) => setExternalDraft(event.target.value)}
+                          step="0.01"
+                          type="number"
+                          value={externalDraft}
+                        />
+                        <button
+                          className="button primary compact"
+                          disabled={busy || result.status === 'released' || !externalDraft.trim()}
+                          onClick={() => void saveExternalPreTax()}
+                          type="button"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    ) : formatBillingCurrency(month.projectedRevenue)}
+                    {month.externalPreTaxOverride !== undefined ? <small>Override</small> : null}
+                  </td>
+                  <td>
+                    {formatBillingCurrency(month.ingramCost)}
+                    {isCurrent && previousMonth ? (
+                      <AzureBillingMonthDelta delta={month.ingramCost - previousMonth.ingramCost} />
+                    ) : null}
+                  </td>
+                  <td>
+                    {formatBillingCurrency(month.nerdioCost)}
+                    {isCurrent && previousMonth ? (
+                      <AzureBillingMonthDelta delta={month.nerdioCost - previousMonth.nerdioCost} />
+                    ) : null}
+                  </td>
+                  <td>{formatBillingCurrency(month.combinedCost)}</td>
+                  <td>{month.effectiveMarkupRate === undefined ? '—' : `${(month.effectiveMarkupRate * 100).toFixed(2)}%`}</td>
+                  <td>{formatBillingCurrency(month.projectedMargin)}</td>
+                  <td>{marginPercent === undefined ? '—' : `${(marginPercent * 100).toFixed(2)}%`}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {history.length > visibleHistory.length ? (
+          <div className="azure-billing-history-more">
+            <button className="azure-billing-history-more-button" onClick={() => setHistoryLimit((current) => current + 4)} type="button">
+              Show more
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="azure-billing-review-context">
+        <span>ConnectWise unit price <strong>{formatBillingCurrency(result.proposedUnitPrice ?? 0)}</strong></span>
+        <span>ConnectWise unit cost <strong>{formatBillingCurrency(result.proposedUnitCost ?? 0)}</strong></span>
+        <span>Policy default <strong>{formatBillingCurrency(policyDefault)}</strong></span>
+        {result.reviewerNote ? <span>Review note <strong>{result.reviewerNote}</strong></span> : null}
+      </div>
+
+      {result.policyType === 'fixed-avd-per-user' ? (
+        <div className="azure-billing-count-choice">
+          <span>User-count source for this month</span>
+          <button
+            className={result.selectedNerdioCountSource === 'invoice' ? 'active' : ''}
+            disabled={busy}
+            onClick={() => void chooseCount('invoice')}
+            type="button"
+          >
+            Prior invoice: {formatCount(result.invoiceNerdioCount)}
+          </button>
+          <button
+            className={result.selectedNerdioCountSource === 'live' ? 'active' : ''}
+            disabled={busy || result.liveNerdioCount === undefined}
+            onClick={() => void chooseCount('live')}
+            type="button"
+          >
+            Current live: {result.liveNerdioCount === undefined ? 'Unavailable' : formatCount(result.liveNerdioCount)}
+          </button>
+        </div>
+      ) : null}
+
+      {result.varianceFlags.length ? <p className="azure-billing-warning">{result.varianceFlags.join(' · ')}</p> : null}
+      {result.holdReason ? <p className="azure-billing-warning">Skipped this month: {result.holdReason}</p> : null}
+
+      <details className="azure-billing-evidence">
+        <summary>Ingram changes and approval history</summary>
+        {result.ingramComparisonMonth ? (
+          <section className="azure-billing-ingram-changes">
+            <h4>Ingram changes vs {result.ingramComparisonMonth}</h4>
+            {result.ingramChanges.length ? (
+              <div className="azure-billing-change-table">
+                <table className="data-table">
+                  <thead><tr><th>Change</th><th>Product</th><th>SKU</th><th>Previous qty</th><th>Current qty</th><th>Qty Δ</th><th>Unit cost</th><th>Previous cost</th><th>Current cost</th><th>Cost Δ</th></tr></thead>
+                  <tbody>{result.ingramChanges.map((change) => (
+                    <tr key={`${change.subscriptionId ?? ''}:${change.productCode}:${change.productName}`}>
+                      <td><span className={`status-chip ${change.status}`}>{azureBillingStatusLabel(change.status)}</span></td>
+                      <td>{change.productName}</td><td>{change.productCode || '—'}</td>
+                      <td>{formatCount(change.previousQuantity)}</td><td>{formatCount(change.currentQuantity)}</td>
+                      <td>{formatSignedNumber(change.quantityChange)}</td><td>{formatOptionalCurrency(change.unitCost)}</td>
+                      <td>{formatCurrency(change.previousCost)}</td><td>{formatCurrency(change.currentCost)}</td>
+                      <td>{formatSignedCurrency(change.costChange)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="field-help">No Ingram product, quantity, or cost changes.</p>}
+          </section>
+        ) : null}
+        {result.approvals.map((approval) => (
+          <p key={`${approval.reviewerEmail}:${approval.createdAt}`}>
+            <strong>{approval.reviewerName}</strong> approved {formatDateTime(approval.createdAt)}
+            {approval.comment ? ` — ${approval.comment}` : ''}
+          </p>
+        ))}
+      </details>
+
+      <footer className="azure-billing-client-actions">
+        <button
+          className="button secondary"
+          disabled={busy || result.status === 'released'}
+          onClick={() => void reviseBillingResult(result, 'policy', runAction, onReload)}
+          title="Clear the external override and recalculate from the agreement's assigned billing policy."
+          type="button"
+        >
+          Reset to agreement default
+        </button>
+        <button
+          className="button secondary"
+          disabled={busy || result.status === 'released'}
+          onClick={() => void reviseBillingResult(result, 'previous-approved', runAction, onReload)}
+          title="Reuse the most recent released proposal for this agreement."
+          type="button"
+        >
+          Use previous approved total
+        </button>
+        <button
+          className="button secondary"
+          disabled={busy || result.status === 'released'}
+          onClick={() => {
+            const reason = window.prompt(`Reason to skip ${result.customerName} for this month's ConnectWise release:`);
+            if (!reason?.trim()) return;
+            void runAction(`hold:${result.id}`, async () => {
+              await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/hold`, {
+                method: 'POST',
+                body: JSON.stringify({ reason }),
+              });
+              await onReload();
+            });
+          }}
+          title="Exclude this client from the current release. A required reason is retained in the audit history."
+          type="button"
+        >
+          Skip this month
+        </button>
+        <button
+          className="button primary"
+          disabled={busy || ['approved', 'held', 'released'].includes(result.status)}
+          onClick={() => void runAction(`approve:${result.id}`, async () => {
+            await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/approve`, {
+              method: 'POST',
+              body: JSON.stringify({}),
+            });
+            await onReload();
+          })}
+          type="button"
+        >
+          <Check size={17} /> Approve total
+        </button>
+      </footer>
+    </article>
+  );
+}
+
+function BillingMetric({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function formatBillingCurrency(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    style: 'currency',
+  }).format(value);
+}
+
+function AzureBillingMonthDelta({ delta }: { delta: number }) {
+  const tone = Math.abs(delta) < 0.005 ? 'flat' : delta > 0 ? 'up' : 'down';
+  const label = Math.abs(delta) < 0.005
+    ? '($0.00)'
+    : `(${delta > 0 ? '+' : '-'}${formatBillingCurrency(Math.abs(delta))})`;
+  return <span className={`azure-billing-month-delta ${tone}`}>{label}</span>;
+}
+
+async function azureBillingJson<T = unknown>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: init?.body ? { 'Content-Type': 'application/json', ...(init.headers ?? {}) } : init?.headers,
+  });
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(String(body.error ?? `Azure Billing request failed with HTTP ${response.status}.`));
+  return body as T;
+}
+
+async function reviseBillingResult(
+  result: AzureBillingResult,
+  decisionType: 'policy' | 'previous-approved',
+  runAction: (key: string, action: () => Promise<void>) => Promise<void>,
+  reload: () => Promise<void>,
+) {
+  await runAction(`revise:${result.id}`, async () => {
+    await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        decisionType,
+        selectedNerdioCountSource: result.selectedNerdioCountSource,
+        externalPreTaxOverride: null,
+      }),
+    });
+    await reload();
+  });
+}
+
+async function manualBillingProposal(
+  result: AzureBillingResult,
+  runAction: (key: string, action: () => Promise<void>) => Promise<void>,
+  reload: () => Promise<void>,
+) {
+  const quantity = window.prompt('Proposed quantity:', String(result.proposedQuantity));
+  if (quantity === null) return;
+  const unitPrice = window.prompt('Proposed unit price:', String(result.proposedUnitPrice ?? ''));
+  if (unitPrice === null) return;
+  const unitCost = window.prompt('Proposed unit cost:', String(result.proposedUnitCost ?? ''));
+  if (unitCost === null) return;
+  const reviewerNote = window.prompt('Required reason for this manual proposal:');
+  if (!reviewerNote?.trim()) return;
+  await runAction(`manual:${result.id}`, async () => {
+    await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        decisionType: 'manual',
+        manualQuantity: Number(quantity),
+        manualUnitPrice: unitPrice.trim() ? Number(unitPrice) : undefined,
+        manualUnitCost: unitCost.trim() ? Number(unitCost) : undefined,
+        reviewerNote,
+      }),
+    });
+    await reload();
+  });
+}
+
+function toggleBillingValue<T extends string>(values: T[], item: T) {
+  const selected = new Set(values);
+  if (selected.has(item)) selected.delete(item);
+  else selected.add(item);
+  return [...selected];
+}
+
+function buildAzureBillingDetectedClients(
+  sources: AzureBillingSourceCatalog,
+  policies: AzureBillingPolicy[],
+): AzureBillingDetectedClient[] {
+  const detected: AzureBillingDetectedClient[] = [];
+  const usedNerdioAccountIds = new Set<string>();
+  const azureIngramCustomers = sources.ingramCustomers.filter((customer) =>
+    customer.products.some((product) => product.family === 'azure-consumption'));
+
+  for (const ingramCustomer of azureIngramCustomers) {
+    const nerdioAccount = sources.nerdioAccounts.find((account) => {
+      if (
+        ingramCustomer.mappedCustomerId
+        && account.mappedCustomerId
+        && ingramCustomer.mappedCustomerId === account.mappedCustomerId
+      ) {
+        return true;
+      }
+      return billingNamesMatch(ingramCustomer.customerName, account.accountName);
+    });
+    if (nerdioAccount) usedNerdioAccountIds.add(nerdioAccount.accountId);
+    detected.push(buildAzureBillingDetectedClient(sources, policies, ingramCustomer, nerdioAccount));
+  }
+
+  for (const nerdioAccount of sources.nerdioAccounts) {
+    if (usedNerdioAccountIds.has(nerdioAccount.accountId)) continue;
+    detected.push(buildAzureBillingDetectedClient(sources, policies, undefined, nerdioAccount));
+  }
+
+  return detected.sort((left, right) => {
+    const order = { conflict: 0, unmatched: 1, partial: 2, suggested: 3, mapped: 4, configured: 5 };
+    return order[left.status] - order[right.status] || left.displayName.localeCompare(right.displayName);
+  });
+}
+
+function filterAzureBillingSources(
+  sources: AzureBillingSourceCatalog,
+  exclusions: AzureBillingClientExclusion[],
+  includeExcluded: boolean,
+): AzureBillingSourceCatalog {
+  const hasExclusion = (sourceType: 'ingram' | 'nerdio', externalAccountId: string) =>
+    exclusions.some((exclusion) =>
+      exclusion.sourceType === sourceType && exclusion.externalAccountId === externalAccountId);
+  return {
+    connectWiseCustomers: sources.connectWiseCustomers,
+    ingramCustomers: sources.ingramCustomers.filter((customer) =>
+      hasExclusion('ingram', customer.customerAccountId) === includeExcluded),
+    nerdioAccounts: sources.nerdioAccounts.filter((account) =>
+      hasExclusion('nerdio', account.accountId) === includeExcluded),
+  };
+}
+
+function azureBillingClientExclusion(
+  client: AzureBillingDetectedClient,
+  exclusions: AzureBillingClientExclusion[],
+) {
+  return exclusions.find((exclusion) =>
+    (exclusion.sourceType === 'ingram'
+      && client.ingramCustomer?.customerAccountId === exclusion.externalAccountId)
+    || (exclusion.sourceType === 'nerdio'
+      && client.nerdioAccount?.accountId === exclusion.externalAccountId));
+}
+
+function buildAzureBillingDetectedClient(
+  sources: AzureBillingSourceCatalog,
+  policies: AzureBillingPolicy[],
+  ingramCustomer?: AzureBillingSourceCatalog['ingramCustomers'][number],
+  nerdioAccount?: AzureBillingSourceCatalog['nerdioAccounts'][number],
+): AzureBillingDetectedClient {
+  const mappedIds = [...new Set([
+    ingramCustomer?.mappedCustomerId,
+    nerdioAccount?.mappedCustomerId,
+  ].filter((value): value is string => Boolean(value)))];
+  const inferredCustomers = sources.connectWiseCustomers.filter((customer) =>
+    billingNamesMatch(ingramCustomer?.customerName ?? nerdioAccount?.accountName ?? '', customer.customerName)
+    || billingNamesMatch(nerdioAccount?.accountName ?? '', customer.customerName));
+  const connectWiseCustomer = mappedIds.length === 1
+    ? sources.connectWiseCustomers.find((customer) => customer.customerId === mappedIds[0])
+    : inferredCustomers.length === 1
+      ? inferredCustomers[0]
+      : undefined;
+  const policy = policies.find((item) =>
+    (ingramCustomer && item.ingramCustomerAccountIds.includes(ingramCustomer.customerAccountId))
+    || (nerdioAccount && item.nerdioAccountIds.includes(nerdioAccount.accountId)));
+
+  let status: AzureBillingDetectedClient['status'];
+  let statusReason: string;
+  if (policy) {
+    status = 'configured';
+    statusReason = `Policy configured for ${policy.agreementName ?? 'the selected agreement'}.`;
+  } else if (mappedIds.length > 1) {
+    status = 'conflict';
+    statusReason = 'Ingram and Nerdio are mapped to different ConnectWise clients.';
+  } else if (connectWiseCustomer && mappedIds.length === 1 && ingramCustomer && nerdioAccount) {
+    const bothMapped = ingramCustomer.mappedCustomerId === connectWiseCustomer.customerId
+      && nerdioAccount.mappedCustomerId === connectWiseCustomer.customerId;
+    status = bothMapped ? 'mapped' : 'partial';
+    statusReason = bothMapped
+      ? `Both vendor sources are mapped to ${connectWiseCustomer.customerName}.`
+      : `One vendor source still needs to be confirmed for ${connectWiseCustomer.customerName}.`;
+  } else if (connectWiseCustomer && mappedIds.length === 1) {
+    status = 'mapped';
+    statusReason = `Mapped to ${connectWiseCustomer.customerName}.`;
+  } else if (connectWiseCustomer) {
+    status = 'suggested';
+    statusReason = `Name match found for ${connectWiseCustomer.customerName}; confirm before saving.`;
+  } else {
+    status = 'unmatched';
+    statusReason = 'No ConnectWise client mapping has been confirmed.';
+  }
+
+  return {
+    key: `detected:${ingramCustomer?.customerAccountId ?? 'no-ingram'}:${nerdioAccount?.accountId ?? 'no-nerdio'}`,
+    displayName: connectWiseCustomer?.customerName ?? ingramCustomer?.customerName ?? nerdioAccount?.accountName ?? 'Unknown client',
+    status,
+    statusReason,
+    connectWiseCustomer,
+    ingramCustomer,
+    nerdioAccount,
+    policy,
+  };
+}
+
+function billingSourceOptionsForCustomer<T extends {
+  mappedCustomerId?: string;
+  customerName?: string;
+  accountName?: string;
+}>(items: T[], customerId: string, customerName?: string) {
+  if (!customerId || !customerName) return [];
+  const mapped = items.filter((item) => item.mappedCustomerId === customerId);
+  const nameMatches = items.filter((item) => billingNamesMatch(item.customerName ?? item.accountName ?? '', customerName));
+  const relevant = [...new Set([...mapped, ...nameMatches])];
+  return relevant.length > 0 ? relevant : items;
+}
+
+function billingNamesMatch(left: string, right: string) {
+  const normalize = (value: string) => value
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]/g, '');
+  const normalizedLeft = normalize(left);
+  const normalizedRight = normalize(right);
+  return Boolean(
+    normalizedLeft
+    && normalizedRight
+    && (
+      normalizedLeft === normalizedRight
+      || normalizedLeft.includes(normalizedRight)
+      || normalizedRight.includes(normalizedLeft)
+    )
+  );
+}
+
+function preferredAzureBillingAddition(
+  additions: AzureBillingSourceCatalog['connectWiseCustomers'][number]['agreements'][number]['additions'],
+) {
+  return additions.find((addition) => /windows virtual desktop|windows 365|cloud pc|\bavd\b/i.test(`${addition.productName} ${addition.productCode}`))
+    ?? additions[0];
+}
+
+function preferredNerdioQuantityAddition(
+  additions: AzureBillingSourceCatalog['connectWiseCustomers'][number]['agreements'][number]['additions'],
+) {
+  return additions.find((addition) => /\bbmb\s*-\s*labor\b|\blabor\b/i.test(`${addition.productName} ${addition.productCode}`));
+}
+
+function defaultNerdioBillingMetrics(
+  accounts: AzureBillingSourceCatalog['nerdioAccounts'],
+) {
+  const available = new Set(accounts.flatMap((account) => account.metrics.map((metric) => metric.toLowerCase())));
+  const defaults = ['avd', 'cpc'].filter((metric) => available.has(metric));
+  return defaults.length > 0 ? defaults : ['avd', 'cpc'];
+}
+
+function nerdioBillingMetricLabel(metric: string) {
+  if (metric === 'avd') return 'AVD users';
+  if (metric === 'cpc') return 'Windows 365 Cloud PC users';
+  if (metric === 'intune') return 'Intune users';
+  if (metric === 'mau') return 'Monthly active users';
+  return metric.replace(/[-_]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function azureBillingAdditionName(
+  sources: AzureBillingSourceCatalog,
+  agreementId: string,
+  additionId: string,
+) {
+  return sources.connectWiseCustomers
+    .flatMap((customer) => customer.agreements)
+    .find((agreement) => agreement.agreementId === agreementId)
+    ?.additions.find((addition) => addition.connectWiseAdditionId === additionId)
+    ?.productName ?? 'Separate agreement addition';
+}
+
+function azureBillingProductFamilyLabel(value: 'azure-consumption' | 'windows-365') {
+  return value === 'azure-consumption' ? 'Azure consumption' : 'Windows 365';
+}
+
+function azureBillingCoverageStatusLabel(status: AzureBillingDetectedClient['status']) {
+  if (status === 'configured') return 'Configured';
+  if (status === 'mapped') return 'Mapped';
+  if (status === 'suggested') return 'Suggested match';
+  if (status === 'partial') return 'Partially mapped';
+  if (status === 'conflict') return 'Mapping conflict';
+  return 'Unmatched';
+}
+
+function azureBillingStatusLabel(value: string) {
+  return value.split('-').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+function azureBillingPolicyLabel(value: AzureBillingResult['policyType']) {
+  if (value === 'combined-avd-markup') return 'Combined AVD markup';
+  if (value === 'ingram-subscription-markup') return 'Ingram subscription markup';
+  return 'Fixed AVD per user';
+}
+
+function formatOptionalCurrency(value: number | undefined) {
+  return value === undefined ? '—' : formatCurrency(value);
+}
+
+function formatSignedCurrency(value: number) {
+  if (Math.abs(value) < 0.0001) return formatCurrency(0);
+  return `${value > 0 ? '+' : '−'}${formatCurrency(Math.abs(value))}`;
+}
+
+function formatSignedNumber(value: number) {
+  if (Math.abs(value) < 0.0001) return '0';
+  return `${value > 0 ? '+' : '−'}${formatCount(Math.abs(value))}`;
+}
+
+function AzureUtilizationReportView(props: {
+  loadMessage: string;
+  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  onRefresh: () => Promise<AzureUtilizationReportResponse | null>;
+  report: AzureUtilizationReportResponse | null;
+}) {
+  const { loadMessage, loadState, onRefresh, report } = props;
+  const maxCost = Math.max(1, ...(report?.subscriptions.map((subscription) => subscription.retailCost) ?? [0]));
+
+  return (
+    <section className="reports-page azure-utilization-page" aria-label="Azure utilization report">
+      <div className="integrations-live-bar report-reminder">
+        <div>
+          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : loadState === 'idle' ? 'idle' : 'ready'}`} />
+          <strong>
+            {loadState === 'failed' ? 'Report issue' : loadState === 'loading' ? 'Loading' : 'Azure utilization'}
+          </strong>
+          <span>{loadMessage}</span>
+        </div>
+        <div className="integrations-live-meta">
+          <span>
+            {report?.syncRun?.completedAt
+              ? `Cost sync ${formatDateTime(report.syncRun.completedAt)}`
+              : 'Latest completed cost sync'}
+          </span>
+          <button className="button compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
+            <RefreshCcw size={16} />
+            {loadState === 'loading' ? 'Loading' : 'Generate'}
+          </button>
+        </div>
+      </div>
+
+      <section className="metric-grid report-metrics" aria-label="Azure cost summary">
+        <MetricCard icon={Building2} label="Subscriptions" tone="ready" value={formatCount(report?.summary.subscriptionCount ?? 0)} />
+        <MetricCard
+          icon={Link2}
+          label="Mapped"
+          tone="approved"
+          value={`${formatCount(report?.summary.mappedSubscriptionCount ?? 0)} / ${formatCount(report?.summary.subscriptionCount ?? 0)}`}
+        />
+        <MetricCard icon={BarChart3} label="Azure retail cost" tone="money" value={formatMoneyValue(report?.summary.retailCost ?? 0)} />
+        <MetricCard icon={CircleDollarSign} label="Ingram cost" tone="warn" value={formatMoneyValue(report?.summary.ingramCost ?? 0)} />
+        <MetricCard
+          icon={Activity}
+          label="Retail minus Ingram"
+          tone={(report?.summary.variance ?? 0) >= 0 ? 'ready' : 'warn'}
+          value={formatMoneyValue(report?.summary.variance ?? 0)}
+        />
+      </section>
+
+      {!report || report.subscriptions.length === 0 ? (
+        <section className="work-surface report-surface">
+          <div className="empty-state report-empty">
+            <BarChart3 size={20} />
+            <strong>No Azure utilization loaded.</strong>
+            <span>Configure Microsoft Azure, run Cost and resource usage, then generate this report.</span>
+          </div>
+        </section>
+      ) : (
+        <>
+          <section className="work-surface report-surface azure-cost-chart">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">Cost distribution</span>
+                <h3>Retail cost by subscription</h3>
+              </div>
+              <span className="status-pill ready">{report.summary.currency}</span>
+            </div>
+            <div className="azure-cost-bars">
+              {report.subscriptions.map((subscription) => (
+                <div className="azure-cost-bar-row" key={subscription.subscriptionId}>
+                  <div>
+                    <strong>{subscription.subscriptionName ?? subscription.subscriptionId}</strong>
+                    <small>{subscription.customerName ?? 'Unmapped subscription'}</small>
+                  </div>
+                  <div className="azure-cost-bar-track" title={`${subscription.subscriptionName ?? subscription.subscriptionId}: ${formatMoneyValue(subscription.retailCost)}`}>
+                    <span style={{ width: `${Math.max(1, (subscription.retailCost / maxCost) * 100)}%` }} />
+                  </div>
+                  <strong>{formatMoneyValue(subscription.retailCost)}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="work-surface report-surface">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">Cross-reference</span>
+                <h3>Azure usage vs Ingram invoice</h3>
+              </div>
+              <span className="status-pill approved">
+                {report.invoice?.number ? `Invoice ${report.invoice.number}` : 'No Ingram invoice'}
+              </span>
+            </div>
+            <div className="report-table-scroll">
+              <table className="report-table">
+                <thead>
+                  <tr>
+                    <th>Customer</th>
+                    <th>Subscription</th>
+                    <th>Top services</th>
+                    <th>Azure retail</th>
+                    <th>Ingram cost</th>
+                    <th>Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.subscriptions.map((subscription) => (
+                    <tr key={subscription.subscriptionId}>
+                      <td>{subscription.customerName ?? 'Unmapped'}</td>
+                      <td>
+                        <strong>{subscription.subscriptionName ?? subscription.subscriptionId}</strong>
+                        <small>{subscription.subscriptionId}</small>
+                      </td>
+                      <td>{subscription.services.slice(0, 3).map((service) => service.serviceName).join(', ') || '—'}</td>
+                      <td>{formatMoneyValue(subscription.retailCost)}</td>
+                      <td>{formatMoneyValue(subscription.ingramCost)}</td>
+                      <td className={subscription.variance >= 0 ? 'money-positive' : 'money-negative'}>
+                        {formatMoneyValue(subscription.variance)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
       )}
     </section>
   );

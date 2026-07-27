@@ -11,6 +11,8 @@ export type IntegrationId =
   | 'opentext-appriver'
   | 'huntress'
   | 'microsoft-azure'
+  | 'ingram-micro'
+  | 'nerdio'
   | 'pax8'
   | 'custom-table';
 
@@ -110,6 +112,16 @@ const integrationApiOperations: Partial<Record<IntegrationId, IntegrationApiOper
   ],
   huntress: [
     { key: 'usage-snapshots', label: 'Organization product usage', dataSourceKey: 'huntress-organization-product-usage' },
+  ],
+  'microsoft-azure': [
+    { key: 'azure-cost-usage', label: 'Cost and resource usage', dataSourceKey: 'azure-subscription-consumption' },
+  ],
+  'ingram-micro': [
+    { key: 'ingram-invoices', label: 'Microsoft invoice reports', dataSourceKey: 'ingram-azure-invoices' },
+  ],
+  nerdio: [
+    { key: 'nerdio-invoices', label: 'Invoice charges', dataSourceKey: 'nerdio-invoice-charges' },
+    { key: 'nerdio-live-usage', label: 'Live AVD/CPC usage', dataSourceKey: 'nerdio-live-usage' },
   ],
 };
 
@@ -497,13 +509,13 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Microsoft Azure',
     category: 'Cloud',
     authMode: 'oauth2',
-    capabilities: ['mapping', 'invoice-import'],
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
     dataSources: [
       dataSource(
         'azure-subscription-consumption',
         'Subscription consumption',
         'customer-product-breakdown',
-        ['csv', 'excel'],
+        ['live-api', 'csv', 'excel'],
         true,
         true,
         'Azure subscription consumption and invoice charges by customer or subscription.',
@@ -515,12 +527,140 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-azure-client-secret', 'AZURE_CLIENT_SECRET')],
     requiredNonSecrets: [
       nonSecret('endpoint', 'Management Endpoint', 'AZURE_ENDPOINT', 'https://management.azure.com'),
-      nonSecret('tenantId', 'Tenant ID', 'AZURE_TENANT_ID'),
-      nonSecret('clientId', 'Client ID', 'AZURE_CLIENT_ID'),
-      nonSecret('subscriptionId', 'Subscription ID', 'AZURE_SUBSCRIPTION_ID'),
+      nonSecret('tenantId', 'Managing Tenant ID', 'AZURE_TENANT_ID'),
+      nonSecret('clientId', 'Application (Client) ID', 'AZURE_CLIENT_ID'),
     ],
-    optionalNonSecrets: mappingIntegrationOptions('AZURE'),
-    scopes: ['Billing.Read', 'Consumption.Read'],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'subscriptionIds',
+        'Subscription allowlist',
+        'AZURE_SUBSCRIPTION_IDS',
+        undefined,
+        'textarea',
+        'Optional comma- or line-separated subscription IDs. Leave blank to sync every subscription delegated through Azure Lighthouse.',
+        'Azure Cost Management',
+      ),
+      optionalNonSecret(
+        'lookbackDays',
+        'Usage lookback days',
+        'AZURE_LOOKBACK_DAYS',
+        '35',
+        'text',
+        'Daily Cost Management window to refresh on each sync. Use at least 35 days to cover late adjustments.',
+        'Azure Cost Management',
+      ),
+      ...mappingIntegrationOptions('AZURE'),
+    ],
+    scopes: ['Azure RBAC: Cost Management Reader', 'Azure Lighthouse delegated subscription access'],
+    syncFrequency: 'daily',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'ingram-micro',
+    displayName: 'Ingram Micro Cloud',
+    category: 'Marketplace',
+    authMode: 'basic',
+    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    dataSources: [
+      dataSource(
+        'ingram-azure-invoices',
+        'Microsoft invoice reports',
+        'invoice',
+        ['live-api', 'csv', 'excel'],
+        true,
+        true,
+        'Ingram Microsoft invoice lines mapped by customer account, with subscription ID retained as evidence and product SKU used for billing selection.',
+      ),
+    ],
+    description: 'Indirect-reseller Microsoft Azure, Windows 365, and Modern Work subscription invoices and cost evidence.',
+    endpoint: 'https://api.cloud.im/marketplace/na',
+    requiredSecrets: [
+      secret('apiSecret', 'API Secret', 'mspharmony-ingram-api-secret', 'INGRAM_MICRO_API_SECRET'),
+      secret(
+        'subscriptionKey',
+        'Subscription Key',
+        'mspharmony-ingram-subscription-key',
+        'INGRAM_MICRO_SUBSCRIPTION_KEY',
+      ),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'API Endpoint', 'INGRAM_MICRO_ENDPOINT', 'https://api.cloud.im/marketplace/na'),
+      nonSecret('apiUsername', 'API Username', 'INGRAM_MICRO_API_USERNAME'),
+      nonSecret('marketplace', 'Marketplace', 'INGRAM_MICRO_MARKETPLACE', 'us'),
+    ],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'reportNamePrefix',
+        'Invoice report prefix',
+        'INGRAM_MICRO_REPORT_PREFIX',
+        'Every Invoice - ',
+        'text',
+        'Only completed Excel reports whose names begin with this value are imported.',
+        'Invoice reports',
+      ),
+      optionalNonSecret(
+        'excludedCustomerNames',
+        'Excluded customer names',
+        'INGRAM_MICRO_EXCLUDED_CUSTOMERS',
+        'BMB Solutions',
+        'text',
+        'Comma- or line-separated Ingram customer names to retain in the raw report archive but exclude from synchronized invoice lines.',
+        'Invoice reports',
+      ),
+    ],
+    scopes: ['reports.read', 'subscriptions.read'],
+    syncFrequency: 'daily',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'nerdio',
+    displayName: 'Nerdio Manager',
+    category: 'Cloud',
+    authMode: 'oauth2',
+    capabilities: ['live-api', 'mapping'],
+    dataSources: [
+      dataSource(
+        'nerdio-invoice-charges',
+        'Invoice charges',
+        'invoice',
+        ['live-api', 'json'],
+        true,
+        true,
+        'Actual Nerdio invoice charges, discounts, minimums, metrics, and license counts.',
+      ),
+      dataSource(
+        'nerdio-live-usage',
+        'Live AVD/CPC usage',
+        'customer-product-breakdown',
+        ['live-api', 'json'],
+        true,
+        false,
+        'Current Nerdio account usage used as an optional billing count source.',
+      ),
+    ],
+    description: 'Nerdio invoices and live AVD, Cloud PC, and Intune usage.',
+    endpoint: 'https://nerdio.bmbsolutions.com',
+    requiredSecrets: [
+      secret('clientSecret', 'Client Secret', 'mspharmony-nerdio-client-secret', 'NERDIO_CLIENT_SECRET'),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Nerdio URL', 'NERDIO_ENDPOINT', 'https://nerdio.bmbsolutions.com'),
+      nonSecret('tenantId', 'Tenant ID', 'NERDIO_TENANT_ID'),
+      nonSecret('clientId', 'Client ID', 'NERDIO_CLIENT_ID'),
+      nonSecret('apiScope', 'API Scope', 'NERDIO_API_SCOPE'),
+    ],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'invoiceLookbackMonths',
+        'Invoice lookback months',
+        'NERDIO_INVOICE_LOOKBACK_MONTHS',
+        '4',
+        'text',
+        'Invoice periods requested during each synchronization.',
+        'Invoice history',
+      ),
+    ],
+    scopes: ['Nerdio REST API RestClient application role'],
     syncFrequency: 'daily',
     webhookSupported: false,
   },

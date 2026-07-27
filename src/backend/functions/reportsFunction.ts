@@ -34,6 +34,7 @@ import {
   saveProductProfitabilityReport,
 } from '../reports/savedProductProfitabilityReports';
 import { getRawSyncDetails, isRawSyncIntegrationId, listRawSyncRuns } from '../reports/rawSyncReports';
+import { getAzureUtilizationReport } from '../reports/azureUtilizationReports';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { assertConnectWiseReady } from '../connectwise/operations';
@@ -256,6 +257,30 @@ export async function getRawSyncDetailsHttp(
     return jsonResponse(200, details);
   } catch (error) {
     return serverErrorResponse(context, error, 'Unable to load raw sync details.');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function getAzureUtilizationReportHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Azure utilization reporting needs PostgreSQL settings before it can load usage.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    return jsonResponse(200, await getAzureUtilizationReport(repositoryContext.pool));
+  } catch (error) {
+    return serverErrorResponse(context, error, 'Unable to load Azure utilization report.');
   } finally {
     await repositoryContext.close();
   }
@@ -1047,6 +1072,13 @@ app.http('getRawSyncDetails', {
   authLevel: 'anonymous',
   route: 'reports/raw-sync-runs/{syncRunId}/details',
   handler: getRawSyncDetailsHttp,
+});
+
+app.http('getAzureUtilizationReport', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reports/azure-utilization',
+  handler: getAzureUtilizationReportHttp,
 });
 
 app.http('getProductProfitabilityReport', {
