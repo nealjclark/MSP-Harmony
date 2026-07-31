@@ -13,6 +13,7 @@
     "test:invoice-import": "tsx src/shared/invoiceImportTemplates.test.ts",
     "test:proofpoint": "tsx src/backend/vendor/proofpoint/client.test.ts && tsx src/backend/vendor/proofpoint/operations.test.ts",
     "test:azure-billing": "tsx src/backend/azureBilling/azureBillingService.test.ts && tsx src/backend/vendor/ingram/client.test.ts && tsx src/backend/vendor/ingram/operations.test.ts && tsx src/backend/vendor/nerdio/client.test.ts && tsx src/backend/vendor/nerdio/operations.test.ts",
+    "pretest": "tsx src/shared/integrationSchedules.test.ts && tsx src/backend/functions/integrationSchedulerFunction.test.ts",
     "typecheck": "tsc --noEmit",
     "backend:demo": "tsx src/backend/demo.ts",
     "cw:check": "tsx src/backend/connectwise/check.ts",

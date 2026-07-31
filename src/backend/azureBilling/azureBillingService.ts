@@ -253,6 +253,7 @@ export type AzureBillingResult = {
   previousApprovedUnitPrice?: number;
   previousApprovedUnitCost?: number;
   externalPreTaxOverride?: number;
+  externalPreTaxSuggestedBy?: string;
   externalBeforeTax: number;
   effectiveMarkupRate?: number;
   projectedRevenue: number;
@@ -375,6 +376,7 @@ type ResultRow = {
   previous_approved_unit_price: string | number | null;
   previous_approved_unit_cost: string | number | null;
   external_pre_tax_override: string | number | null;
+  external_pre_tax_suggested_by: string | null;
   projected_revenue: string | number;
   projected_margin: string | number;
   reviewer_note: string | null;
@@ -1685,12 +1687,12 @@ export async function acceptAzureBillingShadowRun(
   actor: string,
   note: string,
 ) {
-  if (!note.trim()) throw new Error('A shadow reconciliation acceptance note is required.');
+  if (!note.trim()) throw new Error('An Admin Approval note is required.');
   const detail = await getAzureBillingRun(database, runId);
-  if (detail.results.length === 0) throw new Error('A shadow run with no client results cannot be accepted.');
+  if (detail.results.length === 0) throw new Error('A billing run with no client results cannot receive Admin Approval.');
   const incomplete = detail.results.filter((result) => result.status !== 'approved' && result.status !== 'held');
   if (incomplete.length > 0) {
-    throw new Error('Every shadow-run client must be approved or held before the shadow cycle can be accepted.');
+    throw new Error('Every billing client must be approved or held before Admin Approval.');
   }
   await database.query(
     `update azure_billing_runs
@@ -1701,7 +1703,7 @@ export async function acceptAzureBillingShadowRun(
      where id = $1`,
     [runId, actor, note.trim()],
   );
-  await insertAuditEvent(database, actor, 'azure-billing.run.shadow-accepted', 'azure_billing_run', runId, {
+  await insertAuditEvent(database, actor, 'azure-billing.run.admin-approved', 'azure_billing_run', runId, {
     note: note.trim(),
   });
   return getAzureBillingRun(database, runId);
@@ -1988,9 +1990,10 @@ export async function reviseAzureBillingResult(
          projected_revenue = $8,
          projected_margin = $9,
          external_pre_tax_override = $10,
-         reviewer_note = $11,
+         external_pre_tax_suggested_by = $11,
+         reviewer_note = $12,
          hold_reason = null,
-         variance_flags = $12::jsonb,
+         variance_flags = $13::jsonb,
          updated_at = now()
      where id = $1`,
     [
@@ -2004,6 +2007,9 @@ export async function reviseAzureBillingResult(
       projectedRevenue,
       projectedMargin,
       externalPreTaxOverride ?? null,
+      input.externalPreTaxOverride !== undefined
+        ? (externalPreTaxOverride === null ? null : actor)
+        : current.external_pre_tax_suggested_by,
       input.reviewerNote?.trim() || (overrideChanged ? null : current.reviewer_note),
       JSON.stringify(varianceFlags),
     ],
@@ -2121,7 +2127,7 @@ export async function releaseAzureBillingRun(
     throw new Error('Azure billing run must be ready for Billing release.');
   }
   if (!detail.run.shadowAcceptedAt) {
-    throw new Error('ConnectWise release is disabled until an Admin accepts the reconciled shadow cycle.');
+    throw new Error('ConnectWise release is disabled until the billing run receives Admin Approval.');
   }
   const incomplete = detail.results.filter((result) => result.status === 'needs-review');
   if (incomplete.length > 0) throw new Error('Every Azure billing result must be approved or held before release.');
@@ -2928,6 +2934,7 @@ function mapResultRow(row: ResultRow, approvals: ApprovalRow[], billingMonth: st
     previousApprovedUnitPrice: nullableNumber(row.previous_approved_unit_price),
     previousApprovedUnitCost: nullableNumber(row.previous_approved_unit_cost),
     externalPreTaxOverride: nullableNumber(row.external_pre_tax_override),
+    externalPreTaxSuggestedBy: row.external_pre_tax_suggested_by ?? undefined,
     externalBeforeTax: numericValue(row.projected_revenue),
     effectiveMarkupRate: effectiveMarkupRate(
       numericValue(row.projected_revenue),

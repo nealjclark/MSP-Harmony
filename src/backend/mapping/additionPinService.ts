@@ -6,6 +6,7 @@ type PinRow = {
   customer_id: string;
   agreement_id: string;
   vendor_product_key: string;
+  source_account_id: string;
   connectwise_addition_id: string;
   connectwise_product_code: string;
   connectwise_product_name: string;
@@ -22,6 +23,7 @@ export async function loadAdditionPins(database: Queryable, vendorId: string, ag
             customer_id,
             agreement_id,
             vendor_product_key,
+            source_account_id,
             connectwise_addition_id,
             connectwise_product_code,
             connectwise_product_name,
@@ -38,6 +40,7 @@ export async function loadAdditionPins(database: Queryable, vendorId: string, ag
     customerId: row.customer_id,
     agreementId: row.agreement_id,
     vendorProductKey: row.vendor_product_key,
+    sourceAccountId: row.source_account_id || undefined,
     connectWiseAdditionId: row.connectwise_addition_id,
     connectwiseProductCode: row.connectwise_product_code,
     connectwiseProductName: row.connectwise_product_name,
@@ -53,14 +56,15 @@ export async function upsertAdditionPins(database: Queryable, assignments: Vendo
          customer_id,
          agreement_id,
          vendor_product_key,
+         source_account_id,
          connectwise_addition_id,
          connectwise_product_code,
          connectwise_product_name,
          mapping_source,
          active,
          updated_at
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, true, now())
-       on conflict (vendor_id, agreement_id, vendor_product_key)
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, now())
+       on conflict (vendor_id, agreement_id, vendor_product_key, source_account_id)
        do update set
          connectwise_addition_id = excluded.connectwise_addition_id,
          connectwise_product_code = excluded.connectwise_product_code,
@@ -75,6 +79,7 @@ export async function upsertAdditionPins(database: Queryable, assignments: Vendo
         assignment.customerId,
         assignment.agreementId,
         assignment.vendorProductKey,
+        assignment.sourceAccountId ?? '',
         assignment.connectWiseAdditionId,
         assignment.connectwiseProductCode,
         assignment.connectwiseProductName,
@@ -97,7 +102,7 @@ export async function upsertManualAdditionPin(
 
 export async function deactivateAdditionPin(
   database: Queryable,
-  input: { vendorId: string; agreementId: string; vendorProductKey: string },
+  input: { vendorId: string; agreementId: string; vendorProductKey: string; sourceAccountId?: string },
 ) {
   await database.query(
     `update vendor_product_addition_pins
@@ -106,7 +111,8 @@ export async function deactivateAdditionPin(
       where vendor_id = $1
         and agreement_id = $2::uuid
         and vendor_product_key = $3
+        and source_account_id = $4
         and active = true`,
-    [input.vendorId, input.agreementId, input.vendorProductKey],
+    [input.vendorId, input.agreementId, input.vendorProductKey, input.sourceAccountId ?? ''],
   );
 }

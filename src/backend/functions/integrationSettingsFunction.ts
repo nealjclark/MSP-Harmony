@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import type { IntegrationId } from '../../shared/integrationSettings';
+import type { IntegrationSyncSchedule } from '../../shared/integrationSchedules';
 import { updateIntegrationSettingsFromInterface } from '../api/integrationSettings';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import type { IntegrationSettingsRole } from '../config/settingsUpdater';
@@ -13,6 +14,7 @@ type IntegrationSettingsBody = {
   integrationId?: IntegrationId;
   nonSecrets?: Record<string, string | undefined>;
   secrets?: Record<string, string | undefined>;
+  schedule?: IntegrationSyncSchedule;
 };
 
 export async function updateIntegrationSettingsHttp(
@@ -72,6 +74,7 @@ export async function updateIntegrationSettingsHttp(
         role,
         nonSecrets: body.nonSecrets ?? {},
         secrets: body.secrets ?? {},
+        schedule: body.schedule,
         existingKeyVaultSecretNames,
       },
       keyVaultUrl,
@@ -86,6 +89,9 @@ export async function updateIntegrationSettingsHttp(
       writtenKeyVaultSecretNames: result.writtenKeyVaultSecretNames,
       savedNonSecretKeys: result.savedNonSecretKeys,
       validation: result.validation,
+      schedule: body.schedule
+        ? await repositoryContext.repository?.loadSyncSchedule(integrationId)
+        : undefined,
       nonSecretStorage: repositoryContext.repository ? 'database' : 'not-configured',
       missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
     });

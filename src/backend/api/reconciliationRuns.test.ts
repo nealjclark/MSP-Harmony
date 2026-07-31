@@ -212,13 +212,22 @@ async function run() {
   const appRiverInvoiceResult = await reconcileVendorFromDatabase(appRiverInvoiceDatabase, 'opentext-appriver', { syncRunId });
   const invoicedLine = appRiverInvoiceResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
   assert.equal(invoicedLine?.sourceQuantity, 6);
-  assert.equal(invoicedLine?.agreementQuantity, 5);
-  assert.equal(invoicedLine?.delta, 1);
-  assert.equal(invoicedLine?.status, 'needs-review');
+  assert.equal(invoicedLine?.agreementQuantity, 6);
+  assert.equal(invoicedLine?.proposedQuantity, 6);
+  assert.equal(invoicedLine?.delta, 0);
+  assert.equal(invoicedLine?.status, 'matched');
   assert.equal(invoicedLine?.invoiceQuantity, 4);
   assert.equal(invoicedLine?.invoiceLineCount, 2);
   assert.equal(invoicedLine?.invoiceNumber, '4032091');
   assert.equal(appRiverInvoiceResult.latestInvoice?.invoiceNumber, '4032091');
+  const invoiceOnlyLine = appRiverInvoiceResult.lines.find(
+    (line) => line.productCode === 'Exchange Online Plan 1-AA',
+  );
+  assert.equal(invoiceOnlyLine?.sourceQuantity, 0);
+  assert.equal(invoiceOnlyLine?.invoiceQuantity, 1);
+  assert.equal(invoiceOnlyLine?.vendorProductKey, 'Exchange Online (Plan 1)|Annual|Annual');
+  assert.equal(invoiceOnlyLine?.status, 'needs-review');
+  assert.match(invoiceOnlyLine?.reason ?? '', /present on the latest invoice but absent/i);
 
   const appRiverUnmappedResult = await reconcileVendorFromDatabase(appRiverUnmappedProductDatabase, 'opentext-appriver', { syncRunId });
   const unmappedE5Line = appRiverUnmappedResult.lines.find((line) => line.status === 'unmapped');
@@ -632,6 +641,7 @@ const appRiverAliasDatabase: Queryable = {
             dimensions: {
               subscriptionSource: 'appriver-securecloud-subscription',
               appRiverCustomerId: 'appriver-customer-healthcare',
+              externalCustomerAccountNumber: '515418',
             },
           },
         ] as T[],
@@ -711,8 +721,22 @@ const appRiverInvoiceDatabase: Queryable = {
             customer_id: '11111111-1111-1111-1111-111111111111',
             agreement_id: '22222222-2222-2222-2222-222222222222',
             connectwise_product_code: 'Microsoft 365 Business Standard-M',
+            external_account_id: '515418',
+            external_account_name: 'Apollo Jets',
+            vendor_product_key: 'Microsoft 365 Business Standard (T)|Monthly|Monthly',
             invoice_quantity: '4',
             invoice_line_count: '2',
+          },
+          {
+            customer_id: '11111111-1111-1111-1111-111111111111',
+            agreement_id: '22222222-2222-2222-2222-222222222222',
+            connectwise_product_code: 'Exchange Online Plan 1-AA',
+            connectwise_product_name: 'Exchange Online Plan 1 - AA',
+            external_account_id: '515418',
+            external_account_name: 'Apollo Jets',
+            vendor_product_key: 'Exchange Online (Plan 1)|Annual|Annual',
+            invoice_quantity: '1',
+            invoice_line_count: '1',
           },
         ] as T[],
       };
@@ -727,7 +751,7 @@ const appRiverInvoiceDatabase: Queryable = {
             agreement_id: '22222222-2222-2222-2222-222222222222',
             product_code: 'Microsoft 365 Business Standard-M',
             product_name: 'Microsoft 365 Business Standard-M',
-            quantity: '5',
+            quantity: '6',
             unit_price: '14',
             updated_at: new Date('2026-06-24T12:00:00Z'),
           },

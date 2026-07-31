@@ -14,6 +14,7 @@ async function run() {
               customer_id: 'client-1',
               agreement_id: 'agreement-1',
               vendor_product_key: 'sentinelone-server',
+              source_account_id: 'apollojets',
               connectwise_addition_id: '101',
               connectwise_product_code: 'S1-ENDPOINT',
               connectwise_product_name: 'SentinelOne Endpoint',
@@ -30,6 +31,7 @@ async function run() {
   const pins = await loadAdditionPins(database, 'sentinelone', ['agreement-1']);
   assert.equal(pins.length, 1);
   assert.equal(pins[0]?.connectWiseAdditionId, '101');
+  assert.equal(pins[0]?.sourceAccountId, 'apollojets');
 
   await upsertAdditionPins(database, [
     {
@@ -37,6 +39,7 @@ async function run() {
       customerId: 'client-1',
       agreementId: 'agreement-1',
       vendorProductKey: 'sentinelone-workstation',
+      sourceAccountId: 'apjts',
       connectWiseAdditionId: '102',
       connectwiseProductCode: 'S1-ENDPOINT',
       connectwiseProductName: 'SentinelOne Endpoint',
@@ -44,6 +47,7 @@ async function run() {
     },
   ]);
   assert.equal(queries.some((query) => query.sql.includes('insert into vendor_product_addition_pins')), true);
+  assert.equal(queries.some((query) => query.sql.includes('source_account_id')), true);
 
   console.log('addition pin service tests passed');
 }

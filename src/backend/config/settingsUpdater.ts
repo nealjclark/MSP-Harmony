@@ -7,6 +7,10 @@ import {
   type IntegrationId,
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
+import {
+  validateIntegrationSyncSchedule,
+  type IntegrationSyncSchedule,
+} from '../../shared/integrationSchedules';
 
 export type IntegrationSettingsRole = 'Admin' | 'Approver' | 'Analyst';
 
@@ -16,6 +20,7 @@ export type UpdateIntegrationSettingsRequest = {
   role: IntegrationSettingsRole;
   nonSecrets: Record<string, string | undefined>;
   secrets: Record<string, string | undefined>;
+  schedule?: IntegrationSyncSchedule;
   existingKeyVaultSecretNames?: string[];
 };
 
@@ -40,6 +45,11 @@ export type IntegrationSettingsRepository = {
     syncFrequency: string;
     nonSecrets: Record<string, string | undefined>;
     requiredKeyVaultSecrets: string[];
+    updatedBy: string;
+  }) => Promise<void>;
+  saveSyncSchedule: (input: {
+    integrationId: IntegrationId;
+    schedule: IntegrationSyncSchedule;
     updatedBy: string;
   }) => Promise<void>;
 };
@@ -106,6 +116,13 @@ export async function updateIntegrationSettings(
       requiredKeyVaultSecrets: availableKeyVaultSecrets,
       updatedBy: request.actor,
     });
+    if (request.schedule) {
+      await repository.saveSyncSchedule({
+        integrationId: definition.integrationId,
+        schedule: validateIntegrationSyncSchedule(definition.integrationId, request.schedule),
+        updatedBy: request.actor,
+      });
+    }
   }
 
   const validation = validateIntegrationSettings(definition, {

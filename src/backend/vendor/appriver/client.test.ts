@@ -195,6 +195,34 @@ async function run() {
     assert.equal(persistAttempts, 2);
     assert.deepEqual(rotatedRefreshTokens, ['rotated-refresh-1', 'rotated-refresh-2', 'rotated-refresh-3']);
 
+    responses.push({
+      status: 200,
+      body: {
+        token_type: 'Bearer',
+        access_token: 'access-token-unchanged-refresh',
+        refresh_token: 'newly-entered-refresh',
+        expires_in: 3600,
+        scope: '*',
+      },
+    });
+    const unchangedRefreshTokenWrites: string[] = [];
+    const unchangedRefreshTokenClient = new AppRiverClient(
+      {
+        endpoint: 'https://unityapi.webrootcloudav.com/',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        refreshToken: 'newly-entered-refresh',
+      },
+      {
+        onRefreshTokenRotated(refreshToken) {
+          unchangedRefreshTokenWrites.push(refreshToken);
+        },
+      },
+    );
+
+    await unchangedRefreshTokenClient.authenticate();
+    assert.deepEqual(unchangedRefreshTokenWrites, ['newly-entered-refresh']);
+
     responses.push(
       {
         status: 404,

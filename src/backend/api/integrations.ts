@@ -6,6 +6,7 @@ import {
   type IntegrationId,
   type IntegrationSettingsState,
 } from '../../shared/integrationSettings';
+import type { IntegrationSyncSchedule } from '../../shared/integrationSchedules';
 import { createIntegrationSettingsProvider, type IntegrationSettingsMetadataReader } from '../config/settingsProvider';
 
 export type IntegrationSyncOperationStatus = {
@@ -19,6 +20,15 @@ export type IntegrationSyncOperationStatus = {
   recordsWritten?: number;
   error?: string;
   currentItem?: string;
+  failures?: IntegrationSyncFailureDetail[];
+};
+
+export type IntegrationSyncFailureDetail = {
+  itemId: string;
+  itemName?: string;
+  relatedId?: string;
+  category: string;
+  message: string;
 };
 
 export type IntegrationSyncJob = {
@@ -68,6 +78,11 @@ export type IntegrationOperationalStatusReader = {
   loadOperationalStatuses?: (integrationIds: IntegrationId[]) => Promise<Map<IntegrationId, IntegrationOperationalStatus>>;
 };
 
+export type IntegrationSyncScheduleReader = {
+  loadSyncSchedule: (integrationId: IntegrationId) => Promise<IntegrationSyncSchedule>;
+  loadAllSyncSchedules?: (integrationIds: IntegrationId[]) => Promise<Map<IntegrationId, IntegrationSyncSchedule>>;
+};
+
 export function listIntegrations(states: IntegrationSettingsState[] = []) {
   const validationsById = new Map(
     validateIntegrationRegistry(states).map((validation) => [validation.integrationId, validation]),
@@ -96,6 +111,7 @@ export async function listRuntimeIntegrations(
   options: {
     metadataReader?: IntegrationSettingsMetadataReader;
     operationalStatusReader?: IntegrationOperationalStatusReader;
+    scheduleReader?: IntegrationSyncScheduleReader;
   } = {},
 ) {
   const provider = createIntegrationSettingsProvider({
@@ -105,6 +121,9 @@ export async function listRuntimeIntegrations(
   });
   const settings = await provider.listIntegrationSettings();
   const operationalStatusesById = await options.operationalStatusReader?.loadOperationalStatuses?.(
+    settings.map((setting) => setting.definition.integrationId),
+  );
+  const schedulesById = await options.scheduleReader?.loadAllSyncSchedules?.(
     settings.map((setting) => setting.definition.integrationId),
   );
 
@@ -118,6 +137,9 @@ export async function listRuntimeIntegrations(
       validation: setting.validation,
       secretSource: setting.secretSource,
       keyVaultUrl: setting.keyVaultUrl,
+      schedule:
+        schedulesById?.get(integrationId) ??
+        (schedulesById ? undefined : await options.scheduleReader?.loadSyncSchedule(integrationId)),
       operationalStatus:
         operationalStatusesById?.get(integrationId) ??
         (operationalStatusesById ? undefined : await options.operationalStatusReader?.loadOperationalStatus(integrationId)),

@@ -432,6 +432,54 @@ CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_activity
 CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_integration
   ON integration_sync_jobs(integration_id, operation_key, requested_at DESC);
 
+CREATE TABLE IF NOT EXISTS integration_sync_schedules (
+  integration_id text NOT NULL,
+  operation_key text NOT NULL,
+  frequency text NOT NULL CHECK (frequency IN ('manual', 'hourly', 'daily', 'weekly', 'monthly')),
+  scheduled_hour smallint NOT NULL DEFAULT 6 CHECK (scheduled_hour BETWEEN 6 AND 17),
+  weekdays jsonb NOT NULL DEFAULT '[]'::jsonb,
+  day_of_month smallint NOT NULL DEFAULT 1 CHECK (day_of_month BETWEEN 1 AND 31),
+  time_zone text NOT NULL DEFAULT 'America/New_York',
+  last_enqueued_slot text,
+  last_enqueued_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (integration_id, operation_key)
+);
+
+ALTER TABLE integration_sync_schedules
+  DROP CONSTRAINT IF EXISTS integration_sync_schedules_frequency_check;
+ALTER TABLE integration_sync_schedules
+  ADD CONSTRAINT integration_sync_schedules_frequency_check
+  CHECK (frequency IN ('manual', 'hourly', 'daily', 'weekly', 'monthly'));
+
+CREATE INDEX IF NOT EXISTS idx_integration_sync_schedules_frequency
+  ON integration_sync_schedules(frequency, scheduled_hour, integration_id);
+
+INSERT INTO integration_sync_schedules (
+  integration_id,
+  operation_key,
+  frequency,
+  scheduled_hour,
+  weekdays,
+  day_of_month,
+  time_zone
+)
+SELECT
+  'opentext-appriver',
+  'subscription-snapshots',
+  'weekly',
+  6,
+  '[2, 4]'::jsonb,
+  1,
+  'America/New_York'
+WHERE EXISTS (
+  SELECT 1
+  FROM integration_settings
+  WHERE integration_id = 'opentext-appriver'
+)
+ON CONFLICT (integration_id, operation_key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS vendor_device_match_exclusions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   comparison_id text NOT NULL,
@@ -973,6 +1021,7 @@ CREATE TABLE IF NOT EXISTS azure_billing_results (
   previous_approved_unit_price numeric(18, 4),
   previous_approved_unit_cost numeric(18, 4),
   external_pre_tax_override numeric(18, 4),
+  external_pre_tax_suggested_by text,
   projected_revenue numeric(18, 4) NOT NULL DEFAULT 0,
   projected_margin numeric(18, 4) NOT NULL DEFAULT 0,
   reviewer_note text,
@@ -989,6 +1038,7 @@ ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_accepted_by text;
 ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_accepted_at timestamptz;
 ALTER TABLE azure_billing_runs ADD COLUMN IF NOT EXISTS shadow_acceptance_note text;
 ALTER TABLE azure_billing_results ADD COLUMN IF NOT EXISTS external_pre_tax_override numeric(18, 4);
+ALTER TABLE azure_billing_results ADD COLUMN IF NOT EXISTS external_pre_tax_suggested_by text;
 
 CREATE INDEX IF NOT EXISTS idx_azure_billing_results_queue
   ON azure_billing_results(billing_run_id, status, customer_id);
@@ -1274,6 +1324,7 @@ CREATE TABLE IF NOT EXISTS vendor_product_addition_pins (
   customer_id uuid NOT NULL REFERENCES customers(id),
   agreement_id uuid NOT NULL REFERENCES agreements(id),
   vendor_product_key text NOT NULL,
+  source_account_id text NOT NULL DEFAULT '',
   connectwise_addition_id text NOT NULL,
   connectwise_product_code text NOT NULL,
   connectwise_product_name text NOT NULL,
@@ -1281,12 +1332,25 @@ CREATE TABLE IF NOT EXISTS vendor_product_addition_pins (
   active boolean NOT NULL DEFAULT true,
   reviewed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (vendor_id, agreement_id, vendor_product_key)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE vendor_product_addition_pins
+  ADD COLUMN IF NOT EXISTS source_account_id text NOT NULL DEFAULT '';
+
+ALTER TABLE vendor_product_addition_pins
+  DROP CONSTRAINT IF EXISTS vendor_product_addition_pins_vendor_id_agreement_id_vendor_product_key_key;
+
+ALTER TABLE vendor_product_addition_pins
+  DROP CONSTRAINT IF EXISTS vendor_product_addition_pins_vendor_id_agreement_id_vendor__key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_vendor_product_addition_pins_source
+  ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key, source_account_id);
+
+DROP INDEX IF EXISTS idx_vendor_product_addition_pins_scope;
+
 CREATE INDEX IF NOT EXISTS idx_vendor_product_addition_pins_scope
-  ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key)
+  ON vendor_product_addition_pins(vendor_id, agreement_id, vendor_product_key, source_account_id)
   WHERE active;
 
 CREATE TABLE IF NOT EXISTS vendor_labor_mappings (

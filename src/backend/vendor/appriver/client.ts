@@ -317,9 +317,10 @@ export class AppRiverClient {
       scope: parsed.scope,
     };
 
-    if (token.refreshToken !== this.refreshToken) {
-      await this.persistRotatedRefreshToken(token.refreshToken);
-    }
+    // Persist every refresh response, even when AppRiver echoes the token that
+    // was supplied. This matters when an admin tests a newly entered token
+    // before saving the form: Key Vault may still contain the previous token.
+    await this.persistRotatedRefreshToken(token.refreshToken);
 
     this.refreshToken = token.refreshToken;
     this.accessToken = token;

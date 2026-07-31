@@ -146,7 +146,24 @@ async function run() {
               records_read: 763,
               records_written: 763,
               error_message: null,
-              metadata: { operationKey: 'm365-licenses', entity: 'm365-licenses' },
+              metadata: {
+                operationKey: 'm365-licenses',
+                entity: 'm365-licenses',
+                failedTenantDetails: [
+                  {
+                    tenantId: 'tenant-36',
+                    displayName: 'Contoso',
+                    message: 'Microsoft Graph returned 403.',
+                  },
+                ],
+                failedProductSubscriptionDetails: [
+                  {
+                    tenantId: 'tenant-37',
+                    displayName: 'Fabrikam',
+                    message: 'Directory subscriptions timed out.',
+                  },
+                ],
+              },
             },
             {
               integration_id: 'microsoft-365',
@@ -188,6 +205,25 @@ async function run() {
   assert.deepEqual(
     microsoft365Status?.operations?.map((operation) => operation.operationKey),
     ['m365-licenses', 'm365-users'],
+  );
+  assert.deepEqual(
+    microsoft365Status?.operations?.find((operation) => operation.operationKey === 'm365-licenses')?.failures,
+    [
+      {
+        itemId: 'tenant-36',
+        itemName: 'Contoso',
+        relatedId: undefined,
+        category: 'Tenant',
+        message: 'Microsoft Graph returned 403.',
+      },
+      {
+        itemId: 'tenant-37',
+        itemName: 'Fabrikam',
+        relatedId: undefined,
+        category: 'Subscription details',
+        message: 'Directory subscriptions timed out.',
+      },
+    ],
   );
 
   console.log('integration settings repository tests passed');

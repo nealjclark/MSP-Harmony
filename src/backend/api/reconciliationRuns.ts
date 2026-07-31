@@ -10,6 +10,7 @@ import type {
   ReconciliationLine,
   ReconciliationResult,
   UsageSnapshot,
+  VendorProductAdditionPin,
   VendorRuleSet,
 } from '../shared/types';
 import type { ReconciliationAdjustment } from './reconciliationAdjustments';
@@ -38,10 +39,13 @@ import {
   type ProductLinkRuleSource,
 } from '../mapping/mappingService';
 import {
+  invoiceAccountQuantityKey,
   invoiceQuantityKey,
+  invoiceVendorProductQuantityKey,
   loadLatestInvoiceQuantitiesForLines,
   type InvoiceImportSummary,
   type InvoiceQuantity,
+  type InvoiceQuantityGroup,
 } from '../invoices/appriverInvoiceImports';
 import {
   sqlLatestReconcilableSyncRunCte,
@@ -271,16 +275,15 @@ export async function reconcileVendorFromDatabase(
     { ...ruleSet, rules },
     await listProductLinkRules(database, vendorId as IntegrationId),
   );
+  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, []);
 
-  if (!syncRunId && linkedContext.anchorSnapshots.length === 0) {
+  if (!syncRunId && linkedContext.anchorSnapshots.length === 0 && invoiceState.groups.length === 0) {
     const emptyResult = reconcileVendorUsage({
       vendorId,
       rules,
       snapshots: [],
       agreementAdditions: [],
     });
-    const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, []);
-
     return {
       ...emptyResult,
       lines: [],
@@ -299,13 +302,17 @@ export async function reconcileVendorFromDatabase(
     { ...ruleSet, rules },
   );
   const billableSnapshots = await suppressCrossVendorBundleCoveredSnapshots(database, vendorId, overriddenSnapshots);
+  const invoiceScopeSnapshots = invoiceGroupsAsScopeSnapshots(vendorId, invoiceState.groups);
   const agreementAdditions = await loadAgreementAdditions(database, [
     ...billableSnapshots,
     ...linkedContext.anchorSnapshots,
+    ...invoiceScopeSnapshots,
   ]);
   const agreementIds = [
     ...new Set(
-      [...billableSnapshots, ...linkedContext.anchorSnapshots].map((snapshot) => snapshot.agreementId),
+      [...billableSnapshots, ...linkedContext.anchorSnapshots, ...invoiceScopeSnapshots].map(
+        (snapshot) => snapshot.agreementId,
+      ),
     ),
   ];
   const reconcileMode = await loadVendorReconcileMode(database, vendorId);
@@ -333,12 +340,29 @@ export async function reconcileVendorFromDatabase(
   const visibleLines = doNotSuggestNewAdditions
     ? linkedLines.filter((line) => line.writeAction !== 'create-addition')
     : linkedLines;
-  const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, visibleLines);
+  const linesWithInvoiceOnly = appendInvoiceOnlyLines(
+    vendorId,
+    visibleLines,
+    invoiceState.groups,
+    agreementAdditions,
+    additionPins,
+    doNotSuggestNewAdditions,
+  );
+  const invoiceAwareLines = linesWithInvoiceOnly.map((line) =>
+    applyInvoiceQuantityToLine(invoiceState.quantities, line),
+  );
 
   return {
     ...result,
-    totals: totalsForLines(visibleLines),
-    lines: await withLineDetails(database, visibleLines, snapshots, agreementAdditions, { ...ruleSet, rules }, invoiceState.quantities),
+    totals: totalsForLines(invoiceAwareLines),
+    lines: await withLineDetails(
+      database,
+      invoiceAwareLines,
+      snapshots,
+      agreementAdditions,
+      { ...ruleSet, rules },
+      invoiceState.quantities,
+    ),
     syncRunId,
     snapshotCount: snapshots.length,
     agreementAdditionCount: agreementAdditions.length,
@@ -857,6 +881,163 @@ async function loadAgreementAdditionsForProductCodes(
   );
 
   return result.rows.map(mapAdditionRow);
+}
+
+function invoiceGroupsAsScopeSnapshots(vendorId: string, groups: InvoiceQuantityGroup[]): UsageSnapshot[] {
+  return groups.map((group, index) => ({
+    id: `invoice-scope:${group.customerId}:${group.agreementId}:${group.vendorProductKey}:${index}`,
+    vendorId,
+    clientId: group.customerId,
+    agreementId: group.agreementId,
+    vendorProductKey: group.vendorProductKey,
+    productCode: group.productCode,
+    productName: group.productName,
+    quantity: 0,
+    observedAt: new Date(0).toISOString(),
+    dimensions: {
+      externalAccountId: group.externalAccountId,
+      externalAccountName: group.externalAccountName,
+    },
+  }));
+}
+
+function appendInvoiceOnlyLines(
+  vendorId: string,
+  lines: ReconciliationLine[],
+  groups: InvoiceQuantityGroup[],
+  agreementAdditions: LoadedAgreementAddition[],
+  additionPins: VendorProductAdditionPin[],
+  doNotSuggestNewAdditions: boolean,
+) {
+  const invoiceOnlyLines = groups.flatMap((group) => {
+    if (group.invoiceQuantity === 0 || invoiceGroupHasLine(group, lines)) {
+      return [];
+    }
+
+    const sourceAccountAliases = [
+      ...new Set(
+        [group.externalAccountId, group.externalAccountName].filter(
+          (value): value is string => Boolean(value),
+        ),
+      ),
+    ];
+    const pin = additionPins.find(
+      (candidate) =>
+        candidate.agreementId === group.agreementId &&
+        candidate.vendorProductKey === group.vendorProductKey &&
+        Boolean(candidate.sourceAccountId && sourceAccountAliases.includes(candidate.sourceAccountId)),
+    );
+    const pinnedAddition = pin
+      ? agreementAdditions.find(
+          (addition) =>
+            addition.agreementId === group.agreementId &&
+            (addition.connectWiseAdditionId === pin.connectWiseAdditionId ||
+              addition.id === pin.connectWiseAdditionId),
+        )
+      : undefined;
+    const matchingAdditions = agreementAdditions.filter(
+      (addition) =>
+        addition.clientId === group.customerId &&
+        addition.agreementId === group.agreementId &&
+        normalizeProductCode(addition.productCode) === normalizeProductCode(group.productCode),
+    );
+    const assignedAddition =
+      pinnedAddition ?? uniqueClosestInvoiceAddition(group.invoiceQuantity, matchingAdditions);
+    const assignedAdditions = assignedAddition ? [assignedAddition] : [];
+    const agreementQuantity = assignedAdditions.reduce((total, addition) => total + addition.quantity, 0);
+    const delta = group.invoiceQuantity - agreementQuantity;
+    const unitPrice = assignedAddition?.unitPrice;
+    const sourceAccountId = group.externalAccountId ?? group.externalAccountName;
+
+    return [{
+      id: [
+        group.customerId,
+        group.agreementId,
+        sourceAccountId ?? 'unknown-account',
+        group.vendorProductKey,
+        group.productCode,
+        'invoice-only',
+      ].join('|'),
+      vendorId,
+      clientId: group.customerId,
+      agreementId: group.agreementId,
+      productCode: assignedAddition?.productCode ?? group.productCode,
+      productName: assignedAddition?.productName ?? group.productName,
+      vendorProductKey: group.vendorProductKey,
+      sourceAccountId,
+      sourceAccountAliases,
+      connectWiseAdditionId: assignedAddition?.connectWiseAdditionId ?? assignedAddition?.id,
+      matchedAdditionIds: assignedAdditions.map((addition) => addition.connectWiseAdditionId ?? addition.id),
+      lineType: 'base-count' as const,
+      ruleId: 'invoice-only-product',
+      sourceQuantity: 0,
+      agreementQuantity,
+      proposedQuantity: group.invoiceQuantity,
+      delta,
+      unit: 'license' as const,
+      unitPrice,
+      financialImpact: {
+        amount: unitPrice ? delta * unitPrice.amount : 0,
+        currency: 'USD' as const,
+      },
+      status: 'needs-review' as const,
+      writeAction:
+        assignedAdditions.length === 1
+          ? delta === 0
+            ? undefined
+            : ('update-addition' as const)
+          : doNotSuggestNewAdditions
+            ? ('review-required' as const)
+            : ('create-addition' as const),
+      reason: pinnedAddition
+        ? `${group.productName} is present on the latest invoice, absent from the vendor API snapshot, and manually mapped to ${pinnedAddition.productName}.`
+        : `${group.productName} is present on the latest invoice but absent from the vendor API snapshot.`,
+      evidence: [
+        { label: 'Invoice-only product', value: group.vendorProductKey },
+        { label: 'Invoice quantity', value: group.invoiceQuantity },
+        { label: 'Invoice line rows', value: group.invoiceLineCount },
+        { label: 'Matched agreement additions', value: assignedAdditions.length },
+        { label: 'Action', value: 'Review or remap this invoice product before applying changes.' },
+      ],
+    } satisfies ReconciliationLine];
+  });
+
+  return [...lines, ...invoiceOnlyLines];
+}
+
+function invoiceGroupHasLine(group: InvoiceQuantityGroup, lines: ReconciliationLine[]) {
+  const groupAccounts = new Set(
+    [group.externalAccountId, group.externalAccountName].filter(
+      (value): value is string => Boolean(value),
+    ),
+  );
+  return lines.some((line) => {
+    if (line.clientId !== group.customerId || line.agreementId !== group.agreementId) {
+      return false;
+    }
+    const productMatches =
+      normalizeProductCode(line.productCode) === normalizeProductCode(group.productCode) ||
+      line.vendorProductKey === group.vendorProductKey;
+    if (!productMatches) return false;
+    const lineAccounts = [
+      line.sourceAccountId,
+      ...(line.sourceAccountAliases ?? []),
+    ].filter((value): value is string => Boolean(value));
+    return groupAccounts.size === 0 || lineAccounts.length === 0 || lineAccounts.some((value) => groupAccounts.has(value));
+  });
+}
+
+function uniqueClosestInvoiceAddition(quantity: number, additions: LoadedAgreementAddition[]) {
+  if (additions.length === 0) {
+    return undefined;
+  }
+  const ranked = [...additions].sort(
+    (left, right) => Math.abs(left.quantity - quantity) - Math.abs(right.quantity - quantity),
+  );
+  return ranked.length === 1 ||
+    Math.abs(ranked[0].quantity - quantity) < Math.abs(ranked[1].quantity - quantity)
+    ? ranked[0]
+    : undefined;
 }
 
 function totalsForLines(lines: ReconciliationLine[]) {
@@ -2082,7 +2263,66 @@ function indexSnapshotsByClient(snapshots: UsageSnapshot[]) {
 }
 
 function invoiceDetailsForLine(quantities: Map<string, InvoiceQuantity>, line: ReconciliationLine) {
-  const quantity = quantities.get(invoiceQuantityKey(line.clientId, line.agreementId, line.productCode));
+  if (
+    !line.sourceAccountId &&
+    (line.sourceAccountAliases?.length ?? 0) === 0 &&
+    line.sourceQuantity === 0 &&
+    line.writeAction === 'review-required'
+  ) {
+    return {};
+  }
+
+  const sourceAccountIds = [
+    ...new Set(
+      [line.sourceAccountId, ...(line.sourceAccountAliases ?? [])].filter(
+        (value): value is string => Boolean(value),
+      ),
+    ),
+  ];
+  const quantity =
+    sourceAccountIds.length > 0
+      ? sourceAccountIds
+          .map((sourceAccountId) =>
+            line.vendorProductKey
+              ? quantities.get(
+                  invoiceQuantityKey(
+                    line.clientId,
+                    line.agreementId,
+                    line.productCode,
+                    sourceAccountId,
+                    line.vendorProductKey,
+                  ),
+                )
+              : undefined,
+          )
+          .find((candidate): candidate is InvoiceQuantity => Boolean(candidate)) ??
+        (line.vendorProductKey
+          ? sourceAccountIds
+              .map((sourceAccountId) =>
+                quantities.get(
+                  invoiceVendorProductQuantityKey(
+                    line.clientId,
+                    line.agreementId,
+                    sourceAccountId,
+                    line.vendorProductKey!,
+                  ),
+                ),
+              )
+              .find((candidate): candidate is InvoiceQuantity => Boolean(candidate))
+          : undefined) ??
+        sourceAccountIds
+          .map((sourceAccountId) =>
+            quantities.get(
+              invoiceAccountQuantityKey(
+                line.clientId,
+                line.agreementId,
+                line.productCode,
+                sourceAccountId,
+              ),
+            ),
+          )
+          .find((candidate): candidate is InvoiceQuantity => Boolean(candidate))
+      : quantities.get(invoiceQuantityKey(line.clientId, line.agreementId, line.productCode));
   if (!quantity) {
     return {};
   }
@@ -2093,6 +2333,54 @@ function invoiceDetailsForLine(quantities: Map<string, InvoiceQuantity>, line: R
     invoiceImportId: quantity.invoiceImportId,
     invoiceNumber: quantity.invoiceNumber,
     invoiceDate: quantity.invoiceDate,
+  };
+}
+
+function applyInvoiceQuantityToLine(
+  quantities: Map<string, InvoiceQuantity>,
+  line: ReconciliationLine,
+): ReconciliationLine & Partial<DatabaseReconciliationLine> {
+  const invoiceDetails = invoiceDetailsForLine(quantities, line);
+  if (invoiceDetails.invoiceQuantity === undefined) {
+    return line;
+  }
+
+  const proposedQuantity = Math.max(line.sourceQuantity, invoiceDetails.invoiceQuantity);
+  const delta = proposedQuantity - line.agreementQuantity;
+  const preservesUnresolvedMapping = line.status === 'unmapped' || line.writeAction === 'review-required';
+  const matchedAdditionCount = line.matchedAdditionIds?.length ?? (line.connectWiseAdditionId ? 1 : 0);
+  const writeAction =
+    delta === 0
+      ? undefined
+      : matchedAdditionCount === 0
+        ? 'create-addition'
+        : matchedAdditionCount === 1
+          ? 'update-addition'
+          : 'review-required';
+
+  return {
+    ...line,
+    ...invoiceDetails,
+    proposedQuantity,
+    delta,
+    financialImpact: {
+      ...line.financialImpact,
+      amount: line.unitPrice ? delta * line.unitPrice.amount : 0,
+    },
+    status: preservesUnresolvedMapping ? line.status : delta === 0 ? 'matched' : 'needs-review',
+    writeAction: preservesUnresolvedMapping ? line.writeAction : writeAction,
+    reason:
+      line.ruleId === 'invoice-only-product'
+        ? delta === 0
+          ? `${line.productName} is absent from the vendor API, but its invoice count matches ConnectWise.`
+          : line.reason
+        : delta === 0
+          ? `${line.productName} matches the highest AppRiver API or invoice count.`
+          : `${line.productName} differs from the highest AppRiver API or invoice count.`,
+    evidence: [
+      ...line.evidence,
+      { label: 'Highest API or invoice count', value: proposedQuantity },
+    ],
   };
 }
 
@@ -2110,6 +2398,7 @@ function devicesForLine(line: ReconciliationLine, snapshots: UsageSnapshot[], ru
       (snapshot) =>
         snapshot.clientId === line.clientId &&
         snapshot.agreementId === line.agreementId &&
+        (!line.sourceAccountId || snapshotExternalAccountId(snapshot) === line.sourceAccountId) &&
         (lineVendorProductKeys.size === 0 ||
           !snapshot.vendorProductKey ||
           lineVendorProductKeys.has(snapshot.vendorProductKey)) &&
@@ -2409,6 +2698,7 @@ function dimensionValuesEqual(left: DimensionValue, right: DimensionValue) {
 
 function snapshotExternalAccountId(snapshot: UsageSnapshot) {
   const externalAccountId =
+    snapshot.dimensions.externalCustomerAccountNumber ??
     snapshot.dimensions.appRiverCustomerId ??
     snapshot.dimensions.externalAccountId ??
     snapshot.dimensions.accountId ??

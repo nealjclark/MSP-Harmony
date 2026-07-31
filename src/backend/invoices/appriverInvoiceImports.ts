@@ -55,6 +55,18 @@ export type InvoiceQuantity = {
   invoiceLineCount: number;
 };
 
+export type InvoiceQuantityGroup = {
+  customerId: string;
+  agreementId: string;
+  externalAccountId?: string;
+  externalAccountName?: string;
+  vendorProductKey: string;
+  productCode: string;
+  productName: string;
+  invoiceQuantity: number;
+  invoiceLineCount: number;
+};
+
 export type InvoiceImportMode = 'merge' | 'overwrite';
 export type ManualImportSyncMode = 'info-only' | 'full-vendor-sync';
 
@@ -308,6 +320,10 @@ type InvoiceQuantityRow = {
   customer_id: string;
   agreement_id: string;
   connectwise_product_code: string;
+  external_account_id: string | null;
+  external_account_name: string | null;
+  vendor_product_key: string | null;
+  connectwise_product_name: string | null;
   invoice_quantity: string | number;
   invoice_line_count: string | number;
 };
@@ -1018,16 +1034,56 @@ export async function refreshInvoiceImportMappings(
                  target_index,
                  connectwise_product_code
      ),
-     updated as (
-       update invoice_line_items
-          set connectwise_product_code = approved_product_mappings.connectwise_product_code,
-              connectwise_product_name = approved_product_mappings.connectwise_product_name
-         from approved_product_mappings
+     line_product_matches as (
+       select distinct on (invoice_line_items.id)
+              invoice_line_items.id,
+              approved_product_mappings.vendor_product_key,
+              approved_product_mappings.connectwise_product_code,
+              approved_product_mappings.connectwise_product_name,
+              case
+                when coalesce(invoice_line_items.raw_payload->>'Comments', '') ~* '\\mbilled\\s+monthly\\M'
+                  and lower(approved_product_mappings.vendor_product_key) like '%|monthly'
+                  then 'Monthly'
+                when coalesce(invoice_line_items.raw_payload->>'Comments', '') ~* '\\mbilled\\s+annual(ly)?\\M'
+                  and lower(approved_product_mappings.vendor_product_key) like '%|annual'
+                  then 'Annual'
+                else invoice_line_items.billing_frequency
+              end as billing_frequency
+         from invoice_line_items
+         inner join approved_product_mappings
+           on approved_product_mappings.vendor_id = invoice_line_items.vendor_id
+          and approved_product_mappings.vendor_product_key in (
+            invoice_line_items.vendor_product_key,
+            concat_ws('|', nullif(trim(invoice_line_items.product_name), ''), nullif(trim(invoice_line_items.term), ''), 'Monthly'),
+            concat_ws('|', nullif(trim(invoice_line_items.product_code), ''), nullif(trim(invoice_line_items.term), ''), 'Monthly'),
+            concat_ws('|', nullif(trim(invoice_line_items.product_name), ''), nullif(trim(invoice_line_items.term), ''), 'Annual'),
+            concat_ws('|', nullif(trim(invoice_line_items.product_code), ''), nullif(trim(invoice_line_items.term), ''), 'Annual')
+          )
         where invoice_line_items.invoice_import_id = $1::uuid
           and invoice_line_items.vendor_id = $2
-          and invoice_line_items.vendor_product_key = approved_product_mappings.vendor_product_key
-          and (invoice_line_items.connectwise_product_code is distinct from approved_product_mappings.connectwise_product_code
-            or invoice_line_items.connectwise_product_name is distinct from approved_product_mappings.connectwise_product_name)
+        order by invoice_line_items.id,
+                 case
+                   when coalesce(invoice_line_items.raw_payload->>'Comments', '') ~* '\\mbilled\\s+monthly\\M'
+                     and lower(approved_product_mappings.vendor_product_key) like '%|monthly' then 0
+                   when coalesce(invoice_line_items.raw_payload->>'Comments', '') ~* '\\mbilled\\s+annual(ly)?\\M'
+                     and lower(approved_product_mappings.vendor_product_key) like '%|annual' then 0
+                   when approved_product_mappings.vendor_product_key = invoice_line_items.vendor_product_key then 1
+                   else 2
+                 end,
+                 approved_product_mappings.vendor_product_key
+     ),
+     updated as (
+       update invoice_line_items
+          set vendor_product_key = line_product_matches.vendor_product_key,
+              connectwise_product_code = line_product_matches.connectwise_product_code,
+              connectwise_product_name = line_product_matches.connectwise_product_name,
+              billing_frequency = line_product_matches.billing_frequency
+         from line_product_matches
+        where invoice_line_items.id = line_product_matches.id
+          and (invoice_line_items.vendor_product_key is distinct from line_product_matches.vendor_product_key
+            or invoice_line_items.connectwise_product_code is distinct from line_product_matches.connectwise_product_code
+            or invoice_line_items.connectwise_product_name is distinct from line_product_matches.connectwise_product_name
+            or invoice_line_items.billing_frequency is distinct from line_product_matches.billing_frequency)
         returning invoice_line_items.id
      )
      select count(*) as updated_count from updated`,
@@ -1098,56 +1154,156 @@ export async function loadLatestInvoiceImportSummary(
 export async function loadLatestInvoiceQuantitiesForLines(
   database: Queryable,
   vendorId: VendorKey,
-  lines: Array<{ clientId: string; agreementId: string; productCode: string }>,
-): Promise<{ latestInvoice?: InvoiceImportSummary; quantities: Map<string, InvoiceQuantity> }> {
+  _lines: Array<{
+    clientId: string;
+    agreementId: string;
+    productCode: string;
+    sourceAccountId?: string;
+    vendorProductKey?: string;
+  }>,
+): Promise<{
+  latestInvoice?: InvoiceImportSummary;
+  quantities: Map<string, InvoiceQuantity>;
+  groups: InvoiceQuantityGroup[];
+}> {
   const latestInvoice = await loadLatestInvoiceImportSummary(database, vendorId);
-  if (!latestInvoice || lines.length === 0) {
+  if (!latestInvoice) {
     return {
       latestInvoice,
       quantities: new Map(),
+      groups: [],
     };
   }
 
-  const customerIds = [...new Set(lines.map((line) => line.clientId))];
-  const agreementIds = [...new Set(lines.map((line) => line.agreementId))];
-  const productCodes = [...new Set(lines.map((line) => line.productCode))];
   const result = await database.query<InvoiceQuantityRow>(
     `select customer_id,
             agreement_id,
             connectwise_product_code,
+            connectwise_product_name,
+            external_account_id,
+            external_account_name,
+            vendor_product_key,
             sum(quantity) as invoice_quantity,
             count(*) as invoice_line_count
        from invoice_line_items
-      where invoice_import_id = $1::uuid
-        and vendor_id = $2
-        and charge_type = 'Renewal'
-        and customer_id = any($3::uuid[])
-        and agreement_id = any($4::uuid[])
-        and connectwise_product_code = any($5::text[])
-      group by customer_id, agreement_id, connectwise_product_code`,
-    [latestInvoice.id, vendorId, customerIds, agreementIds, productCodes],
+       where invoice_import_id = $1::uuid
+         and vendor_id = $2
+         and charge_type = 'Renewal'
+         and customer_id is not null
+         and agreement_id is not null
+         and connectwise_product_code is not null
+       group by customer_id, agreement_id, connectwise_product_code, connectwise_product_name, external_account_id, external_account_name, vendor_product_key`,
+    [latestInvoice.id, vendorId],
   );
 
   const quantities = new Map<string, InvoiceQuantity>();
+  const groups: InvoiceQuantityGroup[] = [];
   for (const row of result.rows) {
-    quantities.set(invoiceQuantityKey(row.customer_id, row.agreement_id, row.connectwise_product_code), {
+    const quantity = {
       invoiceImportId: latestInvoice.id,
       invoiceNumber: latestInvoice.invoiceNumber,
       invoiceDate: latestInvoice.invoiceDate,
       importedAt: latestInvoice.importedAt,
       invoiceQuantity: numericValue(row.invoice_quantity),
       invoiceLineCount: integerValue(row.invoice_line_count),
-    });
+    };
+    if (row.vendor_product_key) {
+      for (const sourceAccountId of new Set(
+        [row.external_account_id, row.external_account_name].filter(
+          (value): value is string => Boolean(value),
+        ),
+      )) {
+        quantities.set(
+          invoiceQuantityKey(
+            row.customer_id,
+            row.agreement_id,
+            row.connectwise_product_code,
+            sourceAccountId,
+            row.vendor_product_key,
+          ),
+          quantity,
+        );
+        const accountKey = invoiceAccountQuantityKey(
+          row.customer_id,
+          row.agreement_id,
+          row.connectwise_product_code,
+          sourceAccountId,
+        );
+        quantities.set(accountKey, mergeInvoiceQuantities(quantities.get(accountKey), quantity));
+        const vendorProductKey = invoiceVendorProductQuantityKey(
+          row.customer_id,
+          row.agreement_id,
+          sourceAccountId,
+          row.vendor_product_key,
+        );
+        quantities.set(
+          vendorProductKey,
+          mergeInvoiceQuantities(quantities.get(vendorProductKey), quantity),
+        );
+      }
+    }
+
+    const broadKey = invoiceQuantityKey(row.customer_id, row.agreement_id, row.connectwise_product_code);
+    quantities.set(broadKey, mergeInvoiceQuantities(quantities.get(broadKey), quantity));
+    if (row.vendor_product_key) {
+      groups.push({
+        customerId: row.customer_id,
+        agreementId: row.agreement_id,
+        externalAccountId: row.external_account_id ?? undefined,
+        externalAccountName: row.external_account_name ?? undefined,
+        vendorProductKey: row.vendor_product_key,
+        productCode: row.connectwise_product_code,
+        productName: row.connectwise_product_name ?? row.connectwise_product_code,
+        invoiceQuantity: quantity.invoiceQuantity,
+        invoiceLineCount: quantity.invoiceLineCount,
+      });
+    }
   }
 
   return {
     latestInvoice,
     quantities,
+    groups,
   };
 }
 
-export function invoiceQuantityKey(customerId: string, agreementId: string, productCode: string) {
-  return `${customerId}|${agreementId}|${productCode}`;
+export function invoiceAccountQuantityKey(
+  customerId: string,
+  agreementId: string,
+  productCode: string,
+  sourceAccountId: string,
+) {
+  return `${customerId}|${agreementId}|${productCode}|account:${sourceAccountId}`;
+}
+
+export function invoiceVendorProductQuantityKey(
+  customerId: string,
+  agreementId: string,
+  sourceAccountId: string,
+  vendorProductKey: string,
+) {
+  return `${customerId}|${agreementId}|account:${sourceAccountId}|vendor-product:${vendorProductKey}`;
+}
+
+export function invoiceQuantityKey(
+  customerId: string,
+  agreementId: string,
+  productCode: string,
+  sourceAccountId?: string,
+  vendorProductKey?: string,
+) {
+  const broadKey = `${customerId}|${agreementId}|${productCode}`;
+  return sourceAccountId && vendorProductKey
+    ? `${broadKey}|${sourceAccountId}|${vendorProductKey}`
+    : broadKey;
+}
+
+function mergeInvoiceQuantities(existing: InvoiceQuantity | undefined, quantity: InvoiceQuantity): InvoiceQuantity {
+  return {
+    ...quantity,
+    invoiceQuantity: (existing?.invoiceQuantity ?? 0) + quantity.invoiceQuantity,
+    invoiceLineCount: (existing?.invoiceLineCount ?? 0) + quantity.invoiceLineCount,
+  };
 }
 
 function normalizeInvoiceLine(
@@ -1161,7 +1317,7 @@ function normalizeInvoiceLine(
   const productCode = stringValue(values['Product Code']) ?? '';
   const productName = stringValue(values['Product']) ?? productCode;
   const term = stringValue(values['Term']);
-  const billingFrequency = stringValue(values['Billing Frequency']);
+  const billingFrequency = appRiverEffectiveBillingFrequency(values);
   const vendorProductKeyCandidates = productKeyCandidates(productCode, productName, term, billingFrequency);
   const productMapping = findProductMapping(productIndex, vendorProductKeyCandidates, productCode, productName);
   const accountMapping = findAccountMapping(accountIndex, values);
@@ -2243,6 +2399,25 @@ function productKeyCandidates(
   }
 
   return [...new Set(candidates)];
+}
+
+function appRiverEffectiveBillingFrequency(values: Record<string, string>) {
+  const declaredFrequency = stringValue(values['Billing Frequency']);
+  const descriptiveText = [
+    stringValue(values.Comments),
+    stringValue(values['Appriver Charge Name']),
+    stringValue(values['Custom Charge Name']),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ');
+  const billedFrequency = descriptiveText.match(/\bbilled\s+(monthly|annual(?:ly)?)\b/i)?.[1]?.toLowerCase();
+  if (billedFrequency === 'monthly') {
+    return 'Monthly';
+  }
+  if (billedFrequency === 'annual' || billedFrequency === 'annually') {
+    return 'Annual';
+  }
+  return declaredFrequency;
 }
 
 function termFrequencyCandidatePairs(

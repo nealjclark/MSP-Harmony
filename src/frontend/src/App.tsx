@@ -34,6 +34,7 @@ import {
   Settings2,
   SlidersHorizontal,
   Trash2,
+  Undo2,
   Upload,
   UserPlus,
   Users,
@@ -77,6 +78,14 @@ import {
   type IntegrationSettingsState,
   type IntegrationSettingsValidation,
 } from '../../shared/integrationSettings';
+import {
+  defaultIntegrationSyncSchedule,
+  integrationSchedulerFirstHour,
+  integrationSchedulerLastHour,
+  integrationSchedulerTimeZone,
+  type IntegrationSyncSchedule,
+  type IntegrationSyncScheduleFrequency,
+} from '../../shared/integrationSchedules';
 import {
   crossVendorBundlesVendorId,
   isVendorDatapointId,
@@ -267,6 +276,7 @@ type ReconcileIssue = {
   matchedAgreementAdditions: ReconciliationMatchedAgreementAddition[];
   connectWiseAdditionId?: string;
   vendorProductKey?: string;
+  sourceAccountId?: string;
   writeAction?: 'update-addition' | 'create-addition' | 'review-required';
   proposedLessIncluded?: number;
   lessIncludedTouched?: boolean;
@@ -346,6 +356,7 @@ type Integration = {
   missingSecrets: string[];
   missingNonSecrets: string[];
   webhookSupported: boolean;
+  schedule: IntegrationSyncSchedule;
 };
 
 type AppRiverSyncProgress = {
@@ -369,17 +380,28 @@ type IntegrationSyncOperationStatus = {
   recordsWritten?: number;
   error?: string;
   currentItem?: string;
+  failures?: IntegrationSyncFailureDetail[];
+};
+
+type IntegrationSyncFailureDetail = {
+  itemId: string;
+  itemName?: string;
+  relatedId?: string;
+  category: string;
+  message: string;
 };
 
 type IntegrationSettingsPayload = {
   integrationId: IntegrationId;
   nonSecrets: Record<string, string>;
   secrets: Record<string, string>;
+  schedule?: IntegrationSyncSchedule;
 };
 
 type RuntimeIntegrationSummary = IntegrationSettingsDefinition & {
   nonSecrets?: Record<string, string | undefined>;
   validation?: IntegrationSettingsValidation;
+  schedule?: IntegrationSyncSchedule;
   operationalStatus?: {
     lastSyncAt?: string;
     lastSyncCompletedAt?: string;
@@ -751,6 +773,7 @@ type AzureBillingResult = {
   nerdioQuantityUnitPrice?: number;
   nerdioQuantityUnitCost?: number;
   externalPreTaxOverride?: number;
+  externalPreTaxSuggestedBy?: string;
   externalBeforeTax: number;
   effectiveMarkupRate?: number;
   projectedRevenue: number;
@@ -1870,6 +1893,7 @@ type ReconciliationLineResponse = {
   matchedAgreementAdditions?: ReconciliationMatchedAgreementAddition[];
   connectWiseAdditionId?: string;
   vendorProductKey?: string;
+  sourceAccountId?: string;
   devices?: ReconciliationDevice[];
   adjustments?: ReconciliationAdjustment[];
 };
@@ -2429,7 +2453,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
   { id: 'azure-billing', label: 'Azure Billing', icon: ClipboardCheck },
-  { id: 'invoices', label: 'Invoices', icon: CircleDollarSign },
+  { id: 'invoices', label: 'Finance', icon: CircleDollarSign },
 ];
 
 const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
@@ -2617,20 +2641,10 @@ function isEnabledReconciliationIntegration(integration: Integration) {
 }
 
 function sortIntegrationsForDisplay(integrations: Integration[]) {
-  const statusRank: Record<IntegrationStatus, number> = {
-    connected: 0,
-    degraded: 1,
-    'not-configured': 2,
-  };
-
-  return [...integrations].sort((left, right) => {
-    if (left.enabled !== right.enabled) {
-      return left.enabled ? -1 : 1;
-    }
-
-    const statusDifference = statusRank[left.status] - statusRank[right.status];
-    return statusDifference || left.name.localeCompare(right.name);
-  });
+  return [...integrations].sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }) ||
+    left.id.localeCompare(right.id),
+  );
 }
 
 function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): Integration[] {
@@ -2686,8 +2700,12 @@ function buildIntegrations(runtimeIntegrations?: RuntimeIntegrationSummary[]): I
       missingSecrets: validation?.missingSecrets.map((setting) => setting.label) ?? [],
       missingNonSecrets: validation?.missingNonSecrets.map((setting) => setting.label) ?? [],
       webhookSupported: definition.webhookSupported,
+      schedule: definition.schedule ?? defaultIntegrationSyncSchedule(definition.integrationId),
     };
-  });
+  }).sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }) ||
+    left.id.localeCompare(right.id),
+  );
 }
 
 function checkboxSettingEnabled(value: string | undefined) {
@@ -5267,6 +5285,7 @@ async function saveAdditionPinRequest(
     customerId: string;
     agreementId: string;
     vendorProductKey: string;
+    sourceAccountId?: string;
     connectWiseAdditionId: string;
     connectwiseProductCode: string;
     connectwiseProductName: string;
@@ -6266,6 +6285,7 @@ function reconcileIssuesFromRun(
       matchedAgreementAdditions: line.matchedAgreementAdditions ?? [],
       connectWiseAdditionId: line.connectWiseAdditionId,
       vendorProductKey: line.vendorProductKey,
+      sourceAccountId: line.sourceAccountId,
       writeAction: line.writeAction,
       proposedLessIncluded: undefined,
       lessIncludedTouched: false,
@@ -6545,7 +6565,6 @@ function App() {
   const [invoiceImportMode, setInvoiceImportMode] = useState<InvoiceImportMode>('overwrite');
   const [importingInvoice, setImportingInvoice] = useState(false);
   const [invoiceWorkspaceTab, setInvoiceWorkspaceTab] = useState<InvoiceWorkspaceTab>('overdue');
-  const [showInvoiceImportPanel, setShowInvoiceImportPanel] = useState(false);
   const [overdueInvoices, setOverdueInvoices] = useState<OverdueInvoicesResponse | null>(null);
   const [overdueInvoiceLoadState, setOverdueInvoiceLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [overdueInvoiceMessage, setOverdueInvoiceMessage] = useState('Loading overdue invoices from ConnectWise.');
@@ -9971,6 +9990,7 @@ function App() {
         customerId: issue.clientId,
         agreementId: issue.agreementId,
         vendorProductKey,
+        sourceAccountId: issue.sourceAccountId,
         connectWiseAdditionId: addition.connectWiseAdditionId,
         connectwiseProductCode: addition.productCode,
         connectwiseProductName: addition.productName,
@@ -10184,18 +10204,6 @@ function App() {
                     : `Review & Apply (${queuedAgreementUpdateIssues.length.toLocaleString()})`}
                 </button>
               ) : null
-            ) : view === 'invoices' ? (
-              <button
-                className="button secondary"
-                onClick={() => {
-                  setShowInvoiceImportPanel(true);
-                  void loadInvoiceImports(selectedInvoiceIntegrationId);
-                }}
-                type="button"
-              >
-                <Upload size={18} />
-                Import invoices
-              </button>
             ) : null}
           </div>
         </header>
@@ -10578,38 +10586,6 @@ function App() {
           )}
           {view === 'invoices' && (
             <InvoicesView
-              importUtility={
-                <ImportsView
-                  busyReviewAction={busyInvoiceExceptionAction}
-                  customerOptions={invoiceExceptionCustomerOptions}
-                  importing={importingInvoice}
-                  importMode={invoiceImportMode}
-                  imports={invoiceImports}
-                  integrations={invoiceImportIntegrations}
-                  loadState={invoiceImportLoadState}
-                  message={invoiceImportMessage}
-                  onAccountMappingSave={saveInvoiceExceptionAccountMapping}
-                  onCloseReview={closeInvoiceExceptionReview}
-                  onProductCatalogSearch={(query) =>
-                    searchProductCatalog(invoiceExceptionReview?.import.vendorId ?? 'opentext-appriver', query)
-                  }
-                  onProductMappingSave={saveInvoiceExceptionProductMapping}
-                  onRefreshReview={reloadInvoiceExceptionReview}
-                  onReviewImport={openInvoiceExceptionReview}
-                  onTableUpload={importMappedInvoiceTable}
-                  onUpload={importVendorInvoice}
-                  onVendorChange={(integrationId) => {
-                    setSelectedInvoiceIntegrationId(integrationId);
-                    closeInvoiceExceptionReview();
-                  }}
-                  review={invoiceExceptionReview}
-                  reviewLoadState={invoiceExceptionLoadState}
-                  reviewMessage={invoiceExceptionMessage}
-                  selectedVendorId={selectedInvoiceIntegrationId}
-                  setImportMode={setInvoiceImportMode}
-                  vendorDatapoints={vendorDatapoints}
-                />
-              }
               monthlyCandidates={monthlyInvoiceCandidates}
               monthlyLoadMessage={monthlyInvoiceMessage}
               monthlyLoadState={monthlyInvoiceLoadState}
@@ -10618,17 +10594,12 @@ function App() {
               noticeBusyKey={invoiceNoticeBusyKey}
               noticeMessage={invoiceNoticeMessage}
               noticeResult={invoiceNoticeResult}
-              onCloseImportPanel={() => setShowInvoiceImportPanel(false)}
               onCloseNoticePreview={() => {
                 setInvoiceNoticeResult(null);
                 setInvoiceNoticeMessage('');
               }}
               onConfirmNotice={confirmInvoiceNotice}
               onTestNotice={testInvoiceNotice}
-              onImportInvoices={() => {
-                setShowInvoiceImportPanel(true);
-                void loadInvoiceImports(selectedInvoiceIntegrationId);
-              }}
               onMonthlyPreview={previewMonthlyInvoice}
               onNoticePreview={previewInvoiceNotice}
               onOpenBulkNoticeConfirm={openBulkNoticeConfirm}
@@ -10649,13 +10620,11 @@ function App() {
               overdueLoadMessage={overdueInvoiceMessage}
               overdueLoadState={overdueInvoiceLoadState}
               refreshing={
-                invoiceImportLoadState === 'loading' ||
                 overdueInvoiceLoadState === 'loading' ||
                 monthlyInvoiceLoadState === 'loading' ||
                 standardInvoiceLoadState === 'loading'
               }
               selectedTab={invoiceWorkspaceTab}
-              showImportPanel={showInvoiceImportPanel}
               standardCandidates={standardInvoiceCandidates}
               standardLoadMessage={standardInvoiceMessage}
               standardLoadState={standardInvoiceLoadState}
@@ -10838,7 +10807,7 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
     case 'azure-billing':
       return 'Azure Billing';
     case 'invoices':
-      return 'Invoices';
+      return 'Finance';
     case 'agreements':
       return 'Agreements';
     case 'settings':
@@ -10870,7 +10839,7 @@ function pageKicker(view: View, settingsSection: SettingsSection = defaultSettin
     case 'azure-billing':
       return 'Monthly cost, review, approval, and release';
     case 'invoices':
-      return 'Overdue and vendor invoice review';
+      return 'Client billing and collections';
     case 'agreements':
       return 'Agreement additions and overrides';
     case 'settings':
@@ -15518,6 +15487,20 @@ function IntegrationsView(props: {
   const comingSoonIntegrations = sortIntegrationsForDisplay(
     catalogIntegrations.filter((integration) => !isImplementedIntegration(integration.id)),
   );
+  const enabledIntegrationEntries = [
+    ...manualIntegrations.map((datapoint) => ({
+      kind: 'manual' as const,
+      name: datapoint.displayName,
+      datapoint,
+    })),
+    ...activeIntegrations.map((integration) => ({
+      kind: 'catalog' as const,
+      name: integration.name,
+      integration,
+    })),
+  ].sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }),
+  );
   const renderIntegrationPanel = (integration: Integration, comingSoon = false) => {
     const scopedDatapoints = vendorDatapoints.filter((datapoint) =>
       integration.id === 'custom-table' ? !datapoint.linkedIntegrationId : datapoint.linkedIntegrationId === integration.id,
@@ -15657,8 +15640,11 @@ function IntegrationsView(props: {
       </div>
 
       <div className="integration-list" aria-label="Enabled integrations">
-        {manualIntegrations.map((datapoint) => renderManualIntegrationPanel(datapoint))}
-        {activeIntegrations.map((integration) => renderIntegrationPanel(integration))}
+        {enabledIntegrationEntries.map((entry) =>
+          entry.kind === 'manual'
+            ? renderManualIntegrationPanel(entry.datapoint)
+            : renderIntegrationPanel(entry.integration),
+        )}
       </div>
 
       {availableIntegrations.length > 0 ? (
@@ -17288,6 +17274,27 @@ function IntegrationCard(props: {
                   <RefreshCcw className={running ? 'sync-button-spin' : undefined} size={16} />
                   {running ? 'Syncing' : 'Sync now'}
                 </button>
+                {operation.failures?.length ? (
+                  <details className="integration-sync-failures">
+                    <summary>
+                      View {operation.failures.length.toLocaleString()} failed item{operation.failures.length === 1 ? '' : 's'}
+                    </summary>
+                    <div className="integration-sync-failure-list">
+                      {operation.failures.map((failure, index) => (
+                        <div className="integration-sync-failure" key={`${failure.category}:${failure.itemId}:${failure.relatedId ?? ''}:${index}`}>
+                          <div>
+                            <strong>{failure.itemName ?? failure.itemId}</strong>
+                            <span>
+                              {failure.category} · {failure.itemId}
+                              {failure.relatedId ? ` · ${failure.relatedId}` : ''}
+                            </span>
+                          </div>
+                          <p>{failure.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
               </div>
             );
           })}
@@ -22307,6 +22314,10 @@ function IntegrationModal(props: {
   const { integration, onClose, onSave, onTest, saving, saveMessage, testing } = props;
   const formRef = useRef<HTMLFormElement>(null);
   const [dirty, setDirty] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState<IntegrationSyncScheduleFrequency>(
+    integration.schedule.frequency,
+  );
+  const syncOperations = listIntegrationApiOperations(integration.id);
   const buildPayload = (form: HTMLFormElement): IntegrationSettingsPayload => {
     const formData = new FormData(form);
     const requiredNonSecrets = integration.requiredNonSecrets.map((setting) => [
@@ -22329,6 +22340,18 @@ function IntegrationModal(props: {
       integrationId: integration.id,
       nonSecrets: Object.fromEntries([...requiredNonSecrets, ...optionalNonSecrets]),
       secrets,
+      ...(integration.capabilities.includes('live-api')
+        ? {
+            schedule: {
+              frequency: String(formData.get('schedule:frequency') ?? 'manual') as IntegrationSyncScheduleFrequency,
+              scheduledHour: Number(formData.get('schedule:hour') ?? integrationSchedulerFirstHour),
+              weekdays: formData.getAll('schedule:weekday').map(Number),
+              dayOfMonth: Number(formData.get('schedule:dayOfMonth') ?? 1),
+              timeZone: integrationSchedulerTimeZone,
+              operationKeys: formData.getAll('schedule:operation').map(String),
+            },
+          }
+        : {}),
     };
   };
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -22407,6 +22430,114 @@ function IntegrationModal(props: {
                 </div>
               </div>
             ))}
+            {integration.capabilities.includes('live-api') ? (
+              <div className="integration-settings-section integration-schedule-section">
+                <h3 className="integration-settings-section-title">Sync schedule</h3>
+                <div className="integration-settings-grid">
+                  <label className="config-field">
+                    <span>Frequency</span>
+                    <select
+                      defaultValue={integration.schedule.frequency}
+                      name="schedule:frequency"
+                      onChange={(event) => setScheduleFrequency(event.target.value as IntegrationSyncScheduleFrequency)}
+                    >
+                      <option value="manual">Manual</option>
+                      <option value="hourly">Hourly</option>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
+                  </label>
+                  {scheduleFrequency !== 'manual' && scheduleFrequency !== 'hourly' ? (
+                    <label className="config-field">
+                      <span>Start time</span>
+                      <select defaultValue={String(integration.schedule.scheduledHour)} name="schedule:hour">
+                        {Array.from(
+                          { length: integrationSchedulerLastHour - integrationSchedulerFirstHour + 1 },
+                          (_, index) => integrationSchedulerFirstHour + index,
+                        ).map((hour) => (
+                          <option key={hour} value={hour}>
+                            {new Date(2026, 0, 1, hour).toLocaleTimeString(undefined, {
+                              hour: 'numeric',
+                              minute: '2-digit',
+                            })}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <input name="schedule:hour" type="hidden" value={integration.schedule.scheduledHour} />
+                  )}
+                  {scheduleFrequency === 'monthly' ? (
+                    <label className="config-field">
+                      <span>Day of month</span>
+                      <select defaultValue={String(integration.schedule.dayOfMonth)} name="schedule:dayOfMonth">
+                        {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                          <option key={day} value={day}>{day}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <input name="schedule:dayOfMonth" type="hidden" value={integration.schedule.dayOfMonth} />
+                  )}
+                </div>
+                {scheduleFrequency === 'weekly' ? (
+                  <fieldset className="integration-schedule-options">
+                    <legend>Run on</legend>
+                    <div className="integration-schedule-choice-row">
+                      {[
+                        ['Sunday', 0],
+                        ['Monday', 1],
+                        ['Tuesday', 2],
+                        ['Wednesday', 3],
+                        ['Thursday', 4],
+                        ['Friday', 5],
+                        ['Saturday', 6],
+                      ].map(([label, day]) => (
+                        <label className="config-checkbox compact" key={String(day)}>
+                          <input
+                            defaultChecked={integration.schedule.weekdays.includes(Number(day))}
+                            name="schedule:weekday"
+                            type="checkbox"
+                            value={day}
+                          />
+                          <span><strong>{String(label).slice(0, 3)}</strong></span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                ) : null}
+                {scheduleFrequency !== 'manual' ? (
+                  <fieldset className="integration-schedule-options">
+                    <legend>Operations to run</legend>
+                    <div className="integration-schedule-operation-list">
+                      {syncOperations.map((operation) => (
+                        <label className="config-checkbox" key={operation.key}>
+                          <input
+                            defaultChecked={integration.schedule.operationKeys.includes(operation.key)}
+                            name="schedule:operation"
+                            type="checkbox"
+                            value={operation.key}
+                          />
+                          <span><strong>{operation.label}</strong></span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                ) : (
+                  syncOperations.map((operation) => (
+                    <input key={operation.key} name="schedule:operation" type="hidden" value={operation.key} />
+                  ))
+                )}
+                <p className="config-note integration-schedule-note">
+                  {scheduleFrequency === 'manual'
+                    ? 'Automatic synchronization is off. Sync now remains available.'
+                    : scheduleFrequency === 'hourly'
+                      ? 'Runs once per hour from 6:00 AM through 5:00 PM Eastern.'
+                      : `Times use Eastern Time. If two syncs are already active, this run stays due for a later hourly check.`}
+                </p>
+              </div>
+            ) : null}
             <p className="config-note integration-modal-summary">
               {integration.missingSecrets.length + integration.missingNonSecrets.length > 0
                 ? `Missing: ${[...integration.missingSecrets, ...integration.missingNonSecrets].join(', ')}`
@@ -23277,7 +23408,8 @@ function AzureBillingWorkspace({
   const [billingMonth, setBillingMonth] = useState(new Date().toISOString().slice(0, 7));
   const [ingramReadiness, setIngramReadiness] = useState<AzureBillingIngramReadiness | null>(null);
   const [message, setMessage] = useState('Loading Azure billing runs...');
-  const [busy, setBusy] = useState('');
+  const [busyActions, setBusyActions] = useState<string[]>([]);
+  const busy = busyActions.length > 0;
   const [policyCustomerSearch, setPolicyCustomerSearch] = useState('');
   const [selectedDetectedClientKey, setSelectedDetectedClientKey] = useState('');
   const [policyDraft, setPolicyDraft] = useState({
@@ -23350,7 +23482,7 @@ function AzureBillingWorkspace({
   };
 
   const runAction = async (key: string, action: () => Promise<void>) => {
-    setBusy(key);
+    setBusyActions((current) => current.includes(key) ? current : [...current, key]);
     setMessage('Saving Azure billing changes...');
     try {
       await action();
@@ -23358,7 +23490,7 @@ function AzureBillingWorkspace({
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Azure billing action failed.');
     } finally {
-      setBusy('');
+      setBusyActions((current) => current.filter((activeKey) => activeKey !== key));
     }
   };
 
@@ -23730,7 +23862,7 @@ function AzureBillingWorkspace({
               {detail.results.map((result) => (
                 <AzureBillingClientReviewTable
                   approvalCount={approvalSettings?.requiredApprovalCount ?? 1}
-                  busy={Boolean(busy)}
+                  busy={busyActions.some((key) => key.endsWith(`:${result.id}`))}
                   key={result.id}
                   onReload={loadRuns}
                   result={result}
@@ -24396,10 +24528,12 @@ function AzureBillingWorkspace({
             <div className="azure-billing-release-summary">
               <BillingMetric label="Run" value={selectedRun.billingMonth} />
               <BillingMetric label="Status" value={azureBillingStatusLabel(selectedRun.status)} />
-              <BillingMetric label="Shadow cycle" value={selectedRun.shadowAcceptedAt ? `Accepted ${formatDateTime(selectedRun.shadowAcceptedAt)}` : 'Not accepted'} />
+              <BillingMetric label="Admin approval" value={selectedRun.shadowAcceptedAt ? `Approved ${formatDateTime(selectedRun.shadowAcceptedAt)}` : 'Pending'} />
               <BillingMetric label="Approved" value={String(selectedRun.approvedCount)} />
               <BillingMetric label="Held" value={String(selectedRun.heldCount)} />
+              <BillingMetric label="Costs" value={formatCurrency(selectedRun.sourceCost)} />
               <BillingMetric label="Revenue" value={formatCurrency(selectedRun.projectedRevenue)} />
+              <BillingMetric label="Projected profit" value={formatCurrency(selectedRun.projectedRevenue - selectedRun.sourceCost)} />
             </div>
           ) : null}
           {selectedRun && !selectedRun.shadowAcceptedAt ? (
@@ -24407,7 +24541,7 @@ function AzureBillingWorkspace({
               className="button secondary"
               disabled={!canAcceptShadow || !['ready-for-billing', 'partial'].includes(selectedRun.status) || Boolean(busy)}
               onClick={() => {
-                const note = window.prompt('Document the accepted shadow reconciliation (workbook comparison and portfolio total):');
+                const note = window.prompt('Add an Admin Approval note confirming the workbook comparison and portfolio total:');
                 if (!note?.trim()) return;
                 void runAction('accept-shadow', async () => {
                   await azureBillingJson(`/api/azure-billing/runs/${encodeURIComponent(selectedRun.id)}/accept-shadow`, {
@@ -24419,7 +24553,7 @@ function AzureBillingWorkspace({
               }}
               type="button"
             >
-              <BadgeCheck size={17} /> Accept shadow cycle
+              <BadgeCheck size={17} /> Admin Approval
             </button>
           ) : null}
           <button
@@ -24441,7 +24575,7 @@ function AzureBillingWorkspace({
             <Zap size={17} /> Release approved batch
           </button>
           {!canRelease ? <p className="field-help">An Admin/Billing operator must perform the release.</p> : null}
-          {selectedRun && !selectedRun.shadowAcceptedAt ? <p className="field-help">Release remains disabled until an Admin documents and accepts the shadow reconciliation.</p> : null}
+          {selectedRun && !selectedRun.shadowAcceptedAt ? <p className="field-help">Release remains disabled until an Admin reviews and approves the billing totals.</p> : null}
           <div className="azure-billing-policy-list">
             <h3>Release history</h3>
             {releases.map((release) => (
@@ -24507,8 +24641,14 @@ function AzureBillingClientReviewTable({
 }) {
   const externalBeforeTax = result.externalBeforeTax ?? result.projectedRevenue;
   const [externalDraft, setExternalDraft] = useState(externalBeforeTax.toFixed(2));
+  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [approvalExplanation, setApprovalExplanation] = useState('');
   const [historyLimit, setHistoryLimit] = useState(4);
-  useEffect(() => setExternalDraft(externalBeforeTax.toFixed(2)), [result.id, result.revision, externalBeforeTax]);
+  useEffect(() => {
+    setExternalDraft(externalBeforeTax.toFixed(2));
+    setApprovalModalOpen(false);
+    setApprovalExplanation('');
+  }, [result.id, result.revision, externalBeforeTax]);
   useEffect(() => setHistoryLimit(4), [result.id]);
 
   const policyCost = result.policyType === 'ingram-subscription-markup' ? result.ingramCost : result.combinedCost;
@@ -24518,30 +24658,50 @@ function AzureBillingClientReviewTable({
   const approvedCount = result.approvals.filter((approval) => approval.decision === 'approved').length;
   const history = [...(result.history ?? [])].sort((left, right) => right.billingMonth.localeCompare(left.billingMonth));
   const visibleHistory = history.slice(0, historyLimit);
+  const externalDraftValue = Number(externalDraft);
+  const externalDraftIsValid = externalDraft.trim() !== '' && Number.isFinite(externalDraftValue) && externalDraftValue >= 0;
+  const externalDraftIsPolicyDefault = externalDraftIsValid && Math.abs(externalDraftValue - policyDefault) < 0.005;
+  const externalDraftDiffersFromPolicy = !externalDraftIsPolicyDefault;
+  const externalDraftDiffersFromSaved = externalDraftIsValid && Math.abs(externalDraftValue - externalBeforeTax) >= 0.005;
 
-  const saveExternalPreTax = async () => {
-    const value = Number(externalDraft);
-    if (!Number.isFinite(value) || value < 0) {
+  const approveTotal = async (reviewerNote?: string) => {
+    if (!externalDraftIsValid) {
       window.alert('External pre-tax must be zero or greater.');
       return;
     }
-    const isPolicyDefault = Math.abs(value - policyDefault) < 0.005;
-    const reviewerNote = isPolicyDefault
-      ? undefined
-      : window.prompt(`Reason for changing ${result.customerName}'s external pre-tax total:`);
-    if (!isPolicyDefault && !reviewerNote?.trim()) return;
-    await runAction(`external:${result.id}`, async () => {
-      await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          decisionType: 'policy',
-          selectedNerdioCountSource: result.selectedNerdioCountSource,
-          externalPreTaxOverride: isPolicyDefault ? null : value,
-          reviewerNote,
-        }),
+    const isManualTotal = !externalDraftIsPolicyDefault;
+    if (isManualTotal && !reviewerNote?.trim()) return;
+    await runAction(`approve:${result.id}`, async () => {
+      if (isManualTotal || result.externalPreTaxOverride !== undefined) {
+        await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            decisionType: 'policy',
+            selectedNerdioCountSource: result.selectedNerdioCountSource,
+            externalPreTaxOverride: isManualTotal ? externalDraftValue : null,
+            reviewerNote: isManualTotal ? reviewerNote?.trim() : undefined,
+          }),
+        });
+      }
+      await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({}),
       });
       await onReload();
     });
+  };
+
+  const requestApproval = () => {
+    if (!externalDraftIsValid) {
+      window.alert('External pre-tax must be zero or greater.');
+      return;
+    }
+    if (externalDraftIsPolicyDefault) {
+      void approveTotal();
+      return;
+    }
+    setApprovalExplanation('');
+    setApprovalModalOpen(true);
   };
 
   const chooseCount = async (source: 'invoice' | 'live') => {
@@ -24558,7 +24718,8 @@ function AzureBillingClientReviewTable({
   };
 
   return (
-    <article className="azure-billing-client-table-card">
+    <>
+      <article className="azure-billing-client-table-card">
       <header className="azure-billing-client-table-heading">
         <div>
           <span className={`status-chip ${result.status}`}>{azureBillingStatusLabel(result.status)}</span>
@@ -24568,6 +24729,18 @@ function AzureBillingClientReviewTable({
         <div className="azure-billing-client-approval">
           <strong>{approvedCount}/{approvalCount} approval</strong>
           {result.externalPreTaxOverride !== undefined ? <span>External total overridden</span> : <span>Agreement default</span>}
+          <button
+            className="button primary compact azure-billing-approve-button"
+            disabled={
+              busy
+              || ['held', 'released'].includes(result.status)
+              || (result.status === 'approved' && !externalDraftDiffersFromSaved)
+            }
+            onClick={requestApproval}
+            type="button"
+          >
+            <Check size={14} /> Approve total
+          </button>
         </div>
       </header>
 
@@ -24605,7 +24778,7 @@ function AzureBillingClientReviewTable({
                         <span>$</span>
                         <input
                           aria-label={`${result.customerName} external pre-tax`}
-                          disabled={busy || result.status === 'released'}
+                          disabled={busy || ['held', 'released'].includes(result.status)}
                           min="0"
                           onChange={(event) => setExternalDraft(event.target.value)}
                           step="0.01"
@@ -24613,16 +24786,31 @@ function AzureBillingClientReviewTable({
                           value={externalDraft}
                         />
                         <button
-                          className="button primary compact"
-                          disabled={busy || result.status === 'released' || !externalDraft.trim()}
-                          onClick={() => void saveExternalPreTax()}
+                          aria-label={`Revert ${result.customerName} external pre-tax to the policy default`}
+                          className="button secondary compact azure-billing-revert-button"
+                          disabled={busy || ['held', 'released'].includes(result.status) || !externalDraftDiffersFromPolicy}
+                          onClick={() => setExternalDraft(policyDefault.toFixed(2))}
+                          title="Revert the external pre-tax total back to the Policy default price."
                           type="button"
                         >
-                          Apply
+                          <Undo2 size={14} />
                         </button>
                       </div>
-                    ) : formatBillingCurrency(month.projectedRevenue)}
+                    ) : (
+                      <button
+                        className="azure-billing-total-suggestion"
+                        disabled={busy || ['held', 'released'].includes(result.status)}
+                        onClick={() => setExternalDraft(month.projectedRevenue.toFixed(2))}
+                        title={`Use ${formatBillingCurrency(month.projectedRevenue)} as the suggested external pre-tax total. Click Approve total to review and save it.`}
+                        type="button"
+                      >
+                        {formatBillingCurrency(month.projectedRevenue)}
+                      </button>
+                    )}
                     {month.externalPreTaxOverride !== undefined ? <small>Override</small> : null}
+                    {isCurrent && result.externalPreTaxOverride !== undefined && result.externalPreTaxSuggestedBy ? (
+                      <small>Suggested by {result.externalPreTaxSuggestedBy}{result.reviewerNote ? ` — ${result.reviewerNote}` : ''}</small>
+                    ) : null}
                   </td>
                   <td>
                     {formatBillingCurrency(month.ingramCost)}
@@ -24658,7 +24846,7 @@ function AzureBillingClientReviewTable({
         <span>ConnectWise unit price <strong>{formatBillingCurrency(result.proposedUnitPrice ?? 0)}</strong></span>
         <span>ConnectWise unit cost <strong>{formatBillingCurrency(result.proposedUnitCost ?? 0)}</strong></span>
         <span>Policy default <strong>{formatBillingCurrency(policyDefault)}</strong></span>
-        {result.reviewerNote ? <span>Review note <strong>{result.reviewerNote}</strong></span> : null}
+        {result.reviewerNote && result.externalPreTaxOverride === undefined ? <span>Review note <strong>{result.reviewerNote}</strong></span> : null}
       </div>
 
       {result.policyType === 'fixed-avd-per-user' ? (
@@ -24741,51 +24929,78 @@ function AzureBillingClientReviewTable({
         ))}
       </details>
 
-      <footer className="azure-billing-client-actions">
-        <button
-          className="button secondary"
-          disabled={busy || result.status === 'released'}
-          onClick={() => void reviseBillingResult(result, 'policy', runAction, onReload)}
-          title="Clear the external override and recalculate from the agreement's assigned billing policy."
-          type="button"
-        >
-          Reset to agreement default
-        </button>
-        <button
-          className="button secondary"
-          disabled={busy || result.status === 'released'}
-          onClick={() => {
-            const reason = window.prompt(`Reason to skip ${result.customerName} for this month's ConnectWise release:`);
-            if (!reason?.trim()) return;
-            void runAction(`hold:${result.id}`, async () => {
-              await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/hold`, {
-                method: 'POST',
-                body: JSON.stringify({ reason }),
-              });
-              await onReload();
-            });
-          }}
-          title="Exclude this client from the current release. A required reason is retained in the audit history."
-          type="button"
-        >
-          Skip this month
-        </button>
-        <button
-          className="button primary"
-          disabled={busy || ['approved', 'held', 'released'].includes(result.status)}
-          onClick={() => void runAction(`approve:${result.id}`, async () => {
-            await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/approve`, {
-              method: 'POST',
-              body: JSON.stringify({}),
-            });
-            await onReload();
-          })}
-          type="button"
-        >
-          <Check size={17} /> Approve total
-        </button>
-      </footer>
-    </article>
+      </article>
+
+      {approvalModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby={`azure-billing-approval-title-${result.id}`}
+            aria-modal="true"
+            className="azure-billing-approval-modal"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="section-kicker">Manual external pre-tax total</span>
+                <h2 id={`azure-billing-approval-title-${result.id}`}>Approve {result.customerName}</h2>
+                <p>Explain why this total differs from the assigned billing policy.</p>
+              </div>
+              <button
+                aria-label="Close approval dialog"
+                className="modal-close"
+                disabled={busy}
+                onClick={() => setApprovalModalOpen(false)}
+                title="Close"
+                type="button"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="azure-billing-approval-comparison">
+              <div>
+                <span>Policy default</span>
+                <strong>{formatBillingCurrency(policyDefault)}</strong>
+              </div>
+              <div>
+                <span>Manual total</span>
+                <strong>{formatBillingCurrency(externalDraftValue)}</strong>
+              </div>
+              <div className={externalDraftValue - policyDefault >= 0 ? 'increase' : 'decrease'}>
+                <span>Difference</span>
+                <strong>{formatSignedCurrency(externalDraftValue - policyDefault)}</strong>
+              </div>
+            </div>
+
+            <label className="azure-billing-approval-explanation">
+              <span>Why is the manual total needed?</span>
+              <textarea
+                autoFocus
+                disabled={busy}
+                onChange={(event) => setApprovalExplanation(event.target.value)}
+                placeholder="Enter the reason for using this total…"
+                rows={4}
+                value={approvalExplanation}
+              />
+            </label>
+
+            <div className="modal-actions">
+              <button className="button secondary" disabled={busy} onClick={() => setApprovalModalOpen(false)} type="button">
+                Cancel
+              </button>
+              <button
+                className="button primary"
+                disabled={busy || !approvalExplanation.trim()}
+                onClick={() => void approveTotal(approvalExplanation)}
+                type="button"
+              >
+                <Check size={17} /> Approve
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -26152,7 +26367,6 @@ function InvoicesView(props: {
   bulkNoticeBusy: boolean;
   bulkNoticeCustomers: OverdueInvoiceCustomerGroup[] | null;
   bulkNoticeMessage: string;
-  importUtility: ReactNode;
   monthlyCandidates: MonthlyInvoiceCandidatesResponse | null;
   monthlyLoadMessage: string;
   monthlyLoadState: 'idle' | 'loading' | 'ready' | 'failed';
@@ -26162,11 +26376,9 @@ function InvoicesView(props: {
   noticeMessage: string;
   noticeResult: InvoiceNotificationResponse | null;
   onCloseBulkNoticeConfirm: () => void;
-  onCloseImportPanel: () => void;
   onCloseNoticePreview: () => void;
   onConfirmBulkNotices: (customers: OverdueInvoiceCustomerGroup[], notes?: string) => Promise<void>;
   onConfirmNotice: (preview: InvoiceNotificationPreview, notes?: string) => Promise<InvoiceNotificationResponse | null>;
-  onImportInvoices: () => void;
   onMonthlyPreview: (candidate: MonthlyInvoiceCandidate) => Promise<MonthlyInvoicePreview | null>;
   onNoticePreview: (customer: OverdueInvoiceCustomerGroup) => Promise<InvoiceNotificationResponse | null>;
   onOpenBulkNoticeConfirm: (customers: OverdueInvoiceCustomerGroup[]) => void;
@@ -26189,7 +26401,6 @@ function InvoicesView(props: {
   refreshing: boolean;
   selectedOverdueCustomerKeys: string[];
   selectedTab: InvoiceWorkspaceTab;
-  showImportPanel: boolean;
   standardCandidates: StandardInvoiceCandidatesResponse | null;
   standardLoadMessage: string;
   standardLoadState: 'idle' | 'loading' | 'ready' | 'failed';
@@ -26198,7 +26409,6 @@ function InvoicesView(props: {
     bulkNoticeBusy,
     bulkNoticeCustomers,
     bulkNoticeMessage,
-    importUtility,
     monthlyCandidates,
     monthlyLoadMessage,
     monthlyLoadState,
@@ -26208,11 +26418,9 @@ function InvoicesView(props: {
     noticeMessage,
     noticeResult,
     onCloseBulkNoticeConfirm,
-    onCloseImportPanel,
     onCloseNoticePreview,
     onConfirmBulkNotices,
     onConfirmNotice,
-    onImportInvoices,
     onMonthlyPreview,
     onNoticePreview,
     onOpenBulkNoticeConfirm,
@@ -26227,7 +26435,6 @@ function InvoicesView(props: {
     refreshing,
     selectedOverdueCustomerKeys,
     selectedTab,
-    showImportPanel,
     standardCandidates,
     standardLoadMessage,
     standardLoadState,
@@ -26259,27 +26466,8 @@ function InvoicesView(props: {
             <RefreshCcw size={15} />
             {refreshing ? 'Refreshing' : 'Refresh all'}
           </button>
-          <button className="button primary compact" onClick={onImportInvoices} type="button">
-            <Upload size={15} />
-            Import invoices
-          </button>
         </div>
       </section>
-
-      {showImportPanel ? (
-        <section className="invoice-import-utility" aria-label="Import invoices">
-          <div className="surface-header">
-            <div>
-              <span className="section-kicker">Utility</span>
-              <h2>Import invoices</h2>
-            </div>
-            <button className="icon-button" onClick={onCloseImportPanel} title="Close import utility" type="button">
-              <X size={18} />
-            </button>
-          </div>
-          <div className="invoice-import-utility-body">{importUtility}</div>
-        </section>
-      ) : null}
 
       {selectedTab === 'overdue' ? (
         <OverdueInvoicesTab

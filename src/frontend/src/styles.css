@@ -6887,6 +6887,63 @@ h2 {
   color: #9d3120;
 }
 
+.integration-sync-failures {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.integration-sync-failures summary {
+  width: fit-content;
+  color: #9d3120;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.integration-sync-failure-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.integration-sync-failure {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(240px, 1.3fr);
+  gap: 14px;
+  padding: 9px 10px;
+  border: 1px solid #f0d0ca;
+  border-radius: 6px;
+  background: #fffafa;
+}
+
+.integration-sync-failure > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.integration-sync-failure strong,
+.integration-sync-failure span,
+.integration-sync-failure p {
+  overflow-wrap: anywhere;
+}
+
+.integration-sync-failure span {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.integration-sync-failure p {
+  margin: 0;
+  color: #7d3024;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
 .integration-workflow-content {
   grid-area: workspace;
   min-width: 0;
@@ -7129,6 +7186,52 @@ h2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.integration-schedule-section {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.integration-schedule-options {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.integration-schedule-options legend {
+  margin-bottom: 6px;
+  color: #4d5d58;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.integration-schedule-choice-row {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.integration-schedule-choice-row .config-checkbox.compact {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 6px;
+}
+
+.integration-schedule-operation-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.integration-schedule-note {
+  margin: 0;
 }
 
 .integration-setting-psaAgreementReconcileMode,
@@ -9250,6 +9353,10 @@ h2 {
     width: 100%;
   }
 
+  .integration-sync-failure {
+    grid-template-columns: 1fr;
+  }
+
   .integration-modal .modal-actions {
     flex-wrap: wrap;
   }
@@ -10401,6 +10508,13 @@ h2 {
   color: var(--muted);
 }
 
+.azure-billing-approve-button {
+  min-height: 28px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+}
+
 .azure-billing-client-matrix-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);
@@ -10530,6 +10644,115 @@ h2 {
   border-radius: 6px;
   text-align: right;
   background: #fff;
+}
+
+.azure-billing-revert-button {
+  width: 30px;
+  min-width: 30px;
+  padding: 5px;
+}
+
+.azure-billing-total-suggestion {
+  padding: 0;
+  border: 0;
+  color: #2f6842;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.azure-billing-total-suggestion:hover {
+  color: #1f4e30;
+}
+
+.azure-billing-total-suggestion:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.azure-billing-approval-modal {
+  width: min(520px, 100%);
+  overflow: hidden;
+  border: 1px solid #cfd8d0;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(22, 36, 31, 0.28);
+}
+
+.azure-billing-approval-modal .modal-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.azure-billing-approval-comparison {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 20px 22px 14px;
+}
+
+.azure-billing-approval-comparison > div {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7faf7;
+}
+
+.azure-billing-approval-comparison span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.azure-billing-approval-comparison strong {
+  font-size: 1rem;
+}
+
+.azure-billing-approval-comparison .increase strong {
+  color: #1f7a3a;
+}
+
+.azure-billing-approval-comparison .decrease strong {
+  color: #b42318;
+}
+
+.azure-billing-approval-explanation {
+  display: grid;
+  gap: 7px;
+  padding: 0 22px 20px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.azure-billing-approval-explanation textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 10px 11px;
+  border: 1px solid #cfd8d0;
+  border-radius: 7px;
+  outline: 0;
+  color: var(--ink);
+  background: #fbfcfa;
+  font: inherit;
+  font-weight: 400;
+}
+
+.azure-billing-approval-explanation textarea:focus {
+  border-color: #4f8060;
+  box-shadow: 0 0 0 3px rgba(63, 121, 82, 0.14);
+}
+
+@media (max-width: 560px) {
+  .azure-billing-approval-comparison {
+    grid-template-columns: 1fr;
+  }
 }
 
 .azure-billing-review-context {

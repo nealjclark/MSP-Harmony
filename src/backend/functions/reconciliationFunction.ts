@@ -344,6 +344,7 @@ type AdditionPinBody = {
   customerId?: string;
   agreementId?: string;
   vendorProductKey?: string;
+  sourceAccountId?: string;
   connectWiseAdditionId?: string;
   connectwiseProductCode?: string;
   connectwiseProductName?: string;
@@ -399,6 +400,7 @@ export async function upsertReconciliationAdditionPinHttp(
       customerId: body.customerId,
       agreementId: body.agreementId,
       vendorProductKey: body.vendorProductKey.trim(),
+      sourceAccountId: body.sourceAccountId?.trim() || undefined,
       connectWiseAdditionId: body.connectWiseAdditionId.trim(),
       connectwiseProductCode: body.connectwiseProductCode.trim(),
       connectwiseProductName: body.connectwiseProductName.trim(),
@@ -453,6 +455,7 @@ export async function deactivateReconciliationAdditionPinHttp(
       vendorId,
       agreementId: body.agreementId,
       vendorProductKey: body.vendorProductKey.trim(),
+      sourceAccountId: body.sourceAccountId?.trim() || undefined,
     });
     return jsonResponse(200, { deactivated: true });
   } catch (error) {

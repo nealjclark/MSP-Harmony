@@ -135,9 +135,16 @@ function reconcileRuleFamily(input: {
       findAdditions(input.agreementAdditions, input.clientId, input.agreementId, targetProductCodes(rule)),
     ),
   );
+  const sourceGroups = buildRuleSourceGroups(input.familyRules, input.snapshotsByRule);
+  const sourceAccountIds = new Set(
+    sourceGroups
+      .map((group) => group.sourceAccountId)
+      .filter((value): value is string => Boolean(value)),
+  );
+  const hasAccountSplit = sourceAccountIds.size > 1;
 
   // Single CW addition for this catalog family: merge related vendor counts into one line.
-  if (matchedAdditions.length <= 1) {
+  if (matchedAdditions.length <= 1 && !hasAccountSplit) {
     const mergedSnapshots = input.familyRules.flatMap((rule) => input.snapshotsByRule.get(rule.id) ?? []);
     const primaryRule = pickPrimaryMergedRule(input.familyRules, input.snapshotsByRule);
     if (primaryRule.requiresExistingAgreementProduct && matchedAdditions.length === 0) {
@@ -154,6 +161,9 @@ function reconcileRuleFamily(input: {
         snapshots: mergedSnapshots,
         matchedAdditions,
         assignedAddition: matchedAdditions[0],
+        sourceVendorProductKey: sourceGroups.length === 1 ? sourceGroups[0].vendorProductKey : undefined,
+        sourceAccountId: sourceAccountIds.size === 1 ? sourceAccountIds.values().next().value : undefined,
+        sourceAccountName: sourceGroups.find((group) => group.sourceAccountId)?.sourceAccountName,
         merged: input.familyRules.length > 1,
       }),
     ].filter((line): line is ReconciliationLine => Boolean(line));
@@ -164,8 +174,7 @@ function reconcileRuleFamily(input: {
   const claimedAdditionIds = new Set<string>();
   const assignments = assignRulesToAdditions({
     request: input.request,
-    rules: input.familyRules,
-    snapshotsByRule: input.snapshotsByRule,
+    sourceGroups,
     additions: matchedAdditions,
     pins: input.pins,
     clientId: input.clientId,
@@ -183,8 +192,11 @@ function reconcileRuleFamily(input: {
         clientId: input.clientId,
         agreementId: input.agreementId,
         snapshots: assignment.snapshots,
-        matchedAdditions: assignment.addition ? [assignment.addition] : matchedAdditions,
+        matchedAdditions: assignment.addition ? [assignment.addition] : [],
         assignedAddition: assignment.addition,
+        sourceVendorProductKey: assignment.vendorProductKey,
+        sourceAccountId: assignment.sourceAccountId,
+        sourceAccountName: assignment.sourceAccountName,
         merged: false,
         ambiguous: assignment.ambiguous,
       }),
@@ -287,14 +299,56 @@ function pickRuleForLeftoverAddition(rules: QuantityRule[], addition: AgreementA
 type RuleAssignment = {
   rule: QuantityRule;
   snapshots: UsageSnapshot[];
+  vendorProductKey?: string;
+  sourceAccountId?: string;
+  sourceAccountName?: string;
   addition?: AgreementAddition;
   ambiguous: boolean;
 };
 
+function buildRuleSourceGroups(
+  rules: QuantityRule[],
+  snapshotsByRule: Map<string, UsageSnapshot[]>,
+): RuleAssignment[] {
+  return rules.flatMap((rule) => {
+    const snapshots = snapshotsByRule.get(rule.id) ?? [];
+    const explicitAccountIds = new Set(
+      snapshots
+        .map(snapshotSourceAccountId)
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    if (explicitAccountIds.size <= 1) {
+      return [{
+        rule,
+        snapshots,
+        vendorProductKey: sourceGroupVendorProductKey(rule, snapshots),
+        sourceAccountId: explicitAccountIds.values().next().value,
+        sourceAccountName: snapshotSourceAccountName(snapshots[0]),
+        ambiguous: false,
+      }];
+    }
+
+    const groups = new Map<string, UsageSnapshot[]>();
+    for (const snapshot of snapshots) {
+      const sourceAccountId = snapshotSourceAccountId(snapshot) ?? snapshot.clientId;
+      groups.set(sourceAccountId, [...(groups.get(sourceAccountId) ?? []), snapshot]);
+    }
+
+    return [...groups.entries()].map(([sourceAccountId, accountSnapshots]) => ({
+      rule,
+      snapshots: accountSnapshots,
+      vendorProductKey: sourceGroupVendorProductKey(rule, accountSnapshots),
+      sourceAccountId,
+      sourceAccountName: snapshotSourceAccountName(accountSnapshots[0]),
+      ambiguous: false,
+    }));
+  });
+}
+
 function assignRulesToAdditions(input: {
   request: ReconcileVendorUsageRequest;
-  rules: QuantityRule[];
-  snapshotsByRule: Map<string, UsageSnapshot[]>;
+  sourceGroups: RuleAssignment[];
   additions: AgreementAddition[];
   pins: VendorProductAdditionPin[];
   clientId: string;
@@ -303,10 +357,16 @@ function assignRulesToAdditions(input: {
   claimedAdditionIds: Set<string>;
 }) {
   const assignments: RuleAssignment[] = [];
-  const pendingRules: QuantityRule[] = [];
+  const pendingGroups: RuleAssignment[] = [];
+  const hasMultipleSourceAccounts =
+    new Set(
+      input.sourceGroups
+        .map((group) => group.sourceAccountId)
+        .filter((value): value is string => Boolean(value)),
+    ).size > 1;
 
-  for (const rule of input.rules) {
-    const snapshots = input.snapshotsByRule.get(rule.id) ?? [];
+  for (const group of input.sourceGroups) {
+    const { rule, snapshots, sourceAccountId } = group;
     const proposedQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     if (rule.requiresExistingAgreementProduct && input.additions.length === 0) {
       continue;
@@ -315,9 +375,12 @@ function assignRulesToAdditions(input: {
       continue;
     }
 
-    const vendorProductKey = ruleVendorProductKey(rule);
+    const vendorProductKey = group.vendorProductKey;
     const pin = input.pins.find(
-      (candidate) => candidate.agreementId === input.agreementId && candidate.vendorProductKey === vendorProductKey,
+      (candidate) =>
+        candidate.agreementId === input.agreementId &&
+        candidate.vendorProductKey === vendorProductKey &&
+        candidate.sourceAccountId === sourceAccountId,
     );
     const pinnedAddition = pin
       ? input.additions.find(
@@ -328,45 +391,49 @@ function assignRulesToAdditions(input: {
 
     if (pinnedAddition && !input.claimedAdditionIds.has(additionIdentity(pinnedAddition))) {
       input.claimedAdditionIds.add(additionIdentity(pinnedAddition));
-      assignments.push({ rule, snapshots, addition: pinnedAddition, ambiguous: false });
+      assignments.push({ ...group, addition: pinnedAddition, ambiguous: false });
       continue;
     }
 
-    pendingRules.push(rule);
+    pendingGroups.push(group);
   }
 
-  const pendingByQuantity = [...pendingRules].sort((left, right) => {
-    const leftQuantity = (input.snapshotsByRule.get(left.id) ?? []).reduce((total, snapshot) => total + snapshot.quantity, 0);
-    const rightQuantity = (input.snapshotsByRule.get(right.id) ?? []).reduce(
-      (total, snapshot) => total + snapshot.quantity,
-      0,
-    );
+  const pendingByQuantity = [...pendingGroups].sort((left, right) => {
+    const leftQuantity = left.snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
+    const rightQuantity = right.snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     return rightQuantity - leftQuantity;
   });
 
-  for (const rule of pendingByQuantity) {
-    const snapshots = input.snapshotsByRule.get(rule.id) ?? [];
+  for (const group of pendingByQuantity) {
+    const { rule, snapshots, sourceAccountId } = group;
     const proposedQuantity = snapshots.reduce((total, snapshot) => total + snapshot.quantity, 0);
     const availableAdditions = input.additions.filter(
       (addition) =>
         !input.claimedAdditionIds.has(additionIdentity(addition)) && ruleTargetsProductCode(rule, addition.productCode),
     );
-    const closestAddition = pickClosestAddition(proposedQuantity, availableAdditions, rule);
+    const closestAddition = pickClosestAddition(
+      proposedQuantity,
+      availableAdditions,
+      rule,
+      hasMultipleSourceAccounts,
+    );
 
     if (!closestAddition) {
       assignments.push({
-        rule,
-        snapshots,
+        ...group,
         ambiguous: availableAdditions.length > 0,
       });
       continue;
     }
 
     input.claimedAdditionIds.add(additionIdentity(closestAddition));
-    assignments.push({ rule, snapshots, addition: closestAddition, ambiguous: false });
-    const vendorProductKey = ruleVendorProductKey(rule);
+    assignments.push({ ...group, addition: closestAddition, ambiguous: false });
+    const vendorProductKey = group.vendorProductKey;
     const existingPin = input.pins.find(
-      (candidate) => candidate.agreementId === input.agreementId && candidate.vendorProductKey === vendorProductKey,
+      (candidate) =>
+        candidate.agreementId === input.agreementId &&
+        candidate.vendorProductKey === vendorProductKey &&
+        candidate.sourceAccountId === sourceAccountId,
     );
     if (vendorProductKey && existingPin?.mappingSource !== 'manual') {
       input.pinAssignments.push({
@@ -374,6 +441,7 @@ function assignRulesToAdditions(input: {
         customerId: input.clientId,
         agreementId: input.agreementId,
         vendorProductKey,
+        sourceAccountId,
         connectWiseAdditionId: closestAddition.connectWiseAdditionId ?? closestAddition.id,
         connectwiseProductCode: closestAddition.productCode,
         connectwiseProductName: closestAddition.productName,
@@ -385,7 +453,12 @@ function assignRulesToAdditions(input: {
   return assignments;
 }
 
-function pickClosestAddition(proposedQuantity: number, additions: AgreementAddition[], rule: QuantityRule) {
+function pickClosestAddition(
+  proposedQuantity: number,
+  additions: AgreementAddition[],
+  rule: QuantityRule,
+  allowStableAccountTieBreak = false,
+) {
   if (additions.length === 0) {
     return undefined;
   }
@@ -393,6 +466,11 @@ function pickClosestAddition(proposedQuantity: number, additions: AgreementAddit
   const exactMatches = additions.filter((addition) => addition.quantity === proposedQuantity);
   if (exactMatches.length === 1) {
     return exactMatches[0];
+  }
+  if (exactMatches.length > 1 && allowStableAccountTieBreak) {
+    return [...exactMatches].sort((left, right) =>
+      additionIdentity(left).localeCompare(additionIdentity(right)),
+    )[0];
   }
 
   const ranked = [...(exactMatches.length > 0 ? exactMatches : additions)].sort((left, right) => {
@@ -405,7 +483,63 @@ function pickClosestAddition(proposedQuantity: number, additions: AgreementAddit
     return priceHintScore(right, rule) - priceHintScore(left, rule);
   });
 
+  if (
+    ranked.length > 1 &&
+    Math.abs(ranked[0].quantity - proposedQuantity) === Math.abs(ranked[1].quantity - proposedQuantity) &&
+    priceHintScore(ranked[0], rule) === priceHintScore(ranked[1], rule)
+  ) {
+    return undefined;
+  }
+
   return ranked[0];
+}
+
+function snapshotSourceAccountId(snapshot: UsageSnapshot) {
+  const value =
+    snapshot.dimensions.externalCustomerAccountNumber ??
+    snapshot.dimensions.appRiverCustomerId ??
+    snapshot.dimensions.externalAccountId ??
+    snapshot.dimensions.accountId;
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+}
+
+function snapshotSourceAccountName(snapshot: UsageSnapshot | undefined) {
+  const value =
+    snapshot?.dimensions.appRiverCustomerName ??
+    snapshot?.dimensions.externalAccountName ??
+    snapshot?.dimensions.customerName;
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+}
+
+function snapshotSourceAccountAliases(snapshots: UsageSnapshot[]) {
+  return [
+    ...new Set(
+      snapshots.flatMap((snapshot) =>
+        [
+          snapshot.dimensions.externalCustomerAccountNumber,
+          snapshot.dimensions.appRiverCustomerId,
+          snapshot.dimensions.externalAccountId,
+          snapshot.dimensions.accountId,
+          snapshot.dimensions.appRiverCustomerName,
+          snapshot.dimensions.externalAccountName,
+          snapshot.dimensions.customerName,
+        ]
+          .filter((value): value is string | number => typeof value === 'string' || typeof value === 'number')
+          .map(String),
+      ),
+    ),
+  ];
+}
+
+function sourceGroupVendorProductKey(rule: QuantityRule, snapshots: UsageSnapshot[]) {
+  const keys = [
+    ...new Set(
+      snapshots
+        .map((snapshot) => snapshot.vendorProductKey)
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ];
+  return keys.length === 1 ? keys[0] : ruleVendorProductKey(rule);
 }
 
 function priceHintScore(addition: AgreementAddition, rule: QuantityRule) {
@@ -457,6 +591,9 @@ function buildLine(input: {
   snapshots: UsageSnapshot[];
   matchedAdditions: AgreementAddition[];
   assignedAddition?: AgreementAddition;
+  sourceVendorProductKey?: string;
+  sourceAccountId?: string;
+  sourceAccountName?: string;
   merged: boolean;
   ambiguous?: boolean;
 }): ReconciliationLine | undefined {
@@ -483,7 +620,7 @@ function buildLine(input: {
     ? liveVendorProductKeys.length === 1
       ? liveVendorProductKeys[0]
       : undefined
-    : ruleVendorProductKey(input.rule);
+    : input.sourceVendorProductKey ?? ruleVendorProductKey(input.rule);
   const assignedAddition = input.assignedAddition ?? input.matchedAdditions[0];
   const connectWiseAdditionId = assignedAddition?.connectWiseAdditionId ?? assignedAddition?.id;
   const unitPrice =
@@ -497,13 +634,15 @@ function buildLine(input: {
   return {
     id: input.merged
       ? `${input.agreementKey}|${normalizeProductCode(assignedAddition?.productCode ?? input.rule.productCode)}|merged-base`
-      : `${input.agreementKey}|${vendorProductKey ?? input.rule.productCode}|${connectWiseAdditionId ?? 'unassigned'}|base`,
+      : `${input.agreementKey}|${input.sourceAccountId ?? 'all-accounts'}|${vendorProductKey ?? input.rule.productCode}|${connectWiseAdditionId ?? 'unassigned'}|base`,
     vendorId: input.request.vendorId,
     clientId: input.clientId,
     agreementId: input.agreementId,
     productCode: assignedAddition?.productCode ?? input.rule.productCode,
     productName: assignedAddition?.productName ?? input.rule.productName,
     vendorProductKey,
+    sourceAccountId: input.sourceAccountId,
+    sourceAccountAliases: snapshotSourceAccountAliases(input.snapshots),
     connectWiseAdditionId,
     matchedAdditionIds: input.matchedAdditions.map((addition) => addition.connectWiseAdditionId ?? addition.id),
     lineType: 'base-count',
@@ -525,6 +664,11 @@ function buildLine(input: {
     evidence: [
       { label: 'Snapshot rows', value: input.snapshots.length },
       { label: 'Matched agreement additions', value: matchedAdditionCount },
+      ...(input.sourceAccountName
+        ? [{ label: 'Source account', value: input.sourceAccountName }]
+        : input.sourceAccountId
+          ? [{ label: 'Source account', value: input.sourceAccountId }]
+          : []),
       ...(input.merged ? [{ label: 'Reconcile mode', value: 'merged-single-addition' }] : []),
       ...(!input.merged && connectWiseAdditionId
         ? [{ label: 'Assigned ConnectWise addition', value: connectWiseAdditionId }]

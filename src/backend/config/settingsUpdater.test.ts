@@ -12,9 +12,13 @@ const secretWriter: IntegrationSecretWriter = {
   },
 };
 const savedNonSecrets: Array<Record<string, unknown>> = [];
+const savedSchedules: Array<Record<string, unknown>> = [];
 const repository: IntegrationSettingsRepository = {
   async saveNonSecrets(input) {
     savedNonSecrets.push(input);
+  },
+  async saveSyncSchedule(input) {
+    savedSchedules.push(input);
   },
 };
 
@@ -33,6 +37,14 @@ async function run() {
         publicKey: 'public-key',
         privateKey: 'private-key',
       },
+      schedule: {
+        frequency: 'daily',
+        scheduledHour: 6,
+        weekdays: [],
+        dayOfMonth: 1,
+        timeZone: 'America/New_York',
+        operationKeys: ['agreement-report'],
+      },
     },
     secretWriter,
     repository,
@@ -47,6 +59,11 @@ async function run() {
   assert.equal(result.validation.configuredStatus, 'connected');
   assert.deepEqual(result.savedNonSecretKeys, ['endpoint', 'companyId', 'clientId']);
   assert.equal(savedNonSecrets.length, 1);
+  assert.equal(savedSchedules[0]?.integrationId, 'connectwise');
+  assert.equal(
+    savedSchedules[0]?.schedule && (savedSchedules[0].schedule as { frequency: string }).frequency,
+    'daily',
+  );
 
   const partialProofpointResult = await updateIntegrationSettings(
     {

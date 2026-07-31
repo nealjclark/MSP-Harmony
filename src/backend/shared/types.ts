@@ -100,6 +100,7 @@ export type VendorProductAdditionPin = {
   customerId: string;
   agreementId: string;
   vendorProductKey: string;
+  sourceAccountId?: string;
   connectWiseAdditionId: string;
   connectwiseProductCode: string;
   connectwiseProductName: string;
@@ -149,6 +150,8 @@ export type ReconciliationLine = {
   productCode: string;
   productName: string;
   vendorProductKey?: string;
+  sourceAccountId?: string;
+  sourceAccountAliases?: string[];
   connectWiseAdditionId?: string;
   matchedAdditionIds?: string[];
   lineType: ReconciliationLineType;

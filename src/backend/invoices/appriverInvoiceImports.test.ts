@@ -125,7 +125,20 @@ async function run() {
               customer_id: customerId,
               agreement_id: agreementId,
               connectwise_product_code: 'CW-EXCHANGE-P1',
-              invoice_quantity: '27',
+              external_account_id: 'apollojets',
+              external_account_name: 'Apollo Jets',
+              vendor_product_key: 'Exchange Online Plan 1|Monthly|Monthly',
+              invoice_quantity: '12',
+              invoice_line_count: '1',
+            },
+            {
+              customer_id: customerId,
+              agreement_id: agreementId,
+              connectwise_product_code: 'CW-EXCHANGE-P1',
+              external_account_id: 'apjts',
+              external_account_name: 'APJts',
+              vendor_product_key: 'Exchange Online Plan 1|Monthly|Monthly',
+              invoice_quantity: '15',
               invoice_line_count: '1',
             },
           ] as T[],
@@ -382,6 +395,7 @@ async function run() {
   assert.equal(annualImported.exceptionRows, 0);
   assert.equal(annualInsertedLines[0]?.values?.[6], 'Microsoft 365 Business Premium|Annual|Monthly');
   assert.equal(annualInsertedLines[0]?.values?.[10], 'CW-M365-BUSINESS-PREMIUM-AM');
+  assert.equal(annualInsertedLines[0]?.values?.[26], 'Monthly');
   assert.equal(
     String(annualInsertedLines[0]?.values?.[7] ?? '').includes('Microsoft 365 Business Premium|Annual|Annual'),
     true,
@@ -398,7 +412,20 @@ async function run() {
   const quantity = invoiceState.quantities.get(`${customerId}|${agreementId}|CW-EXCHANGE-P1`);
   assert.equal(invoiceState.latestInvoice?.invoiceNumber, '4032091');
   assert.equal(quantity?.invoiceQuantity, 27);
-  assert.equal(quantity?.invoiceLineCount, 1);
+  assert.equal(quantity?.invoiceLineCount, 2);
+  const apolloQuantity = invoiceState.quantities.get(
+    `${customerId}|${agreementId}|CW-EXCHANGE-P1|apollojets|Exchange Online Plan 1|Monthly|Monthly`,
+  );
+  assert.equal(apolloQuantity?.invoiceQuantity, 12);
+  assert.equal(apolloQuantity?.invoiceLineCount, 1);
+  const apolloQuantityByName = invoiceState.quantities.get(
+    `${customerId}|${agreementId}|CW-EXCHANGE-P1|Apollo Jets|Exchange Online Plan 1|Monthly|Monthly`,
+  );
+  assert.equal(apolloQuantityByName?.invoiceQuantity, 12);
+  const apolloAccountQuantity = invoiceState.quantities.get(
+    `${customerId}|${agreementId}|CW-EXCHANGE-P1|account:Apollo Jets`,
+  );
+  assert.equal(apolloAccountQuantity?.invoiceQuantity, 12);
 
   const reviewDatabase: Queryable = {
     async query<T = unknown>(sql: string) {
@@ -597,6 +624,9 @@ async function run() {
   const refreshAccountQuery = refreshQueries.find((query) => query.sql.includes('approved_account_mapping_keys'));
   assert.equal(refreshAccountQuery?.sql.includes("dimensions->>'externalCustomerAccountNumber'"), true);
   assert.equal(refreshAccountQuery?.values?.[2], 'opentext-appriver');
+  const refreshProductQuery = refreshQueries.find((query) => query.sql.includes('line_product_matches'));
+  assert.equal(refreshProductQuery?.sql.includes("raw_payload->>'Comments'"), true);
+  assert.equal(refreshProductQuery?.sql.includes('set vendor_product_key = line_product_matches.vendor_product_key'), true);
 
   const totalInvoiceImports: Array<{ sql: string; values?: unknown[] }> = [];
   const totalInvoiceLines: Array<{ sql: string; values?: unknown[] }> = [];

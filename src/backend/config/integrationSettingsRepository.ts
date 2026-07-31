@@ -1,5 +1,15 @@
 import { getIntegrationSettingsDefinition, listIntegrationApiOperations, type IntegrationId, type IntegrationTestResult } from '../../shared/integrationSettings';
-import type { IntegrationOperationalStatus, IntegrationOperationalStatusReader, IntegrationSyncJob } from '../api/integrations';
+import {
+  defaultIntegrationSyncSchedule,
+  type IntegrationSyncSchedule,
+  type IntegrationSyncScheduleEntry,
+} from '../../shared/integrationSchedules';
+import type {
+  IntegrationOperationalStatus,
+  IntegrationOperationalStatusReader,
+  IntegrationSyncFailureDetail,
+  IntegrationSyncJob,
+} from '../api/integrations';
 import type { IntegrationSettingsMetadata, IntegrationSettingsMetadataReader } from './settingsProvider';
 import type { IntegrationSettingsRepository } from './settingsUpdater';
 
@@ -62,6 +72,18 @@ type IntegrationSyncJobRow = {
   progress_unit_label: string | null;
 };
 
+type IntegrationSyncScheduleRow = {
+  integration_id: IntegrationId;
+  operation_key: string;
+  frequency: IntegrationSyncSchedule['frequency'];
+  scheduled_hour: number;
+  weekdays: unknown;
+  day_of_month: number;
+  time_zone: string;
+  last_enqueued_slot: string | null;
+  last_enqueued_at: Date | string | null;
+};
+
 export type SaveIntegrationTestResultInput = {
   integrationId: IntegrationId;
   displayName: string;
@@ -96,6 +118,201 @@ export class PostgresIntegrationSettingsRepository
     const id = result.rows[0]?.id;
     if (!id) throw new Error(`Unable to create ${input.integrationName} sync job.`);
     return id;
+  }
+
+  async saveSyncSchedule(input: {
+    integrationId: IntegrationId;
+    schedule: IntegrationSyncSchedule;
+    updatedBy: string;
+  }) {
+    await this.database.query(
+      `insert into integration_sync_schedules (
+         integration_id, operation_key, frequency, scheduled_hour, weekdays, day_of_month, time_zone, updated_at
+       )
+       select $1, operation_key, $2, $3, $4::jsonb, $5, $6, now()
+       from unnest($7::text[]) operation_key
+       on conflict (integration_id, operation_key)
+       do update set
+         frequency = excluded.frequency,
+         scheduled_hour = excluded.scheduled_hour,
+         weekdays = excluded.weekdays,
+         day_of_month = excluded.day_of_month,
+         time_zone = excluded.time_zone,
+         last_enqueued_slot = case
+           when integration_sync_schedules.frequency is distinct from excluded.frequency
+             or integration_sync_schedules.scheduled_hour is distinct from excluded.scheduled_hour
+             or integration_sync_schedules.weekdays is distinct from excluded.weekdays
+             or integration_sync_schedules.day_of_month is distinct from excluded.day_of_month
+             or integration_sync_schedules.time_zone is distinct from excluded.time_zone
+           then null
+           else integration_sync_schedules.last_enqueued_slot
+         end,
+         updated_at = now()`,
+      [
+        input.integrationId,
+        input.schedule.frequency,
+        input.schedule.scheduledHour,
+        JSON.stringify(input.schedule.weekdays),
+        input.schedule.dayOfMonth,
+        input.schedule.timeZone,
+        input.schedule.operationKeys,
+      ],
+    );
+    await this.database.query(
+      `delete from integration_sync_schedules
+       where integration_id = $1
+         and not (operation_key = any($2::text[]))`,
+      [input.integrationId, input.schedule.operationKeys],
+    );
+
+    await this.database.query(
+      `insert into audit_events (actor, event_type, entity_type, entity_id, payload)
+       values ($1, 'integration.schedule.updated', 'integration', $2, $3::jsonb)`,
+      [
+        input.updatedBy,
+        input.integrationId,
+        JSON.stringify({
+          frequency: input.schedule.frequency,
+          scheduledHour: input.schedule.scheduledHour,
+          weekdays: input.schedule.weekdays,
+          dayOfMonth: input.schedule.dayOfMonth,
+          timeZone: input.schedule.timeZone,
+          operationKeys: input.schedule.operationKeys,
+        }),
+      ],
+    );
+  }
+
+  async loadSyncSchedule(integrationId: IntegrationId): Promise<IntegrationSyncSchedule> {
+    const schedules = await this.loadAllSyncSchedules([integrationId]);
+    return schedules.get(integrationId) ?? defaultIntegrationSyncSchedule(integrationId);
+  }
+
+  async loadAllSyncSchedules(integrationIds: IntegrationId[]): Promise<Map<IntegrationId, IntegrationSyncSchedule>> {
+    if (integrationIds.length === 0) return new Map();
+
+    const result = await this.database.query<IntegrationSyncScheduleRow>(
+      `select integration_id, operation_key, frequency, scheduled_hour, weekdays, day_of_month, time_zone,
+              last_enqueued_slot, last_enqueued_at
+       from integration_sync_schedules
+       where integration_id = any($1::text[])
+       order by integration_id, operation_key`,
+      [integrationIds],
+    );
+    const grouped = new Map<IntegrationId, IntegrationSyncScheduleRow[]>();
+    for (const row of result.rows) {
+      grouped.set(row.integration_id, [...(grouped.get(row.integration_id) ?? []), row]);
+    }
+
+    return new Map(
+      integrationIds.map((integrationId) => {
+        const rows = grouped.get(integrationId) ?? [];
+        const first = rows[0];
+        if (!first) return [integrationId, defaultIntegrationSyncSchedule(integrationId)];
+        const enqueuedAtValues = rows
+          .map((row) => isoDate(row.last_enqueued_at))
+          .filter((value): value is string => Boolean(value))
+          .sort();
+        const latestEnqueuedAt = enqueuedAtValues[enqueuedAtValues.length - 1];
+        return [
+          integrationId,
+          {
+            frequency: first.frequency,
+            scheduledHour: first.scheduled_hour,
+            weekdays: numberArrayFromJson(first.weekdays),
+            dayOfMonth: first.day_of_month,
+            timeZone: first.time_zone,
+            operationKeys: rows.map((row) => row.operation_key),
+            lastEnqueuedAt: latestEnqueuedAt,
+          },
+        ];
+      }),
+    );
+  }
+
+  async listSyncScheduleEntries(): Promise<IntegrationSyncScheduleEntry[]> {
+    const result = await this.database.query<IntegrationSyncScheduleRow>(
+      `select schedules.integration_id, schedules.operation_key, schedules.frequency, schedules.scheduled_hour,
+              schedules.weekdays, schedules.day_of_month, schedules.time_zone,
+              schedules.last_enqueued_slot, schedules.last_enqueued_at
+       from integration_sync_schedules schedules
+       join integration_settings settings on settings.integration_id = schedules.integration_id
+       where settings.configured_status <> 'not-configured'
+         and schedules.frequency <> 'manual'
+       order by schedules.scheduled_hour, schedules.integration_id, schedules.operation_key`,
+    );
+
+    return result.rows.map((row) => ({
+      integrationId: row.integration_id,
+      operationKey: row.operation_key,
+      frequency: row.frequency as IntegrationSyncScheduleEntry['frequency'],
+      scheduledHour: row.scheduled_hour,
+      weekdays: numberArrayFromJson(row.weekdays),
+      dayOfMonth: row.day_of_month,
+      timeZone: row.time_zone,
+      lastEnqueuedSlot: row.last_enqueued_slot ?? undefined,
+      lastEnqueuedAt: isoDate(row.last_enqueued_at),
+    }));
+  }
+
+  async claimScheduledSync(input: {
+    integrationId: IntegrationId;
+    operationKey: string;
+    operationLabel: string;
+    slot: string;
+    requestedAt: string;
+    maximumActiveJobs: number;
+  }): Promise<string | undefined> {
+    const result = await this.database.query<{ id: string }>(
+      `with scheduler_lock as (
+         select pg_advisory_xact_lock(hashtext('msp-harmony:integration-scheduler'))
+       ),
+       inserted as (
+         insert into integration_sync_jobs (
+           integration_id, operation_key, operation_label, status, requested_by, requested_at
+         )
+         select $1, $2, $3, 'queued', 'MSP Harmony scheduler', $5::timestamptz
+         from scheduler_lock
+         where (
+           select count(*)
+           from integration_sync_jobs
+           where status in ('queued', 'running')
+         ) < $6
+           and exists (
+             select 1
+             from integration_sync_schedules
+             where integration_id = $1
+               and operation_key = $2
+               and last_enqueued_slot is distinct from $4
+           )
+           and not exists (
+             select 1
+             from integration_sync_jobs
+             where integration_id = $1
+               and operation_key = $2
+               and status in ('queued', 'running')
+           )
+         returning id
+       ),
+       updated as (
+         update integration_sync_schedules
+         set last_enqueued_slot = $4, last_enqueued_at = $5::timestamptz, updated_at = now()
+         where integration_id = $1
+           and operation_key = $2
+           and exists (select 1 from inserted)
+       )
+       select id from inserted`,
+      [
+        input.integrationId,
+        input.operationKey,
+        input.operationLabel,
+        input.slot,
+        input.requestedAt,
+        input.maximumActiveJobs,
+      ],
+    );
+
+    return result.rows[0]?.id;
   }
 
   async markSyncJobRunning(jobId: string) {
@@ -529,6 +746,7 @@ export class PostgresIntegrationSettingsRepository
         recordsWritten: row.records_written,
         error: row.error_message ?? undefined,
         currentItem,
+        failures: syncFailureDetails(row.integration_id, row.metadata),
       };
       statuses.set(row.integration_id, [...(statuses.get(row.integration_id) ?? []), operation]);
     }
@@ -642,6 +860,81 @@ function stringArrayFromJson(value: unknown) {
   }
 
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function syncFailureDetails(
+  integrationId: IntegrationId,
+  metadataValue: unknown,
+): IntegrationSyncFailureDetail[] | undefined {
+  const metadata = jsonObject(metadataValue);
+  const failures =
+    integrationId === 'microsoft-365'
+      ? [
+          ...failureArray(metadata.failedTenantDetails, 'Tenant', 'tenantId', 'displayName'),
+          ...failureArray(
+            metadata.failedProductSubscriptionDetails,
+            'Subscription details',
+            'tenantId',
+            'displayName',
+          ),
+        ]
+      : integrationId === 'opentext-appriver'
+        ? [
+            ...failureArray(metadata.failedCustomerDetails, 'Customer', 'customerId', 'customerName'),
+            ...failureArray(
+              metadata.failedSubscriptionDetails,
+              'Subscription',
+              'customerId',
+              'customerName',
+              'subscriptionKey',
+            ),
+          ]
+        : [];
+
+  return failures.length > 0 ? failures : undefined;
+}
+
+function failureArray(
+  value: unknown,
+  category: string,
+  idKey: string,
+  nameKey: string,
+  relatedIdKey?: string,
+): IntegrationSyncFailureDetail[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((item) => {
+    const detail = jsonObject(item);
+    const itemId = stringValue(detail[idKey]);
+    const message = stringValue(detail.message);
+    if (!itemId || !message) return [];
+
+    return [{
+      itemId,
+      itemName: stringValue(detail[nameKey]),
+      relatedId: relatedIdKey ? stringValue(detail[relatedIdKey]) : undefined,
+      category,
+      message,
+    }];
+  });
+}
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function numberArrayFromJson(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is number => typeof item === 'number' && Number.isInteger(item));
 }
 
 function isoDate(value: Date | string | null) {

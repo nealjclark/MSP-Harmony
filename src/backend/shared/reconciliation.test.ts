@@ -397,6 +397,91 @@ assert.equal(workstationLine?.connectWiseAdditionId, '701');
 assert.equal(workstationLine?.agreementQuantity, 7);
 assert.equal(workstationLine?.delta, -2);
 
+const appRiverSubsidiaryResult = reconcileVendorUsage({
+  vendorId: 'opentext-appriver',
+  reconcileMode: 'separate-multiple-products',
+  rules: [
+    {
+      id: 'm365-business-standard-count',
+      vendorId: 'opentext-appriver',
+      vendorProductKey: 'Microsoft 365 Business Standard|Monthly|Monthly',
+      productCode: 'M365-BUSINESS-STANDARD-M',
+      productName: 'Microsoft 365 Business Standard',
+      sourceMetric: 'snapshot-count',
+      billableUnit: 'license',
+      notes: 'AppRiver subscription count.',
+    },
+  ],
+  snapshots: [
+    {
+      id: 'apollojets-standard',
+      vendorId: 'opentext-appriver',
+      clientId: 'apollo-cw-customer',
+      agreementId: 'apollo-cw-agreement',
+      vendorProductKey: 'Microsoft 365 Business Standard|Monthly|Monthly',
+      productCode: 'M365-BUSINESS-STANDARD-M',
+      productName: 'Microsoft 365 Business Standard',
+      quantity: 69,
+      observedAt: '2026-07-30T00:00:00.000Z',
+      dimensions: {
+        appRiverCustomerId: 'apollojets',
+        appRiverCustomerName: 'ApolloJets',
+        externalCustomerAccountNumber: '515418',
+      },
+    },
+    {
+      id: 'apjts-standard',
+      vendorId: 'opentext-appriver',
+      clientId: 'apollo-cw-customer',
+      agreementId: 'apollo-cw-agreement',
+      vendorProductKey: 'Microsoft 365 Business Standard|Monthly|Monthly',
+      productCode: 'M365-BUSINESS-STANDARD-M',
+      productName: 'Microsoft 365 Business Standard',
+      quantity: 68,
+      observedAt: '2026-07-30T00:00:00.000Z',
+      dimensions: {
+        appRiverCustomerId: 'apjts',
+        appRiverCustomerName: 'APJts',
+        externalCustomerAccountNumber: '515419',
+      },
+    },
+  ],
+  agreementAdditions: [
+    {
+      id: 'apollo-cw-1929',
+      connectWiseAdditionId: '1929',
+      clientId: 'apollo-cw-customer',
+      agreementId: 'apollo-cw-agreement',
+      productCode: 'M365-BUSINESS-STANDARD-M',
+      productName: 'Microsoft 365 Business Standard',
+      quantity: 69,
+    },
+    {
+      id: 'apollo-cw-2941',
+      connectWiseAdditionId: '2941',
+      clientId: 'apollo-cw-customer',
+      agreementId: 'apollo-cw-agreement',
+      productCode: 'M365-BUSINESS-STANDARD-M',
+      productName: 'Microsoft 365 Business Standard',
+      quantity: 68,
+    },
+  ],
+});
+const apolloJetsLine = appRiverSubsidiaryResult.lines.find((line) => line.sourceAccountId === '515418');
+const apJtsLine = appRiverSubsidiaryResult.lines.find((line) => line.sourceAccountId === '515419');
+assert.equal(appRiverSubsidiaryResult.lines.filter((line) => line.lineType === 'base-count').length, 2);
+assert.equal(apolloJetsLine?.sourceQuantity, 69);
+assert.equal(apolloJetsLine?.connectWiseAdditionId, '1929');
+assert.equal(apJtsLine?.sourceQuantity, 68);
+assert.equal(apJtsLine?.connectWiseAdditionId, '2941');
+assert.deepEqual(
+  appRiverSubsidiaryResult.pinAssignments?.map((pin) => [pin.sourceAccountId, pin.connectWiseAdditionId]).sort(),
+  [
+    ['515418', '1929'],
+    ['515419', '2941'],
+  ],
+);
+
 const singleAdditionSeparateResult = reconcileVendorUsage({
   vendorId: 'sentinelone',
   reconcileMode: 'separate-multiple-products',
