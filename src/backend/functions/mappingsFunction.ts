@@ -17,9 +17,11 @@ import {
   deactivateProductLinkRule,
   deactivateProductBundle,
   listCrossVendorProductBundles,
+  ignoreVendorProduct,
   listProductMappingCustomers,
   listMappingState,
   runAccountAutomap,
+  restoreIgnoredVendorProduct,
   searchConnectWiseProductCatalog,
   setProductLinkRuleActive,
   testProductLinkRule,
@@ -103,6 +105,10 @@ type ProductBundleBody = {
   targetProduct?: ProductMappingTarget;
   reviewedBy?: string;
   active?: boolean;
+};
+
+type VendorProductExclusionBody = {
+  reason?: string;
 };
 
 type CrossVendorBundleBody = {
@@ -490,6 +496,84 @@ export async function deactivateProductBundleHttp(
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to deactivate product bundle mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function ignoreVendorProductHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const vendorProductKey = decodedRouteParam(request.params.vendorProductKey);
+  if (!integrationId) return unsupportedVendorResponse(request.params.vendorId);
+  if (!vendorProductKey) return jsonResponse(400, { error: 'Ignoring a product requires vendorProductKey.' });
+
+  const bodyResult = await readJsonBody<VendorProductExclusionBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const reason = bodyResult.body.reason?.trim();
+  if (!reason) return jsonResponse(400, { error: 'Ignoring a vendor product requires a reason.' });
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Ignoring a vendor product needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    await ignoreVendorProduct(repositoryContext.pool, integrationId, vendorProductKey, {
+      reason,
+      ignoredBy: auth.principal.name,
+    });
+    return jsonResponse(200, { vendorId: integrationId, vendorProductKey, active: true, reason });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to ignore vendor product.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function restoreIgnoredVendorProductHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const integrationId = parseIntegrationId(request.params.vendorId);
+  const vendorProductKey = decodedRouteParam(request.params.vendorProductKey);
+  if (!integrationId) return unsupportedVendorResponse(request.params.vendorId);
+  if (!vendorProductKey) return jsonResponse(400, { error: 'Restoring a product requires vendorProductKey.' });
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Restoring a vendor product needs PostgreSQL settings before it can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    await restoreIgnoredVendorProduct(repositoryContext.pool, integrationId, vendorProductKey, auth.principal.name);
+    return jsonResponse(200, { vendorId: integrationId, vendorProductKey, active: false });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to restore vendor product.',
     });
   } finally {
     await repositoryContext.close();
@@ -1499,6 +1583,20 @@ app.http('deactivateProductBundle', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/bundles/{bundleKey}/deactivate',
   handler: deactivateProductBundleHttp,
+});
+
+app.http('ignoreVendorProduct', {
+  methods: ['PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/products/{vendorProductKey}/ignore',
+  handler: ignoreVendorProductHttp,
+});
+
+app.http('restoreIgnoredVendorProduct', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'mappings/{vendorId}/products/{vendorProductKey}/ignore',
+  handler: restoreIgnoredVendorProductHttp,
 });
 
 app.http('listDeviceMatchExclusions', {

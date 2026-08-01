@@ -188,7 +188,7 @@ type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationWorkflowTab = 'api' | 'manual' | 'invoice';
 type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'azure-utilization' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'ignored-products' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -2324,6 +2324,18 @@ type ProductMapping = ProductMappingCandidate & {
   reviewedAt?: string;
 };
 
+type IgnoredVendorProduct = {
+  id: string;
+  vendorId: IntegrationId;
+  vendorProductKey: string;
+  reason: string;
+  active: boolean;
+  ignoredBy: string;
+  ignoredAt: string;
+  restoredBy?: string;
+  restoredAt?: string;
+};
+
 type MappingStateResponse = {
   vendorId: IntegrationId;
   summary: {
@@ -2334,6 +2346,7 @@ type MappingStateResponse = {
     productMappings: number;
     approvedProductMappings: number;
     productCandidates: number;
+    ignoredProducts: number;
     productBundles: number;
     linkedProductRules: number;
     unmappedSnapshots: number;
@@ -2342,6 +2355,7 @@ type MappingStateResponse = {
   accountCandidates: AccountMappingCandidate[];
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
+  ignoredProducts: IgnoredVendorProduct[];
   productBundles: ProductBundle[];
   productLinkRules: ProductLinkRule[];
   customerOptions: MappingCustomerOption[];
@@ -5058,6 +5072,39 @@ async function saveProductMapping(
 
   if (!response.ok) {
     throw new Error(String(body.error ?? `Product mapping save failed with HTTP ${response.status}.`));
+  }
+}
+
+async function ignoreVendorProductRequest(
+  integrationId: VendorKey,
+  vendorProductKey: string,
+  reason: string,
+) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/products/${encodeURIComponent(vendorProductKey)}/ignore`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product ignore failed with HTTP ${response.status}.`));
+  }
+}
+
+async function restoreIgnoredVendorProductRequest(
+  integrationId: VendorKey,
+  vendorProductKey: string,
+) {
+  const response = await fetch(
+    `/api/mappings/${encodeURIComponent(integrationId)}/products/${encodeURIComponent(vendorProductKey)}/ignore`,
+    { method: 'DELETE' },
+  );
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Product restore failed with HTTP ${response.status}.`));
   }
 }
 
@@ -9395,6 +9442,49 @@ function App() {
     }
   };
 
+  const ignoreVendorProduct = async (
+    integrationId: VendorKey,
+    vendorProductKey: string,
+    reason: string,
+  ) => {
+    setBusyMappingAction(`ignore-product:${vendorProductKey}`);
+    try {
+      await ignoreVendorProductRequest(integrationId, vendorProductKey, reason);
+      await loadMappings(integrationId);
+      setMappingMessage(`Ignored ${vendorProductKey}: ${reason}`);
+      if (
+        reconciliationComparisonRequested &&
+        isRegistryIntegrationId(integrationId) &&
+        selectedReconciliationIntegrationSet.has(integrationId) &&
+        reconciliationVendorIds.includes(integrationId)
+      ) {
+        await loadVendorReconciliation(integrationId);
+      }
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to ignore vendor product.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const restoreIgnoredVendorProduct = async (
+    integrationId: VendorKey,
+    vendorProductKey: string,
+  ) => {
+    setBusyMappingAction(`ignore-product:${vendorProductKey}`);
+    try {
+      await restoreIgnoredVendorProductRequest(integrationId, vendorProductKey);
+      await loadMappings(integrationId);
+      setMappingMessage(`Restored ${vendorProductKey} to product mapping review.`);
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Unable to restore vendor product.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
   const saveProductBundle = async (
     integrationId: VendorKey,
     payload: {
@@ -10445,6 +10535,8 @@ function App() {
                 selectMappingIntegration(integrationId);
                 updateRouteForView('mappings', integrationId);
               }}
+              onProductIgnore={ignoreVendorProduct}
+              onProductRestore={restoreIgnoredVendorProduct}
               onProductTargetsSave={saveProductTargets}
               onProductBundleDeactivate={deactivateProductBundle}
               onProductBundleSave={saveProductBundle}
@@ -17406,6 +17498,12 @@ function MappingsView(props: {
   onCrossVendorBundlesRefresh: () => Promise<CrossVendorProductBundle[]>;
   onDeviceExclusionDeactivate: (exclusion: DeviceMatchExclusion) => Promise<void>;
   onIntegrationChange: (integrationId: VendorKey) => void;
+  onProductIgnore: (
+    integrationId: VendorKey,
+    vendorProductKey: string,
+    reason: string,
+  ) => Promise<void>;
+  onProductRestore: (integrationId: VendorKey, vendorProductKey: string) => Promise<void>;
   onProductTargetsSave: (
     integrationId: VendorKey,
     vendorProductKey: string,
@@ -17478,6 +17576,8 @@ function MappingsView(props: {
     onCrossVendorBundlesRefresh,
     onDeviceExclusionDeactivate,
     onIntegrationChange,
+    onProductIgnore,
+    onProductRestore,
     onProductTargetsSave,
     onProductBundleDeactivate,
     onProductBundleSave,
@@ -17614,6 +17714,10 @@ function MappingsView(props: {
   const productCandidates = (mappingState?.productCandidates ?? [])
     .filter((row) => dattoProductMatchesDataset(row.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined))
     .filter((row) => huntressProductMatchesDataset(row.vendorProductKey, isHuntressMappingWorkspace ? huntressMappingDataset : undefined));
+  const ignoredProducts = (mappingState?.ignoredProducts ?? [])
+    .filter((product) => product.active)
+    .filter((product) => dattoProductMatchesDataset(product.vendorProductKey, isDattoMappingWorkspace ? dattoMappingDataset : undefined))
+    .filter((product) => huntressProductMatchesDataset(product.vendorProductKey, isHuntressMappingWorkspace ? huntressMappingDataset : undefined));
   const allProductRows = [...productMappings, ...productCandidates];
   const visibleProductRows = showMappedProducts ? allProductRows : productCandidates;
   const allProductGroups = useMemo(() => buildProductGroups(allProductRows), [allProductRows]);
@@ -19127,11 +19231,77 @@ function MappingsView(props: {
                       <Check size={16} />
                       Save
                     </button>
+                    {approvedCount === 0 ? (
+                      <button
+                        className="button secondary compact"
+                        disabled={busyAction === `ignore-product:${group.vendorProductKey}`}
+                        onClick={() => {
+                          const reason = window.prompt(
+                            `Why should ${group.vendorProductName} be ignored as non-billable?`,
+                          )?.trim();
+                          if (reason) {
+                            void onProductIgnore(group.vendorId, group.vendorProductKey, reason);
+                          }
+                        }}
+                        title="Intentionally ignore this non-billable vendor product"
+                        type="button"
+                      >
+                        Ignore
+                      </button>
+                    ) : null}
                   </span>
                 </article>
               );
             })}
           </div>
+          </div>
+        </MappingSectionDrawer>
+
+        <MappingSectionDrawer
+          defaultOpen={false}
+          meta="Non-billable vendor products"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="ignored-products"
+          status={`${ignoredProducts.length.toLocaleString()} ignored`}
+          statusTone={ignoredProducts.length > 0 ? 'blocked' : 'approved'}
+          title="Ignored products"
+        >
+          <div className="work-surface">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">Ignored products</span>
+                <h2>{ignoredProducts.length.toLocaleString()} intentionally non-billable products</h2>
+              </div>
+            </div>
+            <div className="product-bundle-list">
+              {ignoredProducts.length === 0 ? (
+                <div className="empty-state">
+                  <Check size={20} />
+                  <strong>No products are intentionally ignored.</strong>
+                </div>
+              ) : null}
+              {ignoredProducts.map((product) => (
+                <article className="product-bundle-row ignored-product-row" key={product.id}>
+                  <div>
+                    <strong>{product.vendorProductKey}</strong>
+                    <span>{product.reason}</span>
+                  </div>
+                  <span className="status-pill blocked">Ignored</span>
+                  <span>
+                    {product.ignoredBy} · {formatDateTime(product.ignoredAt)}
+                  </span>
+                  <button
+                    className="button secondary compact"
+                    disabled={busyAction === `ignore-product:${product.vendorProductKey}`}
+                    onClick={() => void onProductRestore(product.vendorId, product.vendorProductKey)}
+                    type="button"
+                  >
+                    Restore
+                  </button>
+                </article>
+              ))}
+            </div>
           </div>
         </MappingSectionDrawer>
       </section>
@@ -22354,6 +22524,7 @@ function IntegrationModal(props: {
         : {}),
     };
   };
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     void onSave(buildPayload(event.currentTarget));

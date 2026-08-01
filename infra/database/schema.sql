@@ -85,6 +85,21 @@ CREATE TABLE IF NOT EXISTS vendor_product_mappings (
   UNIQUE (vendor_id, vendor_product_key, connectwise_product_code)
 );
 
+CREATE TABLE IF NOT EXISTS vendor_product_exclusions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  vendor_product_key text NOT NULL,
+  reason text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  ignored_by text NOT NULL,
+  ignored_at timestamptz NOT NULL DEFAULT now(),
+  restored_by text,
+  restored_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (vendor_id, vendor_product_key)
+);
+
 CREATE TABLE IF NOT EXISTS vendor_product_bundles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -674,6 +689,9 @@ CREATE INDEX IF NOT EXISTS idx_app_users_status_role ON app_users(status, role);
 CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_vendor_observed ON vendor_usage_snapshots(vendor_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_vendor_account_mappings_vendor ON vendor_account_mappings(vendor_id, external_account_id) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_mappings_vendor ON vendor_product_mappings(vendor_id, vendor_product_key) WHERE active;
+CREATE INDEX IF NOT EXISTS idx_vendor_product_exclusions_vendor
+  ON vendor_product_exclusions(vendor_id, vendor_product_key)
+  WHERE active;
 CREATE INDEX IF NOT EXISTS idx_vendor_product_bundles_vendor ON vendor_product_bundles(vendor_id, bundle_key) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_cross_vendor_product_bundles_active
   ON cross_vendor_product_bundles(active, bundle_key)
@@ -733,6 +751,24 @@ ALTER TABLE vendor_product_mappings ADD COLUMN IF NOT EXISTS reviewed_at timesta
 ALTER TABLE vendor_product_mappings ADD COLUMN IF NOT EXISTS match_evidence jsonb NOT NULL DEFAULT '[]'::jsonb;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_vendor_product_mappings_target
   ON vendor_product_mappings(vendor_id, vendor_product_key, connectwise_product_code);
+
+CREATE TABLE IF NOT EXISTS vendor_product_exclusions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id text NOT NULL,
+  vendor_product_key text NOT NULL,
+  reason text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  ignored_by text NOT NULL,
+  ignored_at timestamptz NOT NULL DEFAULT now(),
+  restored_by text,
+  restored_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (vendor_id, vendor_product_key)
+);
+CREATE INDEX IF NOT EXISTS idx_vendor_product_exclusions_vendor
+  ON vendor_product_exclusions(vendor_id, vendor_product_key)
+  WHERE active;
 
 ALTER TABLE vendor_product_bundles ADD COLUMN IF NOT EXISTS bundle_name text NOT NULL DEFAULT '';
 ALTER TABLE vendor_product_bundles ADD COLUMN IF NOT EXISTS components jsonb NOT NULL DEFAULT '[]'::jsonb;

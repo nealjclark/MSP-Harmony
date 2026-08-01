@@ -627,8 +627,13 @@ function buildLine(input: {
     assignedAddition?.unitPrice ??
     unitPriceForImpact(input.matchedAdditions, input.rule.productCode, input.rule.unitPrice);
   const matchedAdditionCount = input.matchedAdditions.length;
+  const missingOnVendorSide = input.snapshots.some(
+    (snapshot) => snapshot.dimensions.appRiverBundleVendorMissing === true,
+  );
   const writeAction: ReconciliationWriteAction | undefined = input.ambiguous
     ? 'review-required'
+    : missingOnVendorSide
+      ? 'review-required'
     : writeActionForDelta(delta, matchedAdditionCount);
 
   return {
@@ -656,7 +661,9 @@ function buildLine(input: {
     financialImpact: calculateImpact(delta, unitPrice),
     status: statusForDelta(delta),
     writeAction,
-    reason: input.ambiguous
+    reason: missingOnVendorSide
+      ? `${input.rule.productName} is on the ConnectWise agreement but its configured AppRiver bundle products are missing on the vendor side.`
+      : input.ambiguous
       ? `${input.rule.productName} could not be uniquely matched to a ConnectWise addition.`
       : proposedQuantity === agreementQuantity
         ? `${input.rule.productName} count matches the agreement addition.`
@@ -670,6 +677,9 @@ function buildLine(input: {
           ? [{ label: 'Source account', value: input.sourceAccountId }]
           : []),
       ...(input.merged ? [{ label: 'Reconcile mode', value: 'merged-single-addition' }] : []),
+      ...(missingOnVendorSide
+        ? [{ label: 'Vendor status', value: 'Missing configured bundle products' }]
+        : []),
       ...(!input.merged && connectWiseAdditionId
         ? [{ label: 'Assigned ConnectWise addition', value: connectWiseAdditionId }]
         : []),

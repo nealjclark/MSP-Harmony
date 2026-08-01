@@ -197,6 +197,15 @@ async function run() {
   assert.equal(bundleLine?.devices[0]?.dimensions.appRiverBundle, true);
   assert.equal(appRiverBundleResult.snapshotCount, 1);
 
+  const appRiverMissingBundleResult = await reconcileVendorFromDatabase(appRiverMissingBundleDatabase, 'opentext-appriver', { syncRunId });
+  const missingBundleLine = appRiverMissingBundleResult.lines.find((line) => line.productCode === 'CW-ZIX-ADVANCED');
+  assert.equal(missingBundleLine?.sourceQuantity, 0);
+  assert.equal(missingBundleLine?.agreementQuantity, 8);
+  assert.equal(missingBundleLine?.status, 'needs-review');
+  assert.equal(missingBundleLine?.writeAction, 'review-required');
+  assert.match(missingBundleLine?.reason ?? '', /missing on the vendor side/i);
+  assert.equal(missingBundleLine?.devices[0]?.dimensions.appRiverBundleVendorMissing, true);
+
   const appRiverBundleWithoutAdditionResult = await reconcileVendorFromDatabase(appRiverBundleWithoutAdditionDatabase, 'opentext-appriver', { syncRunId });
   const bundleLineWithoutAddition = appRiverBundleWithoutAdditionResult.lines.find((line) => line.productCode === 'CW-ZIX-ADVANCED');
   assert.equal(bundleLineWithoutAddition, undefined);
@@ -238,6 +247,10 @@ async function run() {
   assert.equal(unmappedE5Line?.devices.length, 1);
   assert.equal(unmappedE5Line?.devices[0]?.vendorProductKey, 'Microsoft 365 E5 (no Teams)|Monthly|Monthly');
   assert.equal(appRiverUnmappedResult.totals.unmapped, 1);
+
+  const appRiverIgnoredProductResult = await reconcileVendorFromDatabase(appRiverIgnoredProductDatabase, 'opentext-appriver', { syncRunId });
+  assert.equal(appRiverIgnoredProductResult.lines.some((line) => line.status === 'unmapped'), false);
+  assert.equal(appRiverIgnoredProductResult.totals.unmapped, 0);
 
   const appRiverLinkedResult = await reconcileVendorFromDatabase(appRiverLinkedMicrosoftDatabase, 'opentext-appriver', { syncRunId });
   const linkedStandardLine = appRiverLinkedResult.lines.find((line) => line.productCode === 'Microsoft 365 Business Standard-M');
@@ -622,6 +635,16 @@ const appRiverBundleWithoutAdditionDatabase: Queryable = {
   },
 };
 
+const appRiverMissingBundleDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_usage_snapshots')) {
+      return { rows: [] as T[] };
+    }
+
+    return appRiverBundleDatabase.query<T>(sql, values);
+  },
+};
+
 const appRiverAliasDatabase: Queryable = {
   async query<T = unknown>(sql: string) {
     if (sql.includes('from vendor_usage_snapshots')) {
@@ -832,6 +855,30 @@ const appRiverUnmappedProductDatabase: Queryable = {
     }
 
     return { rows: [] as T[] };
+  },
+};
+
+const appRiverIgnoredProductDatabase: Queryable = {
+  async query<T = unknown>(sql: string, values?: unknown[]) {
+    if (sql.includes('from vendor_product_exclusions')) {
+      return {
+        rows: [
+          {
+            id: 'ignored-e5',
+            vendor_id: 'opentext-appriver',
+            vendor_product_key: 'Microsoft 365 E5 (no Teams)|Monthly|Monthly',
+            reason: 'Non-billable test product.',
+            active: true,
+            ignored_by: 'reviewer@example.com',
+            ignored_at: '2026-07-31T12:00:00Z',
+            restored_by: null,
+            restored_at: null,
+          },
+        ] as T[],
+      };
+    }
+
+    return appRiverUnmappedProductDatabase.query<T>(sql, values);
   },
 };
 

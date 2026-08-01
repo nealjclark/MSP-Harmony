@@ -28,6 +28,7 @@ import { loadHuntressRuleSet } from '../vendor/huntress/operations';
 import { loadCaveloRuleSet } from '../vendor/cavelo/operations';
 import {
   listProductBundles,
+  listIgnoredVendorProducts,
   listCrossVendorProductBundles,
   listProductLinkRules,
   type CrossVendorProductBundle,
@@ -262,6 +263,12 @@ export async function reconcileVendorFromDatabase(
 
   const syncRunId = options.syncRunId ?? (await loadLatestSyncRunId(database, vendorId));
   const ruleSet = await loadRuleSet(database, vendorId);
+  const ignoredProductKeys = new Set(
+    (await listIgnoredVendorProducts(database, vendorId as VendorKey))
+      .filter((product) => product.active)
+      .map((product) => canonicalVendorProductKey(product.vendorProductKey)),
+  );
+  const productBundles = await listProductBundles(database, vendorId as IntegrationId);
   const doNotSuggestNewAdditions = await loadDoNotSuggestNewAdditions(database, vendorId);
   const rules = doNotSuggestNewAdditions
     ? ruleSet.rules.map((rule) => ({
@@ -276,6 +283,9 @@ export async function reconcileVendorFromDatabase(
     await listProductLinkRules(database, vendorId as IntegrationId),
   );
   const invoiceState = await loadLatestInvoiceQuantitiesForLines(database, vendorId as IntegrationId, []);
+  const visibleInvoiceGroups = invoiceState.groups.filter(
+    (group) => !ignoredProductKeys.has(canonicalVendorProductKey(group.vendorProductKey)),
+  );
 
   if (!syncRunId && linkedContext.anchorSnapshots.length === 0 && invoiceState.groups.length === 0) {
     const emptyResult = reconcileVendorUsage({
@@ -295,18 +305,27 @@ export async function reconcileVendorFromDatabase(
     };
   }
 
-  const loadedSnapshots = syncRunId ? await loadUsageSnapshots(database, vendorId, syncRunId) : [];
+  const loadedSnapshots = syncRunId
+    ? (await loadUsageSnapshots(database, vendorId, syncRunId)).filter(
+        (snapshot) =>
+          !snapshot.vendorProductKey ||
+          !ignoredProductKeys.has(canonicalVendorProductKey(snapshot.vendorProductKey)),
+      )
+    : [];
   const overriddenSnapshots = applyUsageOverrides(
     loadedSnapshots,
     await loadUsageOverrides(database, vendorId, loadedSnapshots),
     { ...ruleSet, rules },
   );
   const billableSnapshots = await suppressCrossVendorBundleCoveredSnapshots(database, vendorId, overriddenSnapshots);
-  const invoiceScopeSnapshots = invoiceGroupsAsScopeSnapshots(vendorId, invoiceState.groups);
-  const agreementAdditions = await loadAgreementAdditions(database, [
+  const invoiceScopeSnapshots = invoiceGroupsAsScopeSnapshots(vendorId, visibleInvoiceGroups);
+  const agreementAdditions = uniqueAgreementAdditions([
+    ...(await loadAgreementAdditions(database, [
     ...billableSnapshots,
     ...linkedContext.anchorSnapshots,
     ...invoiceScopeSnapshots,
+    ])),
+    ...(await loadBundleTargetAgreementAdditions(database, vendorId, productBundles)),
   ]);
   const agreementIds = [
     ...new Set(
@@ -320,7 +339,7 @@ export async function reconcileVendorFromDatabase(
   const snapshots = [
     ...applyProductBundles(
       billableSnapshots,
-      await listProductBundles(database, vendorId as IntegrationId),
+      productBundles,
       agreementAdditions,
     ),
     ...linkedContext.anchorSnapshots,
@@ -343,7 +362,7 @@ export async function reconcileVendorFromDatabase(
   const linesWithInvoiceOnly = appendInvoiceOnlyLines(
     vendorId,
     visibleLines,
-    invoiceState.groups,
+    visibleInvoiceGroups,
     agreementAdditions,
     additionPins,
     doNotSuggestNewAdditions,
@@ -1308,7 +1327,7 @@ function applyProductBundles(
   const activeBundles = bundles.filter(
     (bundle) => bundle.active && bundle.status === 'approved' && bundle.components.length > 0,
   );
-  if (activeBundles.length === 0 || snapshots.length === 0) {
+  if (activeBundles.length === 0) {
     return snapshots;
   }
 
@@ -1326,6 +1345,7 @@ function applyProductBundles(
         observedAt: string;
         componentTotals: Map<string, number>;
         sourceSnapshotIds: string[];
+        vendorMissing: boolean;
       }
     >();
 
@@ -1345,6 +1365,7 @@ function applyProductBundles(
           observedAt: snapshot.observedAt,
           componentTotals: new Map<string, number>(),
           sourceSnapshotIds: [],
+          vendorMissing: false,
         };
       group.componentTotals.set(
         snapshot.vendorProductKey,
@@ -1355,6 +1376,42 @@ function applyProductBundles(
         group.observedAt = snapshot.observedAt;
       }
       groups.set(groupKey, group);
+    }
+
+    for (const addition of agreementAdditions) {
+      if (
+        normalizeProductCode(addition.productCode) !==
+        normalizeProductCode(bundle.target.connectwiseProductCode)
+      ) {
+        continue;
+      }
+
+      const existingGroup = [...groups.values()].find(
+        (group) => group.clientId === addition.clientId && group.agreementId === addition.agreementId,
+      );
+      if (existingGroup) {
+        continue;
+      }
+
+      const scopeSnapshots = snapshots.filter(
+        (snapshot) =>
+          snapshot.clientId === addition.clientId && snapshot.agreementId === addition.agreementId,
+      );
+      const externalAccountId = scopeSnapshots.map(snapshotExternalAccountId).find(Boolean) ?? '';
+      const observedAt =
+        scopeSnapshots.map((snapshot) => snapshot.observedAt).sort().slice(-1)[0] ??
+        addition.updatedAt ??
+        new Date().toISOString();
+      const groupKey = `${addition.clientId}|${addition.agreementId}|${externalAccountId}`;
+      groups.set(groupKey, {
+        clientId: addition.clientId,
+        agreementId: addition.agreementId,
+        externalAccountId,
+        observedAt,
+        componentTotals: new Map<string, number>(),
+        sourceSnapshotIds: [],
+        vendorMissing: true,
+      });
     }
 
     for (const [groupKey, group] of groups.entries()) {
@@ -1382,7 +1439,8 @@ function applyProductBundles(
           appRiverBundleComponentCount: bundle.components.length,
           appRiverBundleComponentQuantities: componentQuantitySummary(group.componentTotals),
           appRiverBundleSourceSnapshotIds: group.sourceSnapshotIds.join(','),
-          appRiverCustomerId: group.externalAccountId,
+          appRiverCustomerId: group.externalAccountId || undefined,
+          appRiverBundleVendorMissing: group.vendorMissing,
         },
       });
       group.sourceSnapshotIds.forEach((snapshotId) => bundledSourceSnapshotIds.add(snapshotId));
@@ -1393,6 +1451,14 @@ function applyProductBundles(
     ...snapshots.filter((snapshot) => !bundledSourceSnapshotIds.has(snapshot.id)),
     ...bundledSnapshots,
   ];
+}
+
+function uniqueAgreementAdditions(additions: LoadedAgreementAddition[]) {
+  const byId = new Map<string, LoadedAgreementAddition>();
+  for (const addition of additions) {
+    byId.set(addition.connectWiseAdditionId ?? addition.id, addition);
+  }
+  return [...byId.values()];
 }
 
 async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnapshot[]) {
@@ -1426,6 +1492,64 @@ async function loadAgreementAdditions(database: Queryable, snapshots: UsageSnaps
        and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
        and coalesce(agreements.raw_payload->>'agreementStatus', agreements.raw_payload->>'AgreementStatus', agreements.raw_payload->'status'->>'name', '') !~* 'expired|cancelled|canceled|inactive'`,
     [customerIds],
+  );
+
+  return result.rows.map(mapAdditionRow);
+}
+
+async function loadBundleTargetAgreementAdditions(
+  database: Queryable,
+  vendorId: string,
+  bundles: ProductBundle[],
+) {
+  const targetProductCodes = [
+    ...new Set(
+      bundles
+        .filter((bundle) => bundle.active && bundle.status === 'approved')
+        .map((bundle) => bundle.target.connectwiseProductCode)
+        .filter(Boolean),
+    ),
+  ];
+  if (targetProductCodes.length === 0) {
+    return [];
+  }
+
+  const result = await database.query<AdditionRow>(
+    `select
+       agreement_additions.id,
+       agreement_additions.customer_id,
+       agreement_additions.agreement_id,
+       agreements.name as source_agreement_name,
+       agreements.connectwise_agreement_id as source_connectwise_agreement_id,
+       agreement_additions.connectwise_addition_id,
+       agreement_additions.product_code,
+       agreement_additions.product_name,
+       agreement_additions.quantity,
+       agreement_additions.unit_price,
+       agreement_additions.addition_status,
+       agreement_additions.updated_at,
+       agreement_additions.raw_payload
+     from agreement_additions
+     inner join agreements
+       on agreements.id = agreement_additions.agreement_id
+     where lower(agreement_additions.product_code) = any($2::text[])
+       and coalesce(agreement_additions.addition_status, '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'additionStatus', agreement_additions.raw_payload->>'AdditionStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreement_additions.raw_payload->>'agreementStatus', agreement_additions.raw_payload->>'AgreementStatus', '') !~* 'expired|cancelled|canceled|inactive'
+       and coalesce(agreements.status, '') !~* 'expired|cancelled|canceled|inactive'
+       and exists (
+         select 1
+         from vendor_account_mappings
+         where vendor_account_mappings.vendor_id = $1
+           and vendor_account_mappings.customer_id = agreement_additions.customer_id
+           and (
+             vendor_account_mappings.agreement_id is null
+             or vendor_account_mappings.agreement_id = agreement_additions.agreement_id
+           )
+           and vendor_account_mappings.active = true
+           and vendor_account_mappings.mapping_status = 'approved'
+       )`,
+    [vendorId, targetProductCodes.map((code) => code.toLowerCase())],
   );
 
   return result.rows.map(mapAdditionRow);
@@ -2444,6 +2568,7 @@ const deviceDimensionKeys = [
   'appRiverBundle',
   'appRiverBundleKey',
   'appRiverBundleName',
+  'appRiverBundleVendorMissing',
   'subscriptionSource',
   'huntressProductClass',
   'huntressProductClassLabel',

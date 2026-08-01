@@ -3976,6 +3976,10 @@ h2 {
   grid-template-columns: minmax(200px, 1fr) 28px minmax(220px, 1.2fr) auto minmax(90px, auto) minmax(360px, auto);
 }
 
+.ignored-product-row {
+  grid-template-columns: minmax(280px, 1.4fr) auto minmax(220px, 0.8fr) auto;
+}
+
 .product-bundle-row svg {
   justify-self: center;
   color: var(--teal-dark);

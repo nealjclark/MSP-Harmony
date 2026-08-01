@@ -243,6 +243,18 @@ export type ProductMapping = ProductMappingCandidate & {
   reviewedAt?: string;
 };
 
+export type IgnoredVendorProduct = {
+  id: string;
+  vendorId: VendorKey;
+  vendorProductKey: string;
+  reason: string;
+  active: boolean;
+  ignoredBy: string;
+  ignoredAt: string;
+  restoredBy?: string;
+  restoredAt?: string;
+};
+
 export type MappingState = {
   vendorId: VendorKey;
   summary: {
@@ -253,6 +265,7 @@ export type MappingState = {
     productMappings: number;
     approvedProductMappings: number;
     productCandidates: number;
+    ignoredProducts: number;
     productBundles: number;
     linkedProductRules: number;
     unmappedSnapshots: number;
@@ -261,6 +274,7 @@ export type MappingState = {
   accountCandidates: AccountMappingCandidate[];
   productMappings: ProductMapping[];
   productCandidates: ProductMappingCandidate[];
+  ignoredProducts: IgnoredVendorProduct[];
   productBundles: ProductBundle[];
   productLinkRules: ProductLinkRule[];
   customerOptions: ConnectWiseCustomerCandidate[];
@@ -413,6 +427,18 @@ type ProductMappingRow = {
   reviewed_at: Date | string | null;
   match_evidence: unknown;
   customer_count?: string | number | null;
+};
+
+type IgnoredVendorProductRow = {
+  id: string;
+  vendor_id: IntegrationId;
+  vendor_product_key: string;
+  reason: string;
+  active: boolean;
+  ignored_by: string;
+  ignored_at: Date | string;
+  restored_by: string | null;
+  restored_at: Date | string | null;
 };
 
 type ProductBundleRow = {
@@ -711,6 +737,7 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     accountCandidates,
     productMappings,
     productCandidates,
+    ignoredProducts,
     productBundles,
     productLinkRules,
     unmappedSnapshots,
@@ -720,6 +747,7 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     generateAccountMappingCandidates(database, vendorId),
     listProductMappings(database, vendorId),
     generateProductMappingCandidates(database, vendorId),
+    listIgnoredVendorProducts(database, vendorId),
     listProductBundles(database, vendorId),
     listProductLinkRules(database, vendorId),
     countUnmappedSnapshots(database, vendorId),
@@ -738,7 +766,11 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
       .map((mapping) => mapping.vendorProductKey),
   );
   const unmappedProductCandidates = productCandidates.filter(
-    (candidate) => !mappedProductKeys.has(candidate.vendorProductKey),
+    (candidate) =>
+      !mappedProductKeys.has(candidate.vendorProductKey) &&
+      !ignoredProducts.some(
+        (ignored) => ignored.active && canonicalVendorProductKey(ignored.vendorProductKey) === canonicalVendorProductKey(candidate.vendorProductKey),
+      ),
   );
 
   return {
@@ -751,6 +783,7 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
       productMappings: productMappings.length,
       approvedProductMappings: productMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length,
       productCandidates: unmappedProductCandidates.length,
+      ignoredProducts: ignoredProducts.filter((product) => product.active).length,
       productBundles: productBundles.filter((bundle) => bundle.status === 'approved' && bundle.active).length,
       linkedProductRules: productLinkRules.filter((rule) => rule.status === 'approved' && rule.active).length,
       unmappedSnapshots,
@@ -759,6 +792,7 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     accountCandidates: unmappedCandidates,
     productMappings,
     productCandidates: unmappedProductCandidates,
+    ignoredProducts,
     productBundles,
     productLinkRules,
     customerOptions,
@@ -990,6 +1024,62 @@ export async function updateProductMapping(
       ],
     );
   }
+}
+
+export async function ignoreVendorProduct(
+  database: Queryable,
+  vendorId: VendorKey,
+  vendorProductKey: string,
+  input: { reason: string; ignoredBy?: string },
+) {
+  const canonicalProductKey = canonicalVendorProductKey(vendorProductKey);
+  const reason = input.reason.trim();
+  if (!reason) {
+    throw new Error('Ignoring a vendor product requires a reason.');
+  }
+
+  await database.query(
+    `insert into vendor_product_exclusions (
+       vendor_id,
+       vendor_product_key,
+       reason,
+       active,
+       ignored_by,
+       ignored_at,
+       restored_by,
+       restored_at,
+       updated_at
+     )
+     values ($1, $2, $3, true, $4, now(), null, null, now())
+     on conflict (vendor_id, vendor_product_key)
+     do update set
+       reason = excluded.reason,
+       active = true,
+       ignored_by = excluded.ignored_by,
+       ignored_at = now(),
+       restored_by = null,
+       restored_at = null,
+       updated_at = now()`,
+    [vendorId, canonicalProductKey, reason, input.ignoredBy ?? 'user'],
+  );
+}
+
+export async function restoreIgnoredVendorProduct(
+  database: Queryable,
+  vendorId: VendorKey,
+  vendorProductKey: string,
+  restoredBy = 'user',
+) {
+  await database.query(
+    `update vendor_product_exclusions
+     set active = false,
+         restored_by = $3,
+         restored_at = now(),
+         updated_at = now()
+     where vendor_id = $1
+       and vendor_product_key = any($2::text[])`,
+    [vendorId, vendorProductKeyAliases(canonicalVendorProductKey(vendorProductKey), vendorProductKey), restoredBy],
+  );
 }
 
 export async function listProductBundles(database: Queryable, vendorId: VendorKey): Promise<ProductBundle[]> {
@@ -3200,6 +3290,40 @@ async function listProductMappings(database: Queryable, vendorId: VendorKey): Pr
   return result.rows.map(mapProductMappingRow);
 }
 
+export async function listIgnoredVendorProducts(
+  database: Queryable,
+  vendorId: VendorKey,
+): Promise<IgnoredVendorProduct[]> {
+  const result = await database.query<IgnoredVendorProductRow>(
+    `select
+       id,
+       vendor_id,
+       vendor_product_key,
+       reason,
+       active,
+       ignored_by,
+       ignored_at,
+       restored_by,
+       restored_at
+     from vendor_product_exclusions
+     where vendor_id = $1
+     order by active desc, ignored_at desc, vendor_product_key`,
+    [vendorId],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    vendorId: row.vendor_id,
+    vendorProductKey: canonicalVendorProductKey(row.vendor_product_key),
+    reason: row.reason,
+    active: row.active,
+    ignoredBy: row.ignored_by,
+    ignoredAt: isoDate(row.ignored_at) ?? new Date(row.ignored_at).toISOString(),
+    restoredBy: row.restored_by ?? undefined,
+    restoredAt: isoDate(row.restored_at),
+  }));
+}
+
 async function loadVendorAccountSources(database: Queryable, vendorId: VendorKey): Promise<VendorAccountSource[]> {
   if (vendorId === 'nerdio') {
     const result = await database.query<AccountSourceRow>(
@@ -3746,6 +3870,14 @@ async function countUnmappedSnapshots(database: Queryable, vendorId: VendorKey) 
          and coalesce(sync_runs.metadata->>'source', '') <> 'invoice-table'
          and sync_runs.metadata->>'invoiceImportId' is null
          and lower(coalesce(vendor_usage_snapshots.dimensions->>'detailOnlySync', 'false')) <> 'true'
+         and not exists (
+           select 1
+           from vendor_product_exclusions
+           where vendor_product_exclusions.vendor_id = vendor_usage_snapshots.vendor_id
+             and vendor_product_exclusions.active = true
+             and replace(replace(vendor_product_exclusions.vendor_product_key, '%2F', '/'), '%2f', '/') =
+                 replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/')
+         )
          and (customer_id is null or agreement_id is null)
      ) + (
        select count(*)
@@ -3755,6 +3887,14 @@ async function countUnmappedSnapshots(database: Queryable, vendorId: VendorKey) 
        where invoice_line_items.vendor_id = $1
          and invoice_line_items.invoice_import_id = (select id from latest_invoice_import)
          and coalesce(invoice_imports.raw_summary->>'sourceType', 'customer-product-breakdown') <> 'reseller-product-total'
+         and not exists (
+           select 1
+           from vendor_product_exclusions
+           where vendor_product_exclusions.vendor_id = invoice_line_items.vendor_id
+             and vendor_product_exclusions.active = true
+             and replace(replace(vendor_product_exclusions.vendor_product_key, '%2F', '/'), '%2f', '/') =
+                 replace(replace(invoice_line_items.vendor_product_key, '%2F', '/'), '%2f', '/')
+         )
          and (invoice_line_items.customer_id is null
            or invoice_line_items.agreement_id is null
            or (
