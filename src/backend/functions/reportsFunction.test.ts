@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   generateChangeReportHttp,
   getCustomerLicenseReportHttp,
@@ -19,6 +20,13 @@ const analystHeaders = new Headers({
 
 async function run() {
   process.env.ALLOW_HEADER_ROLE_AUTH = 'true';
+
+  const reportsFunctionSource = readFileSync(new URL('./reportsFunction.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    reportsFunctionSource,
+    /listChargeEvents|loadAppRiverChargeEventsForReport/,
+    'Discrepancy report routes must use persisted AppRiver sync snapshots instead of calling AppRiver.',
+  );
 
   const invalidCustomerResponse = await getCustomerLicenseReportHttp(
     request({ customerId: 'not-a-uuid', vendorId: 'cove' }, analystHeaders),

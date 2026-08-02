@@ -38,8 +38,6 @@ import { getAzureUtilizationReport } from '../reports/azureUtilizationReports';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { assertConnectWiseReady } from '../connectwise/operations';
-import { AppRiverApiError } from '../vendor/appriver/client';
-import { assertAppRiverReady, createAppRiverClient } from '../vendor/appriver/operations';
 import { listClosedTicketsInRange, syncClosedTicketsForRange } from '../connectwise/ticketSync';
 import { listAllActiveLaborMappings } from '../mapping/laborMappings';
 import type { Queryable } from '../reports/agreementReports';
@@ -50,7 +48,6 @@ import {
   readJsonBody,
   requireMutatingRequestOrigin,
   serverErrorResponse,
-  type OptionalPostgresSettingsRepository,
 } from './runtime';
 
 loadDotEnv({ override: false });
@@ -687,18 +684,14 @@ export async function getDiscrepancyReportHttp(
   }
 
   try {
-    const appRiverChargeEvents =
-      comparisonId === 'appriver-license-cleanup'
-        ? await loadAppRiverChargeEventsForReport(repositoryContext)
-        : undefined;
-
+    // Discrepancy reports compare persisted sync snapshots only. AppRiver is
+    // queried separately by the cleanup preview and worker before any change.
     const reportOptions = {
       comparisonId,
       customerId,
       basis: isDiscrepancyBasis(basis) ? basis : undefined,
       severity: isDiscrepancySeverity(severity) ? severity : undefined,
       includeMatched,
-      appRiverChargeEvents,
     };
 
     if (isLiveDiscrepancyComparison(comparisonId)) {
@@ -707,13 +700,6 @@ export async function getDiscrepancyReportHttp(
 
     return jsonResponse(200, await getDiscrepancyReport(repositoryContext.pool, reportOptions));
   } catch (error) {
-    if (error instanceof AppRiverApiError) {
-      return jsonResponse(502, {
-        error: error.message || 'Unable to load AppRiver charge events for license cleanup.',
-        status: error.status,
-      });
-    }
-
     return jsonResponse(500, {
       error: error instanceof Error ? error.message : 'Unable to load discrepancy report.',
     });
@@ -820,30 +806,17 @@ export async function runDiscrepancyAuditReportHttp(
   }
 
   try {
-    const appRiverChargeEvents =
-      comparisonId === 'appriver-license-cleanup'
-        ? await loadAppRiverChargeEventsForReport(repositoryContext)
-        : undefined;
-
     const report = await runAndSaveDiscrepancyAudit(repositoryContext.pool, {
       comparisonId: comparisonId as string,
       customerId,
       basis: isDiscrepancyBasis(basis) ? basis : undefined,
       severity: isDiscrepancySeverity(severity) ? severity : undefined,
       includeMatched,
-      appRiverChargeEvents,
       createdBy: auth.principal.email ?? auth.principal.name,
     });
 
     return jsonResponse(201, report);
   } catch (error) {
-    if (error instanceof AppRiverApiError) {
-      return jsonResponse(502, {
-        error: error.message || 'Unable to load AppRiver charge events for license cleanup.',
-        status: error.status,
-      });
-    }
-
     return jsonResponse(500, {
       error: error instanceof Error ? error.message : 'Unable to run discrepancy audit.',
     });
@@ -883,21 +856,6 @@ export async function listDiscrepancyComparisonsHttp(
   } finally {
     await repositoryContext.close();
   }
-}
-
-async function loadAppRiverChargeEventsForReport(repositoryContext: OptionalPostgresSettingsRepository) {
-  if (!repositoryContext.repository) {
-    return [];
-  }
-
-  const provider = createIntegrationSettingsProvider({
-    loadLocalEnv: true,
-    metadataReader: repositoryContext.repository,
-  });
-  const settings = await provider.getIntegrationSettings('opentext-appriver');
-  assertAppRiverReady(settings);
-  const client = createAppRiverClient(settings);
-  return client.listChargeEvents({ pageSize: 1000, maxPages: 5 });
 }
 
 export async function listCustomerLicenseReportCustomersHttp(

@@ -7139,7 +7139,7 @@ function App() {
 
     if (!options.silent) {
       setDiscrepancyLoadState('loading');
-      setDiscrepancyMessage('Loading live AppRiver license cleanup...');
+      setDiscrepancyMessage('Loading AppRiver license cleanup from the latest sync...');
     }
     if (!options.preserveCleanupMessage) {
       setAppRiverCleanupQueueState('idle');
@@ -7158,8 +7158,8 @@ function App() {
         const snapshotLabel = formatDateOnly(report.auditState?.currentSourceSnapshot.latestCompletedAt) ?? 'current snapshot';
         setDiscrepancyMessage(
           report.rows.length > 0
-            ? `Loaded live cleanup for ${snapshotLabel}: ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
-            : `Live cleanup has no rows for the current filters (${snapshotLabel}).`,
+            ? `Loaded the ${snapshotLabel} AppRiver snapshot: ${report.summary.openDiscrepancyCount.toLocaleString()} open discrepancies across ${report.rows.length.toLocaleString()} rows.`
+            : `The AppRiver snapshot has no rows for the current filters (${snapshotLabel}).`,
         );
       }
       return report;
@@ -11105,7 +11105,7 @@ function DiscrepancyDashboardView(props: {
               ))}
             </select>
           </label>
-          {isLiveComparison ? <span className="discrepancy-audit-chip">Live · today</span> : null}
+          {isLiveComparison ? <span className="discrepancy-audit-chip">Latest sync</span> : null}
           {!isLiveComparison && auditState?.hasNewerSnapshot ? (
             <span className="discrepancy-audit-chip changed">New snapshot available</span>
           ) : null}
