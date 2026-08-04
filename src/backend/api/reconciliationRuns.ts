@@ -1720,10 +1720,12 @@ async function loadVendorProductLinkedSourceTotals(
      matched_rows as (
        select
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.customer_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
            else vendor_usage_snapshots.customer_id
          end as customer_id,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.agreement_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
            else vendor_usage_snapshots.agreement_id
          end as agreement_id,
@@ -1734,6 +1736,11 @@ async function loadVendorProductLinkedSourceTotals(
        left join approved_account_mappings
          on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
         and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+       left join ncentral_site_mappings
+         on vendor_usage_snapshots.vendor_id = 'ncentral'
+        and ncentral_site_mappings.ncentral_customer_id = vendor_usage_snapshots.external_account_id
+        and ncentral_site_mappings.ncentral_site_id = vendor_usage_snapshots.dimensions->>'siteId'
+        and ncentral_site_mappings.active = true
        where vendor_usage_snapshots.vendor_id = $1
          and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
@@ -1746,10 +1753,12 @@ async function loadVendorProductLinkedSourceTotals(
              and replace(replace(vendor_product_mappings.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          )
          and case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.customer_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
            else vendor_usage_snapshots.customer_id
          end is not null
          and case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.agreement_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
            else vendor_usage_snapshots.agreement_id
          end is not null
@@ -1931,10 +1940,12 @@ function vendorUsageLinkedDatasetQuery(
        select
          vendor_usage_snapshots.*,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.customer_id
            when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
            else vendor_usage_snapshots.customer_id
          end as effective_customer_id,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.agreement_id
            when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
            else vendor_usage_snapshots.agreement_id
          end as effective_agreement_id
@@ -1944,6 +1955,11 @@ function vendorUsageLinkedDatasetQuery(
         and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
         and vendor_account_mappings.active = true
         and vendor_account_mappings.mapping_status = 'approved'
+       left join ncentral_site_mappings
+         on vendor_usage_snapshots.vendor_id = 'ncentral'
+        and ncentral_site_mappings.ncentral_customer_id = vendor_usage_snapshots.external_account_id
+        and ncentral_site_mappings.ncentral_site_id = vendor_usage_snapshots.dimensions->>'siteId'
+        and ncentral_site_mappings.active = true
        where vendor_usage_snapshots.vendor_id = $1
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
      )`,

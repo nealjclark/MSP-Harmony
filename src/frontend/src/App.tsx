@@ -4,6 +4,7 @@ import {
   ArrowRight,
   BadgeCheck,
   BarChart3,
+  Bot,
   Building2,
   Check,
   ChevronRight,
@@ -97,6 +98,16 @@ import {
   type VendorKey,
 } from '../../shared/vendorDatapoints';
 import {
+  reconcileShortLabel,
+  type MonthlyReviewDisposition,
+  type MonthlyReviewFinding,
+  type MonthlyReviewReadiness,
+  type MonthlyReviewRunDetail,
+  type MonthlyReviewRunSummary,
+  type MonthlyReviewVendorEvidence,
+  type ReconcileWorkspaceTab,
+} from '../../shared/monthlyReview';
+import {
   formatLaborFilterSummary,
   integrationSupportsLaborMapping,
   type ConnectWiseBoardOption,
@@ -154,11 +165,12 @@ import {
   type InvoiceNoticeTemplates,
   type InvoiceNoticeType,
 } from '../../shared/communicationSettings';
+import { SalesWorkspace } from './SalesWorkspace';
 
-type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'azure-billing' | 'invoices' | 'agreements' | 'settings';
+type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'azure-billing' | 'invoices' | 'agreements' | 'sales' | 'settings';
 type AzureBillingTab = 'runs' | 'review' | 'release' | 'utilization' | 'policies';
 type SettingsSection = 'user-management' | 'integrations' | 'email-communication' | 'audit-logs';
-type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst';
+type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst' | 'SalesRequester' | 'SalesApprover';
 
 type AuthSessionResponse = {
   status: string;
@@ -188,7 +200,7 @@ type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationWorkflowTab = 'api' | 'manual' | 'invoice';
 type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'azure-utilization' | 'customer-license';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
-type MappingSectionId = 'labor' | 'investigation-tickets' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'ignored-products' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
+type MappingSectionId = 'labor' | 'investigation-tickets' | 'monthly-review-exclusions' | 'ncentral-sites' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'ignored-products' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
   quantityDelta: number;
   lessIncludedDelta?: number;
@@ -2186,6 +2198,41 @@ type ProductCatalogSearchResponse = {
   warning?: string;
 };
 
+type MonthlyReviewProductExclusion = {
+  id: string;
+  connectWiseProductId?: string;
+  connectWiseProductCode: string;
+  connectWiseProductName: string;
+  active: boolean;
+  excludedBy: string;
+  excludedAt: string;
+};
+
+type NcentralSiteOption = {
+  siteId: string;
+  siteName: string;
+  deviceCount: number;
+};
+
+type NcentralSiteCustomerOption = {
+  customerId: string;
+  customerName: string;
+  sites: NcentralSiteOption[];
+};
+
+type NcentralSiteMapping = {
+  id: string;
+  ncentralCustomerId: string;
+  ncentralCustomerName: string;
+  ncentralSiteId: string;
+  ncentralSiteName: string;
+  customerId: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementName?: string;
+  active: boolean;
+};
+
 type LinkedDatasetMetadata = {
   columns: string[];
   uniqueValuesByColumn: Record<string, string[]>;
@@ -2358,6 +2405,9 @@ type MappingStateResponse = {
   ignoredProducts: IgnoredVendorProduct[];
   productBundles: ProductBundle[];
   productLinkRules: ProductLinkRule[];
+  monthlyReviewProductExclusions: MonthlyReviewProductExclusion[];
+  ncentralSiteMappings: NcentralSiteMapping[];
+  ncentralSiteOptions: NcentralSiteCustomerOption[];
   customerOptions: MappingCustomerOption[];
 };
 
@@ -2468,6 +2518,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
   { id: 'azure-billing', label: 'Azure Billing', icon: ClipboardCheck },
   { id: 'invoices', label: 'Finance', icon: CircleDollarSign },
+  { id: 'sales', label: 'Sales', icon: Bot },
 ];
 
 const utilityNavItems: Array<{ id: View; label: string; icon: typeof BarChart3 }> = [
@@ -2478,7 +2529,7 @@ const defaultView: View = 'reconcile';
 const defaultMappingIntegrationId: IntegrationId = 'cove';
 
 const viewPaths: Record<Exclude<View, 'settings'>, string> = {
-  reconcile: '/reconcile',
+  reconcile: '/reconcile/spotcheck',
   discrepancies: '/discrepancies',
   integrations: '/integrations',
   mappings: '/mappings',
@@ -2486,6 +2537,7 @@ const viewPaths: Record<Exclude<View, 'settings'>, string> = {
   'azure-billing': '/azure-billing',
   invoices: '/invoices',
   agreements: '/agreements',
+  sales: '/sales',
 };
 
 const defaultSettingsSection: SettingsSection = 'user-management';
@@ -2986,6 +3038,10 @@ function vendorDisplayName(vendorId: VendorKey, datapoints: VendorDatapointRecor
   }
 
   return integrationName(vendorId);
+}
+
+function reconcileVendorDisplayName(vendorId: VendorKey, datapoints: VendorDatapointRecord[] = []) {
+  return reconcileShortLabel(vendorId, vendorDisplayName(vendorId, datapoints));
 }
 
 function expandCrossVendorBundleSelection(
@@ -3860,6 +3916,10 @@ function initialView(): View {
   return viewFromLocation(window.location);
 }
 
+function initialReconcileWorkspaceTab(): ReconcileWorkspaceTab {
+  return reconcileWorkspaceTabFromPath(window.location.pathname) ?? 'spotcheck';
+}
+
 function initialSettingsSection(): SettingsSection {
   const queryView = new URLSearchParams(window.location.search).get('view');
   if (queryView === 'audit') {
@@ -3890,6 +3950,9 @@ function viewFromLocation(location: Location): View {
 
 function viewFromPath(pathname: string): View | null {
   const normalizedPath = normalizePathname(pathname);
+  if (normalizedPath === '/sales' || normalizedPath.startsWith('/sales/quotes/')) {
+    return 'sales';
+  }
   if (normalizedPath === '/imports') {
     return 'invoices';
   }
@@ -3902,9 +3965,23 @@ function viewFromPath(pathname: string): View | null {
   if (azureBillingTabFromPath(normalizedPath)) {
     return 'azure-billing';
   }
+  if (reconcileWorkspaceTabFromPath(normalizedPath)) {
+    return 'reconcile';
+  }
 
   const matchedEntry = Object.entries(viewPaths).find(([, path]) => path === normalizedPath);
   return matchedEntry ? (matchedEntry[0] as View) : normalizedPath === '/' ? defaultView : null;
+}
+
+function reconcileWorkspaceTabFromPath(pathname: string): ReconcileWorkspaceTab | null {
+  const normalized = normalizePathname(pathname).toLowerCase();
+  if (normalized === '/reconcile' || normalized === '/reconcile/spotcheck') return 'spotcheck';
+  if (normalized === '/reconcile/monthly-review') return 'monthly-review';
+  return null;
+}
+
+function reconcileWorkspacePath(tab: ReconcileWorkspaceTab) {
+  return tab === 'monthly-review' ? '/reconcile/monthly-review' : '/reconcile/spotcheck';
 }
 
 function settingsSectionFromPath(pathname: string): SettingsSection | null {
@@ -4983,6 +5060,64 @@ async function fetchReconciliationRun(vendorId: VendorKey) {
   return body as unknown as ReconciliationRunResponse;
 }
 
+async function monthlyReviewJson<T>(path: string, init?: RequestInit) {
+  const response = await fetch(path, init);
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Monthly Review request failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as T;
+}
+
+async function fetchMonthlyReviewReadiness(billingMonth: string) {
+  const params = new URLSearchParams({ billingMonth });
+  const response = await monthlyReviewJson<{ readiness: MonthlyReviewReadiness }>(
+    `/api/reconciliation/monthly/readiness?${params.toString()}`,
+  );
+  return response.readiness;
+}
+
+async function fetchMonthlyReviewRuns() {
+  const response = await monthlyReviewJson<{ runs: MonthlyReviewRunSummary[] }>('/api/reconciliation/monthly/runs');
+  return response.runs;
+}
+
+async function fetchMonthlyReviewRun(runId: string) {
+  return monthlyReviewJson<MonthlyReviewRunDetail>(
+    `/api/reconciliation/monthly/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+async function createMonthlyReviewRequest(billingMonth: string, overrideReason?: string) {
+  return monthlyReviewJson<MonthlyReviewRunDetail>('/api/reconciliation/monthly/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ billingMonth, overrideReason }),
+  });
+}
+
+async function updateMonthlyReviewFindingRequest(
+  runId: string,
+  findingId: string,
+  payload: {
+    disposition?: MonthlyReviewDisposition;
+    dispositionReason?: string;
+    selectedSourceKey?: string;
+    selectedQuantity?: number;
+    ticketIds?: string[];
+  },
+) {
+  const response = await monthlyReviewJson<{ finding: MonthlyReviewFinding }>(
+    `/api/reconciliation/monthly/runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(findingId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+  return response.finding;
+}
+
 async function applyAgreementAdditionUpdatesRequest(
   updates: AgreementAdditionUpdatePayload[],
   discardedUpdates: AgreementAdditionUpdatePayload[],
@@ -5296,6 +5431,75 @@ async function searchProductCatalog(integrationId: VendorKey, query: string) {
   }
 
   return body as unknown as ProductCatalogSearchResponse;
+}
+
+async function createMonthlyReviewProductExclusionRequest(target: ProductCatalogTarget) {
+  const response = await fetch('/api/mappings/connectwise/monthly-review-exclusions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      connectWiseProductId: target.connectwiseProductId,
+      connectWiseProductCode: target.connectwiseProductCode,
+      connectWiseProductName: target.connectwiseProductName,
+    }),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Monthly Review exclusion save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { exclusion: MonthlyReviewProductExclusion };
+}
+
+async function restoreMonthlyReviewProductExclusionRequest(exclusionId: string) {
+  const response = await fetch(
+    `/api/mappings/connectwise/monthly-review-exclusions/${encodeURIComponent(exclusionId)}`,
+    { method: 'DELETE' },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Monthly Review exclusion removal failed with HTTP ${response.status}.`));
+  }
+}
+
+async function saveNcentralSiteMappingRequest(payload: {
+  ncentralCustomerId: string;
+  ncentralCustomerName: string;
+  ncentralSiteId: string;
+  ncentralSiteName: string;
+  customerId: string;
+  agreementId: string;
+}) {
+  const response = await fetch('/api/mappings/ncentral/site-mappings', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `N-Able site mapping save failed with HTTP ${response.status}.`));
+  }
+
+  return body as unknown as { mapping: NcentralSiteMapping };
+}
+
+async function deactivateNcentralSiteMappingRequest(mappingId: string) {
+  const response = await fetch(
+    `/api/mappings/ncentral/site-mappings/${encodeURIComponent(mappingId)}`,
+    { method: 'DELETE' },
+  );
+  const body = await responseJson(response);
+
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `N-Able site mapping removal failed with HTTP ${response.status}.`));
+  }
 }
 
 async function fetchUsageOverrides(integrationId: VendorKey) {
@@ -6483,6 +6687,8 @@ function shortId(value: string) {
 
 function App() {
   const [view, setView] = useState<View>(() => initialView());
+  const [reconcileWorkspaceTab, setReconcileWorkspaceTab] =
+    useState<ReconcileWorkspaceTab>(() => initialReconcileWorkspaceTab());
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(() => initialSettingsSection());
   const [issues, setIssues] = useState<ReconcileIssue[]>([]);
   const [expandedClientNames, setExpandedClientNames] = useState<string[]>([]);
@@ -6665,6 +6871,9 @@ function App() {
         : defaultSettingsSection;
 
     setView(nextView);
+    if (nextView === 'reconcile') {
+      setReconcileWorkspaceTab('spotcheck');
+    }
     if (nextView === 'settings') {
       setSettingsSection(nextSettingsSection);
     }
@@ -6675,6 +6884,15 @@ function App() {
     setSettingsSection(section);
     setView('settings');
     updateRouteForView('settings', selectedMappingIntegrationId, section);
+  };
+
+  const selectReconcileWorkspaceTab = (tab: ReconcileWorkspaceTab) => {
+    setView('reconcile');
+    setReconcileWorkspaceTab(tab);
+    const nextPath = reconcileWorkspacePath(tab);
+    if (normalizePathname(window.location.pathname) !== nextPath) {
+      window.history.pushState({ view: 'reconcile', reconcileWorkspaceTab: tab }, '', nextPath);
+    }
   };
 
   const selectMappingIntegration = (integrationId: VendorKey) => {
@@ -8045,7 +8263,7 @@ function App() {
     }
 
     if (!syncRunId) {
-      throw new Error(`No completed ${vendorDisplayName(vendorId, vendorDatapoints)} raw sync is available yet.`);
+      throw new Error(`No completed ${reconcileVendorDisplayName(vendorId, vendorDatapoints)} raw sync is available yet.`);
     }
 
     const details = await fetchRawSyncDetails(vendorId, syncRunId, dataset, {
@@ -8237,7 +8455,7 @@ function App() {
   };
 
   const loadVendorReconciliation = async (vendorId: VendorKey) => {
-    const sourceName = vendorDisplayName(vendorId, vendorDatapoints);
+    const sourceName = reconcileVendorDisplayName(vendorId, vendorDatapoints);
     setReconciliationLoadState('loading');
     setReconciliationMessage(`Comparing latest ${sourceName} sync against ConnectWise additions...`);
 
@@ -8325,13 +8543,13 @@ function App() {
     setReconciliationComparisonRequested(true);
     setReconciliationLoadState('loading');
     setReconciliationMessage(
-      `Comparing ${uniqueVendorIds.map((vendorId) => vendorDisplayName(vendorId, vendorDatapoints)).join(', ')} against ConnectWise additions...`,
+      `Comparing ${uniqueVendorIds.map((vendorId) => reconcileVendorDisplayName(vendorId, vendorDatapoints)).join(', ')} against ConnectWise additions...`,
     );
 
     try {
       const runs = await Promise.all(uniqueVendorIds.map((vendorId) => fetchReconciliationRun(vendorId)));
       const nextIssues = runs.flatMap((run) =>
-        reconcileIssuesFromRun(run, vendorDisplayName(run.vendorId, vendorDatapoints)),
+        reconcileIssuesFromRun(run, reconcileVendorDisplayName(run.vendorId, vendorDatapoints)),
       );
       const nextReviewIssues = nextIssues.filter(isReviewableIssue);
       const firstSelectedIssue =
@@ -8430,6 +8648,7 @@ function App() {
       const nextMappingIntegrationId = mappingIntegrationIdFromLocation(window.location);
 
       setView(nextView);
+      setReconcileWorkspaceTab(reconcileWorkspaceTabFromPath(window.location.pathname) ?? 'spotcheck');
       setSettingsSection(settingsSectionFromPath(window.location.pathname) ?? defaultSettingsSection);
       if (nextMappingIntegrationId) {
         setSelectedMappingIntegrationId(nextMappingIntegrationId);
@@ -8573,7 +8792,7 @@ function App() {
       [
         ...enabledReconciliationIntegrations.map((integration) => ({
           id: integration.id,
-          name: integration.name,
+          name: reconcileShortLabel(integration.id, integration.name),
           sourceKind: 'sync' as const,
           lastRefreshedLabel:
             integration.syncProgress && integration.lastSyncStatus !== 'complete' && integration.lastSyncStatus !== 'failed'
@@ -8586,7 +8805,7 @@ function App() {
           .filter(isEnabledReconciliationDatapoint)
           .map((datapoint) => ({
             id: datapoint.vendorId,
-            name: datapoint.displayName,
+            name: reconcileShortLabel(datapoint.vendorId, datapoint.displayName),
             sourceKind: 'import' as const,
             lastRefreshedLabel: formatDateTime(datapoint.lastImportedAt) ?? 'Never',
             canSync: false,
@@ -8810,8 +9029,8 @@ function App() {
     try {
       const sourceName =
         selectedReconciliationIntegrationIds.length === 1
-          ? vendorDisplayName(selectedReconciliationIntegrationIds[0], vendorDatapoints)
-          : selectedReconciliationIntegrationIds.map((vendorId) => vendorDisplayName(vendorId, vendorDatapoints)).join(' + ');
+          ? reconcileVendorDisplayName(selectedReconciliationIntegrationIds[0], vendorDatapoints)
+          : selectedReconciliationIntegrationIds.map((vendorId) => reconcileVendorDisplayName(vendorId, vendorDatapoints)).join(' + ');
       const agreementIds = [...new Set(issues.map((issue) => issue.agreementId))];
       const nextCache: Record<string, AgreementAddition[]> = {};
       const additionEntries = await Promise.all(
@@ -9437,6 +9656,79 @@ function App() {
     } catch (error) {
       setMappingLoadState('failed');
       setMappingMessage(error instanceof Error ? error.message : 'Product mapping save failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const excludeMonthlyReviewProduct = async (target: ProductCatalogTarget) => {
+    setBusyMappingAction(`monthly-review-exclusion:${target.connectwiseProductCode}`);
+    try {
+      await createMonthlyReviewProductExclusionRequest(target);
+      await loadMappings('connectwise');
+      setMappingMessage(
+        `${target.connectwiseProductName} will no longer appear as a standalone CW-only Monthly Review row.`,
+      );
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Monthly Review product exclusion save failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const restoreMonthlyReviewProduct = async (exclusion: MonthlyReviewProductExclusion) => {
+    setBusyMappingAction(`monthly-review-exclusion:${exclusion.id}`);
+    try {
+      await restoreMonthlyReviewProductExclusionRequest(exclusion.id);
+      await loadMappings('connectwise');
+      setMappingMessage(
+        `${exclusion.connectWiseProductName} can appear as a standalone CW-only Monthly Review row again.`,
+      );
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'Monthly Review product exclusion removal failed.');
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const saveNcentralSiteMapping = async (payload: {
+    ncentralCustomerId: string;
+    ncentralCustomerName: string;
+    ncentralSiteId: string;
+    ncentralSiteName: string;
+    customerId: string;
+    agreementId: string;
+  }) => {
+    setBusyMappingAction(`ncentral-site:${payload.ncentralCustomerId}:${payload.ncentralSiteId}`);
+    try {
+      await saveNcentralSiteMappingRequest(payload);
+      await loadMappings('ncentral');
+      setMappingMessage(
+        `${payload.ncentralSiteName} is now assigned independently from its parent N-Able customer.`,
+      );
+      return true;
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'N-Able site mapping save failed.');
+      return false;
+    } finally {
+      setBusyMappingAction(null);
+    }
+  };
+
+  const deactivateNcentralSiteMapping = async (mapping: NcentralSiteMapping) => {
+    setBusyMappingAction(`ncentral-site:${mapping.id}`);
+    try {
+      await deactivateNcentralSiteMappingRequest(mapping.id);
+      await loadMappings('ncentral');
+      setMappingMessage(
+        `${mapping.ncentralSiteName} now follows its parent N-Able customer mapping again.`,
+      );
+    } catch (error) {
+      setMappingLoadState('failed');
+      setMappingMessage(error instanceof Error ? error.message : 'N-Able site mapping removal failed.');
     } finally {
       setBusyMappingAction(null);
     }
@@ -10151,7 +10443,9 @@ function App() {
         </div>
 
         <nav className="nav-list nav-list-primary">
-          {navItems.map((item) => {
+          {navItems.filter((item) => item.id !== 'sales' || currentUserRoles.some((role) =>
+            role === 'Admin' || role === 'SalesRequester' || role === 'SalesApprover'
+          )).map((item) => {
             const Icon = item.icon;
             return (
               <div className="nav-group" key={item.id}>
@@ -10280,7 +10574,7 @@ function App() {
                 ) : null}
               </div>
             ) : null}
-            {view === 'reconcile' ? (
+            {view === 'reconcile' && reconcileWorkspaceTab === 'spotcheck' ? (
               queuedAgreementUpdateIssues.length > 0 ? (
                 <button
                   className="button primary"
@@ -10307,7 +10601,13 @@ function App() {
             />
           )}
           {view === 'reconcile' && (
-            <ReconcileView
+            <>
+              <ReconcileWorkspaceNavigation
+                selectedTab={reconcileWorkspaceTab}
+                onTabChange={selectReconcileWorkspaceTab}
+              />
+              {reconcileWorkspaceTab === 'spotcheck' ? (
+              <ReconcileView
               approveClient={approveClient}
               approveIssue={approveIssue}
               agreementUpdateMessage={agreementUpdateMessage}
@@ -10383,7 +10683,21 @@ function App() {
               vendorDataSummary={vendorDataSummary}
               vendorInvoiceSummary={vendorInvoiceSummary}
               vendorFilter={vendorFilter}
-            />
+              />
+              ) : (
+                <MonthlyReviewView
+                  currentUserRoles={currentUserRoles}
+                  onSyncIntegration={async (integrationId) => {
+                    if (integrationId === 'datto') {
+                      await syncIntegration(integrationId, 'datto-saas-bcdr');
+                      return;
+                    }
+                    await syncIntegration(integrationId);
+                  }}
+                  syncJobs={syncJobs}
+                />
+              )}
+            </>
           )}
           {view === 'discrepancies' && (
             <DiscrepancyDashboardView
@@ -10535,6 +10849,10 @@ function App() {
                 selectMappingIntegration(integrationId);
                 updateRouteForView('mappings', integrationId);
               }}
+              onMonthlyReviewProductExclude={excludeMonthlyReviewProduct}
+              onMonthlyReviewProductRestore={restoreMonthlyReviewProduct}
+              onNcentralSiteMappingDeactivate={deactivateNcentralSiteMapping}
+              onNcentralSiteMappingSave={saveNcentralSiteMapping}
               onProductIgnore={ignoreVendorProduct}
               onProductRestore={restoreIgnoredVendorProduct}
               onProductTargetsSave={saveProductTargets}
@@ -10731,6 +11049,7 @@ function App() {
               visibleRules={visibleRules}
             />
           )}
+          {view === 'sales' && <SalesWorkspace roles={currentUserRoles} />}
           {view === 'settings' && (
             <SettingsPageView
               onNavigateToIntegrations={() => navigateToView('integrations')}
@@ -10902,6 +11221,8 @@ function pageTitle(view: View, settingsSection: SettingsSection = defaultSetting
       return 'Finance';
     case 'agreements':
       return 'Agreements';
+    case 'sales':
+      return 'Sales';
     case 'settings':
       if (settingsSection === 'audit-logs') {
         return 'Audit logs';
@@ -10934,6 +11255,8 @@ function pageKicker(view: View, settingsSection: SettingsSection = defaultSettin
       return 'Client billing and collections';
     case 'agreements':
       return 'Agreement additions and overrides';
+    case 'sales':
+      return 'AI-assisted quoting and approval';
     case 'settings':
       if (settingsSection === 'audit-logs') {
         return 'Security and change history';
@@ -12969,7 +13292,7 @@ function SettingsEmailCommunicationView() {
 
 function SettingsView() {
   const [users, setUsers] = useState<ManagedAppUser[]>([]);
-  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst']);
+  const [roles, setRoles] = useState<AppRole[]>(['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst', 'SalesRequester', 'SalesApprover']);
   const [statuses, setStatuses] = useState<ManagedUserStatus[]>(['active', 'disabled']);
   const [drafts, setDrafts] = useState<Record<string, ManagedUserDraft>>({});
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
@@ -12988,7 +13311,7 @@ function SettingsView() {
 
   const applyUsersResponse = (response: ManagedUsersResponse) => {
     setUsers(response.users);
-    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst']);
+    setRoles(response.roles.length > 0 ? response.roles : ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst', 'SalesRequester', 'SalesApprover']);
     setStatuses(response.statuses.length > 0 ? response.statuses : ['active', 'disabled']);
     setDrafts(draftsFromUsers(response.users));
   };
@@ -13302,6 +13625,977 @@ function managedUserStatusLabel(status: ManagedUserStatus) {
 function appRoleLabel(role: AppRole) {
   if (role === 'LicenseAdmin') return 'License Admin';
   return role;
+}
+
+function ReconcileWorkspaceNavigation(props: {
+  selectedTab: ReconcileWorkspaceTab;
+  onTabChange: (tab: ReconcileWorkspaceTab) => void;
+}) {
+  const { selectedTab, onTabChange } = props;
+  return (
+    <section className="reconcile-workspace-nav" aria-label="Reconcile workspace">
+      <div className="segmented-control" role="tablist" aria-label="Reconcile sections">
+        {([
+          ['spotcheck', 'Spotcheck'],
+          ['monthly-review', 'Monthly Review'],
+        ] as const).map(([id, label]) => (
+          <button
+            aria-selected={selectedTab === id}
+            className={selectedTab === id ? 'active' : ''}
+            key={id}
+            onClick={() => onTabChange(id)}
+            role="tab"
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <span>
+        {selectedTab === 'spotcheck'
+          ? 'Ad hoc vendor comparisons and agreement updates'
+          : 'Frozen, auditable review across every monthly source'}
+      </span>
+    </section>
+  );
+}
+
+type MonthlyReviewFilter =
+  | 'needs-action'
+  | 'all'
+  | 'cw-only'
+  | 'vendor-only'
+  | 'mapping'
+  | 'disagreement'
+  | 'approved'
+  | 'applied'
+  | 'skipped'
+  | 'ignored'
+  | 'ticketed';
+
+function storedMonthlyReviewFilter(): MonthlyReviewFilter {
+  const stored = window.localStorage.getItem('msp-harmony.monthly-review.filter');
+  return [
+    'needs-action', 'all', 'cw-only', 'vendor-only', 'mapping', 'disagreement',
+    'approved', 'applied', 'skipped', 'ignored', 'ticketed',
+  ].includes(stored ?? '') ? stored as MonthlyReviewFilter : 'needs-action';
+}
+
+function MonthlyReviewView(props: {
+  currentUserRoles: AppRole[];
+  onSyncIntegration: (integrationId: IntegrationId) => Promise<void>;
+  syncJobs: IntegrationSyncJob[];
+}) {
+  const { currentUserRoles, onSyncIntegration, syncJobs } = props;
+  const [billingMonth, setBillingMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [readiness, setReadiness] = useState<MonthlyReviewReadiness | null>(null);
+  const [runs, setRuns] = useState<MonthlyReviewRunSummary[]>([]);
+  const [detail, setDetail] = useState<MonthlyReviewRunDetail | null>(null);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [message, setMessage] = useState('Loading Monthly Review readiness...');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [filter, setFilter] = useState<MonthlyReviewFilter>(() => storedMonthlyReviewFilter());
+  const [vendorFilter, setVendorFilter] = useState(() => window.localStorage.getItem('msp-harmony.monthly-review.vendor') ?? 'All vendors');
+  const [clientFilter, setClientFilter] = useState('All clients');
+  const [agreementFilter, setAgreementFilter] = useState('All agreements');
+  const [query, setQuery] = useState(() => window.localStorage.getItem('msp-harmony.monthly-review.query') ?? '');
+  const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>([]);
+  const [vendorDataSelection, setVendorDataSelection] = useState<VendorDataSelection | null>(null);
+  const isAdmin = currentUserRoles.includes('Admin');
+  const canApprove = isAdmin || currentUserRoles.includes('Approver');
+  const activeRun = detail?.run.status === 'in-progress';
+  const activeJobIds = new Set(
+    syncJobs
+      .filter((job) => job.status === 'queued' || job.status === 'running')
+      .map((job) => job.integrationId),
+  );
+
+  const loadWorkspace = async (preferredRunId?: string) => {
+    setLoadState('loading');
+    try {
+      const [nextReadiness, nextRuns] = await Promise.all([
+        fetchMonthlyReviewReadiness(billingMonth),
+        fetchMonthlyReviewRuns(),
+      ]);
+      setReadiness(nextReadiness);
+      setRuns(nextRuns);
+      const preferred =
+        nextRuns.find((run) => run.id === preferredRunId) ??
+        nextRuns.find((run) => run.status === 'in-progress') ??
+        nextRuns[0];
+      setDetail(preferred ? await fetchMonthlyReviewRun(preferred.id) : null);
+      setLoadState('ready');
+      setMessage(
+        preferred
+          ? `Loaded ${preferred.billingMonth} revision ${preferred.revision}.`
+          : 'No Monthly Review run has been created yet.',
+      );
+    } catch (error) {
+      setLoadState('failed');
+      setMessage(error instanceof Error ? error.message : 'Unable to load Monthly Review.');
+    }
+  };
+
+  useEffect(() => {
+    void loadWorkspace();
+  }, [billingMonth]);
+
+  useEffect(() => {
+    window.localStorage.setItem('msp-harmony.monthly-review.filter', filter);
+    window.localStorage.setItem('msp-harmony.monthly-review.vendor', vendorFilter);
+    window.localStorage.setItem('msp-harmony.monthly-review.query', query);
+  }, [filter, query, vendorFilter]);
+
+  const updateFinding = async (
+    finding: MonthlyReviewFinding,
+    payload: Parameters<typeof updateMonthlyReviewFindingRequest>[2],
+  ) => {
+    if (!detail) return;
+    setBusy(`finding:${finding.id}`);
+    try {
+      const updated = await updateMonthlyReviewFindingRequest(detail.run.id, finding.id, payload);
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              run: {
+                ...current.run,
+                unresolvedCount:
+                  current.findings.filter((item) =>
+                    item.id === updated.id ? monthlyReviewFindingNeedsAction(updated) : monthlyReviewFindingNeedsAction(item),
+                  ).length,
+              },
+              findings: current.findings.map((item) => item.id === updated.id ? updated : item),
+            }
+          : current,
+      );
+      setMessage(`Saved ${finding.productName}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update Monthly Review finding.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const visibleFindings = useMemo(() => {
+    if (!detail) return [];
+    const normalizedQuery = query.trim().toLowerCase();
+    return detail.findings
+      .filter((finding) => {
+        const matchesQuery =
+          !normalizedQuery ||
+          `${finding.customerName} ${finding.agreementName} ${finding.productName} ${finding.productCode} ${finding.vendors.map((vendor) => vendor.label).join(' ')}`
+            .toLowerCase()
+            .includes(normalizedQuery);
+        const matchesVendor =
+          vendorFilter === 'All vendors' || finding.vendors.some((vendor) => vendor.label === vendorFilter);
+        const matchesClient = clientFilter === 'All clients' || finding.customerName === clientFilter;
+        const matchesAgreement = agreementFilter === 'All agreements' || finding.agreementName === agreementFilter;
+        if (!matchesQuery || !matchesVendor || !matchesClient || !matchesAgreement) return false;
+        if (filter === 'all') return true;
+        if (filter === 'needs-action') return monthlyReviewFindingNeedsAction(finding);
+        if (filter === 'cw-only') return finding.rowType === 'cw-only';
+        if (filter === 'vendor-only') return finding.rowType === 'vendor-only';
+        if (filter === 'mapping') return finding.rowType === 'vendor-only' || finding.disposition === 'needs-source';
+        if (filter === 'disagreement') return finding.disposition === 'needs-source';
+        return finding.disposition === filter;
+      })
+      .sort(
+        (left, right) =>
+          monthlyReviewTextCompare(left.customerName, right.customerName) ||
+          monthlyReviewTextCompare(monthlyReviewVendorSortKey(left), monthlyReviewVendorSortKey(right)) ||
+          monthlyReviewTextCompare(left.productName, right.productName) ||
+          monthlyReviewTextCompare(left.agreementName, right.agreementName),
+      );
+  }, [agreementFilter, clientFilter, detail, filter, query, vendorFilter]);
+
+  const visibleCustomerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    visibleFindings.forEach((finding) => {
+      counts.set(finding.customerName, (counts.get(finding.customerName) ?? 0) + 1);
+    });
+    return counts;
+  }, [visibleFindings]);
+
+  const vendors = useMemo(
+    () => [
+      'All vendors',
+      ...[...new Set((detail?.findings ?? []).flatMap((finding) => finding.vendors.map((vendor) => vendor.label)))]
+        .sort(monthlyReviewTextCompare),
+    ],
+    [detail],
+  );
+  const clients = useMemo(
+    () => [
+      'All clients',
+      ...[...new Set((detail?.findings ?? []).map((finding) => finding.customerName))].sort(monthlyReviewTextCompare),
+    ],
+    [detail],
+  );
+  const agreementsForFilter = useMemo(
+    () => [
+      'All agreements',
+      ...[...new Set(
+        (detail?.findings ?? [])
+          .filter((finding) => clientFilter === 'All clients' || finding.customerName === clientFilter)
+          .map((finding) => finding.agreementName),
+      )].sort(monthlyReviewTextCompare),
+    ],
+    [clientFilter, detail],
+  );
+
+  const openVendorData = async (finding: MonthlyReviewFinding, vendor: MonthlyReviewFinding['vendors'][number]) => {
+    setVendorDataSelection({
+      customer: finding.customerName,
+      vendorId: vendor.vendorId,
+      vendor: vendor.label,
+      status: 'loading',
+      columns: [],
+      rows: [],
+    });
+    try {
+      if (!finding.customerId) {
+        throw new Error('This finding is not mapped to a customer, so its vendor evidence cannot be opened safely.');
+      }
+      if (!vendor.syncRunId) throw new Error('This frozen invoice source does not have a raw sync run to open.');
+      const raw = await fetchRawSyncDetails(vendor.vendorId, vendor.syncRunId, undefined, {
+        customerId: finding.customerId,
+      });
+      setVendorDataSelection({
+        customer: finding.customerName,
+        vendorId: vendor.vendorId,
+        vendor: vendor.label,
+        status: 'ready',
+        syncSummary: formatVendorRawSyncSummary(raw),
+        message: `${raw.rows.length.toLocaleString()} frozen ${vendor.label} rows loaded for ${finding.customerName}.`,
+        columns: raw.columns.filter((column) => column !== 'CustomerId'),
+        rows: raw.rows,
+      });
+    } catch (error) {
+      setVendorDataSelection({
+        customer: finding.customerName,
+        vendorId: vendor.vendorId,
+        vendor: vendor.label,
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Unable to open frozen vendor data.',
+        columns: [],
+        rows: [],
+      });
+    }
+  };
+
+  const startRun = async () => {
+    if (!readiness) return;
+    let overrideReason: string | undefined;
+    if (readiness.requiresAdminOverride) {
+      if (!isAdmin) {
+        setMessage('An Admin must start this run because readiness warnings are present.');
+        return;
+      }
+      overrideReason = window.prompt('Why should this Monthly Review start despite the readiness warnings?')?.trim();
+      if (!overrideReason) return;
+    }
+    setBusy('create');
+    try {
+      const created = await createMonthlyReviewRequest(billingMonth, overrideReason);
+      setDetail(created);
+      setFilter('needs-action');
+      setMessage(`Created ${billingMonth} revision ${created.run.revision} with frozen source data.`);
+      setRuns(await fetchMonthlyReviewRuns());
+      setReadiness(await fetchMonthlyReviewReadiness(billingMonth));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to create Monthly Review.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const syncStaleApis = async () => {
+    if (!readiness) return;
+    const targets = readiness.sources.filter(
+      (source) =>
+        source.sourceKind === 'live-sync' &&
+        source.integrationId &&
+        source.canSync &&
+        source.state !== 'ready' &&
+        !activeJobIds.has(source.integrationId),
+    );
+    setBusy('sync');
+    try {
+      for (const source of targets) {
+        await onSyncIntegration(source.integrationId!);
+      }
+      setMessage(targets.length > 0 ? `Queued ${targets.length} live source syncs.` : 'No stale live API syncs need queueing.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to queue stale API syncs.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selectFindingQuantity = (
+    finding: MonthlyReviewFinding,
+    sourceKey: string,
+    quantity: number,
+  ) => {
+    void updateFinding(finding, {
+      disposition: 'needs-action',
+      selectedSourceKey: sourceKey,
+      selectedQuantity: quantity,
+    });
+  };
+
+  const toggleFindingApproval = (finding: MonthlyReviewFinding) => {
+    if (finding.disposition === 'approved') {
+      void updateFinding(finding, { disposition: 'needs-action' });
+      return;
+    }
+    if (finding.selectedQuantity === undefined) {
+      setMessage(`Choose a quantity for ${finding.productName} before approving it.`);
+      return;
+    }
+    if (finding.additions.length !== 1) {
+      setMessage(`${finding.productName} needs exactly one ConnectWise addition before it can be approved.`);
+      return;
+    }
+    void updateFinding(finding, {
+      disposition: finding.selectedQuantity === finding.currentQuantity ? 'auto-passed' : 'approved',
+    });
+  };
+
+  const selectManualFindingQuantity = (finding: MonthlyReviewFinding) => {
+    const value = window.prompt('Manual total', String(finding.selectedQuantity ?? finding.currentQuantity));
+    if (value === null) return;
+    const quantity = Number(value);
+    if (Number.isFinite(quantity) && quantity >= 0) {
+      selectFindingQuantity(finding, 'manual', quantity);
+    }
+  };
+
+  const bulkSkip = async () => {
+    if (!detail || selectedFindingIds.length === 0) return;
+    const reason = window.prompt(`Reason for skipping ${selectedFindingIds.length} selected exceptions?`)?.trim();
+    if (!reason) return;
+    setBusy('bulk-skip');
+    try {
+      for (const findingId of selectedFindingIds) {
+        await updateMonthlyReviewFindingRequest(detail.run.id, findingId, {
+          disposition: 'skipped',
+          dispositionReason: reason,
+        });
+      }
+      setSelectedFindingIds([]);
+      await loadWorkspace(detail.run.id);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to skip selected findings.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const applyApproved = async () => {
+    if (!detail) return;
+    setBusy('apply');
+    try {
+      const response = await monthlyReviewJson<{ run: MonthlyReviewRunDetail }>(
+        `/api/reconciliation/monthly/runs/${encodeURIComponent(detail.run.id)}/apply`,
+        { method: 'POST' },
+      );
+      setDetail(response.run);
+      setMessage('Applied approved Monthly Review changes to ConnectWise.');
+      setRuns(await fetchMonthlyReviewRuns());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to apply Monthly Review changes.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const completeRun = async () => {
+    if (!detail) return;
+    setBusy('complete');
+    try {
+      const completed = await monthlyReviewJson<MonthlyReviewRunDetail>(
+        `/api/reconciliation/monthly/runs/${encodeURIComponent(detail.run.id)}/complete`,
+        { method: 'POST' },
+      );
+      setDetail(completed);
+      setRuns(await fetchMonthlyReviewRuns());
+      setMessage('Monthly Review completed and locked.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to complete Monthly Review.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const supersedeRun = async () => {
+    if (!detail || !isAdmin) return;
+    const overrideReason = readiness?.warningReasons.length
+      ? window.prompt('Readiness warnings are present. Enter the Admin override reason for the new revision:')?.trim()
+      : undefined;
+    if (readiness?.warningReasons.length && !overrideReason) return;
+    setBusy('supersede');
+    try {
+      const revised = await monthlyReviewJson<MonthlyReviewRunDetail>(
+        `/api/reconciliation/monthly/runs/${encodeURIComponent(detail.run.id)}/supersede`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ overrideReason }),
+        },
+      );
+      setDetail(revised);
+      setRuns(await fetchMonthlyReviewRuns());
+      setMessage(`Created revision ${revised.run.revision} from the locked run.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to create a superseding revision.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restartRun = async () => {
+    if (!detail || !isAdmin || detail.run.status !== 'in-progress') return;
+    const reason = window.prompt(
+      'This will lock the current attempt and create a clean revision using current mappings and readiness-qualified source data. Enter the reason:',
+    )?.trim();
+    if (!reason) return;
+    setBusy('restart');
+    try {
+      const restarted = await monthlyReviewJson<MonthlyReviewRunDetail>(
+        `/api/reconciliation/monthly/runs/${encodeURIComponent(detail.run.id)}/restart`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason }),
+        },
+      );
+      setDetail(restarted);
+      setSelectedFindingIds([]);
+      setRuns(await fetchMonthlyReviewRuns());
+      setMessage(
+        `Restarted ${restarted.run.billingMonth} as revision ${restarted.run.revision} using current mappings.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to restart Monthly Review.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const exportReview = () => {
+    if (!detail) return;
+    exportExcelFile(
+      `monthly-review-${detail.run.billingMonth}-r${detail.run.revision}.xlsx`,
+      detail.findings.map((finding) => ({
+        Customer: finding.customerName,
+        Agreement: finding.agreementName,
+        'Row Type': monthlyReviewRowTypeLabel(finding.rowType),
+        Product: finding.productName,
+        'Product Code': finding.productCode,
+        Vendors: finding.vendors.map((vendor) => vendor.label).join('; '),
+        'Vendor Counts': finding.vendors.map((vendor) => `${vendor.label}: ${vendor.proposedQuantity}`).join('; '),
+        'CW Count': finding.currentQuantity,
+        'Selected Count': finding.selectedQuantity ?? '',
+        Delta: finding.delta,
+        Impact: finding.financialImpact,
+        Disposition: monthlyReviewDispositionLabel(finding.disposition),
+        Reason: finding.dispositionReason ?? '',
+        'CW Addition IDs': finding.additions.map((addition) => addition.connectWiseAdditionId).join('; '),
+      })),
+    );
+  };
+
+  return (
+    <section className="monthly-review-workspace">
+      <section className="monthly-review-command work-surface">
+        <div>
+          <span className="section-kicker">Monthly control</span>
+          <h2>Review every active agreement against frozen vendor evidence</h2>
+          <p>{message}</p>
+        </div>
+        <div className="monthly-review-command-actions">
+          <input
+            aria-label="Billing month"
+            onChange={(event) => setBillingMonth(event.target.value)}
+            title="Billing month"
+            type="month"
+            value={billingMonth}
+          />
+          <button className="button secondary compact" disabled={busy !== null} onClick={() => void loadWorkspace(detail?.run.id)} type="button">
+            <RefreshCcw size={15} />
+            Refresh
+          </button>
+          <button className="button secondary compact" disabled={busy !== null} onClick={() => void syncStaleApis()} type="button">
+            <RefreshCcw size={15} />
+            Sync stale APIs
+          </button>
+          <button
+            className="button primary compact"
+            disabled={busy !== null || !readiness || readiness.blockingReasons.length > 0 || Boolean(runs.find((run) => run.billingMonth === billingMonth && run.status === 'in-progress'))}
+            onClick={() => void startRun()}
+            type="button"
+          >
+            <Plus size={15} />
+            {busy === 'create' ? 'Creating' : 'Start review'}
+          </button>
+        </div>
+      </section>
+
+      {readiness ? (
+        <section className="monthly-readiness-grid" aria-label="Monthly Review source readiness">
+          {readiness.sources.map((source) => (
+            <article className={`monthly-readiness-card ${source.state}`} key={source.id}>
+              <div>
+                <span className={`live-dot ${source.state === 'ready' ? 'ready' : source.state === 'warning' ? 'loading' : 'failed'}`} />
+                <strong>{source.label}</strong>
+              </div>
+              <span>{source.message}</span>
+              <small>
+                {source.completedAt ? formatDateTime(source.completedAt) : 'No completed source'}
+                {source.billingPeriodStart ? ` · ${source.billingPeriodStart}–${source.billingPeriodEnd ?? '?'}` : ''}
+              </small>
+            </article>
+          ))}
+        </section>
+      ) : null}
+
+      <section className="monthly-run-strip work-surface">
+        <div className="segmented-control" role="list" aria-label="Monthly Review runs">
+          {runs.length === 0 ? <button disabled>No saved runs</button> : runs.slice(0, 8).map((run) => (
+            <button
+              className={detail?.run.id === run.id ? 'active' : ''}
+              key={run.id}
+              onClick={() => void fetchMonthlyReviewRun(run.id).then(setDetail)}
+              type="button"
+            >
+              {run.billingMonth} · R{run.revision}
+              {run.status === 'completed' ? ' · Locked' : run.status === 'superseded' ? ' · Superseded' : ''}
+            </button>
+          ))}
+        </div>
+        {detail ? (
+          <div className="monthly-run-progress">
+            <span><strong>{detail.run.findingCount - detail.run.unresolvedCount}</strong> resolved</span>
+            <span><strong>{detail.run.unresolvedCount}</strong> open</span>
+            <span><strong>{formatCurrency(detail.run.financialImpact)}</strong> exposure</span>
+            {detail.run.status === 'superseded' && detail.run.supersededReason ? (
+              <span title={detail.run.supersededReason}>
+                <strong>Superseded:</strong> {detail.run.supersededReason}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      {detail ? (
+        <section className="work-surface monthly-review-surface">
+          <section className="toolbar monthly-review-toolbar" aria-label="Monthly Review filters">
+            <label className="search-field">
+              <Search size={18} />
+              <input
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search client, agreement, product"
+                type="search"
+                value={query}
+              />
+            </label>
+            <select aria-label="Review filter" onChange={(event) => setFilter(event.target.value as MonthlyReviewFilter)} value={filter}>
+              <option value="needs-action">Needs action</option>
+              <option value="all">All rows</option>
+              <option value="cw-only">CW only</option>
+              <option value="vendor-only">Vendor only</option>
+              <option value="mapping">Mapping review</option>
+              <option value="disagreement">Source disagreement</option>
+              <option value="approved">Approved</option>
+              <option value="applied">Applied</option>
+              <option value="skipped">Skipped</option>
+              <option value="ignored">Ignored</option>
+              <option value="ticketed">Ticketed</option>
+            </select>
+            <select aria-label="Vendor filter" onChange={(event) => setVendorFilter(event.target.value)} value={vendorFilter}>
+              {vendors.map((vendor) => <option key={vendor}>{vendor}</option>)}
+            </select>
+            <select
+              aria-label="Client filter"
+              onChange={(event) => {
+                setClientFilter(event.target.value);
+                setAgreementFilter('All agreements');
+              }}
+              value={clientFilter}
+            >
+              {clients.map((client) => <option key={client}>{client}</option>)}
+            </select>
+            <select aria-label="Agreement filter" onChange={(event) => setAgreementFilter(event.target.value)} value={agreementFilter}>
+              {agreementsForFilter.map((agreement) => <option key={agreement}>{agreement}</option>)}
+            </select>
+            <button
+              className="button secondary compact"
+              disabled={!visibleFindings.some(monthlyReviewFindingNeedsAction)}
+              onClick={() => {
+                const next = visibleFindings.find(monthlyReviewFindingNeedsAction);
+                if (next) document.getElementById(`monthly-finding-${next.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}
+              type="button"
+            >
+              Next unresolved
+            </button>
+            <button className="button secondary compact" disabled={selectedFindingIds.length === 0 || busy !== null || !activeRun} onClick={() => void bulkSkip()} type="button">
+              Skip selected ({selectedFindingIds.length})
+            </button>
+            <button className="button secondary compact" onClick={exportReview} type="button">
+              <Download size={15} />
+              Export
+            </button>
+            {isAdmin && activeRun ? (
+              <button className="button secondary compact" disabled={busy !== null} onClick={() => void restartRun()} type="button">
+                <RefreshCcw size={15} />
+                Restart review
+              </button>
+            ) : null}
+            {canApprove ? (
+              <>
+                <button className="button secondary compact" disabled={!activeRun || busy !== null || !detail.findings.some((finding) => finding.disposition === 'approved')} onClick={() => void applyApproved()} type="button">
+                  Review & Apply
+                </button>
+                <button className="button primary compact" disabled={!activeRun || busy !== null || detail.run.unresolvedCount > 0} onClick={() => void completeRun()} type="button">
+                  <BadgeCheck size={15} />
+                  Complete & lock
+                </button>
+                {isAdmin && detail.run.status === 'completed' ? (
+                  <button className="button secondary compact" disabled={busy !== null} onClick={() => void supersedeRun()} type="button">
+                    <History size={15} />
+                    New revision
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+
+          <div className="monthly-review-table-wrap">
+            <table className="monthly-review-table">
+              <thead>
+                <tr>
+                  <th aria-label="Select" />
+                  <th>Agreement</th>
+                  <th>Vendor</th>
+                  <th>Addition</th>
+                  <th>API</th>
+                  <th>Inv.</th>
+                  <th>Linked</th>
+                  <th>CW</th>
+                  <th>Delta</th>
+                  <th>Impact</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleFindings.map((finding, findingIndex) => {
+                  const findingBusy = busy === `finding:${finding.id}`;
+                  const startsCustomer =
+                    findingIndex === 0 ||
+                    visibleFindings[findingIndex - 1]?.customerName !== finding.customerName;
+                  const selectionDisabled =
+                    !activeRun || findingBusy || finding.disposition === 'applied';
+                  const countButtons = (kind: MonthlyReviewEvidenceCountKind) => {
+                    const available = finding.vendors.filter(
+                      (vendor) => monthlyReviewEvidenceCount(vendor, kind) !== undefined,
+                    );
+                    return (
+                      <div className="monthly-count-options">
+                        {available.length === 0 ? <span className="count-select-placeholder">–</span> : available.map((vendor) => {
+                          const quantity = monthlyReviewEvidenceCount(vendor, kind)!;
+                          return (
+                            <button
+                              aria-label={`Use ${vendor.label} ${monthlyReviewEvidenceCountLabel(kind)} ${quantity}`}
+                              aria-pressed={monthlyReviewEvidenceCountSelected(finding, vendor, kind)}
+                              className={monthlyReviewEvidenceCountButtonClass(finding, vendor, kind)}
+                              disabled={selectionDisabled}
+                              key={`${vendor.id}:${kind}`}
+                              onClick={() => selectFindingQuantity(finding, `${vendor.id}:${kind}`, quantity)}
+                              title={`Use ${vendor.label} ${monthlyReviewEvidenceCountLabel(kind).toLowerCase()} count ${quantity}`}
+                              type="button"
+                            >
+                              {quantity.toLocaleString()}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  };
+                  const isApproved = finding.disposition === 'approved';
+                  const isResolvedApproval =
+                    finding.disposition === 'auto-passed' || finding.disposition === 'applied';
+                  const canToggleApproval =
+                    activeRun &&
+                    finding.additions.length === 1 &&
+                    finding.selectedQuantity !== undefined &&
+                    !isResolvedApproval;
+                  return (
+                    <Fragment key={finding.id}>
+                      {startsCustomer ? (
+                        <tr className="monthly-customer-group-row">
+                          <td colSpan={12}>
+                            <strong>{finding.customerName}</strong>
+                            <span>{(visibleCustomerCounts.get(finding.customerName) ?? 0).toLocaleString()} review rows</span>
+                          </td>
+                        </tr>
+                      ) : null}
+                      <tr className={monthlyReviewFindingNeedsAction(finding) ? 'needs-action' : ''} id={`monthly-finding-${finding.id}`}>
+                        <td>
+                          <input
+                            aria-label={`Select ${finding.productName}`}
+                            checked={selectedFindingIds.includes(finding.id)}
+                            disabled={!activeRun || !monthlyReviewFindingNeedsAction(finding)}
+                            onChange={() => setSelectedFindingIds((current) => current.includes(finding.id) ? current.filter((id) => id !== finding.id) : [...current, finding.id])}
+                            type="checkbox"
+                          />
+                        </td>
+                        <td className="monthly-truncate-cell" title={finding.agreementName}>
+                          {finding.agreementName}
+                        </td>
+                        <td>
+                          <div className="monthly-vendor-badges">
+                            {finding.vendors.length === 0 ? <span className="status-pill blocked">CW only</span> : finding.vendors.map((vendor) => (
+                              <button
+                                className="vendor-data-link monthly-vendor-badge"
+                                disabled={!vendor.syncRunId || !finding.customerId}
+                                key={vendor.id}
+                                onClick={() => void openVendorData(finding, vendor)}
+                                title={
+                                  finding.customerId
+                                    ? `Open ${vendor.label} frozen evidence for ${finding.customerName}`
+                                    : 'Map this finding to a customer before opening evidence'
+                                }
+                                type="button"
+                              >
+                                <Database size={12} />
+                                {vendor.label}
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                        <td
+                          className="monthly-truncate-cell monthly-addition-cell"
+                          title={`${finding.productName} · ${finding.productCode} · ${monthlyReviewRowTypeLabel(finding.rowType)}${
+                            finding.additions.length > 0
+                              ? ` · CW ${finding.additions.map((addition) => addition.connectWiseAdditionId).join(', ')}`
+                              : ''
+                          }`}
+                        >
+                          <strong>{finding.productName}</strong>
+                          <small>{finding.productCode}</small>
+                        </td>
+                        <td className="count-cell">{countButtons('api')}</td>
+                        <td className="count-cell">{countButtons('invoice')}</td>
+                        <td className="count-cell">{countButtons('linked')}</td>
+                        <td className="count-cell">
+                          <button
+                            aria-label={`Keep ConnectWise count ${finding.currentQuantity}`}
+                            aria-pressed={finding.selectedSourceKey === 'connectwise'}
+                            className={`count-select-button${finding.selectedSourceKey === 'connectwise' ? ' selected' : ''}`}
+                            disabled={selectionDisabled}
+                            onClick={() => selectFindingQuantity(finding, 'connectwise', finding.currentQuantity)}
+                            title={`Keep ConnectWise count ${finding.currentQuantity}`}
+                            type="button"
+                          >
+                            {finding.currentQuantity.toLocaleString()}
+                          </button>
+                        </td>
+                        <td className={finding.delta === 0 ? 'count-cell' : finding.delta > 0 ? 'count-cell money-positive' : 'count-cell money-negative'}>
+                          {deltaLabel(finding.delta)}
+                        </td>
+                        <td>{formatCurrency(finding.financialImpact)}</td>
+                        <td title={finding.dispositionReason}>
+                          <span className={`status-pill ${monthlyReviewFindingNeedsAction(finding) ? 'blocked' : 'ready'}`}>
+                            {monthlyReviewDispositionLabel(finding.disposition)}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="license-actions monthly-row-actions">
+                            <button
+                              aria-label={
+                                isApproved
+                                  ? 'Remove approval'
+                                  : isResolvedApproval
+                                    ? monthlyReviewDispositionLabel(finding.disposition)
+                                    : 'Approve selected count'
+                              }
+                              aria-pressed={isApproved || isResolvedApproval}
+                              className={isApproved || isResolvedApproval ? 'approval-toggle approved' : 'approval-toggle'}
+                              disabled={!canToggleApproval || findingBusy}
+                              onClick={() => toggleFindingApproval(finding)}
+                              title={
+                                isApproved
+                                  ? 'Remove approval'
+                                  : isResolvedApproval
+                                    ? monthlyReviewDispositionLabel(finding.disposition)
+                                    : finding.selectedQuantity === undefined
+                                      ? 'Choose a count before approving'
+                                      : 'Approve selected count'
+                              }
+                              type="button"
+                            >
+                              {isApproved || isResolvedApproval ? <Check size={15} /> : null}
+                            </button>
+                            {activeRun && !isApproved && !isResolvedApproval ? (
+                              <button
+                                className="button secondary compact table-action-button"
+                                disabled={findingBusy}
+                                onClick={() => {
+                                  const reason = window.prompt('Reason for skipping this exception?')?.trim();
+                                  if (reason) void updateFinding(finding, { disposition: 'skipped', dispositionReason: reason });
+                                }}
+                                title="Skip this row"
+                                type="button"
+                              >
+                                Skip
+                              </button>
+                            ) : null}
+                            {activeRun && finding.disposition !== 'applied' ? (
+                              <details className="monthly-more-actions">
+                                <summary aria-label="More row actions" className="icon-button table-icon" title="More row actions">
+                                  <MoreHorizontal size={16} />
+                                </summary>
+                                <div className="monthly-more-actions-menu">
+                                  <button disabled={findingBusy} onClick={() => selectManualFindingQuantity(finding)} type="button">
+                                    Manual quantity
+                                  </button>
+                                  <button
+                                    disabled={findingBusy}
+                                    onClick={() => {
+                                      const reason = window.prompt('Why is this row intentionally ignored?')?.trim();
+                                      if (reason) void updateFinding(finding, { disposition: 'ignored', dispositionReason: reason });
+                                    }}
+                                    type="button"
+                                  >
+                                    Ignore row
+                                  </button>
+                                  <button
+                                    disabled={findingBusy}
+                                    onClick={() => {
+                                      const ticketId = window.prompt('Investigation ticket ID or reference')?.trim();
+                                      if (ticketId) {
+                                        void updateFinding(finding, {
+                                          disposition: 'ticketed',
+                                          dispositionReason: `Tracked in investigation ticket ${ticketId}.`,
+                                          ticketIds: [ticketId],
+                                        });
+                                      }
+                                    }}
+                                    type="button"
+                                  >
+                                    Link ticket
+                                  </button>
+                                </div>
+                              </details>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+            {visibleFindings.length === 0 ? (
+              <div className="empty-state">
+                <Check size={20} />
+                <strong>No rows match this review queue.</strong>
+                <span>Adjust the filters or select All rows.</span>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : (
+        <div className="empty-state work-surface">
+          <ListChecks size={20} />
+          <strong>{loadState === 'loading' ? 'Loading Monthly Review.' : 'Start the first monthly review when sources are ready.'}</strong>
+          <span>The readiness cards preserve the exact sync and import evidence that will be frozen into the run.</span>
+        </div>
+      )}
+      {vendorDataSelection ? <VendorDataModal onClose={() => setVendorDataSelection(null)} selection={vendorDataSelection} /> : null}
+    </section>
+  );
+}
+
+function monthlyReviewFindingNeedsAction(finding: MonthlyReviewFinding) {
+  return !['auto-passed', 'applied', 'skipped', 'ignored', 'ticketed'].includes(finding.disposition);
+}
+
+function monthlyReviewDispositionLabel(disposition: MonthlyReviewDisposition) {
+  return disposition
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function monthlyReviewRowTypeLabel(rowType: MonthlyReviewFinding['rowType']) {
+  if (rowType === 'cw-only') return 'CW only';
+  if (rowType === 'vendor-only') return 'Vendor only';
+  return 'Correlated';
+}
+
+type MonthlyReviewEvidenceCountKind = 'api' | 'invoice' | 'linked';
+
+function monthlyReviewTextCompare(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true });
+}
+
+function monthlyReviewVendorSortKey(finding: MonthlyReviewFinding) {
+  return finding.vendors.length > 0
+    ? [...finding.vendors.map((vendor) => vendor.label)].sort(monthlyReviewTextCompare).join(' / ')
+    : 'ConnectWise';
+}
+
+function monthlyReviewEvidenceCount(
+  vendor: MonthlyReviewVendorEvidence,
+  kind: MonthlyReviewEvidenceCountKind,
+) {
+  if (kind === 'invoice') return vendor.invoiceQuantity;
+  if (kind === 'linked') return vendor.linkedQuantity;
+  return vendor.apiQuantity;
+}
+
+function monthlyReviewEvidenceCountLabel(kind: MonthlyReviewEvidenceCountKind) {
+  if (kind === 'invoice') return 'Invoice count';
+  if (kind === 'linked') return 'Linked count';
+  return 'API count';
+}
+
+function monthlyReviewPreferredEvidenceCountKind(vendor: MonthlyReviewVendorEvidence) {
+  return preferredReconciliationCountSource(
+    vendor.apiQuantity ?? vendor.proposedQuantity,
+    vendor.invoiceQuantity,
+    vendor.linkedQuantity,
+  ) as MonthlyReviewEvidenceCountKind;
+}
+
+function monthlyReviewEvidenceCountSelected(
+  finding: MonthlyReviewFinding,
+  vendor: MonthlyReviewVendorEvidence,
+  kind: MonthlyReviewEvidenceCountKind,
+) {
+  if (finding.selectedSourceKey === `${vendor.id}:${kind}`) return true;
+  if (finding.selectedSourceKey !== vendor.id) return false;
+  return (
+    monthlyReviewPreferredEvidenceCountKind(vendor) === kind &&
+    finding.selectedQuantity === monthlyReviewEvidenceCount(vendor, kind)
+  );
+}
+
+function monthlyReviewEvidenceCountButtonClass(
+  finding: MonthlyReviewFinding,
+  vendor: MonthlyReviewVendorEvidence,
+  kind: MonthlyReviewEvidenceCountKind,
+) {
+  return [
+    'count-select-button',
+    monthlyReviewPreferredEvidenceCountKind(vendor) === kind ? 'largest' : '',
+    monthlyReviewEvidenceCountSelected(finding, vendor, kind) ? 'selected' : '',
+  ].filter(Boolean).join(' ');
 }
 
 function ReconcileView(props: {
@@ -17498,6 +18792,17 @@ function MappingsView(props: {
   onCrossVendorBundlesRefresh: () => Promise<CrossVendorProductBundle[]>;
   onDeviceExclusionDeactivate: (exclusion: DeviceMatchExclusion) => Promise<void>;
   onIntegrationChange: (integrationId: VendorKey) => void;
+  onMonthlyReviewProductExclude: (target: ProductCatalogTarget) => Promise<void>;
+  onMonthlyReviewProductRestore: (exclusion: MonthlyReviewProductExclusion) => Promise<void>;
+  onNcentralSiteMappingDeactivate: (mapping: NcentralSiteMapping) => Promise<void>;
+  onNcentralSiteMappingSave: (payload: {
+    ncentralCustomerId: string;
+    ncentralCustomerName: string;
+    ncentralSiteId: string;
+    ncentralSiteName: string;
+    customerId: string;
+    agreementId: string;
+  }) => Promise<boolean>;
   onProductIgnore: (
     integrationId: VendorKey,
     vendorProductKey: string,
@@ -17576,6 +18881,10 @@ function MappingsView(props: {
     onCrossVendorBundlesRefresh,
     onDeviceExclusionDeactivate,
     onIntegrationChange,
+    onMonthlyReviewProductExclude,
+    onMonthlyReviewProductRestore,
+    onNcentralSiteMappingDeactivate,
+    onNcentralSiteMappingSave,
     onProductIgnore,
     onProductRestore,
     onProductTargetsSave,
@@ -17610,6 +18919,14 @@ function MappingsView(props: {
   const [productCatalogResults, setProductCatalogResults] = useState<Record<string, ProductCatalogTarget[]>>({});
   const [productCatalogMessages, setProductCatalogMessages] = useState<Record<string, string>>({});
   const [productCatalogLoading, setProductCatalogLoading] = useState<Record<string, boolean>>({});
+  const [monthlyReviewExclusionQuery, setMonthlyReviewExclusionQuery] = useState('');
+  const [monthlyReviewExclusionResults, setMonthlyReviewExclusionResults] = useState<ProductCatalogTarget[]>([]);
+  const [monthlyReviewExclusionMessage, setMonthlyReviewExclusionMessage] = useState('');
+  const [monthlyReviewExclusionLoading, setMonthlyReviewExclusionLoading] = useState(false);
+  const [ncentralSiteCustomerId, setNcentralSiteCustomerId] = useState('');
+  const [ncentralSiteId, setNcentralSiteId] = useState('');
+  const [ncentralSiteTargetCustomerId, setNcentralSiteTargetCustomerId] = useState('');
+  const [ncentralSiteTargetAgreementId, setNcentralSiteTargetAgreementId] = useState('');
   const [productCustomerReview, setProductCustomerReview] = useState<ProductMappingCustomerReview | null>(null);
   const [productCustomerReviewLoadState, setProductCustomerReviewLoadState] = useState<'loading' | 'ready' | 'failed'>('ready');
   const [productCustomerReviewMessage, setProductCustomerReviewMessage] = useState('');
@@ -17697,6 +19014,9 @@ function MappingsView(props: {
   const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
   const isHuntressMappingWorkspace = selectedIntegrationId === 'huntress';
   const isLaborOnlyMappingWorkspace = selectedIntegrationId === 'connectwise';
+  const monthlyReviewProductExclusions = mappingState?.monthlyReviewProductExclusions ?? [];
+  const ncentralSiteMappings = mappingState?.ncentralSiteMappings ?? [];
+  const ncentralSiteOptions = mappingState?.ncentralSiteOptions ?? [];
   const showLaborMappingSection = hasLaborMappingWorkspace(selectedIntegrationId);
   const showInvestigationTicketMappingSection = hasInvestigationTicketMappingWorkspace(selectedIntegrationId);
   const accountMappings = filterHuntressAccountRows(
@@ -17750,6 +19070,16 @@ function MappingsView(props: {
     [allProductGroups],
   );
   const customerOptions = mappingState?.customerOptions ?? [];
+  const selectedNcentralSiteCustomer = ncentralSiteOptions.find(
+    (option) => option.customerId === ncentralSiteCustomerId,
+  );
+  const selectedNcentralSite = selectedNcentralSiteCustomer?.sites.find(
+    (site) => site.siteId === ncentralSiteId,
+  );
+  const selectedNcentralTargetCustomer = customerOptions.find(
+    (option) => option.customerId === ncentralSiteTargetCustomerId,
+  );
+  const ncentralTargetAgreementOptions = selectedNcentralTargetCustomer?.agreements ?? [];
   const selectedOverrideCustomer = customerOptions.find((option) => option.customerId === overrideCustomerId);
   const overrideAgreementOptions = selectedOverrideCustomer?.agreements ?? [];
   const suggestedCustomerMappingCount = (mappingState?.accountCandidates ?? []).filter(
@@ -18643,6 +19973,31 @@ function MappingsView(props: {
     }
   };
 
+  const runMonthlyReviewExclusionSearch = async () => {
+    const query = monthlyReviewExclusionQuery.trim();
+    if (!query) {
+      setMonthlyReviewExclusionMessage('Enter a product code or name to search ConnectWise.');
+      return;
+    }
+
+    setMonthlyReviewExclusionLoading(true);
+    setMonthlyReviewExclusionMessage('');
+    try {
+      const response = await searchProductCatalog('connectwise', query);
+      setMonthlyReviewExclusionResults(response.targets);
+      setMonthlyReviewExclusionMessage(
+        response.warning ?? `${response.targets.length} catalog item${response.targets.length === 1 ? '' : 's'} found.`,
+      );
+    } catch (error) {
+      setMonthlyReviewExclusionResults([]);
+      setMonthlyReviewExclusionMessage(
+        error instanceof Error ? error.message : 'Product catalog search failed.',
+      );
+    } finally {
+      setMonthlyReviewExclusionLoading(false);
+    }
+  };
+
   return (
     <section className="mappings-page" aria-label="Mapping review">
       <div className="integrations-live-bar">
@@ -18723,6 +20078,272 @@ function MappingsView(props: {
             mapping={investigationTicketMapping}
             onSave={onInvestigationTicketMappingSave}
           />
+        </MappingSectionDrawer>
+      ) : null}
+
+      {isLaborOnlyMappingWorkspace ? (
+        <MappingSectionDrawer
+          defaultOpen
+          meta="Catalog products that remain linkable but do not create standalone CW-only rows"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="monthly-review-exclusions"
+          status={`${monthlyReviewProductExclusions.length.toLocaleString()} excluded`}
+          statusTone={monthlyReviewProductExclusions.length > 0 ? 'ready' : 'needs-review'}
+          title="Monthly Review product exclusions"
+        >
+          <section className="work-surface monthly-review-exclusion-panel" aria-label="Monthly Review product exclusions">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">ConnectWise catalog</span>
+                <h2>Exclude helper products from CW-only review</h2>
+                <p>
+                  These products still work in linked-count rules and matched rows. Only unmatched standalone
+                  CW-only rows are suppressed.
+                </p>
+              </div>
+            </div>
+
+            <div className="monthly-review-exclusion-search">
+              <input
+                onChange={(event) => setMonthlyReviewExclusionQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void runMonthlyReviewExclusionSearch();
+                  }
+                }}
+                placeholder="Search ConnectWise product code or name"
+                value={monthlyReviewExclusionQuery}
+              />
+              <button
+                className="button secondary compact"
+                disabled={monthlyReviewExclusionLoading}
+                onClick={() => void runMonthlyReviewExclusionSearch()}
+                type="button"
+              >
+                <Search size={14} />
+                {monthlyReviewExclusionLoading ? 'Searching' : 'Search'}
+              </button>
+            </div>
+            {monthlyReviewExclusionMessage ? (
+              <span className="product-catalog-message">{monthlyReviewExclusionMessage}</span>
+            ) : null}
+
+            {monthlyReviewExclusionResults.length > 0 ? (
+              <div className="monthly-review-exclusion-list catalog-results">
+                {monthlyReviewExclusionResults.map((target) => {
+                  const existing = monthlyReviewProductExclusions.some(
+                    (exclusion) =>
+                      exclusion.connectWiseProductCode.toLowerCase() ===
+                      target.connectwiseProductCode.toLowerCase(),
+                  );
+                  const actionKey = `monthly-review-exclusion:${target.connectwiseProductCode}`;
+                  return (
+                    <div className="monthly-review-exclusion-row" key={target.connectwiseProductCode}>
+                      <div>
+                        <strong>{target.connectwiseProductName}</strong>
+                        <span>{target.connectwiseProductCode}</span>
+                      </div>
+                      <button
+                        className="button secondary compact"
+                        disabled={existing || busyAction === actionKey}
+                        onClick={() => void onMonthlyReviewProductExclude(target)}
+                        type="button"
+                      >
+                        {existing ? 'Excluded' : busyAction === actionKey ? 'Saving' : 'Exclude'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <div className="monthly-review-exclusion-current">
+              <strong>Currently excluded</strong>
+              {monthlyReviewProductExclusions.length === 0 ? (
+                <span className="empty-inline">No ConnectWise products are excluded.</span>
+              ) : (
+                <div className="monthly-review-exclusion-list">
+                  {monthlyReviewProductExclusions.map((exclusion) => (
+                    <div className="monthly-review-exclusion-row" key={exclusion.id}>
+                      <div>
+                        <strong>{exclusion.connectWiseProductName}</strong>
+                        <span>{exclusion.connectWiseProductCode}</span>
+                      </div>
+                      <button
+                        aria-label={`Remove ${exclusion.connectWiseProductName} exclusion`}
+                        className="icon-button compact"
+                        disabled={busyAction === `monthly-review-exclusion:${exclusion.id}`}
+                        onClick={() => void onMonthlyReviewProductRestore(exclusion)}
+                        title="Allow this product to appear as CW only again"
+                        type="button"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        </MappingSectionDrawer>
+      ) : null}
+
+      {selectedIntegrationId === 'ncentral' ? (
+        <MappingSectionDrawer
+          defaultOpen={ncentralSiteMappings.length > 0}
+          meta="Assign individual N-Able sites independently from their parent customer"
+          onOpenChange={setMappingSection}
+          openState={mappingSectionOpen}
+          sectionId="ncentral-sites"
+          status={`${ncentralSiteMappings.length.toLocaleString()} mapped`}
+          statusTone={ncentralSiteMappings.length > 0 ? 'ready' : 'approved'}
+          title="Site-to-customer overrides"
+        >
+          <section className="work-surface ncentral-site-mapping-panel" aria-label="N-Able site-to-customer overrides">
+            <div className="surface-header">
+              <div>
+                <span className="section-kicker">N-Able hierarchy</span>
+                <h2>Map a site separately from its parent customer</h2>
+                <p>
+                  Devices and license counts for the selected site move to the chosen ConnectWise customer and
+                  agreement. They no longer contribute to the parent N-Able customer’s totals.
+                </p>
+              </div>
+            </div>
+
+            <div className="ncentral-site-mapping-form">
+              <label>
+                <span>N-Able customer</span>
+                <select
+                  onChange={(event) => {
+                    setNcentralSiteCustomerId(event.target.value);
+                    setNcentralSiteId('');
+                  }}
+                  value={ncentralSiteCustomerId}
+                >
+                  <option value="">Select customer</option>
+                  {ncentralSiteOptions.map((customer) => (
+                    <option key={customer.customerId} value={customer.customerId}>
+                      {customer.customerName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>N-Able site</span>
+                <select
+                  disabled={!selectedNcentralSiteCustomer}
+                  onChange={(event) => setNcentralSiteId(event.target.value)}
+                  value={ncentralSiteId}
+                >
+                  <option value="">Select site</option>
+                  {(selectedNcentralSiteCustomer?.sites ?? []).map((site) => (
+                    <option key={site.siteId} value={site.siteId}>
+                      {site.siteName} ({site.deviceCount.toLocaleString()})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <ArrowRight className="ncentral-site-mapping-arrow" size={16} />
+              <label>
+                <span>ConnectWise customer</span>
+                <select
+                  onChange={(event) => {
+                    setNcentralSiteTargetCustomerId(event.target.value);
+                    setNcentralSiteTargetAgreementId('');
+                  }}
+                  value={ncentralSiteTargetCustomerId}
+                >
+                  <option value="">Select customer</option>
+                  {customerOptions.map((customer) => (
+                    <option key={customer.customerId} value={customer.customerId}>
+                      {customer.customerName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>ConnectWise agreement</span>
+                <select
+                  disabled={!selectedNcentralTargetCustomer}
+                  onChange={(event) => setNcentralSiteTargetAgreementId(event.target.value)}
+                  value={ncentralSiteTargetAgreementId}
+                >
+                  <option value="">Select agreement</option>
+                  {ncentralTargetAgreementOptions.map((agreement) => (
+                    <option key={agreement.agreementId} value={agreement.agreementId}>
+                      {agreement.agreementName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="button primary compact"
+                disabled={
+                  !selectedNcentralSiteCustomer ||
+                  !selectedNcentralSite ||
+                  !selectedNcentralTargetCustomer ||
+                  !ncentralSiteTargetAgreementId ||
+                  Boolean(busyAction?.startsWith('ncentral-site:'))
+                }
+                onClick={async () => {
+                  if (!selectedNcentralSiteCustomer || !selectedNcentralSite || !selectedNcentralTargetCustomer) return;
+                  const saved = await onNcentralSiteMappingSave({
+                    ncentralCustomerId: selectedNcentralSiteCustomer.customerId,
+                    ncentralCustomerName: selectedNcentralSiteCustomer.customerName,
+                    ncentralSiteId: selectedNcentralSite.siteId,
+                    ncentralSiteName: selectedNcentralSite.siteName,
+                    customerId: selectedNcentralTargetCustomer.customerId,
+                    agreementId: ncentralSiteTargetAgreementId,
+                  });
+                  if (saved) {
+                    setNcentralSiteId('');
+                    setNcentralSiteTargetCustomerId('');
+                    setNcentralSiteTargetAgreementId('');
+                  }
+                }}
+                type="button"
+              >
+                <Plus size={14} />
+                Add override
+              </button>
+            </div>
+
+            <div className="ncentral-site-mapping-current">
+              <strong>Active site overrides</strong>
+              {ncentralSiteMappings.length === 0 ? (
+                <span className="empty-inline">No sites currently override their parent N-Able customer.</span>
+              ) : (
+                <div className="ncentral-site-mapping-list">
+                  {ncentralSiteMappings.map((mapping) => (
+                    <div className="ncentral-site-mapping-row" key={mapping.id}>
+                      <div>
+                        <strong>{mapping.ncentralSiteName}</strong>
+                        <span>{mapping.ncentralCustomerName}</span>
+                      </div>
+                      <ArrowRight size={14} />
+                      <div>
+                        <strong>{mapping.customerName ?? 'ConnectWise customer'}</strong>
+                        <span>{mapping.agreementName ?? 'Agreement'}</span>
+                      </div>
+                      <button
+                        aria-label={`Remove ${mapping.ncentralSiteName} site override`}
+                        className="icon-button compact"
+                        disabled={busyAction === `ncentral-site:${mapping.id}`}
+                        onClick={() => void onNcentralSiteMappingDeactivate(mapping)}
+                        title="Return this site to its parent N-Able customer mapping"
+                        type="button"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
         </MappingSectionDrawer>
       ) : null}
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { hasLicenseActionRole, readAuthPrincipal, requireRole } from './auth';
+import { hasLicenseActionRole, readAuthPrincipal, requireCapability, requireRole } from './auth';
 
 const originalAllowHeaderRoleAuth = process.env.ALLOW_HEADER_ROLE_AUTH;
 const originalWebsiteSiteName = process.env.WEBSITE_SITE_NAME;
@@ -39,6 +39,25 @@ async function run() {
   assert.deepEqual(licenseAdmin.principal?.roles, ['LicenseAdmin']);
   assert.equal(hasLicenseActionRole(licenseAdmin.principal), true);
   assert.equal((await requireRole(licenseAdminRequest, 'Admin')).response?.status, 403);
+
+  const salesApproverRequest = {
+    headers: new Headers({
+      'x-ms-client-principal-name': 'sales-approver@example.com',
+      'x-ms-client-principal-role': 'SalesApprover',
+    }),
+  } as never;
+  const salesApprover = await requireCapability(salesApproverRequest, 'sales.requests.approve');
+  assert.equal(salesApprover.principal?.name, 'sales-approver@example.com');
+  assert.equal((await requireCapability(salesApproverRequest, 'sales.settings.manage')).response?.status, 403);
+
+  const salesRequesterRequest = {
+    headers: new Headers({
+      'x-ms-client-principal-name': 'sales-requester@example.com',
+      'x-ms-client-principal-role': 'SalesRequester',
+    }),
+  } as never;
+  assert.equal((await requireCapability(salesRequesterRequest, 'sales.requests.read-own')).response, undefined);
+  assert.equal((await requireCapability(salesRequesterRequest, 'sales.requests.read-all')).response?.status, 403);
 
   const principalPayload = Buffer.from(
     JSON.stringify({

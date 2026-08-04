@@ -54,6 +54,28 @@ const database: Queryable = {
       };
     }
 
+    if (sql.includes('from ncentral_site_mappings')) {
+      return {
+        rows: [
+          {
+            id: 'site-mapping-1',
+            ncentral_customer_id: '200',
+            ncentral_customer_name: 'Mapped Customer',
+            ncentral_site_id: '300',
+            ncentral_site_name: 'Downstream Client',
+            customer_id: 'customer-2',
+            customer_name: 'Downstream Client',
+            agreement_id: 'agreement-2',
+            agreement_name: 'Managed Services',
+            active: true,
+            reviewed_by: 'admin@example.com',
+            reviewed_at: '2026-06-16T00:00:00.000Z',
+            last_seen_at: '2026-06-16T00:00:00.000Z',
+          } as T,
+        ],
+      };
+    }
+
     if (sql.includes('from vendor_product_mappings')) {
       return {
         rows: [
@@ -165,6 +187,8 @@ async function run() {
             deviceClass: 'Windows Server',
             customerId: 200,
             customerName: 'Mapped Customer',
+            siteId: 300,
+            siteName: 'Downstream Client',
             supportedOs: 'Windows Server 2022',
             raw: { deviceId: 101 },
           },
@@ -236,8 +260,8 @@ async function run() {
   assert.equal(syncResult.detailEnrichedSnapshots, 1);
 
   const mappedServer = insertedSnapshots[0];
-  assert.equal(mappedServer?.[1], 'customer-1');
-  assert.equal(mappedServer?.[2], 'agreement-1');
+  assert.equal(mappedServer?.[1], 'customer-2');
+  assert.equal(mappedServer?.[2], 'agreement-2');
   assert.equal(mappedServer?.[3], '200');
   assert.equal(mappedServer?.[4], 'ncentral-physical-server');
   assert.equal(mappedServer?.[5], 'CW-MANAGED-SERVER');

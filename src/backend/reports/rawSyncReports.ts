@@ -1332,15 +1332,16 @@ async function getGenericRawSyncDetails(
        mapped_snapshots.dimensions,
        mapped_snapshots.raw_payload
      from mapped_snapshots
-     left join customers
-       on customers.id = mapped_snapshots.effective_customer_id
-     left join agreements
-       on agreements.id = mapped_snapshots.effective_agreement_id
-     order by customers.name nulls last,
-              agreements.name nulls last,
-              mapped_snapshots.external_account_id,
-              mapped_snapshots.product_name`,
-    [syncRunId, integrationId],
+      left join customers
+        on customers.id = mapped_snapshots.effective_customer_id
+      left join agreements
+        on agreements.id = mapped_snapshots.effective_agreement_id
+      where ($3::uuid is null or mapped_snapshots.effective_customer_id = $3::uuid)
+      order by customers.name nulls last,
+               agreements.name nulls last,
+               mapped_snapshots.external_account_id,
+               mapped_snapshots.product_name`,
+    [syncRunId, integrationId, options.customerId ?? null],
   );
   const mappedImportColumns = isVendorDatapointId(integrationId)
     ? await loadVendorDatapointPreviewColumns(database, integrationId)

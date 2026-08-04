@@ -416,7 +416,12 @@ async function run() {
       }
 
       if (sql.includes('vendor_usage_snapshots.vendor_id = $2')) {
-        assert.deepEqual(values, ['sentinel-sync-1', 'sentinelone']);
+        assert.match(sql, /mapped_snapshots\.effective_customer_id = \$3::uuid/);
+        assert.deepEqual(values, [
+          'sentinel-sync-1',
+          'sentinelone',
+          '8ad5d494-37a4-45f9-b519-0ec6fcd85976',
+        ]);
         return {
           rows: [
             {
@@ -631,7 +636,9 @@ async function run() {
   });
   assert.equal(rawHuntressDetails?.rows[0]?.RawPayload, JSON.stringify({ organization: { id: 101, name: 'Mapped Huntress Org' } }));
 
-  const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1');
+  const genericDetails = await getRawSyncDetails(database, 'sentinelone', 'sentinel-sync-1', {
+    customerId: '8ad5d494-37a4-45f9-b519-0ec6fcd85976',
+  });
   assert.equal(genericDetails?.integrationId, 'sentinelone');
   assert.equal(genericDetails?.syncRun.id, 'sentinel-sync-1');
   assert.equal(genericDetails?.columns.includes('SourceType'), true);
@@ -681,7 +688,8 @@ async function run() {
       }
 
       if (sql.includes('from vendor_usage_snapshots')) {
-        assert.deepEqual(values, ['barracuda-import-1', manualVendorId]);
+        assert.match(sql, /mapped_snapshots\.effective_customer_id = \$3::uuid/);
+        assert.deepEqual(values, ['barracuda-import-1', manualVendorId, null]);
         return {
           rows: [{
             customer_id: 'customer-1',

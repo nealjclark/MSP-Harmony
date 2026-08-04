@@ -63,6 +63,54 @@ export type ConnectWiseContact = {
   [key: string]: unknown;
 };
 
+export type ConnectWiseOpportunity = {
+  id: number;
+  name?: string;
+  company?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  contact?: {
+    id?: number;
+    name?: string;
+  };
+  type?: {
+    id?: number;
+    name?: string;
+  };
+  stage?: {
+    id?: number;
+    name?: string;
+  };
+  status?: {
+    id?: number;
+    name?: string;
+  };
+  salesRep?: {
+    id?: number;
+    identifier?: string;
+    name?: string;
+  };
+  notes?: string;
+  _info?: {
+    lastUpdated?: string;
+    dateEntered?: string;
+  };
+  [key: string]: unknown;
+};
+
+export type ConnectWiseCreateOpportunityRequest = {
+  name: string;
+  company: { id: number };
+  contact?: { id: number };
+  type?: { id: number };
+  stage?: { id: number };
+  status?: { id: number };
+  salesRep?: { id: number };
+  notes?: string;
+};
+
 export type ConnectWiseAgreement = {
   id: number;
   name: string;
@@ -377,6 +425,23 @@ export class ConnectWiseClient {
 
   async listContacts(options: ConnectWiseListOptions = {}) {
     return this.request<ConnectWiseContact[]>(`/company/contacts?${listParams(options).toString()}`);
+  }
+
+  async listOpportunities(options: ConnectWiseListOptions = {}) {
+    return this.request<ConnectWiseOpportunity[]>(`/sales/opportunities?${listParams(options).toString()}`);
+  }
+
+  async getOpportunity(opportunityId: number | string) {
+    return this.request<ConnectWiseOpportunity>(
+      `/sales/opportunities/${encodeURIComponent(String(opportunityId))}`,
+    );
+  }
+
+  async createOpportunity(payload: ConnectWiseCreateOpportunityRequest) {
+    return this.request<ConnectWiseOpportunity>('/sales/opportunities', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   async listAgreements(options: ConnectWiseListOptions = {}) {

@@ -1,5 +1,9 @@
 export type IntegrationId =
   | 'connectwise'
+  | 'connectwise-cpq'
+  | 'dell-premier'
+  | 'sales-mailbox'
+  | 'azure-openai'
   | 'wisepay'
   | 'cove'
   | 'ncentral'
@@ -17,7 +21,7 @@ export type IntegrationId =
   | 'custom-table';
 
 export type IntegrationAuthMode = 'api-key' | 'oauth2' | 'token' | 'basic' | 'none';
-export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import' | 'payment-link';
+export type IntegrationCapability = 'live-api' | 'mapping' | 'invoice-import' | 'payment-link' | 'sales';
 export type IntegrationConfiguredStatus = 'connected' | 'degraded' | 'not-configured';
 export type IntegrationDataIngestionMethod = 'live-api' | 'csv' | 'excel' | 'json';
 export type IntegrationDataSourceType =
@@ -38,6 +42,8 @@ export const doNotSuggestNewAdditionsSettingKey = 'doNotSuggestNewAdditions';
 export const enableApiSyncSettingKey = 'enableApiSync';
 export const enableManualDetailImportsSettingKey = 'enableManualDetailImports';
 export const enableInvoiceImportSettingKey = 'enableInvoiceImport';
+export const monthlyReviewCwOnlyExcludedProductCodesSettingKey =
+  'monthlyReviewCwOnlyExcludedProductCodes';
 
 export type IntegrationApiOperationDefinition = {
   key: string;
@@ -161,6 +167,25 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
       nonSecret('endpoint', 'API Endpoint', 'CONNECTWISE_ENDPOINT', 'https://api-na.myconnectwise.net'),
       nonSecret('companyId', 'Company ID', 'CONNECTWISE_COMPANY_ID'),
       nonSecret('clientId', 'Client ID', 'CONNECTWISE_CLIENT_ID'),
+    ],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'siteUrl',
+        'ConnectWise Site URL',
+        'CONNECTWISE_SITE_URL',
+        undefined,
+        'text',
+        'Browser URL used for opportunity deep links.',
+      ),
+      optionalNonSecret(
+        monthlyReviewCwOnlyExcludedProductCodesSettingKey,
+        'Monthly Review CW-only exceptions',
+        'CONNECTWISE_MONTHLY_REVIEW_CW_ONLY_EXCLUDED_PRODUCT_CODES',
+        undefined,
+        'textarea',
+        'One exact ConnectWise product code per line. These additions remain available to linked-count rules and vendor matches, but do not appear as standalone CW-only rows.',
+        'Monthly Review',
+      ),
     ],
     scopes: ['companies.read', 'agreements.read', 'agreements.write', 'products.read', 'tickets.write'],
     syncFrequency: 'hourly',
@@ -556,6 +581,114 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     webhookSupported: false,
   },
   {
+    integrationId: 'connectwise-cpq',
+    displayName: 'ConnectWise CPQ / Sell',
+    category: 'Sales',
+    authMode: 'api-key',
+    capabilities: ['sales'],
+    dataSources: [],
+    description: 'Governed template reads, reviewable quote drafts, line selection, and ready-state transitions.',
+    endpoint: 'https://sellapi.quosalsell.com',
+    requiredSecrets: [
+      secret('publicKey', 'Public Key', 'mspharmony-connectwise-cpq-public-key', 'CONNECTWISE_CPQ_PUBLIC_KEY'),
+      secret('privateKey', 'Private Key', 'mspharmony-connectwise-cpq-private-key', 'CONNECTWISE_CPQ_PRIVATE_KEY'),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'API Endpoint', 'CONNECTWISE_CPQ_ENDPOINT', 'https://sellapi.quosalsell.com'),
+      nonSecret('accessKey', 'Access Key', 'CONNECTWISE_CPQ_ACCESS_KEY'),
+      nonSecret('templatesPath', 'Templates API Path', 'CONNECTWISE_CPQ_TEMPLATES_PATH', '/api/templates'),
+      nonSecret('quotesPath', 'Quotes API Path', 'CONNECTWISE_CPQ_QUOTES_PATH', '/api/quotes'),
+      nonSecret('quoteItemsPath', 'Quote Items API Path', 'CONNECTWISE_CPQ_QUOTE_ITEMS_PATH', '/api/quoteItems'),
+      nonSecret('quoteTabsPath', 'Quote Tabs API Path', 'CONNECTWISE_CPQ_QUOTE_TABS_PATH', '/api/quoteTabs'),
+      nonSecret('testCompanyId', 'Pilot Test Company ID', 'CONNECTWISE_CPQ_TEST_COMPANY_ID'),
+    ],
+    optionalNonSecrets: [
+      optionalNonSecret(
+        'siteUrl',
+        'CPQ Site URL',
+        'CONNECTWISE_CPQ_SITE_URL',
+        undefined,
+        'text',
+        'Browser URL for CPQ quote deep links, such as https://bmb.quosalsell.com.',
+      ),
+      optionalNonSecret(
+        'hardwareTabId',
+        'Hardware Quote Tab ID',
+        'CONNECTWISE_CPQ_HARDWARE_TAB_ID',
+        undefined,
+        'text',
+        'Optional CPQ template tab identifier used when inserting Dell eQuote lines.',
+      ),
+    ],
+    scopes: ['templates.read', 'quotes.read', 'quotes.write', 'quotes.status.write'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'dell-premier',
+    displayName: 'Dell Premier Quote API',
+    category: 'Sales',
+    authMode: 'oauth2',
+    capabilities: ['sales'],
+    dataSources: [],
+    description: 'Read-only retrieval of existing Dell Premier eQuotes and their hardware line items.',
+    endpoint: 'https://apigtwb2c.us.dell.com',
+    requiredSecrets: [
+      secret('clientSecret', 'Client Secret', 'mspharmony-dell-premier-client-secret', 'DELL_PREMIER_CLIENT_SECRET'),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'API Endpoint', 'DELL_PREMIER_ENDPOINT', 'https://apigtwb2c.us.dell.com'),
+      nonSecret('tokenEndpoint', 'OAuth Token Endpoint', 'DELL_PREMIER_TOKEN_ENDPOINT'),
+      nonSecret('clientId', 'Client ID', 'DELL_PREMIER_CLIENT_ID'),
+      nonSecret('accountId', 'Premier Account ID', 'DELL_PREMIER_ACCOUNT_ID'),
+      nonSecret('locale', 'Default Locale', 'DELL_PREMIER_LOCALE', 'en-us'),
+      nonSecret('quotesPath', 'Quote API Path', 'DELL_PREMIER_QUOTES_PATH', '/quote'),
+    ],
+    scopes: ['quotes.read'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'sales-mailbox',
+    displayName: 'Sales Quote Mailbox',
+    category: 'Sales',
+    authMode: 'oauth2',
+    capabilities: ['sales'],
+    dataSources: [],
+    description: 'Dedicated Microsoft Graph application for scoped quote-request intake and same-thread replies.',
+    endpoint: 'https://graph.microsoft.com',
+    requiredSecrets: [
+      secret('clientSecret', 'Client Secret', 'mspharmony-sales-mailbox-client-secret', 'SALES_MAILBOX_CLIENT_SECRET'),
+    ],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Graph Endpoint', 'SALES_MAILBOX_GRAPH_ENDPOINT', 'https://graph.microsoft.com'),
+      nonSecret('tenantId', 'Tenant ID', 'SALES_MAILBOX_TENANT_ID'),
+      nonSecret('clientId', 'Client ID', 'SALES_MAILBOX_CLIENT_ID'),
+      nonSecret('sharedMailbox', 'Shared Mailbox', 'SALES_SHARED_MAILBOX'),
+    ],
+    scopes: ['Mail.Read', 'Mail.Send'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
+  },
+  {
+    integrationId: 'azure-openai',
+    displayName: 'Azure OpenAI Quote Agent',
+    category: 'Sales',
+    authMode: 'none',
+    capabilities: ['sales'],
+    dataSources: [],
+    description: 'Managed-identity access to a US Data Zone model deployment for strict quote-plan generation.',
+    endpoint: '',
+    requiredSecrets: [],
+    requiredNonSecrets: [
+      nonSecret('endpoint', 'Azure OpenAI Endpoint', 'AZURE_OPENAI_ENDPOINT'),
+      nonSecret('deployment', 'Model Deployment', 'AZURE_OPENAI_DEPLOYMENT'),
+    ],
+    scopes: ['https://cognitiveservices.azure.com/.default'],
+    syncFrequency: 'manual',
+    webhookSupported: false,
+  },
+  {
     integrationId: 'ingram-micro',
     displayName: 'Ingram Micro Cloud',
     category: 'Marketplace',
@@ -838,6 +971,17 @@ export function integrationPsaAgreementReconcileMode(
     definition?.optionalNonSecrets?.find((setting) => setting.key === psaAgreementReconcileModeSettingKey)?.defaultValue;
 
   return configuredValue === 'separate-multiple-products' ? 'separate-multiple-products' : 'merge-multiple-products';
+}
+
+export function parseMonthlyReviewCwOnlyExcludedProductCodes(value: string | undefined) {
+  return [
+    ...new Set(
+      (value ?? '')
+        .split(/[\r\n,;]+/)
+        .map((productCode) => productCode.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 export function integrationDoNotSuggestNewAdditions(

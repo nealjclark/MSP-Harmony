@@ -47,6 +47,15 @@ import {
   type CreateUsageOverrideInput,
 } from '../mapping/usageOverridesService';
 import {
+  createMonthlyReviewProductExclusion,
+  restoreMonthlyReviewProductExclusion,
+} from '../mapping/monthlyReviewProductExclusions';
+import {
+  deactivateNcentralSiteMapping,
+  upsertNcentralSiteMapping,
+  type UpsertNcentralSiteMappingInput,
+} from '../mapping/ncentralSiteMappings';
+import {
   listLaborMappings,
   upsertLaborMapping,
 } from '../mapping/laborMappings';
@@ -110,6 +119,14 @@ type ProductBundleBody = {
 type VendorProductExclusionBody = {
   reason?: string;
 };
+
+type MonthlyReviewProductExclusionBody = {
+  connectWiseProductId?: string;
+  connectWiseProductCode?: string;
+  connectWiseProductName?: string;
+};
+
+type NcentralSiteMappingBody = Partial<Omit<UpsertNcentralSiteMappingInput, 'reviewedBy'>>;
 
 type CrossVendorBundleBody = {
   bundleKey?: string;
@@ -574,6 +591,154 @@ export async function restoreIgnoredVendorProductHttp(
   } catch (error) {
     return jsonResponse(400, {
       error: error instanceof Error ? error.message : 'Unable to restore vendor product.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function createMonthlyReviewProductExclusionHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<MonthlyReviewProductExclusionBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
+  if (!body.connectWiseProductCode?.trim() || !body.connectWiseProductName?.trim()) {
+    return jsonResponse(400, { error: 'Choose a ConnectWise catalog product before excluding it.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review product exclusions need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const exclusion = await createMonthlyReviewProductExclusion(repositoryContext.pool, {
+      connectWiseProductId: body.connectWiseProductId,
+      connectWiseProductCode: body.connectWiseProductCode,
+      connectWiseProductName: body.connectWiseProductName,
+      excludedBy: auth.principal.name,
+    });
+    return jsonResponse(200, { exclusion });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save the Monthly Review product exclusion.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function restoreMonthlyReviewProductExclusionHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const exclusionId = decodedRouteParam(request.params.exclusionId);
+  if (!exclusionId) return jsonResponse(400, { error: 'Removing an exclusion requires exclusionId.' });
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review product exclusions need PostgreSQL settings before they can be removed.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    await restoreMonthlyReviewProductExclusion(repositoryContext.pool, exclusionId, auth.principal.name);
+    return jsonResponse(200, { exclusionId, active: false });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to remove the Monthly Review product exclusion.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function upsertNcentralSiteMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const bodyResult = await readJsonBody<NcentralSiteMappingBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'N-Able site mappings need PostgreSQL settings before they can save.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const mapping = await upsertNcentralSiteMapping(repositoryContext.pool, {
+      ncentralCustomerId: bodyResult.body.ncentralCustomerId ?? '',
+      ncentralCustomerName: bodyResult.body.ncentralCustomerName ?? '',
+      ncentralSiteId: bodyResult.body.ncentralSiteId ?? '',
+      ncentralSiteName: bodyResult.body.ncentralSiteName ?? '',
+      customerId: bodyResult.body.customerId ?? '',
+      agreementId: bodyResult.body.agreementId,
+      reviewedBy: auth.principal.name,
+    });
+    return jsonResponse(200, { mapping });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to save the N-Able site mapping.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function deactivateNcentralSiteMappingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const mappingId = decodedRouteParam(request.params.mappingId);
+  if (!mappingId) return jsonResponse(400, { error: 'Removing a site mapping requires mappingId.' });
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'N-Able site mappings need PostgreSQL settings before they can be removed.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    await deactivateNcentralSiteMapping(repositoryContext.pool, mappingId, auth.principal.name);
+    return jsonResponse(200, { mappingId, active: false });
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to remove the N-Able site mapping.',
     });
   } finally {
     await repositoryContext.close();
@@ -1597,6 +1762,34 @@ app.http('restoreIgnoredVendorProduct', {
   authLevel: 'anonymous',
   route: 'mappings/{vendorId}/products/{vendorProductKey}/ignore',
   handler: restoreIgnoredVendorProductHttp,
+});
+
+app.http('createMonthlyReviewProductExclusion', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'mappings/connectwise/monthly-review-exclusions',
+  handler: createMonthlyReviewProductExclusionHttp,
+});
+
+app.http('restoreMonthlyReviewProductExclusion', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'mappings/connectwise/monthly-review-exclusions/{exclusionId}',
+  handler: restoreMonthlyReviewProductExclusionHttp,
+});
+
+app.http('upsertNcentralSiteMapping', {
+  methods: ['POST', 'PUT'],
+  authLevel: 'anonymous',
+  route: 'mappings/ncentral/site-mappings',
+  handler: upsertNcentralSiteMappingHttp,
+});
+
+app.http('deactivateNcentralSiteMapping', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'mappings/ncentral/site-mappings/{mappingId}',
+  handler: deactivateNcentralSiteMappingHttp,
 });
 
 app.http('listDeviceMatchExclusions', {

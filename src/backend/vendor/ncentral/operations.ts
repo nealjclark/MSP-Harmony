@@ -4,6 +4,10 @@ import {
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
 import type { SyncProgressReporter } from '../../shared/syncProgress';
+import {
+  loadActiveNcentralSiteMappingTargets,
+  siteMappingKey,
+} from '../../mapping/ncentralSiteMappings';
 import { NcentralClient, ncentralCredentialsFromSettings, type NcentralDeviceFilter, type NcentralDeviceSummary } from './client';
 import {
   ensureDefaultNcentralFilterMappings,
@@ -130,8 +134,9 @@ export async function syncNcentralUsageSnapshots(input: {
 
   try {
     await ensureDefaultNcentralFilterMappings(input.pool);
-    const [accountMappings, productMappings, savedMappings, filters] = await Promise.all([
+    const [accountMappings, siteMappings, productMappings, savedMappings, filters] = await Promise.all([
       loadNcentralAccountMappings(input.pool),
+      loadActiveNcentralSiteMappingTargets(input.pool),
       loadNcentralProductMappings(input.pool),
       listNcentralFilterMappings(input.pool),
       client.listDeviceFilters({ pageSize: 500, maxPages: 20 }),
@@ -178,7 +183,13 @@ export async function syncNcentralUsageSnapshots(input: {
 
       const externalAccountId = externalAccountIdForDevice(detail ?? aggregated.device);
       const accountMapping = externalAccountId ? accountMappings.get(externalAccountId) : undefined;
-      if (accountMapping) {
+      const siteId = (detail ?? aggregated.device).siteId;
+      const siteMapping =
+        externalAccountId && typeof siteId === 'number'
+          ? siteMappings.get(siteMappingKey(externalAccountId, String(siteId)))
+          : undefined;
+      const effectiveAccountMapping = siteMapping ?? accountMapping;
+      if (effectiveAccountMapping) {
         mappedSnapshots += 1;
       } else {
         unmappedSnapshots += 1;
@@ -194,8 +205,8 @@ export async function syncNcentralUsageSnapshots(input: {
 
       await insertNcentralUsageSnapshot(input.pool, {
         syncRunId,
-        customerId: accountMapping?.customerId,
-        agreementId: accountMapping?.agreementId,
+        customerId: effectiveAccountMapping?.customerId,
+        agreementId: effectiveAccountMapping?.agreementId,
         externalAccountId,
         vendorProductKey: primaryProductMapping.vendorProductKey,
         productCode: productMapping.productCode,

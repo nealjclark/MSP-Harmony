@@ -3,7 +3,24 @@ import { Pool } from 'pg';
 import { getDatabaseSettings } from '../database/config';
 import { getSharedDatabasePool } from '../database/pool';
 
-export type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst';
+import type { SalesRoleCapability } from '../../shared/sales';
+
+export type AppRole =
+  | 'Admin'
+  | 'Approver'
+  | 'Billing'
+  | 'LicenseAdmin'
+  | 'Analyst'
+  | 'SalesRequester'
+  | 'SalesApprover';
+
+export type AppCapability =
+  | SalesRoleCapability
+  | 'application.read'
+  | 'application.admin'
+  | 'billing.approve'
+  | 'billing.manage'
+  | 'licenses.manage';
 
 export type AuthPrincipal = {
   appUserId?: string;
@@ -20,6 +37,8 @@ type StaticWebAppsPrincipal = {
 };
 
 const roleRank: Record<AppRole, number> = {
+  SalesRequester: 0,
+  SalesApprover: 0,
   Analyst: 1,
   LicenseAdmin: 1,
   Billing: 1,
@@ -27,7 +46,47 @@ const roleRank: Record<AppRole, number> = {
   Admin: 3,
 };
 
-const appRoles: AppRole[] = ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst'];
+const allSalesCapabilities: SalesRoleCapability[] = [
+  'sales.requests.read-own',
+  'sales.requests.read-all',
+  'sales.requests.comment',
+  'sales.requests.request-changes',
+  'sales.requests.approve',
+  'sales.requests.reject',
+  'sales.requests.retry',
+  'sales.settings.manage',
+];
+
+const roleCapabilities: Record<AppRole, AppCapability[]> = {
+  Admin: ['application.read', 'application.admin', 'billing.approve', 'billing.manage', 'licenses.manage', ...allSalesCapabilities],
+  Approver: ['application.read', 'billing.approve'],
+  Billing: ['application.read', 'billing.manage'],
+  LicenseAdmin: ['application.read', 'licenses.manage'],
+  Analyst: ['application.read'],
+  SalesRequester: [
+    'sales.requests.read-own',
+    'sales.requests.comment',
+    'sales.requests.request-changes',
+  ],
+  SalesApprover: [
+    'sales.requests.read-own',
+    'sales.requests.read-all',
+    'sales.requests.comment',
+    'sales.requests.request-changes',
+    'sales.requests.approve',
+    'sales.requests.reject',
+  ],
+};
+
+const appRoles: AppRole[] = [
+  'Admin',
+  'Approver',
+  'Billing',
+  'LicenseAdmin',
+  'Analyst',
+  'SalesRequester',
+  'SalesApprover',
+];
 let authPool: Pool | undefined;
 let authPoolPromise: Promise<Pool> | undefined;
 
@@ -51,6 +110,36 @@ export async function requireRole(
     return {
       response: authJsonResponse(403, {
         error: `The ${minimumRole} role is required for this action.`,
+        user: {
+          email: principal.email,
+          name: principal.name,
+        },
+      }),
+    };
+  }
+
+  return { principal };
+}
+
+export async function requireCapability(
+  request: HttpRequest,
+  capability: AppCapability,
+): Promise<{ principal: AuthPrincipal; response?: undefined } | { principal?: undefined; response: HttpResponseInit }> {
+  const headerPrincipal = readAuthPrincipal(request);
+  if (!headerPrincipal) {
+    return {
+      response: authJsonResponse(401, {
+        error: 'Authentication is required.',
+      }),
+    };
+  }
+
+  const principal = await resolveApplicationPrincipal(headerPrincipal);
+  if (!hasCapability(principal, capability)) {
+    return {
+      response: authJsonResponse(403, {
+        error: 'You do not have permission to perform this action.',
+        requiredCapability: capability,
         user: {
           email: principal.email,
           name: principal.name,
@@ -137,6 +226,10 @@ export function readAuthPrincipal(request: HttpRequest): AuthPrincipal | undefin
 export function hasMinimumRole(principal: AuthPrincipal, minimumRole: AppRole) {
   const requiredRank = roleRank[minimumRole];
   return principal.roles.some((role) => roleRank[role] >= requiredRank);
+}
+
+export function hasCapability(principal: AuthPrincipal, capability: AppCapability) {
+  return principal.roles.some((role) => roleCapabilities[role].includes(capability));
 }
 
 export function hasLicenseActionRole(principal: AuthPrincipal) {

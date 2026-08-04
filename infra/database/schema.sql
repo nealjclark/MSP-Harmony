@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS vendor_account_mappings (
   UNIQUE (vendor_id, external_account_id)
 );
 
+CREATE TABLE IF NOT EXISTS ncentral_site_mappings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  ncentral_customer_id text NOT NULL,
+  ncentral_customer_name text NOT NULL,
+  ncentral_site_id text NOT NULL,
+  ncentral_site_name text NOT NULL,
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  agreement_id uuid REFERENCES agreements(id),
+  active boolean NOT NULL DEFAULT true,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  last_seen_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (ncentral_customer_id, ncentral_site_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ncentral_site_mappings_active
+  ON ncentral_site_mappings(ncentral_customer_id, ncentral_site_id)
+  WHERE active;
+
 CREATE TABLE IF NOT EXISTS vendor_product_mappings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id text NOT NULL,
@@ -99,6 +120,25 @@ CREATE TABLE IF NOT EXISTS vendor_product_exclusions (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (vendor_id, vendor_product_key)
 );
+
+CREATE TABLE IF NOT EXISTS monthly_review_product_exclusions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  connectwise_product_id text,
+  connectwise_product_code text NOT NULL,
+  connectwise_product_name text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  excluded_by text NOT NULL,
+  excluded_at timestamptz NOT NULL DEFAULT now(),
+  restored_by text,
+  restored_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (connectwise_product_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_monthly_review_product_exclusions_active
+  ON monthly_review_product_exclusions(connectwise_product_code)
+  WHERE active;
 
 CREATE TABLE IF NOT EXISTS vendor_product_bundles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -245,7 +285,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   aad_user_id text,
   email text NOT NULL,
   display_name text,
-  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst')),
+  role text NOT NULL CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst', 'SalesRequester', 'SalesApprover')),
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   last_seen_at timestamptz,
   created_by text,
@@ -604,6 +644,39 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 1;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS supersedes_run_id uuid REFERENCES reconciliation_runs(id);
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS created_by text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS completed_by text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS freshness_override_reason text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS freshness_overridden_by text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS freshness_overridden_at timestamptz;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS superseded_reason text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS superseded_by text;
+ALTER TABLE reconciliation_runs ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reconciliation_runs_month_revision
+  ON reconciliation_runs(billing_month, revision);
+
+CREATE TABLE IF NOT EXISTS reconciliation_run_sources (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reconciliation_run_id uuid NOT NULL REFERENCES reconciliation_runs(id) ON DELETE CASCADE,
+  vendor_id text NOT NULL,
+  display_name text NOT NULL,
+  source_kind text NOT NULL CHECK (source_kind IN ('live-sync', 'invoice-import')),
+  sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  invoice_import_id uuid REFERENCES invoice_imports(id) ON DELETE SET NULL,
+  completed_at timestamptz,
+  billing_period_start date,
+  billing_period_end date,
+  readiness_state text NOT NULL CHECK (readiness_state IN ('ready', 'warning', 'blocked')),
+  readiness_message text NOT NULL DEFAULT '',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (reconciliation_run_id, vendor_id, source_kind)
+);
+
 CREATE TABLE IF NOT EXISTS reconciliation_findings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   reconciliation_run_id uuid NOT NULL REFERENCES reconciliation_runs(id),
@@ -622,6 +695,53 @@ CREATE TABLE IF NOT EXISTS reconciliation_findings (
   evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS row_key text;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS row_type text NOT NULL DEFAULT 'vendor-only';
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS connectwise_addition_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS connectwise_snapshot jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS selected_source_key text;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS selected_quantity numeric(18, 4);
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS disposition text NOT NULL DEFAULT 'needs-action';
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS disposition_reason text;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS reviewed_by text;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS ticket_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS write_batch_id uuid;
+ALTER TABLE reconciliation_findings ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reconciliation_findings_run_row
+  ON reconciliation_findings(reconciliation_run_id, row_key)
+  WHERE row_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS reconciliation_finding_sources (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reconciliation_finding_id uuid NOT NULL REFERENCES reconciliation_findings(id) ON DELETE CASCADE,
+  source_key text NOT NULL DEFAULT '',
+  vendor_id text NOT NULL,
+  display_name text NOT NULL,
+  source_kind text NOT NULL CHECK (source_kind IN ('live-sync', 'invoice-import')),
+  sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  invoice_import_id uuid REFERENCES invoice_imports(id) ON DELETE SET NULL,
+  vendor_product_key text,
+  source_account_id text,
+  product_code text NOT NULL,
+  product_name text NOT NULL,
+  source_quantity numeric(18, 4),
+  invoice_quantity numeric(18, 4),
+  linked_quantity numeric(18, 4),
+  proposed_quantity numeric(18, 4) NOT NULL,
+  raw_row_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE reconciliation_finding_sources ADD COLUMN IF NOT EXISTS source_key text NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_finding_sources_finding
+  ON reconciliation_finding_sources(reconciliation_finding_id);
+CREATE INDEX IF NOT EXISTS idx_reconciliation_run_sources_run
+  ON reconciliation_run_sources(reconciliation_run_id);
 
 CREATE TABLE IF NOT EXISTS approval_batches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1247,7 +1367,7 @@ CREATE UNIQUE INDEX ux_appriver_license_cleanup_actions_active_subscription
 
 ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
 ALTER TABLE app_users
-  ADD CONSTRAINT app_users_role_check CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst'));
+  ADD CONSTRAINT app_users_role_check CHECK (role IN ('Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst', 'SalesRequester', 'SalesApprover'));
 
 ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS invoice_number text;
 CREATE TABLE IF NOT EXISTS invoice_line_items (
@@ -1719,3 +1839,190 @@ ALTER TABLE invoice_imports ADD COLUMN IF NOT EXISTS mapping_snapshot jsonb NOT 
 
 CREATE INDEX IF NOT EXISTS idx_invoice_imports_template_history
   ON invoice_imports(template_id, imported_at DESC);
+
+CREATE TABLE IF NOT EXISTS sales_settings (
+  id text PRIMARY KEY DEFAULT 'default',
+  requester_allowlist jsonb NOT NULL DEFAULT '[]'::jsonb,
+  approver_notification_emails jsonb NOT NULL DEFAULT '[]'::jsonb,
+  review_base_url text NOT NULL DEFAULT '',
+  default_opportunity_type_id integer,
+  default_opportunity_stage_id integer,
+  default_opportunity_status_id integer,
+  default_opportunity_owner_id integer,
+  cpq_ready_status text NOT NULL DEFAULT 'Ready for Delivery',
+  minimum_margin_percent numeric(8, 4) NOT NULL DEFAULT 20,
+  maximum_discount_percent numeric(8, 4) NOT NULL DEFAULT 20,
+  high_value_threshold numeric(18, 4) NOT NULL DEFAULT 25000,
+  attachment_retention_days integer NOT NULL DEFAULT 90,
+  prompt_version text NOT NULL DEFAULT 'sales-quote-v1',
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by text
+);
+
+INSERT INTO sales_settings (id, updated_by)
+VALUES ('default', 'system')
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS sales_mailbox_checkpoints (
+  mailbox text PRIMARY KEY,
+  delta_link text,
+  last_polled_at timestamptz,
+  last_success_at timestamptz,
+  last_error text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sales_quote_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  status text NOT NULL DEFAULT 'received' CHECK (
+    status IN (
+      'received',
+      'awaiting-clarification',
+      'ready-to-draft',
+      'drafting',
+      'awaiting-approval',
+      'changes-requested',
+      'approved-ready-delivery',
+      'rejected',
+      'failed'
+    )
+  ),
+  subject text NOT NULL,
+  requester_email text NOT NULL,
+  requester_name text,
+  graph_conversation_id text,
+  company_id integer,
+  company_name text,
+  contact_id integer,
+  contact_name text,
+  template_rule_id uuid,
+  template_name text,
+  template_version integer,
+  current_revision integer NOT NULL DEFAULT 0,
+  connectwise_opportunity_id integer,
+  opportunity_url text,
+  cpq_quote_id text,
+  cpq_quote_url text,
+  cpq_snapshot_hash text,
+  cpq_manual_transition_required boolean NOT NULL DEFAULT false,
+  error_message text,
+  processing_started_at timestamptz,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_quote_requests_conversation
+  ON sales_quote_requests(graph_conversation_id)
+  WHERE graph_conversation_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_requests_status_updated
+  ON sales_quote_requests(status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_requests_requester
+  ON sales_quote_requests(lower(requester_email), updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS sales_quote_messages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quote_request_id uuid NOT NULL REFERENCES sales_quote_requests(id) ON DELETE CASCADE,
+  direction text NOT NULL CHECK (direction IN ('inbound', 'outbound', 'internal')),
+  graph_message_id text,
+  internet_message_id text,
+  sender_email text,
+  subject text,
+  body_text text NOT NULL DEFAULT '',
+  received_at timestamptz,
+  sent_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_quote_messages_graph_id
+  ON sales_quote_messages(graph_message_id)
+  WHERE graph_message_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_quote_messages_internet_id
+  ON sales_quote_messages(internet_message_id)
+  WHERE internet_message_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_messages_request
+  ON sales_quote_messages(quote_request_id, created_at);
+
+CREATE TABLE IF NOT EXISTS sales_quote_attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quote_request_id uuid NOT NULL REFERENCES sales_quote_requests(id) ON DELETE CASCADE,
+  message_id uuid REFERENCES sales_quote_messages(id) ON DELETE SET NULL,
+  graph_attachment_id text,
+  file_name text NOT NULL,
+  content_type text NOT NULL,
+  file_size bigint NOT NULL,
+  sha256 text NOT NULL,
+  blob_name text NOT NULL,
+  extraction_status text NOT NULL DEFAULT 'pending' CHECK (
+    extraction_status IN ('pending', 'extracted', 'rejected', 'failed')
+  ),
+  extracted_text text,
+  extraction_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (quote_request_id, sha256, file_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_attachments_request
+  ON sales_quote_attachments(quote_request_id, created_at);
+
+CREATE TABLE IF NOT EXISTS sales_template_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  cpq_template_id text NOT NULL,
+  name text NOT NULL,
+  version integer NOT NULL DEFAULT 1,
+  active boolean NOT NULL DEFAULT true,
+  required_facts jsonb NOT NULL DEFAULT '[]'::jsonb,
+  line_rules jsonb NOT NULL DEFAULT '[]'::jsonb,
+  source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by text,
+  UNIQUE (cpq_template_id, version)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_template_rules_active_template
+  ON sales_template_rules(cpq_template_id)
+  WHERE active;
+
+ALTER TABLE sales_quote_requests
+  DROP CONSTRAINT IF EXISTS sales_quote_requests_template_rule_id_fkey;
+ALTER TABLE sales_quote_requests
+  ADD CONSTRAINT sales_quote_requests_template_rule_id_fkey
+  FOREIGN KEY (template_rule_id) REFERENCES sales_template_rules(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS sales_quote_revisions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quote_request_id uuid NOT NULL REFERENCES sales_quote_requests(id) ON DELETE CASCADE,
+  revision integer NOT NULL,
+  created_by text NOT NULL,
+  model_deployment text,
+  prompt_version text,
+  plan jsonb NOT NULL,
+  line_snapshot jsonb NOT NULL DEFAULT '[]'::jsonb,
+  policy_result jsonb NOT NULL,
+  cpq_snapshot_hash text,
+  cpq_snapshot jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (quote_request_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_revisions_request
+  ON sales_quote_revisions(quote_request_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS sales_quote_decisions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quote_request_id uuid NOT NULL REFERENCES sales_quote_requests(id) ON DELETE CASCADE,
+  revision integer NOT NULL,
+  decision text NOT NULL CHECK (decision IN ('approved', 'rejected', 'changes-requested')),
+  actor text NOT NULL,
+  comment text,
+  idempotency_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (quote_request_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_quote_decisions_request
+  ON sales_quote_decisions(quote_request_id, revision DESC, created_at DESC);

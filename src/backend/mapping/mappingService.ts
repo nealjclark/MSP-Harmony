@@ -3,6 +3,17 @@ import { crossVendorBundlesVendorId, isVendorDatapointId, type VendorKey } from 
 import { sqlLatestReconcilableSyncRunCte } from '../shared/reconcilableSyncRuns';
 import { defaultCoveProductMappings, type CoveProductMappingKey } from '../vendor/cove/rules';
 import { defaultNcentralProductMappings } from '../vendor/ncentral/rules';
+import {
+  listMonthlyReviewProductExclusions,
+  type MonthlyReviewProductExclusion,
+} from './monthlyReviewProductExclusions';
+import {
+  applyNcentralSiteMappingsToSnapshots,
+  listNcentralSiteMappings,
+  listNcentralSiteOptions,
+  type NcentralSiteCustomerOption,
+  type NcentralSiteMapping,
+} from './ncentralSiteMappings';
 
 export type QueryResult<T> = {
   rows: T[];
@@ -277,6 +288,9 @@ export type MappingState = {
   ignoredProducts: IgnoredVendorProduct[];
   productBundles: ProductBundle[];
   productLinkRules: ProductLinkRule[];
+  monthlyReviewProductExclusions: MonthlyReviewProductExclusion[];
+  ncentralSiteMappings: NcentralSiteMapping[];
+  ncentralSiteOptions: NcentralSiteCustomerOption[];
   customerOptions: ConnectWiseCustomerCandidate[];
 };
 
@@ -740,6 +754,9 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     ignoredProducts,
     productBundles,
     productLinkRules,
+    monthlyReviewProductExclusions,
+    ncentralSiteMappings,
+    ncentralSiteOptions,
     unmappedSnapshots,
     customerOptions,
   ] = await Promise.all([
@@ -750,6 +767,9 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     listIgnoredVendorProducts(database, vendorId),
     listProductBundles(database, vendorId),
     listProductLinkRules(database, vendorId),
+    vendorId === 'connectwise' ? listMonthlyReviewProductExclusions(database) : Promise.resolve([]),
+    vendorId === 'ncentral' ? listNcentralSiteMappings(database) : Promise.resolve([]),
+    vendorId === 'ncentral' ? listNcentralSiteOptions(database) : Promise.resolve([]),
     countUnmappedSnapshots(database, vendorId),
     loadConnectWiseCustomers(database),
   ]);
@@ -795,6 +815,9 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     ignoredProducts,
     productBundles,
     productLinkRules,
+    monthlyReviewProductExclusions,
+    ncentralSiteMappings,
+    ncentralSiteOptions,
     customerOptions,
   };
 }
@@ -1824,10 +1847,12 @@ async function loadVendorProductLinkRuleTestRows(
        select
          vendor_usage_snapshots.*,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.customer_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.customer_id
            else vendor_usage_snapshots.customer_id
          end as effective_customer_id,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.agreement_id
            when approved_account_mappings.external_account_id is not null then approved_account_mappings.agreement_id
            else vendor_usage_snapshots.agreement_id
          end as effective_agreement_id
@@ -1835,6 +1860,11 @@ async function loadVendorProductLinkRuleTestRows(
        left join approved_account_mappings
          on approved_account_mappings.vendor_id = vendor_usage_snapshots.vendor_id
         and approved_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
+       left join ncentral_site_mappings
+         on vendor_usage_snapshots.vendor_id = 'ncentral'
+        and ncentral_site_mappings.ncentral_customer_id = vendor_usage_snapshots.external_account_id
+        and ncentral_site_mappings.ncentral_site_id = vendor_usage_snapshots.dimensions->>'siteId'
+        and ncentral_site_mappings.active = true
        where vendor_usage_snapshots.vendor_id = $1
          and replace(replace(vendor_usage_snapshots.vendor_product_key, '%2F', '/'), '%2f', '/') = $2
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
@@ -2082,10 +2112,12 @@ function vendorUsageLinkedDatasetQuery(
        select
          vendor_usage_snapshots.*,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.customer_id
            when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.customer_id
            else vendor_usage_snapshots.customer_id
          end as effective_customer_id,
          case
+           when ncentral_site_mappings.id is not null then ncentral_site_mappings.agreement_id
            when vendor_account_mappings.external_account_id is not null then vendor_account_mappings.agreement_id
            else vendor_usage_snapshots.agreement_id
          end as effective_agreement_id
@@ -2095,6 +2127,11 @@ function vendorUsageLinkedDatasetQuery(
         and vendor_account_mappings.external_account_id = vendor_usage_snapshots.external_account_id
         and vendor_account_mappings.active = true
         and vendor_account_mappings.mapping_status = 'approved'
+       left join ncentral_site_mappings
+         on vendor_usage_snapshots.vendor_id = 'ncentral'
+        and ncentral_site_mappings.ncentral_customer_id = vendor_usage_snapshots.external_account_id
+        and ncentral_site_mappings.ncentral_site_id = vendor_usage_snapshots.dimensions->>'siteId'
+        and ncentral_site_mappings.active = true
        where vendor_usage_snapshots.vendor_id = $1
          and vendor_usage_snapshots.sync_run_id = (select id from latest_sync_run)
      )`,
@@ -2689,6 +2726,9 @@ export async function applyApprovedMappings(
      select count(*) as updated_count from updated`,
     [vendorId],
   );
+  if (vendorId === 'ncentral') {
+    await applyNcentralSiteMappingsToSnapshots(database);
+  }
 
   const productResult = await database.query<{ updated_count: string | number }>(
     `with approved_product_mappings as (
@@ -3994,6 +4034,9 @@ async function applyApprovedAccountMappingToSnapshots(
          or vendor_usage_snapshots.agreement_id is distinct from vendor_account_mappings.agreement_id)`,
     [vendorId, externalAccountId],
   );
+  if (vendorId === 'ncentral') {
+    await applyNcentralSiteMappingsToSnapshots(database, externalAccountId);
+  }
 }
 
 async function loadExternalAccountName(database: Queryable, vendorId: VendorKey, externalAccountId: string) {

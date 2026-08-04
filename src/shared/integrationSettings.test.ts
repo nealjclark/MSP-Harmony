@@ -34,7 +34,6 @@ const connectedConnectWise = validateIntegrationSettings(connectWise, {
 assert.equal(connectedConnectWise.configuredStatus, 'connected');
 assert.equal(connectedConnectWise.missingSecrets.length, 0);
 assert.equal(connectedConnectWise.missingNonSecrets.length, 0);
-
 const missingPrivateKey = validateIntegrationSettings(connectWise, {
   integrationId: 'connectwise',
   nonSecrets: {

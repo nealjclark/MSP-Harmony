@@ -47,7 +47,15 @@ async function run() {
   const listedUsers = await listManagedAppUsers(listDatabase);
   assert.equal(listedUsers[0]?.email, 'admin@example.com');
   assert.equal(listedUsers[0]?.role, 'Admin');
-  assert.deepEqual(managedAppUserRoles(), ['Admin', 'Approver', 'Billing', 'LicenseAdmin', 'Analyst']);
+  assert.deepEqual(managedAppUserRoles(), [
+    'Admin',
+    'Approver',
+    'Billing',
+    'LicenseAdmin',
+    'Analyst',
+    'SalesRequester',
+    'SalesApprover',
+  ]);
 
   await assert.rejects(
     () => createManagedAppUser(new MockDatabase(), { email: 'not-an-email', role: 'Analyst' }, 'admin@example.com'),

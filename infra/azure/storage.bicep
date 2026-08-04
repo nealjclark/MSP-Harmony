@@ -13,6 +13,9 @@ param integrationSyncQueueName string = 'integration-sync-work'
 @description('Queue used by AppRiver license cleanup verification work.')
 param appRiverLicenseCleanupQueueName string = 'appriver-license-cleanup-work'
 
+@description('Queue used by the AI-assisted sales quote worker.')
+param salesQuoteQueueName string = 'sales-quote-work'
+
 @description('Storage SKU for the queue workload.')
 @allowed([
   'Standard_LRS'
@@ -51,6 +54,14 @@ resource vendorInvoiceFiles 'Microsoft.Storage/storageAccounts/blobServices/cont
   }
 }
 
+resource salesQuoteAttachments 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'sales-quote-attachments'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
   parent: storageAccount
   name: 'default'
@@ -71,8 +82,14 @@ resource appRiverLicenseCleanupQueue 'Microsoft.Storage/storageAccounts/queueSer
   name: appRiverLicenseCleanupQueueName
 }
 
+resource salesQuoteQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
+  parent: queueService
+  name: salesQuoteQueueName
+}
+
 output storageAccountName string = storageAccount.name
 output queueName string = appRiverQueue.name
 output integrationSyncQueueName string = integrationSyncQueue.name
 output appRiverLicenseCleanupQueueName string = appRiverLicenseCleanupQueue.name
+output salesQuoteQueueName string = salesQuoteQueue.name
 output queueEndpoint string = storageAccount.properties.primaryEndpoints.queue

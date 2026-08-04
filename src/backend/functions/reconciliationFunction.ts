@@ -19,6 +19,18 @@ import {
   type InvestigationTicketLicenseInput,
 } from '../api/investigationTickets';
 import { listActiveAgreementAdditions, reconcileVendorFromDatabase } from '../api/reconciliationRuns';
+import {
+  completeMonthlyReviewRun,
+  createMonthlyReviewRun,
+  createSupersedingMonthlyReviewRun,
+  getMonthlyReviewReadiness,
+  getMonthlyReviewRun,
+  listMonthlyReviewRuns,
+  loadApprovedMonthlyReviewUpdates,
+  recordMonthlyReviewApplyResult,
+  restartMonthlyReviewRun,
+  updateMonthlyReviewFinding,
+} from '../api/monthlyReview';
 import { deactivateAdditionPin, upsertManualAdditionPin } from '../mapping/additionPinService';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
@@ -54,6 +66,23 @@ type InvestigationTicketsCreateBody = {
     vendorName?: string;
     licenses?: InvestigationTicketLicenseInput[];
   }>;
+};
+
+type MonthlyReviewRunBody = {
+  billingMonth?: string;
+  overrideReason?: string;
+};
+
+type MonthlyReviewRestartBody = {
+  reason?: string;
+};
+
+type MonthlyReviewFindingBody = {
+  disposition?: 'auto-passed' | 'needs-action' | 'needs-source' | 'approved' | 'applied' | 'skipped' | 'ignored' | 'ticketed';
+  dispositionReason?: string;
+  selectedSourceKey?: string;
+  selectedQuantity?: number;
+  ticketIds?: string[];
 };
 
 export async function runVendorReconciliationHttp(
@@ -105,6 +134,356 @@ app.http('runVendorReconciliation', {
   authLevel: 'anonymous',
   route: 'reconciliation/{vendorId}/run',
   handler: runVendorReconciliationHttp,
+});
+
+export async function monthlyReviewReadinessHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const billingMonth = request.query.get('billingMonth') ?? '';
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review readiness needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(200, {
+      readiness: await getMonthlyReviewReadiness(repositoryContext.pool, billingMonth),
+    });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to check Monthly Review readiness.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function listMonthlyReviewRunsHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(200, { runs: await listMonthlyReviewRuns(repositoryContext.pool) });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to list Monthly Review runs.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function createMonthlyReviewRunHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const bodyResult = await readJsonBody<MonthlyReviewRunBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  const overrideReason = bodyResult.body.overrideReason?.trim();
+  const isAdmin = auth.principal.roles.includes('Admin');
+  if (overrideReason && !isAdmin) {
+    await repositoryContext.close();
+    return jsonResponse(403, { error: 'Only an Admin can override Monthly Review readiness warnings.' });
+  }
+  try {
+    return jsonResponse(201, await createMonthlyReviewRun(repositoryContext.pool, {
+      billingMonth: bodyResult.body.billingMonth ?? '',
+      actor: auth.principal.name,
+      allowWarnings: isAdmin && Boolean(overrideReason),
+      overrideReason,
+    }));
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to create Monthly Review.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function getMonthlyReviewRunHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const runId = request.params.runId ?? '';
+  if (!isUuid(runId)) return jsonResponse(400, { error: 'A valid Monthly Review run id is required.' });
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(200, await getMonthlyReviewRun(repositoryContext.pool, runId));
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to load Monthly Review.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function updateMonthlyReviewFindingHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const runId = request.params.runId ?? '';
+  const findingId = request.params.findingId ?? '';
+  if (!isUuid(runId) || !isUuid(findingId)) return jsonResponse(400, { error: 'Valid run and finding ids are required.' });
+  const bodyResult = await readJsonBody<MonthlyReviewFindingBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(200, {
+      finding: await updateMonthlyReviewFinding(
+        repositoryContext.pool,
+        runId,
+        findingId,
+        bodyResult.body,
+        auth.principal.name,
+      ),
+    });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to update Monthly Review finding.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function applyMonthlyReviewHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const runId = request.params.runId ?? '';
+  if (!isUuid(runId)) return jsonResponse(400, { error: 'A valid Monthly Review run id is required.' });
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    return jsonResponse(400, {
+      error: 'Monthly Review writeback needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    const updates = await loadApprovedMonthlyReviewUpdates(repositoryContext.pool, runId);
+    if (updates.length === 0) return jsonResponse(400, { error: 'No approved Monthly Review changes are ready to apply.' });
+    const provider = createIntegrationSettingsProvider({
+      loadLocalEnv: true,
+      metadataReader: repositoryContext.repository,
+    });
+    const settings = await provider.getIntegrationSettings('connectwise');
+    const client = new ConnectWiseClient(connectWiseCredentialsFromSettings(settings));
+    const result = await applyReconciliationAgreementAdditionUpdates(repositoryContext.pool, {
+      actor: auth.principal.name,
+      updates,
+      writer: {
+        patchAgreementAddition(connectWiseAgreementId, connectWiseAdditionId, changes) {
+          return client.patchAgreementAddition(connectWiseAgreementId, connectWiseAdditionId, [
+            { op: 'replace', path: '/quantity', value: changes.quantity },
+          ]);
+        },
+      },
+    });
+    await recordMonthlyReviewApplyResult(repositoryContext.pool, runId, result.batchId, result.items, auth.principal.name);
+    return jsonResponse(200, { ...result, run: await getMonthlyReviewRun(repositoryContext.pool, runId) });
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to apply Monthly Review changes.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function completeMonthlyReviewRunHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const runId = request.params.runId ?? '';
+  if (!isUuid(runId)) return jsonResponse(400, { error: 'A valid Monthly Review run id is required.' });
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(200, await completeMonthlyReviewRun(repositoryContext.pool, runId, auth.principal.name));
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to complete Monthly Review.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function supersedeMonthlyReviewRunHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const runId = request.params.runId ?? '';
+  if (!isUuid(runId)) return jsonResponse(400, { error: 'A valid Monthly Review run id is required.' });
+  const bodyResult = await readJsonBody<MonthlyReviewRunBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(201, await createSupersedingMonthlyReviewRun(repositoryContext.pool, runId, {
+      actor: auth.principal.name,
+      allowWarnings: Boolean(bodyResult.body.overrideReason?.trim()),
+      overrideReason: bodyResult.body.overrideReason?.trim(),
+    }));
+  } catch (error) {
+    return jsonResponse(400, { error: error instanceof Error ? error.message : 'Unable to create a Monthly Review revision.' });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function restartMonthlyReviewRunHttp(
+  request: HttpRequest,
+  _context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const runId = request.params.runId ?? '';
+  if (!isUuid(runId)) return jsonResponse(400, { error: 'A valid Monthly Review run id is required.' });
+  const bodyResult = await readJsonBody<MonthlyReviewRestartBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  const reason = bodyResult.body.reason?.trim();
+  if (!reason) return jsonResponse(400, { error: 'Restarting a Monthly Review requires a reason.' });
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Monthly Review needs PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+  try {
+    return jsonResponse(201, await restartMonthlyReviewRun(repositoryContext.pool, runId, {
+      actor: auth.principal.name,
+      allowWarnings: true,
+      overrideReason: reason,
+      reason,
+    }));
+  } catch (error) {
+    return jsonResponse(400, {
+      error: error instanceof Error ? error.message : 'Unable to restart Monthly Review.',
+    });
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+app.http('monthlyReviewReadiness', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/readiness',
+  handler: monthlyReviewReadinessHttp,
+});
+
+app.http('monthlyReviewRuns', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs',
+  handler: listMonthlyReviewRunsHttp,
+});
+
+app.http('createMonthlyReviewRun', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs',
+  handler: createMonthlyReviewRunHttp,
+});
+
+app.http('getMonthlyReviewRun', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}',
+  handler: getMonthlyReviewRunHttp,
+});
+
+app.http('updateMonthlyReviewFinding', {
+  methods: ['PATCH', 'POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}/findings/{findingId}',
+  handler: updateMonthlyReviewFindingHttp,
+});
+
+app.http('applyMonthlyReview', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}/apply',
+  handler: applyMonthlyReviewHttp,
+});
+
+app.http('completeMonthlyReviewRun', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}/complete',
+  handler: completeMonthlyReviewRunHttp,
+});
+
+app.http('supersedeMonthlyReviewRun', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}/supersede',
+  handler: supersedeMonthlyReviewRunHttp,
+});
+
+app.http('restartMonthlyReviewRun', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'reconciliation/monthly/runs/{runId}/restart',
+  handler: restartMonthlyReviewRunHttp,
 });
 
 export async function listAgreementAdditionsHttp(
