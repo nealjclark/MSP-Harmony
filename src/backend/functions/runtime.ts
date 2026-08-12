@@ -218,10 +218,8 @@ function defaultAllowedOrigins() {
   return [
     'https://wonderful-bay-0fe59020f.7.azurestaticapps.net',
     'http://localhost:4280',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:5174',
-    'http://127.0.0.1:5174',
+    'http://localhost:5274',
+    'http://127.0.0.1:5274',
   ];
 }
 

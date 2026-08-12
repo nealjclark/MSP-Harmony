@@ -1,4 +1,4 @@
-import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
+import { app, output, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import * as XLSX from '@e965/xlsx';
 import {
   approveAzureBillingResult,
@@ -23,6 +23,18 @@ import {
 } from '../azureBilling/azureBillingService';
 import { ConnectWiseClient, connectWiseCredentialsFromSettings } from '../connectwise/client';
 import { createIntegrationSettingsProvider } from '../config/settingsProvider';
+import {
+  getAzureCostMonitorDashboard,
+  getAzureCostMonitorSettings,
+  listAzureAdvisorRecommendations,
+  listAzureCostMonitorRules,
+  listAzureCostMonitorRuns,
+  listAzureMonthlyCosts,
+  saveAzureCostMonitorRules,
+  updateAzureCostFinding,
+  type SaveAzureCostMonitorRulesInput,
+} from '../azureMonitoring/azureCostMonitorService';
+import { buildIntegrationSyncQueueMessage } from '../integrations/syncQueue';
 import { requireRole } from './auth';
 import {
   createOptionalPostgresSettingsRepository,
@@ -31,6 +43,157 @@ import {
   requireMutatingRequestOrigin,
   serverErrorResponse,
 } from './runtime';
+
+const azureMonitorSyncQueueOutput = output.storageQueue({
+  queueName: 'integration-sync-work',
+  connection: 'AzureWebJobsStorage',
+});
+
+export async function getAzureCostMonitorHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'SalesRequester');
+  if (auth.response) return auth.response;
+  return withDatabase(context, async (database) => jsonResponse(200, await getAzureCostMonitorDashboard(database, {
+    status: request.query.get('status')?.trim() || undefined,
+    subscriptionId: request.query.get('subscriptionId')?.trim() || undefined,
+    customerId: request.query.get('customerId')?.trim() || undefined,
+  })));
+}
+
+export async function listAzureCostMonitorRunsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'SalesRequester');
+  if (auth.response) return auth.response;
+  const limit = Number.parseInt(request.query.get('limit') ?? '24', 10);
+  return withDatabase(context, async (database) =>
+    jsonResponse(200, { runs: await listAzureCostMonitorRuns(database, limit) }));
+}
+
+export async function queueAzureCostMonitorRunHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+  const origin = requireMutatingRequestOrigin(request);
+  if (origin) return origin;
+  const repository = await createOptionalPostgresSettingsRepository();
+  if (!repository.repository) return jsonResponse(400, { error: 'Azure monitoring requires PostgreSQL settings.' });
+  try {
+    const queuedAt = new Date().toISOString();
+    const requestedBy = auth.principal.email ?? auth.principal.name;
+    const jobId = await repository.repository.createSyncJob({
+      integrationId: 'microsoft-azure',
+      integrationName: 'Azure - Lighthouse',
+      operationKey: 'azure-cost-usage',
+      operationLabel: 'Azure Cost Monitor',
+      requestedBy,
+      requestedAt: queuedAt,
+    });
+    const message = {
+      ...buildIntegrationSyncQueueMessage(
+        'microsoft-azure',
+        { operationKey: 'azure-cost-usage' },
+        requestedBy,
+        queuedAt,
+      ),
+      jobId,
+    };
+    context.extraOutputs.set(azureMonitorSyncQueueOutput, message);
+    return jsonResponse(202, { status: 'queued', jobId, queuedAt });
+  } catch (error) {
+    return domainError(error);
+  } finally {
+    await repository.close();
+  }
+}
+
+export async function getAzureCostMonitorRulesHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'SalesRequester');
+  if (auth.response) return auth.response;
+  return withDatabase(context, async (database) => jsonResponse(200, {
+    settings: await getAzureCostMonitorSettings(database),
+    rules: await listAzureCostMonitorRules(database),
+  }));
+}
+
+export async function saveAzureCostMonitorRulesHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+  const origin = requireMutatingRequestOrigin(request);
+  if (origin) return origin;
+  const body = await readJsonBody<SaveAzureCostMonitorRulesInput>(request);
+  if (!body.ok) return body.response;
+  return withDatabase(context, async (database) => {
+    try {
+      return jsonResponse(200, await saveAzureCostMonitorRules(
+        database,
+        body.body,
+        auth.principal.email ?? auth.principal.name,
+      ));
+    } catch (error) {
+      return domainError(error);
+    }
+  });
+}
+
+export async function updateAzureCostFindingHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Approver');
+  if (auth.response) return auth.response;
+  const origin = requireMutatingRequestOrigin(request);
+  if (origin) return origin;
+  const body = await readJsonBody<{
+    action: 'acknowledge' | 'snooze' | 'resolve';
+    note?: string;
+    snoozedUntil?: string;
+  }>(request);
+  if (!body.ok) return body.response;
+  return withDatabase(context, async (database) => {
+    try {
+      return jsonResponse(200, { finding: await updateAzureCostFinding(
+        database,
+        requiredParam(request, 'findingId'),
+        body.body,
+        auth.principal.email ?? auth.principal.name,
+      ) });
+    } catch (error) {
+      return domainError(error);
+    }
+  });
+}
+
+export async function listAzureMonthlyCostsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'SalesRequester');
+  if (auth.response) return auth.response;
+  return withDatabase(context, async (database) =>
+    jsonResponse(200, { months: await listAzureMonthlyCosts(database) }));
+}
+
+export async function listAzureAdvisorRecommendationsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'SalesRequester');
+  if (auth.response) return auth.response;
+  return withDatabase(context, async (database) =>
+    jsonResponse(200, { recommendations: await listAzureAdvisorRecommendations(database) }));
+}
 
 export async function listAzureBillingPoliciesHttp(
   request: HttpRequest,
@@ -538,3 +701,17 @@ app.http('holdAzureBillingResult', { methods: ['POST'], authLevel: 'anonymous', 
 app.http('releaseAzureBillingRun', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/runs/{runId}/release', handler: releaseAzureBillingRunHttp });
 app.http('acceptAzureBillingShadowRun', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/runs/{runId}/accept-shadow', handler: acceptAzureBillingShadowRunHttp });
 app.http('exportAzureBillingRun', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/runs/{runId}/export', handler: exportAzureBillingRunHttp });
+app.http('getAzureCostMonitor', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/monitor', handler: getAzureCostMonitorHttp });
+app.http('listAzureCostMonitorRuns', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/monitor/runs', handler: listAzureCostMonitorRunsHttp });
+app.http('queueAzureCostMonitorRun', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'azure-billing/monitor/runs',
+  extraOutputs: [azureMonitorSyncQueueOutput],
+  handler: queueAzureCostMonitorRunHttp,
+});
+app.http('getAzureCostMonitorRules', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/monitor/rules', handler: getAzureCostMonitorRulesHttp });
+app.http('saveAzureCostMonitorRules', { methods: ['PUT'], authLevel: 'anonymous', route: 'azure-billing/monitor/rules', handler: saveAzureCostMonitorRulesHttp });
+app.http('updateAzureCostFinding', { methods: ['PATCH'], authLevel: 'anonymous', route: 'azure-billing/monitor/findings/{findingId}', handler: updateAzureCostFindingHttp });
+app.http('listAzureMonthlyCosts', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/monthly-costs', handler: listAzureMonthlyCostsHttp });
+app.http('listAzureAdvisorRecommendations', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/advisor-recommendations', handler: listAzureAdvisorRecommendationsHttp });

@@ -52,6 +52,8 @@ export type AzureUtilizationReport = {
   summary: {
     subscriptionCount: number;
     mappedSubscriptionCount: number;
+    azureEstimatedActualCost: number;
+    /** @deprecated Use azureEstimatedActualCost. */
     retailCost: number;
     ingramCost: number;
     variance: number;
@@ -61,6 +63,8 @@ export type AzureUtilizationReport = {
     subscriptionId: string;
     subscriptionName?: string;
     customerName?: string;
+    azureEstimatedActualCost: number;
+    /** @deprecated Use azureEstimatedActualCost. */
     retailCost: number;
     ingramCost: number;
     variance: number;
@@ -68,6 +72,8 @@ export type AzureUtilizationReport = {
     services: Array<{
       serviceName: string;
       usageQuantity: number;
+      azureEstimatedActualCost: number;
+      /** @deprecated Use azureEstimatedActualCost. */
       retailCost: number;
     }>;
     resources: Array<{
@@ -75,7 +81,15 @@ export type AzureUtilizationReport = {
       resourceName: string;
       resourceGroup?: string;
       serviceName: string;
-      dailyCosts: Array<{ date: string; retailCost: number; usageQuantity: number }>;
+      dailyCosts: Array<{
+        date: string;
+        azureEstimatedActualCost: number;
+        /** @deprecated Use azureEstimatedActualCost. */
+        retailCost: number;
+        usageQuantity: number;
+      }>;
+      azureEstimatedActualCost: number;
+      /** @deprecated Use azureEstimatedActualCost. */
       retailCost: number;
       usageQuantity: number;
       powerState?: string;
@@ -188,6 +202,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
       subscriptionId: row.external_account_id,
       subscriptionName: row.subscription_name ?? undefined,
       customerName: row.customer_name ?? undefined,
+      azureEstimatedActualCost: 0,
       retailCost: 0,
       ingramCost: invoiceBySubscription.get(key) ?? 0,
       variance: 0,
@@ -196,16 +211,19 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
       resources: [],
     };
     const serviceCost = numericValue(row.retail_cost);
+    subscription.azureEstimatedActualCost += serviceCost;
     subscription.retailCost += serviceCost;
     const serviceName = row.service_name ?? 'Other Azure services';
     const service = subscription.services.find((item) => item.serviceName === serviceName);
     if (service) {
       service.usageQuantity += numericValue(row.usage_quantity);
+      service.azureEstimatedActualCost += serviceCost;
       service.retailCost += serviceCost;
     } else {
       subscription.services.push({
         serviceName,
         usageQuantity: numericValue(row.usage_quantity),
+        azureEstimatedActualCost: serviceCost,
         retailCost: serviceCost,
       });
     }
@@ -213,11 +231,13 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
       const resource = subscription.resources.find((item) => item.resourceId.toLowerCase() === row.resource_id?.toLowerCase());
       const daily = {
         date: row.usage_date ?? '',
+        azureEstimatedActualCost: serviceCost,
         retailCost: serviceCost,
         usageQuantity: numericValue(row.usage_quantity),
       };
       const telemetry = resourceTelemetry.get(row.resource_id.toLowerCase());
       if (resource) {
+        resource.azureEstimatedActualCost += serviceCost;
         resource.retailCost += serviceCost;
         resource.usageQuantity += daily.usageQuantity;
         resource.dailyCosts.push(daily);
@@ -228,6 +248,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
           resourceGroup: row.resource_group ?? undefined,
           serviceName,
           dailyCosts: [daily],
+          azureEstimatedActualCost: serviceCost,
           retailCost: serviceCost,
           usageQuantity: daily.usageQuantity,
           powerState: telemetry?.power_state ?? undefined,
@@ -246,6 +267,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
     if (subscriptions.has(key)) continue;
     subscriptions.set(key, {
       subscriptionId: invoiceResult.rows.find((row) => row.external_account_id.toLowerCase() === key)?.external_account_id ?? key,
+      azureEstimatedActualCost: 0,
       retailCost: 0,
       ingramCost,
       variance: -ingramCost,
@@ -258,6 +280,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
   const rows = [...subscriptions.values()]
     .map((row) => ({
       ...row,
+      azureEstimatedActualCost: roundMoney(row.retailCost),
       retailCost: roundMoney(row.retailCost),
       ingramCost: roundMoney(row.ingramCost),
       variance: roundMoney(row.retailCost - row.ingramCost),
@@ -265,6 +288,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
         .map((service) => ({
           ...service,
           usageQuantity: roundQuantity(service.usageQuantity),
+          azureEstimatedActualCost: roundMoney(service.retailCost),
           retailCost: roundMoney(service.retailCost),
         }))
         .sort((left, right) => right.retailCost - left.retailCost),
@@ -272,11 +296,13 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
         .map((resource) => ({
           ...resource,
           usageQuantity: roundQuantity(resource.usageQuantity),
+          azureEstimatedActualCost: roundMoney(resource.retailCost),
           retailCost: roundMoney(resource.retailCost),
           dailyCosts: resource.dailyCosts
             .map((day) => ({
               ...day,
               usageQuantity: roundQuantity(day.usageQuantity),
+              azureEstimatedActualCost: roundMoney(day.retailCost),
               retailCost: roundMoney(day.retailCost),
             }))
             .sort((left, right) => left.date.localeCompare(right.date)),
@@ -305,6 +331,7 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
     summary: {
       subscriptionCount: rows.length,
       mappedSubscriptionCount: rows.filter((row) => Boolean(row.customerName)).length,
+      azureEstimatedActualCost: retailCost,
       retailCost,
       ingramCost,
       variance: roundMoney(retailCost - ingramCost),
@@ -321,6 +348,7 @@ function emptyReport(): AzureUtilizationReport {
     summary: {
       subscriptionCount: 0,
       mappedSubscriptionCount: 0,
+      azureEstimatedActualCost: 0,
       retailCost: 0,
       ingramCost: 0,
       variance: 0,

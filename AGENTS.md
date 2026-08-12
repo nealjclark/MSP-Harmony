@@ -27,11 +27,11 @@ See [`docs/database.md`](docs/database.md) for connection settings and Azure not
 
 To avoid conflicts with other local apps, use these preferred ports when starting MSP Harmony services:
 
-- Frontend Vite dev server: `5173` primary, `5174` fallback.
-- Backend Azure Functions host: `7071` primary, `7072` fallback.
+- Frontend Vite dev server: `5274`.
+- Backend Azure Functions host: `7072`.
 - Static Web Apps CLI, when used for local SWA emulation: `4280`.
 
-The Vite proxy in `src/frontend/vite.config.ts` looks for the Functions host on `http://127.0.0.1:7071` first, then `http://127.0.0.1:7072`. If a preferred port is already occupied by another MSP Harmony process, use the listed fallback before choosing another port. Do not stop unrelated local apps unless the user asks.
+The Vite proxy in `src/frontend/vite.config.ts` sends API traffic to `http://127.0.0.1:7072`. Both dev servers use strict, project-specific ports so they do not silently move to another port. Do not stop unrelated local apps unless the user asks.
 
 ## Frontend layout
 

@@ -120,7 +120,7 @@ const integrationApiOperations: Partial<Record<IntegrationId, IntegrationApiOper
     { key: 'usage-snapshots', label: 'Organization product usage', dataSourceKey: 'huntress-organization-product-usage' },
   ],
   'microsoft-azure': [
-    { key: 'azure-cost-usage', label: 'Cost and resource usage', dataSourceKey: 'azure-subscription-consumption' },
+    { key: 'azure-cost-usage', label: 'Azure Cost Monitor', dataSourceKey: 'azure-subscription-consumption' },
   ],
   'ingram-micro': [
     { key: 'ingram-invoices', label: 'Microsoft invoice reports', dataSourceKey: 'ingram-azure-invoices' },
@@ -531,23 +531,22 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
   },
   {
     integrationId: 'microsoft-azure',
-    displayName: 'Microsoft Azure',
+    displayName: 'Azure - Lighthouse',
     category: 'Cloud',
     authMode: 'oauth2',
-    capabilities: ['live-api', 'mapping', 'invoice-import'],
+    capabilities: ['live-api'],
     dataSources: [
       dataSource(
         'azure-subscription-consumption',
-        'Subscription consumption',
+        'Subscription billing detail',
         'customer-product-breakdown',
-        ['live-api', 'csv', 'excel'],
+        ['live-api'],
         true,
         true,
-        'Azure subscription consumption and invoice charges by customer or subscription.',
+        'Reporting-only Azure subscription cost and usage detail associated with one ConnectWise agreement addition.',
       ),
-      resellerInvoiceTotals(),
     ],
-    description: 'Azure subscription consumption and configurable markup inputs.',
+    description: 'Azure Lighthouse subscription access, cost monitoring, and reporting-only billing detail.',
     endpoint: 'https://management.azure.com',
     requiredSecrets: [secret('clientSecret', 'Client Secret', 'mspharmony-azure-client-secret', 'AZURE_CLIENT_SECRET')],
     requiredNonSecrets: [
@@ -574,7 +573,6 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
         'Daily Cost Management window to refresh on each sync. Use at least 35 days to cover late adjustments.',
         'Azure Cost Management',
       ),
-      ...mappingIntegrationOptions('AZURE'),
     ],
     scopes: ['Azure RBAC: Cost Management Reader', 'Azure Lighthouse delegated subscription access'],
     syncFrequency: 'daily',

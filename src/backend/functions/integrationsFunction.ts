@@ -624,7 +624,7 @@ export async function processIntegrationSyncQueueMessage(
       });
       syncRunId = result.syncRunId;
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
-      context.log(`Microsoft Azure queued sync ${syncRunId} completed.`);
+      context.log(`Azure - Lighthouse queued sync ${syncRunId} completed.`);
       return;
     }
 
@@ -874,7 +874,7 @@ function integrationDisplayName(integrationId: IntegrationId | undefined) {
   if (integrationId === 'sentinelone') return 'SentinelOne';
   if (integrationId === 'proofpoint') return 'Proofpoint Essentials';
   if (integrationId === 'huntress') return 'Huntress';
-  if (integrationId === 'microsoft-azure') return 'Microsoft Azure';
+  if (integrationId === 'microsoft-azure') return 'Azure - Lighthouse';
   if (integrationId === 'ingram-micro') return 'Ingram Micro';
   if (integrationId === 'nerdio') return 'Nerdio';
   return 'ConnectWise';

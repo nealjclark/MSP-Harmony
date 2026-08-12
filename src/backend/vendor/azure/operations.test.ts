@@ -28,7 +28,7 @@ const provider: IntegrationSettingsProvider = {
       secretSource: 'environment',
       validation: {
         integrationId: 'microsoft-azure',
-        displayName: 'Microsoft Azure',
+        displayName: 'Azure - Lighthouse',
         configuredStatus: 'connected',
         missingSecrets: [],
         missingNonSecrets: [],
@@ -55,6 +55,9 @@ const client: AzureUsageClient = {
   async listSubscriptions() {
     return subscriptions;
   },
+  async listTenants() {
+    throw new Error('Tenant projection is temporarily unavailable');
+  },
   async queryCostUsage(input) {
     return [
       {
@@ -64,6 +67,9 @@ const client: AzureUsageClient = {
         resourceId:
           `/subscriptions/${input.subscriptionId}/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm-1`,
         resourceGroup: 'rg-app',
+        resourceType: 'microsoft.compute/virtualmachines',
+        meterCategory: 'Virtual Machines',
+        chargeType: 'Usage',
         cost: 12.34,
         usageQuantity: 24,
         currency: 'USD',
@@ -75,7 +81,9 @@ const client: AzureUsageClient = {
 
 async function run() {
   const inserted: unknown[][] = [];
+  const canonicalCosts: unknown[][] = [];
   const completed: unknown[][] = [];
+  const progress: Array<{ completed: number; total: number; failed?: number; currentItem?: string; unitLabel: string }> = [];
   const database: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {
       if (sql.includes('insert into sync_runs')) {
@@ -88,6 +96,7 @@ async function run() {
               external_account_id: subscriptions[0]?.subscriptionId,
               customer_id: 'customer-1',
               agreement_id: 'agreement-1',
+              agreement_addition_id: 'agreement-addition-1',
             } as T,
           ],
         };
@@ -97,6 +106,10 @@ async function run() {
       }
       if (sql.includes('insert into vendor_usage_snapshots')) {
         inserted.push(values ?? []);
+        return { rows: [] as T[] };
+      }
+      if (sql.includes('insert into azure_cost_daily')) {
+        canonicalCosts.push(values ?? []);
         return { rows: [] as T[] };
       }
       if (sql.includes("set status = 'complete'")) {
@@ -114,12 +127,16 @@ async function run() {
   });
   assert.equal(connection.subscriptionCount, 1);
   assert.equal(connection.sampleSubscriptions[0]?.displayName, 'Northstar Azure');
+  assert.match(connection.tenantLookupWarning ?? '', /temporarily unavailable/);
 
   const result = await syncAzureCostUsage({
     pool: database,
     provider,
     client,
     now: '2026-07-25T12:00:00.000Z',
+    onProgress: async (value) => {
+      progress.push(value);
+    },
   });
   assert.equal(result.syncRunId, 'azure-sync-1');
   assert.equal(result.recordsWritten, 1);
@@ -127,11 +144,22 @@ async function run() {
   assert.equal(result.totalCost, 12.34);
   assert.equal(inserted[0]?.[1], 'microsoft-azure');
   assert.equal(inserted[0]?.[2], 'customer-1');
-  assert.equal(inserted[0]?.[4], subscriptions[0]?.subscriptionId);
-  assert.equal(inserted[0]?.[5], 'azure:virtual-machines');
-  assert.equal(inserted[0]?.[8], 24);
-  assert.equal(JSON.parse(String(inserted[0]?.[10])).cost, 12.34);
+  assert.equal(inserted[0]?.[4], 'agreement-addition-1');
+  assert.equal(inserted[0]?.[5], subscriptions[0]?.subscriptionId);
+  assert.equal(inserted[0]?.[6], 'azure:virtual-machines');
+  assert.equal(inserted[0]?.[9], 24);
+  assert.equal(JSON.parse(String(inserted[0]?.[11])).cost, 12.34);
+  assert.equal(canonicalCosts.length, 1);
+  assert.equal(canonicalCosts[0]?.[0], subscriptions[0]?.subscriptionId);
+  assert.equal(canonicalCosts[0]?.[1], '2026-07-24');
+  assert.equal(canonicalCosts[0]?.[7], 'Usage');
+  assert.equal(canonicalCosts[0]?.[9], 12.34);
   assert.equal(JSON.parse(String(completed[0]?.[3])).successfulSubscriptions, 1);
+  assert.equal(progress[0]?.total, 2);
+  assert.equal(progress[0]?.unitLabel, 'monitoring steps');
+  assert.match(progress.find((item) => item.completed === 1)?.currentItem ?? '', /Evaluating cost changes/);
+  assert.equal(progress[progress.length - 1]?.completed, 2);
+  assert.equal(progress[progress.length - 1]?.total, 2);
   assert.equal(azureProductKey({ serviceName: 'Azure SQL Database' }), 'azure:azure-sql-database');
 
   console.log('azure operations tests passed');

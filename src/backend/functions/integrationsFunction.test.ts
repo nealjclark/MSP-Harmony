@@ -141,7 +141,7 @@ async function run() {
     assert.equal(azureTestResponse.status, 400);
     assert.match(
       String((azureTestResponse.jsonBody as { error?: string }).error),
-      /Microsoft Azure settings|Microsoft Azure test failed|Missing Microsoft Azure setting/i,
+      /Azure - Lighthouse settings|Azure - Lighthouse test failed|Missing Azure - Lighthouse setting/i,
     );
     assert.doesNotMatch(
       String((azureTestResponse.jsonBody as { error?: string }).error),

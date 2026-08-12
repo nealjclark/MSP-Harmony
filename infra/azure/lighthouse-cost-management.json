@@ -1,99 +1,71 @@
 {
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "$schema": "https://schema.management.azure.com/schemas/2019-08-01/subscriptionDeploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "managedByTenantId": {
+    "mspOfferName": {
       "type": "string",
       "metadata": {
-        "description": "Microsoft Entra tenant ID that hosts MSP Harmony."
-      }
+        "description": "Specify a unique name for your offer"
+      },
+      "defaultValue": "BMB Azure Management"
     },
-    "principalId": {
+    "mspOfferDescription": {
       "type": "string",
       "metadata": {
-        "description": "Object ID of the MSP tenant security group that contains the MSP Harmony service principal."
-      }
-    },
-    "principalDisplayName": {
-      "type": "string",
-      "defaultValue": "MSP Harmony Azure Reporting",
-      "metadata": {
-        "description": "Friendly name shown in Azure Lighthouse delegations."
-      }
-    },
-    "includeResourceReader": {
-      "type": "bool",
-      "defaultValue": true,
-      "metadata": {
-        "description": "Also grant Reader for Resource Graph inventory and subscription metadata."
-      }
-    },
-    "includeMonitoringReader": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "description": "Also grant Monitoring Reader for a future Azure Monitor metrics integration."
-      }
+        "description": "Name of the Managed Service Provider offering"
+      },
+      "defaultValue": ""
     }
   },
   "variables": {
-    "registrationDefinitionName": "[guid(parameters('managedByTenantId'), parameters('principalId'), 'msp-harmony-cost-management')]",
-    "registrationAssignmentName": "[guid(subscription().subscriptionId, variables('registrationDefinitionName'))]",
-    "costManagementAuthorization": [
+    "mspRegistrationName": "[guid(parameters('mspOfferName'))]",
+    "mspAssignmentName": "[guid(parameters('mspOfferName'))]",
+    "managedByTenantId": "30a502d2-8570-4207-9b98-ec48dd176588",
+    "authorizations": [
       {
-        "principalId": "[parameters('principalId')]",
-        "principalIdDisplayName": "[parameters('principalDisplayName')]",
-        "roleDefinitionId": "72fafb9e-0641-4937-9268-a91bfd8191a3"
-      }
-    ],
-    "readerAuthorization": [
+        "principalId": "a02badf9-02c7-4254-93cb-42ae82215300",
+        "roleDefinitionId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+        "principalIdDisplayName": "BMB Lighthosue"
+      },
       {
-        "principalId": "[parameters('principalId')]",
-        "principalIdDisplayName": "[parameters('principalDisplayName')]",
-        "roleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+        "principalId": "0800ddab-4459-495a-81e6-aa6b2ac930a3",
+        "roleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+        "principalIdDisplayName": "BMB Azure Reporting"
       }
-    ],
-    "monitoringAuthorization": [
-      {
-        "principalId": "[parameters('principalId')]",
-        "principalIdDisplayName": "[parameters('principalDisplayName')]",
-        "roleDefinitionId": "43d0d8ad-25c7-4714-9337-8ba259a9fe05"
-      }
-    ],
-    "authorizations": "[concat(variables('costManagementAuthorization'), if(parameters('includeResourceReader'), variables('readerAuthorization'), createArray()), if(parameters('includeMonitoringReader'), variables('monitoringAuthorization'), createArray()))]"
+    ]
   },
   "resources": [
     {
       "type": "Microsoft.ManagedServices/registrationDefinitions",
       "apiVersion": "2022-10-01",
-      "name": "[variables('registrationDefinitionName')]",
+      "name": "[variables('mspRegistrationName')]",
       "properties": {
-        "registrationDefinitionName": "MSP Harmony Azure Reporting",
-        "description": "Delegates least-privilege Azure cost and utilization access to MSP Harmony.",
-        "managedByTenantId": "[parameters('managedByTenantId')]",
+        "registrationDefinitionName": "[parameters('mspOfferName')]",
+        "description": "[parameters('mspOfferDescription')]",
+        "managedByTenantId": "[variables('managedByTenantId')]",
         "authorizations": "[variables('authorizations')]"
       }
     },
     {
       "type": "Microsoft.ManagedServices/registrationAssignments",
       "apiVersion": "2022-10-01",
-      "name": "[variables('registrationAssignmentName')]",
+      "name": "[variables('mspAssignmentName')]",
       "dependsOn": [
-        "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+        "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
       ],
       "properties": {
-        "registrationDefinitionId": "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+        "registrationDefinitionId": "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
       }
     }
   ],
   "outputs": {
-    "registrationDefinitionId": {
+    "mspOfferName": {
       "type": "string",
-      "value": "[resourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationDefinitionName'))]"
+      "value": "[concat('Managed by', ' ', parameters('mspOfferName'))]"
     },
-    "delegatedSubscriptionId": {
-      "type": "string",
-      "value": "[subscription().subscriptionId]"
+    "authorizations": {
+      "type": "array",
+      "value": "[variables('authorizations')]"
     }
   }
 }

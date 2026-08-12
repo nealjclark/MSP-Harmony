@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   ArrowDown,
   ArrowRight,
   BadgeCheck,
@@ -43,12 +44,14 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  Component,
   Fragment,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ChangeEvent,
+  type ErrorInfo,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -168,7 +171,7 @@ import {
 import { SalesWorkspace } from './SalesWorkspace';
 
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'azure-billing' | 'invoices' | 'agreements' | 'sales' | 'settings';
-type AzureBillingTab = 'runs' | 'review' | 'release' | 'utilization' | 'policies';
+type AzureBillingTab = 'runs' | 'review' | 'release' | 'monitor' | 'policies';
 type SettingsSection = 'user-management' | 'integrations' | 'email-communication' | 'audit-logs';
 type AppRole = 'Admin' | 'Approver' | 'Billing' | 'LicenseAdmin' | 'Analyst' | 'SalesRequester' | 'SalesApprover';
 
@@ -675,6 +678,8 @@ type AzureUtilizationReportResponse = {
   summary: {
     subscriptionCount: number;
     mappedSubscriptionCount: number;
+    azureEstimatedActualCost: number;
+    /** @deprecated Compatibility alias. */
     retailCost: number;
     ingramCost: number;
     variance: number;
@@ -684,6 +689,8 @@ type AzureUtilizationReportResponse = {
     subscriptionId: string;
     subscriptionName?: string;
     customerName?: string;
+    azureEstimatedActualCost: number;
+    /** @deprecated Compatibility alias. */
     retailCost: number;
     ingramCost: number;
     variance: number;
@@ -691,6 +698,8 @@ type AzureUtilizationReportResponse = {
     services: Array<{
       serviceName: string;
       usageQuantity: number;
+      azureEstimatedActualCost: number;
+      /** @deprecated Compatibility alias. */
       retailCost: number;
     }>;
     resources: Array<{
@@ -698,7 +707,9 @@ type AzureUtilizationReportResponse = {
       resourceName: string;
       resourceGroup?: string;
       serviceName: string;
-      dailyCosts: Array<{ date: string; retailCost: number; usageQuantity: number }>;
+      dailyCosts: Array<{ date: string; azureEstimatedActualCost: number; retailCost: number; usageQuantity: number }>;
+      azureEstimatedActualCost: number;
+      /** @deprecated Compatibility alias. */
       retailCost: number;
       usageQuantity: number;
       powerState?: string;
@@ -709,6 +720,258 @@ type AzureUtilizationReportResponse = {
       disconnectedSessions?: number;
     }>;
   }>;
+};
+
+type AzureLighthouseTemplate = {
+  version: number;
+  fileName: string;
+  sha256: string;
+  offerName?: string;
+  offerDescription?: string;
+  managedByTenantId?: string;
+  authorizations: Array<{
+    principalId: string;
+    principalDisplayName?: string;
+    roleDefinitionId: string;
+    roleName?: string;
+  }>;
+  uploadedBy: string;
+  uploadedAt: string;
+  template: Record<string, unknown>;
+};
+
+type AzureCostMonitorRule = {
+  id: string;
+  ruleLevel: 'subscription' | 'service' | 'resource';
+  subscriptionId?: string;
+  targetKey?: string;
+  chargeType?: string;
+  percentIncrease: number;
+  dollarIncrease: number;
+  newSpendFloor: number;
+  enabled: boolean;
+  idleExcluded: boolean;
+};
+
+type AzureCostMonitorSettings = {
+  comparisonDays: number;
+  settlingLagDays: number;
+  idleAverageCpuPercent: number;
+  idleMaximumCpuPercent: number;
+  cleanChecksToResolve: number;
+  updatedBy: string;
+  updatedAt: string;
+};
+
+type AzureCostMonitorFinding = {
+  id: string;
+  detectorType: 'cost-increase' | 'new-spend' | 'idle-vm';
+  scopeType: 'subscription' | 'service' | 'resource';
+  subscriptionId: string;
+  subscriptionName?: string;
+  customerId?: string;
+  customerName?: string;
+  targetKey: string;
+  targetName: string;
+  chargeType?: string;
+  status: 'open' | 'acknowledged' | 'snoozed' | 'resolved';
+  priority: 'warning' | 'critical';
+  baselineCost?: number;
+  currentCost?: number;
+  costChange?: number;
+  percentChange?: number;
+  currency?: string;
+  evidence: Record<string, unknown>;
+  firstDetectedAt: string;
+  lastDetectedAt: string;
+  consecutiveBreaches: number;
+  cleanCheckCount: number;
+  acknowledgedBy?: string;
+  acknowledgedAt?: string;
+  snoozedUntil?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  resolutionNote?: string;
+  connectWiseTicketId?: number;
+};
+
+type AzureCostMonitorEvaluation = {
+  id: string;
+  subscriptionId: string;
+  subscriptionName?: string;
+  customerId?: string;
+  customerName?: string;
+  currency: string;
+  baselineCost: number;
+  currentCost: number;
+  costChange: number;
+  percentChange?: number;
+  status: string;
+  findingCount: number;
+  idleVmCount: number;
+  telemetryWarningCount: number;
+  details: Record<string, unknown>;
+};
+
+type AzureCostMonitorRun = {
+  id: string;
+  sourceSyncRunId?: string;
+  status: string;
+  currentWindowStart: string;
+  currentWindowEnd: string;
+  baselineWindowStart: string;
+  baselineWindowEnd: string;
+  subscriptionCount: number;
+  findingCount: number;
+  idleVmCount: number;
+  telemetryWarningCount: number;
+  error?: string;
+  startedAt: string;
+  completedAt?: string;
+  evaluations?: AzureCostMonitorEvaluation[];
+};
+
+type AzureCostMonitorDashboardResponse = {
+  generatedAt: string;
+  settings: AzureCostMonitorSettings;
+  rules: AzureCostMonitorRule[];
+  latestRun?: AzureCostMonitorRun;
+  summary: {
+    activeFindingCount: number;
+    criticalFindingCount: number;
+    idleVmCount: number;
+    affectedSubscriptionCount: number;
+    estimatedWeeklyIncrease: number;
+  };
+  findings: AzureCostMonitorFinding[];
+};
+
+type AzureMonthlyCostRow = {
+  billingMonth: string;
+  customerId?: string;
+  customerName: string;
+  currency: string;
+  azureEstimatedCost: number;
+  ingramBilledCost?: number;
+  variance?: number;
+  variancePercent?: number;
+  invoiceNumbers: string[];
+  periodStart?: string;
+  periodEnd?: string;
+  inferredPeriod: boolean;
+  dataStatus: 'awaiting-ingram' | 'missing-ingram' | 'missing-azure' | 'matched';
+  subscriptions: Array<{
+    subscriptionId: string;
+    subscriptionName?: string;
+    azureEstimatedCost: number;
+  }>;
+};
+
+type AzureAdvisorRecommendation = {
+  id: string;
+  recommendationId: string;
+  subscriptionId: string;
+  subscriptionName?: string;
+  customerId?: string;
+  customerName?: string;
+  category: string;
+  impact?: string;
+  impactedResourceId?: string;
+  impactedResourceType?: string;
+  resourceGroup?: string;
+  shortDescription: string;
+  problem?: string;
+  solution?: string;
+  annualSavings?: number;
+  currency?: string;
+  observedAt: string;
+  raw: Record<string, unknown>;
+};
+
+type AzureOnboardingState = {
+  integrationId: 'microsoft-azure';
+  readiness: {
+    discoveryAttempted?: boolean;
+    credentialsConfigured?: boolean;
+    managingTenantId?: string;
+    managingTenantName?: string;
+    tenantLookupWarning?: string;
+    connectionError?: string;
+  };
+  currentTemplate?: AzureLighthouseTemplate;
+  customerOptions: MappingCustomerOption[];
+  portalUrl: string;
+  subscriptions: Array<{
+    subscriptionId: string;
+    subscriptionName: string;
+    tenantId?: string;
+    tenantName?: string;
+    tenantDefaultDomain?: string;
+    state?: string;
+    delegated: boolean;
+    mappingStatus?: string;
+    active: boolean;
+    customerId?: string;
+    customerName?: string;
+    agreementId?: string;
+    agreementName?: string;
+    agreementAdditionId?: string;
+    connectWiseAdditionId?: string;
+    additionCode?: string;
+    additionName?: string;
+    additionStatus?: string;
+    mappingComplete: boolean;
+    reviewedAt?: string;
+    lastSyncAt?: string;
+  }>;
+};
+
+type AzureOnboardingForm = {
+  customerId: string;
+  agreementId: string;
+  agreementAdditionId: string;
+  subscriptionId: string;
+  subscriptionName?: string;
+};
+
+type AzureOnboardingPackage = {
+  integrationId: 'microsoft-azure';
+  subscriptionId: string;
+  subscriptionName?: string;
+  agreementAdditionId: string;
+  connectWiseAdditionId: string;
+  additionCode: string;
+  additionName: string;
+  templateFileName: string;
+  template: Record<string, unknown>;
+  templateVersion: number;
+  templateSha256: string;
+  portalUrl: string;
+};
+
+type AzureOnboardingVerification = {
+  subscriptionId: string;
+  subscriptionName?: string;
+  tenantId?: string;
+  tenantName?: string;
+  tenantDefaultDomain?: string;
+  tenantLookupWarning?: string;
+  agreementAdditionId?: string;
+  connectWiseAdditionId?: string;
+  additionCode?: string;
+  additionName?: string;
+  delegated: boolean;
+  costManagementAccessible: boolean;
+  costManagementError?: string;
+  sampleRowCount?: number;
+  resourceInventoryAccessible: boolean;
+  resourceInventoryError?: string;
+  sampleResourceCount?: number;
+  monitoringMetricsTested: boolean;
+  monitoringMetricsAccessible: boolean;
+  monitoringMetricsError?: string;
+  activated: boolean;
+  message: string;
 };
 
 type AzureBillingRunSummary = {
@@ -4009,13 +4272,14 @@ const azureBillingTabPaths: Record<AzureBillingTab, string> = {
   runs: '/azure-billing/Reports',
   review: '/azure-billing/Review',
   release: '/azure-billing/release',
-  utilization: '/azure-billing/costmanagement',
+  monitor: '/azure-billing/cost-monitor',
   policies: '/azure-billing/PolicyMapping',
 };
 
 function azureBillingTabFromPath(pathname: string): AzureBillingTab | null {
   const normalized = normalizePathname(pathname).toLowerCase();
   if (normalized === '/azure-billing') return 'runs';
+  if (normalized === '/azure-billing/costmanagement') return 'monitor';
   const entry = Object.entries(azureBillingTabPaths).find(([, path]) => path.toLowerCase() === normalized);
   return entry?.[0] as AzureBillingTab | undefined ?? null;
 }
@@ -4462,6 +4726,112 @@ async function fetchAzureUtilizationReport() {
   }
 
   return body as unknown as AzureUtilizationReportResponse;
+}
+
+const azureOnboardingStateRequests = new Map<string, Promise<AzureOnboardingState>>();
+
+function fetchAzureOnboardingStateWithOptions(options: {
+  discoverAzure?: boolean;
+  includeCustomers?: boolean;
+} = {}) {
+  const query = new URLSearchParams();
+  if (options.discoverAzure) query.set('discoverAzure', 'true');
+  if (options.includeCustomers) query.set('includeCustomers', 'true');
+  const requestKey = query.toString();
+  const existing = azureOnboardingStateRequests.get(requestKey);
+  if (existing) return existing;
+
+  const request = (async () => {
+    const response = await fetch(`/api/integrations/microsoft-azure/onboarding${requestKey ? `?${requestKey}` : ''}`);
+    const body = await responseJson(response);
+    if (!response.ok) {
+      throw new Error(String(body.error ?? `Azure onboarding load failed with HTTP ${response.status}.`));
+    }
+    return body as unknown as AzureOnboardingState;
+  })();
+  azureOnboardingStateRequests.set(requestKey, request);
+  void request.then(
+    () => azureOnboardingStateRequests.delete(requestKey),
+    () => azureOnboardingStateRequests.delete(requestKey),
+  );
+  return request;
+}
+
+let azureLighthouseTemplateRequest: Promise<{
+  currentTemplate?: AzureLighthouseTemplate;
+  portalUrl: string;
+}> | undefined;
+
+function fetchAzureLighthouseTemplateRequest() {
+  if (azureLighthouseTemplateRequest) return azureLighthouseTemplateRequest;
+  azureLighthouseTemplateRequest = (async () => {
+    const response = await fetch('/api/integrations/microsoft-azure/onboarding/template');
+    const body = await responseJson(response);
+    if (!response.ok) {
+      throw new Error(String(body.error ?? `Azure Lighthouse template load failed with HTTP ${response.status}.`));
+    }
+    return body as unknown as { currentTemplate?: AzureLighthouseTemplate; portalUrl: string };
+  })();
+  void azureLighthouseTemplateRequest.then(
+    () => { azureLighthouseTemplateRequest = undefined; },
+    () => { azureLighthouseTemplateRequest = undefined; },
+  );
+  return azureLighthouseTemplateRequest;
+}
+
+async function prepareAzureOnboardingPackageRequest(payload: AzureOnboardingForm) {
+  const response = await fetch('/api/integrations/microsoft-azure/onboarding/package', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure onboarding package failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as AzureOnboardingPackage;
+}
+
+async function uploadAzureLighthouseTemplateRequest(fileName: string, template: unknown) {
+  const response = await fetch('/api/integrations/microsoft-azure/onboarding/template', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName, template }),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure Lighthouse template upload failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as AzureLighthouseTemplate;
+}
+
+async function verifyAzureOnboardingRequest(payload: AzureOnboardingForm) {
+  const response = await fetch('/api/integrations/microsoft-azure/onboarding/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure onboarding verification failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as AzureOnboardingVerification;
+}
+
+async function saveAzureSubscriptionMappingRequest(subscriptionId: string, payload: AzureOnboardingForm) {
+  const response = await fetch(
+    `/api/integrations/microsoft-azure/onboarding/mappings/${encodeURIComponent(subscriptionId)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await response.json() as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure subscription mapping failed with HTTP ${response.status}.`));
+  }
+  return body;
 }
 
 async function fetchSavedProductProfitabilityReports() {
@@ -8630,15 +9000,18 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) return;
+    const hasActiveSyncJobs = syncJobs.some((job) => job.status === 'queued' || job.status === 'running');
     const timer = window.setInterval(() => {
       void fetchRuntimeIntegrations()
         .then((response) => {
           setRuntimeIntegrations(response.integrations);
           setSyncJobs(response.syncJobs);
+          if (response.syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) {
+            setShowSyncTracker(true);
+          }
         })
         .catch(() => undefined);
-    }, 3000);
+    }, hasActiveSyncJobs ? 3000 : 15000);
     return () => window.clearInterval(timer);
   }, [syncJobs.map((job) => `${job.id}:${job.status}`).join('|')]);
 
@@ -9413,6 +9786,7 @@ function App() {
   const pollIntegrationOperation = async (
     integrationId: IntegrationId,
     operationKey: string,
+    queuedAt: string,
     token: number,
     attempt = 0,
   ): Promise<void> => {
@@ -9426,7 +9800,9 @@ function App() {
       setSyncJobs(response.syncJobs);
       const runtime = response.integrations.find((item) => item.integrationId === integrationId);
       const operation = runtime?.operationalStatus?.operations?.find((item) => item.operationKey === operationKey);
-      if (operation?.status === 'complete' || operation?.status === 'failed') {
+      const operationStartedAt = operation?.startedAt ? Date.parse(operation.startedAt) : Number.NaN;
+      const isRequestedRun = Number.isFinite(operationStartedAt) && operationStartedAt >= Date.parse(queuedAt) - 1000;
+      if (isRequestedRun && (operation?.status === 'complete' || operation?.status === 'failed')) {
         setIntegrationActionMessages((messages) => ({
           ...messages,
           [integrationId]: operation.status === 'complete'
@@ -9458,7 +9834,7 @@ function App() {
     } catch {
       // Keep monitoring through brief status request failures.
     }
-    return pollIntegrationOperation(integrationId, operationKey, token, attempt + 1);
+    return pollIntegrationOperation(integrationId, operationKey, queuedAt, token, attempt + 1);
   };
 
   const syncIntegration = async (integrationId: IntegrationId, target?: IntegrationSyncTarget) => {
@@ -9504,7 +9880,8 @@ function App() {
           const pollKey = `${integrationId}:${operationKey}`;
           const token = (integrationOperationPollRef.current[pollKey] ?? 0) + 1;
           integrationOperationPollRef.current[pollKey] = token;
-          void pollIntegrationOperation(integrationId, operationKey, token);
+          const queuedAt = typeof body.queuedAt === 'string' ? body.queuedAt : new Date().toISOString();
+          void pollIntegrationOperation(integrationId, operationKey, queuedAt, token);
         }
       }
       if (!queuedSync && selectedRawSyncIntegrationId === integrationId) {
@@ -10428,6 +10805,16 @@ function App() {
   const activeSyncJobs = syncJobs.filter((job) => job.status === 'queued' || job.status === 'running');
   const latestTrackedSyncJobs = syncJobs.slice(0, 10);
   const latestSyncJobsFailed = latestTrackedSyncJobs.some((job) => job.status === 'failed');
+  const revealQueuedSyncJob = async () => {
+    setShowSyncTracker(true);
+    try {
+      const response = await fetchRuntimeIntegrations();
+      setRuntimeIntegrations(response.integrations);
+      setSyncJobs(response.syncJobs);
+    } catch {
+      // The persisted job will be discovered by the background tracker poll.
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -10597,7 +10984,9 @@ function App() {
             <AzureBillingWorkspace
               canAcceptShadow={currentUserRoles.includes('Admin')}
               canManageApprovers={currentUserRoles.includes('Admin')}
+              canUpdateFindings={currentUserRoles.some((role) => role === 'Admin' || role === 'Approver')}
               canRelease={currentUserRoles.some((role) => role === 'Admin' || role === 'Billing')}
+              onMonitorQueued={revealQueuedSyncJob}
             />
           )}
           {view === 'reconcile' && (
@@ -11102,6 +11491,7 @@ function App() {
       ) : null}
       {selectedIntegration && (
           <IntegrationModal
+            canManageAzureTemplate={currentUserRoles.includes('Admin')}
             integration={selectedIntegration}
             onSave={saveIntegrationSettings}
             onTest={testIntegration}
@@ -16857,6 +17247,7 @@ function IntegrationsView(props: {
   const [workflowTabByIntegration, setWorkflowTabByIntegration] = useState<Partial<Record<IntegrationId, IntegrationWorkflowTab>>>({});
   const [invoiceWizardIntegrationId, setInvoiceWizardIntegrationId] = useState<IntegrationId | '' | null>(null);
   const [templateManagerIntegrationId, setTemplateManagerIntegrationId] = useState<IntegrationId | null>(null);
+  const [azureOnboardingOpen, setAzureOnboardingOpen] = useState(false);
   const catalogIntegrations = integrations.filter((integration) => integration.id !== 'custom-table');
   const manualIntegrations = vendorDatapoints
     .filter((datapoint) => datapoint.active && !datapoint.linkedIntegrationId)
@@ -16939,6 +17330,7 @@ function IntegrationsView(props: {
         comingSoon={comingSoon}
         integration={integration}
         key={integration.id}
+        onAzureOnboard={integration.id === 'microsoft-azure' ? () => setAzureOnboardingOpen(true) : undefined}
         onConfigure={() => onConfigure(effectiveIntegration)}
         onOpenMappings={onOpenMappings}
         onSync={onSync}
@@ -17082,6 +17474,609 @@ function IntegrationsView(props: {
           onClose={() => setTemplateManagerIntegrationId(null)}
         />
       ) : null}
+
+      {azureOnboardingOpen ? (
+        <AzureOnboardingErrorBoundary onClose={() => setAzureOnboardingOpen(false)}>
+          <AzureOnboardingWizard onClose={() => setAzureOnboardingOpen(false)} />
+        </AzureOnboardingErrorBoundary>
+      ) : null}
+    </section>
+  );
+}
+
+class AzureOnboardingErrorBoundary extends Component<
+  { children: ReactNode; onClose: () => void },
+  { error?: string }
+> {
+  state: { error?: string } = {};
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error.message : 'The onboarding workspace could not be rendered.' };
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo) {
+    console.error('Azure onboarding render failed.', error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="modal-backdrop" role="presentation">
+        <section aria-labelledby="azure-onboarding-error-title" className="modal-card azure-onboarding-modal" role="dialog">
+          <div className="modal-header">
+            <div>
+              <h2 id="azure-onboarding-error-title"><AlertTriangle size={20} /> Azure onboarding could not open</h2>
+              <p>The rest of MSP Harmony is still available. Close this window or retry the onboarding workspace.</p>
+            </div>
+            <button className="modal-close" onClick={this.props.onClose} title="Close" type="button"><X size={18} /></button>
+          </div>
+          <div className="azure-onboarding-body">
+            <div className="notice warning">{this.state.error}</div>
+          </div>
+          <div className="azure-onboarding-footer">
+            <span>Template management remains available under Azure - Lighthouse Configuration.</span>
+            <div>
+              <button className="button secondary" onClick={this.props.onClose} type="button">Close</button>
+              <button className="button primary" onClick={() => this.setState({ error: undefined })} type="button">Try again</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+}
+
+function AzureOnboardingWizard(props: { onClose: () => void }) {
+  const { onClose } = props;
+  const [step, setStep] = useState(1);
+  const [state, setState] = useState<AzureOnboardingState | null>(null);
+  const [customerOptions, setCustomerOptions] = useState<MappingCustomerOption[]>([]);
+  const [customerQuery, setCustomerQuery] = useState('');
+  const [form, setForm] = useState<AzureOnboardingForm>({
+    customerId: '',
+    agreementId: '',
+    agreementAdditionId: '',
+    subscriptionId: '',
+    subscriptionName: '',
+  });
+  const [agreementAdditions, setAgreementAdditions] = useState<AgreementAddition[]>([]);
+  const [additionLoadState, setAdditionLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [editingSubscriptionId, setEditingSubscriptionId] = useState<string | null>(null);
+  const [onboardingPackage, setOnboardingPackage] = useState<AzureOnboardingPackage | null>(null);
+  const [verification, setVerification] = useState<AzureOnboardingVerification | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loadingState, setLoadingState] = useState(true);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [refreshingAzure, setRefreshingAzure] = useState(false);
+  const [message, setMessage] = useState('Opening the onboarding workspace...');
+  const selectedCustomer = customerOptions.find((customer) => customer.customerId === form.customerId);
+  const visibleCustomerOptions = useMemo(() => {
+    const query = customerQuery.trim().toLowerCase();
+    const matches = query
+      ? customerOptions.filter((customer) => [
+          customer.customerName,
+          customer.connectWiseCompanyId,
+          ...customer.aliases,
+        ].some((value) => value?.toLowerCase().includes(query)))
+      : customerOptions;
+    const visible = matches.slice(0, 50);
+    if (selectedCustomer && !visible.some((customer) => customer.customerId === selectedCustomer.customerId)) {
+      visible.unshift(selectedCustomer);
+    }
+    return visible;
+  }, [customerOptions, customerQuery, selectedCustomer]);
+  const currentTemplate = state?.currentTemplate;
+  const detailsComplete = Boolean(
+    form.customerId && form.agreementId && form.agreementAdditionId && form.subscriptionId.trim(),
+  );
+
+  const loadState = async (options: { discoverAzure?: boolean; includeCustomers?: boolean } = {}) => {
+    if (options.discoverAzure) setRefreshingAzure(true);
+    else setLoadingState(true);
+    try {
+      const onboarding = await fetchAzureOnboardingStateWithOptions(options);
+      setState(onboarding);
+      if (options.includeCustomers) setCustomerOptions(onboarding.customerOptions ?? []);
+      if (options.discoverAzure) {
+        setMessage(onboarding.readiness.connectionError
+          ? `Azure refresh failed: ${onboarding.readiness.connectionError}`
+          : `Azure refresh complete. ${onboarding.subscriptions.filter((subscription) => subscription.delegated).length} delegated subscription${onboarding.subscriptions.filter((subscription) => subscription.delegated).length === 1 ? '' : 's'} found.`);
+      } else {
+        setMessage(onboarding.currentTemplate
+          ? `Approved template version ${onboarding.currentTemplate.version} is ready to use.`
+          : 'An administrator must upload an approved ARM template under Azure - Lighthouse Configuration.');
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to load Azure onboarding.');
+    } finally {
+      setLoadingState(false);
+      setRefreshingAzure(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const loadCustomerOptions = async () => {
+    if (customerOptions.length > 0 || loadingCustomers) return;
+    setLoadingCustomers(true);
+    setMessage('Loading ConnectWise customers and active agreements...');
+    try {
+      const onboarding = await fetchAzureOnboardingStateWithOptions({ includeCustomers: true });
+      setCustomerOptions(onboarding.customerOptions ?? []);
+      setMessage('Choose a customer, agreement, active addition, and Azure subscription ID.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to load ConnectWise customers.');
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!form.agreementId) {
+      setAgreementAdditions([]);
+      setAdditionLoadState('idle');
+      return;
+    }
+    let cancelled = false;
+    setAdditionLoadState('loading');
+    fetchAgreementAdditions(form.agreementId)
+      .then((response) => {
+        if (cancelled) return;
+        setAgreementAdditions(response.additions);
+        setAdditionLoadState('ready');
+        setForm((current) => response.additions.some((addition) => addition.id === current.agreementAdditionId)
+          ? current
+          : { ...current, agreementAdditionId: '' });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAgreementAdditions([]);
+        setAdditionLoadState('failed');
+      });
+    return () => { cancelled = true; };
+  }, [form.agreementId]);
+
+  const preparePackage = async () => {
+    if (!detailsComplete) {
+      setMessage('Choose a ConnectWise customer, agreement, active addition, and Azure subscription ID.');
+      return;
+    }
+    setBusy(true);
+    setMessage(editingSubscriptionId ? 'Saving the subscription mapping...' : 'Saving the pending customer subscription...');
+    try {
+      if (editingSubscriptionId) {
+        await saveAzureSubscriptionMappingRequest(editingSubscriptionId, form);
+        const edited = state?.subscriptions.find((subscription) => subscription.subscriptionId === editingSubscriptionId);
+        setMessage(edited?.active
+          ? 'Subscription mapping updated.'
+          : 'Subscription mapping updated. Verify delegated access when Azure is ready.');
+        await loadState();
+        if (edited?.active) {
+          setEditingSubscriptionId(null);
+          setStep(1);
+        } else {
+          setStep(3);
+        }
+        return;
+      }
+      const result = await prepareAzureOnboardingPackageRequest(form);
+      setOnboardingPackage(result);
+      setStep(3);
+      setMessage('Pending client saved. Verify after Azure finishes the Lighthouse delegation.');
+      await loadState();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to prepare the Azure onboarding package.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verify = async () => {
+    setBusy(true);
+    setVerification(null);
+    setMessage('Checking Lighthouse visibility and Cost Management access...');
+    try {
+      const result = await verifyAzureOnboardingRequest(form);
+      setVerification(result);
+      setMessage(result.message);
+      if (result.activated) {
+        await loadState();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to verify this Azure subscription.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetForAnother = () => {
+    setForm((current) => ({
+      ...current,
+      agreementId: '',
+      agreementAdditionId: '',
+      subscriptionId: '',
+      subscriptionName: '',
+    }));
+    setEditingSubscriptionId(null);
+    setCustomerQuery('');
+    setOnboardingPackage(null);
+    setVerification(null);
+    setStep(1);
+    setMessage('Download the approved template for the next client.');
+  };
+
+  const editSubscriptionMapping = (subscription: AzureOnboardingState['subscriptions'][number]) => {
+    setEditingSubscriptionId(subscription.subscriptionId);
+    setForm({
+      customerId: subscription.customerId ?? '',
+      agreementId: subscription.agreementId ?? '',
+      agreementAdditionId: subscription.agreementAdditionId ?? '',
+      subscriptionId: subscription.subscriptionId,
+      subscriptionName: subscription.subscriptionName,
+    });
+    setCustomerQuery(subscription.customerName ?? '');
+    setOnboardingPackage(null);
+    setVerification(null);
+    setStep(2);
+    setMessage(`Editing the ConnectWise target for ${subscription.subscriptionName}.`);
+    void loadCustomerOptions();
+  };
+
+  const downloadTemplate = () => {
+    if (!currentTemplate) return;
+    const blob = new Blob([`${JSON.stringify(currentTemplate.template, null, 2)}\n`], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = currentTemplate.fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setMessage(`${currentTemplate.fileName} downloaded. Upload this exact file in the client Azure portal.`);
+  };
+
+  const copyPortalLink = async () => {
+    if (!state?.portalUrl) return;
+    try {
+      await navigator.clipboard.writeText(state.portalUrl);
+      setMessage('Azure Service Providers link copied.');
+    } catch {
+      setMessage('Unable to copy automatically. Open the link and copy it from the browser address bar.');
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-labelledby="azure-onboarding-title" className="modal-card azure-onboarding-modal" role="dialog">
+        <div className="modal-header">
+          <div>
+            <h2 id="azure-onboarding-title"><UserPlus size={20} /> Azure - Lighthouse</h2>
+            <p>Delegate subscriptions and map each one to a reporting-only ConnectWise agreement addition.</p>
+          </div>
+          <button className="modal-close" onClick={onClose} title="Close" type="button">
+            <X size={18} />
+          </button>
+        </div>
+
+        <ol className="azure-onboarding-steps" aria-label="Onboarding progress">
+          {['Deploy in Azure', 'Record client', 'Verify access'].map((label, index) => (
+            <li className={step === index + 1 ? 'active' : step > index + 1 ? 'complete' : ''} key={label}>
+              <span>{step > index + 1 ? <Check size={14} /> : index + 1}</span>
+              {label}
+            </li>
+          ))}
+        </ol>
+
+        <div className="azure-onboarding-body">
+          {step === 1 ? (
+            <>
+              <section className="azure-onboarding-panel">
+                <div className="azure-onboarding-panel-heading">
+                  <div>
+                    <h3>Approved ARM template</h3>
+                    <p>Template upload and replacement are managed under Azure - Lighthouse Configuration.</p>
+                  </div>
+                  {currentTemplate ? <span>Version {currentTemplate.version}</span> : null}
+                </div>
+                {currentTemplate ? (
+                  <div className="azure-template-summary">
+                    <div><small>Offer</small><strong>{currentTemplate.offerName ?? 'Azure Lighthouse offer'}</strong></div>
+                    <div><small>File</small><strong>{currentTemplate.fileName}</strong></div>
+                    <div><small>Uploaded</small><strong>{formatDateTime(currentTemplate.uploadedAt)}</strong></div>
+                    <div><small>Uploaded by</small><strong>{currentTemplate.uploadedBy}</strong></div>
+                    <div>
+                      <small>Managing tenant</small>
+                      <strong>{state?.readiness.managingTenantName ?? currentTemplate.managedByTenantId ?? 'Not detected'}</strong>
+                      {currentTemplate.managedByTenantId ? <code>{currentTemplate.managedByTenantId}</code> : null}
+                    </div>
+                    <div className="azure-template-hash"><small>SHA-256</small><code title={currentTemplate.sha256}>{currentTemplate.sha256}</code></div>
+                  </div>
+                ) : (
+                  <div className="empty-inline">No approved Azure Lighthouse template has been uploaded.</div>
+                )}
+                <div className="azure-onboarding-package-actions">
+                  <button className="button primary compact" disabled={!currentTemplate || busy} onClick={downloadTemplate} type="button">
+                    <Download size={16} /> Download ARM template
+                  </button>
+                  <a className="button secondary compact" href={state?.portalUrl} rel="noreferrer" target="_blank">
+                    <ExternalLink size={16} /> Open Azure Service Providers
+                  </a>
+                  <button className="button secondary compact" disabled={!state?.portalUrl} onClick={() => void copyPortalLink()} type="button">
+                    <Link2 size={16} /> Copy portal link
+                  </button>
+                </div>
+                {currentTemplate?.authorizations.length ? (
+                  <div className="azure-template-authorizations">
+                    <h4>Access included in this template</h4>
+                    {currentTemplate.authorizations.map((authorization) => (
+                      <div key={`${authorization.principalId}-${authorization.roleDefinitionId}`}>
+                        <strong>{authorization.principalDisplayName ?? authorization.principalId}</strong>
+                        <span>{authorization.roleName ?? authorization.roleDefinitionId}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+              {state?.readiness.tenantLookupWarning ? (
+                <div className="notice neutral">{state.readiness.tenantLookupWarning} Tenant IDs remain available as a fallback.</div>
+              ) : null}
+              <section className="azure-onboarding-panel azure-portal-guide">
+                <h3>Client portal steps</h3>
+                <ol>
+                  <li><span>1</span><div><strong>Sign in to the client tenant</strong><small>Use an account that is Owner on the subscription being delegated.</small></div></li>
+                  <li><span>2</span><div><strong>Open Azure Service Providers</strong><small>Use the button above, then select <b>Service provider offers</b>.</small></div></li>
+                  <li><span>3</span><div><strong>Add the offer</strong><small>Select <b>Add offer</b>, then <b>Add via template</b>.</small></div></li>
+                  <li><span>4</span><div><strong>Upload the downloaded JSON file</strong><small>Choose the subscription to manage, validate, and create the delegation.</small></div></li>
+                </ol>
+                <div className="notice neutral">Azure Lighthouse visibility can take several minutes after the deployment succeeds.</div>
+              </section>
+              <AzureOnboardingSubscriptions
+                onEdit={editSubscriptionMapping}
+                onRefresh={() => void loadState({ discoverAzure: true })}
+                refreshing={refreshingAzure}
+                subscriptions={state?.subscriptions ?? []}
+              />
+            </>
+          ) : null}
+
+          {step === 2 ? (
+            <section className="azure-onboarding-panel">
+              <h3>{editingSubscriptionId ? 'Edit subscription mapping' : 'Customer, addition, and subscription'}</h3>
+              <p>{editingSubscriptionId
+                ? 'Change the reporting association without redeploying the Lighthouse template.'
+                : 'After the client deploys the template, map the entire subscription to one ConnectWise agreement addition.'}</p>
+              <div className="azure-onboarding-form-grid">
+                <label>
+                  <span>Find ConnectWise customer</span>
+                  <input
+                    disabled={loadingCustomers}
+                    onChange={(event) => setCustomerQuery(event.target.value)}
+                    placeholder="Search name, alias, or company ID"
+                    value={customerQuery}
+                  />
+                  <small>
+                    {loadingCustomers
+                      ? 'Loading customer directory...'
+                      : `Showing ${visibleCustomerOptions.length} of ${customerOptions.length} customers`}
+                  </small>
+                </label>
+                <label>
+                  <span>ConnectWise customer</span>
+                  <select
+                    disabled={loadingCustomers}
+                    value={form.customerId}
+                    onChange={(event) => setForm((current) => ({
+                      ...current,
+                      customerId: event.target.value,
+                      agreementId: '',
+                      agreementAdditionId: '',
+                    }))}
+                  >
+                    <option value="">{loadingCustomers ? 'Loading customers...' : 'Select customer'}</option>
+                    {visibleCustomerOptions.map((customer) => (
+                      <option key={customer.customerId} value={customer.customerId}>{customer.customerName}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Agreement</span>
+                  <select
+                    disabled={!selectedCustomer}
+                    value={form.agreementId}
+                    onChange={(event) => setForm((current) => ({
+                      ...current,
+                      agreementId: event.target.value,
+                      agreementAdditionId: '',
+                    }))}
+                  >
+                    <option value="">Select agreement</option>
+                    {(selectedCustomer?.agreements ?? []).map((agreement) => (
+                      <option key={agreement.agreementId} value={agreement.agreementId}>{agreement.agreementName}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Agreement addition</span>
+                  <select
+                    disabled={!form.agreementId || additionLoadState === 'loading'}
+                    value={form.agreementAdditionId}
+                    onChange={(event) => setForm((current) => ({ ...current, agreementAdditionId: event.target.value }))}
+                  >
+                    <option value="">
+                      {additionLoadState === 'loading' ? 'Loading additions...' : 'Select active addition'}
+                    </option>
+                    {agreementAdditions.map((addition) => (
+                      <option key={addition.id} value={addition.id}>
+                        {addition.productName} ({addition.productCode}) · CW {addition.connectWiseAdditionId}
+                      </option>
+                    ))}
+                  </select>
+                  {additionLoadState === 'failed' ? <small className="error-message">Unable to load active additions.</small> : null}
+                </label>
+                <label>
+                  <span>Subscription ID</span>
+                  <input disabled={Boolean(editingSubscriptionId)} value={form.subscriptionId} onChange={(event) => setForm((current) => ({ ...current, subscriptionId: event.target.value }))} placeholder="00000000-0000-0000-0000-000000000000" />
+                </label>
+                <label>
+                  <span>Subscription name</span>
+                  <input value={form.subscriptionName} onChange={(event) => setForm((current) => ({ ...current, subscriptionName: event.target.value }))} placeholder="Customer Azure subscription" />
+                </label>
+              </div>
+              <div className="notice neutral">
+                Cost line items stay available for reporting only. They do not create product mappings or enter quantity reconciliation.
+              </div>
+            </section>
+          ) : null}
+
+          {step === 3 ? (
+            <section className="azure-onboarding-panel">
+              <h3>Verify delegated access</h3>
+              <p>MSP Harmony will check Azure Lighthouse visibility, cost data, resource inventory, and monitoring access.</p>
+              <button className="button primary" disabled={busy} onClick={() => void verify()} type="button">
+                <RefreshCcw className={busy ? 'spin' : ''} size={16} />
+                {busy ? 'Verifying...' : 'Verify and activate'}
+              </button>
+              {verification ? (
+                <div className="azure-verification-result">
+                  {verification.tenantId ? (
+                    <AzureReadinessRow
+                      ready
+                      label="Customer tenant"
+                      detail={`${verification.tenantName ?? verification.tenantId} · ${verification.tenantId}`}
+                    />
+                  ) : null}
+                  <AzureReadinessRow ready={verification.delegated} label="Lighthouse visibility" detail={verification.delegated ? 'Subscription found' : 'Not visible yet'} />
+                  <AzureReadinessRow ready={verification.costManagementAccessible} label="Cost Management query" detail={verification.costManagementAccessible ? `${verification.sampleRowCount ?? 0} recent usage rows returned` : verification.costManagementError ?? 'Not accessible'} />
+                  <AzureReadinessRow ready={verification.resourceInventoryAccessible} label="Resource inventory query" detail={verification.resourceInventoryAccessible ? `${verification.sampleResourceCount ?? 0} resources returned on the first page` : verification.resourceInventoryError ?? 'Not accessible'} />
+                  {verification.monitoringMetricsTested ? (
+                    <AzureReadinessRow ready={verification.monitoringMetricsAccessible} label="Azure Monitor metrics query" detail={verification.monitoringMetricsAccessible ? 'VM metrics are accessible' : verification.monitoringMetricsError ?? 'Not accessible'} />
+                  ) : null}
+                </div>
+              ) : null}
+              {verification?.activated ? (
+                <div className="azure-onboarding-success">
+                  <BadgeCheck size={36} />
+                  <div>
+                    <h3>{verification.subscriptionName ?? form.subscriptionName ?? form.subscriptionId} is active</h3>
+                    <p>The reporting access checks passed and the ConnectWise mapping is approved.</p>
+                  </div>
+                </div>
+              ) : null}
+              {onboardingPackage ? (
+                <small>Recorded with approved template version {onboardingPackage.templateVersion}.</small>
+              ) : null}
+            </section>
+          ) : null}
+        </div>
+
+        <div className="azure-onboarding-footer">
+          <span className={message.toLowerCase().includes('unable') || message.toLowerCase().includes('missing') ? 'error-message' : ''}>{message}</span>
+          <div>
+            {step > 1 ? (
+              <button className="button secondary" disabled={busy} onClick={() => setStep((current) => Math.max(1, current - 1))} type="button">Back</button>
+            ) : null}
+            {step === 1 ? (
+              <button
+                className="button primary"
+                disabled={!currentTemplate || busy || loadingState}
+                onClick={() => {
+                  setEditingSubscriptionId(null);
+                  setCustomerQuery('');
+                  setForm({ customerId: '', agreementId: '', agreementAdditionId: '', subscriptionId: '', subscriptionName: '' });
+                  setStep(2);
+                  void loadCustomerOptions();
+                }}
+                type="button"
+              >
+                Client deployment completed
+              </button>
+            ) : null}
+            {step === 2 ? (
+              <button className="button primary" disabled={!detailsComplete || busy} onClick={() => void preparePackage()} type="button">
+                {busy ? 'Saving...' : editingSubscriptionId ? 'Save mapping' : 'Save pending client'}
+              </button>
+            ) : null}
+            {step === 3 ? (
+              <>
+                {verification?.activated ? <button className="button secondary" onClick={resetForAnother} type="button">Onboard another</button> : null}
+                <button className="button primary" onClick={onClose} type="button">Done</button>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AzureReadinessRow(props: { ready: boolean; label: string; detail: string }) {
+  return (
+    <div className={props.ready ? 'ready' : 'not-ready'}>
+      <span>{props.ready ? <Check size={15} /> : <X size={15} />}</span>
+      <div><strong>{props.label}</strong><small>{props.detail}</small></div>
+    </div>
+  );
+}
+
+function AzureOnboardingSubscriptions(props: {
+  onEdit: (subscription: AzureOnboardingState['subscriptions'][number]) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+  subscriptions: AzureOnboardingState['subscriptions'];
+}) {
+  return (
+    <section className="azure-onboarding-panel">
+      <div className="azure-onboarding-panel-heading">
+        <div>
+          <h3>Subscription mappings</h3>
+          <p>Saved mappings load immediately. Refresh from Azure only when you need current delegation or tenant details.</p>
+        </div>
+        <div className="azure-subscription-heading-actions">
+          <span>{props.subscriptions.length}</span>
+          <button className="button secondary compact" disabled={props.refreshing} onClick={props.onRefresh} type="button">
+            <RefreshCcw className={props.refreshing ? 'spin' : ''} size={15} />
+            {props.refreshing ? 'Refreshing Azure...' : 'Refresh from Azure'}
+          </button>
+        </div>
+      </div>
+      {props.subscriptions.length === 0 ? (
+        <div className="empty-inline">No delegated or pending Azure subscriptions yet.</div>
+      ) : (
+        <div className="azure-subscription-list">
+          {props.subscriptions.map((subscription) => (
+            <div key={subscription.subscriptionId}>
+              <span className={`live-dot ${subscription.active && subscription.mappingComplete ? 'ready' : subscription.delegated ? 'loading' : 'failed'}`} />
+              <div>
+                <strong>{subscription.subscriptionName}</strong>
+                <small>{subscription.tenantName ?? subscription.tenantId ?? 'Tenant unavailable'}{subscription.tenantId ? ` · ${subscription.tenantId}` : ''}</small>
+                <small>{subscription.subscriptionId}</small>
+                <small>
+                  {subscription.customerName ?? 'ConnectWise mapping pending'}
+                  {subscription.agreementName ? ` · ${subscription.agreementName}` : ''}
+                  {subscription.additionName
+                    ? ` · ${subscription.additionName} (${subscription.additionCode ?? 'addition'})`
+                    : ' · Addition required'}
+                </small>
+              </div>
+              <div className="azure-subscription-actions">
+                <span className={`integration-status ${subscription.active && subscription.mappingComplete ? 'connected' : 'degraded'}`}>
+                  {subscription.active && subscription.mappingComplete
+                    ? 'Active'
+                    : subscription.active
+                      ? 'Needs addition'
+                      : subscription.delegated
+                        ? 'Ready to verify'
+                        : 'Pending approval'}
+                </span>
+                <button className="icon-button table-icon" onClick={() => props.onEdit(subscription)} title="Edit subscription mapping" type="button">
+                  <Pencil size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -18553,6 +19548,7 @@ function IntegrationCard(props: {
   comingSoon?: boolean;
   integration: Integration;
   mappingVendorId?: VendorKey;
+  onAzureOnboard?: () => void;
   onConfigure?: () => void;
   onOpenMappings?: (integrationId: VendorKey) => void;
   onSync?: (integrationId: IntegrationId, target?: IntegrationSyncTarget) => void;
@@ -18567,6 +19563,7 @@ function IntegrationCard(props: {
     comingSoon = false,
     integration,
     mappingVendorId,
+    onAzureOnboard,
     onConfigure,
     onOpenMappings,
     onSync,
@@ -18616,6 +19613,12 @@ function IntegrationCard(props: {
               <KeyRound size={16} />
               {integration.enabled ? 'Configure' : 'Configure to enable'}
             </button>
+            {onAzureOnboard ? (
+              <button className="button primary compact" onClick={onAzureOnboard} type="button">
+                <UserPlus size={16} />
+                Onboard client
+              </button>
+            ) : null}
             {hasAnyMappingWorkspace(mappingVendorId ?? integration.id) ? (
               <button className="button secondary compact" onClick={() => onOpenMappings?.(mappingVendorId ?? integration.id)} type="button">
                 <Link2 size={16} />
@@ -24093,7 +25096,117 @@ function optionalIntegrationSettingValue(integration: Integration, setting: Inte
   return integration.nonSecrets[setting.key] ?? setting.defaultValue ?? '';
 }
 
+function AzureLighthouseTemplateConfiguration(props: { canManage: boolean }) {
+  const [currentTemplate, setCurrentTemplate] = useState<AzureLighthouseTemplate | undefined>();
+  const [portalUrl, setPortalUrl] = useState('');
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState('Loading approved template details...');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAzureLighthouseTemplateRequest()
+      .then((response) => {
+        if (cancelled) return;
+        setCurrentTemplate(response.currentTemplate);
+        setPortalUrl(response.portalUrl);
+        setLoadState('ready');
+        setMessage(response.currentTemplate
+          ? `Approved template version ${response.currentTemplate.version} is ready for client onboarding.`
+          : 'No approved template has been uploaded.');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLoadState('failed');
+        setMessage(error instanceof Error ? error.message : 'Unable to load the approved template.');
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const downloadTemplate = () => {
+    if (!currentTemplate) return;
+    const blob = new Blob([`${JSON.stringify(currentTemplate.template, null, 2)}\n`], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = currentTemplate.fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setMessage(`${currentTemplate.fileName} downloaded.`);
+  };
+
+  const uploadTemplate = async (file: File) => {
+    setUploading(true);
+    setMessage(`Validating ${file.name}...`);
+    try {
+      const template = JSON.parse(await file.text()) as unknown;
+      const uploaded = await uploadAzureLighthouseTemplateRequest(file.name, template);
+      setCurrentTemplate(uploaded);
+      setMessage(`Approved template saved as version ${uploaded.version}.`);
+    } catch (error) {
+      setMessage(error instanceof SyntaxError
+        ? `${file.name} is not valid JSON.`
+        : error instanceof Error ? error.message : 'Unable to upload the Azure Lighthouse template.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="integration-settings-section azure-template-config">
+      <div className="azure-onboarding-panel-heading">
+        <div>
+          <h3 className="integration-settings-section-title">Approved Lighthouse ARM template</h3>
+          <p className="config-note">Manage the reviewed subscription-scope template used for every client deployment.</p>
+        </div>
+        {currentTemplate ? <span>Version {currentTemplate.version}</span> : null}
+      </div>
+      {loadState === 'loading' ? <div className="empty-inline">Loading template metadata...</div> : null}
+      {loadState !== 'loading' && currentTemplate ? (
+        <div className="azure-template-summary">
+          <div><small>Offer</small><strong>{currentTemplate.offerName ?? 'Azure Lighthouse offer'}</strong></div>
+          <div><small>File</small><strong>{currentTemplate.fileName}</strong></div>
+          <div><small>Uploaded</small><strong>{formatDateTime(currentTemplate.uploadedAt)}</strong></div>
+          <div><small>Uploaded by</small><strong>{currentTemplate.uploadedBy}</strong></div>
+          <div><small>Managing tenant</small><code>{currentTemplate.managedByTenantId ?? 'Not detected'}</code></div>
+          <div className="azure-template-hash"><small>SHA-256</small><code title={currentTemplate.sha256}>{currentTemplate.sha256}</code></div>
+        </div>
+      ) : null}
+      {loadState === 'ready' && !currentTemplate ? (
+        <div className="empty-inline">No approved Azure Lighthouse template has been uploaded.</div>
+      ) : null}
+      <div className="azure-onboarding-package-actions">
+        <button className="button secondary compact" disabled={!currentTemplate || uploading} onClick={downloadTemplate} type="button">
+          <Download size={16} /> Download current template
+        </button>
+        {portalUrl ? (
+          <a className="button secondary compact" href={portalUrl} rel="noreferrer" target="_blank">
+            <ExternalLink size={16} /> Open Azure Service Providers
+          </a>
+        ) : null}
+        {props.canManage ? (
+          <label className={`button secondary compact azure-template-upload ${uploading ? 'disabled' : ''}`}>
+            <Upload size={16} /> {uploading ? 'Uploading...' : currentTemplate ? 'Replace template' : 'Upload template'}
+            <input
+              accept=".json,application/json"
+              disabled={uploading}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void uploadTemplate(file);
+              }}
+              type="file"
+            />
+          </label>
+        ) : <span className="config-note">Administrator access is required to replace the approved template.</span>}
+      </div>
+      <p className={loadState === 'failed' || message.toLowerCase().includes('unable') ? 'config-note error' : 'config-note'}>{message}</p>
+    </div>
+  );
+}
+
 function IntegrationModal(props: {
+  canManageAzureTemplate: boolean;
   integration: Integration;
   onClose: () => void;
   onSave: (payload: IntegrationSettingsPayload) => Promise<void>;
@@ -24102,7 +25215,7 @@ function IntegrationModal(props: {
   saveMessage: string | null;
   testing: boolean;
 }) {
-  const { integration, onClose, onSave, onTest, saving, saveMessage, testing } = props;
+  const { canManageAzureTemplate, integration, onClose, onSave, onTest, saving, saveMessage, testing } = props;
   const formRef = useRef<HTMLFormElement>(null);
   const [dirty, setDirty] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState<IntegrationSyncScheduleFrequency>(
@@ -24222,6 +25335,9 @@ function IntegrationModal(props: {
                 </div>
               </div>
             ))}
+            {integration.id === 'microsoft-azure' ? (
+              <AzureLighthouseTemplateConfiguration canManage={canManageAzureTemplate} />
+            ) : null}
             {integration.capabilities.includes('live-api') ? (
               <div className="integration-settings-section integration-schedule-section">
                 <h3 className="integration-settings-section-title">Sync schedule</h3>
@@ -25176,11 +26292,15 @@ function CustomerLicenseReportView(props: {
 function AzureBillingWorkspace({
   canAcceptShadow,
   canManageApprovers,
+  canUpdateFindings,
   canRelease,
+  onMonitorQueued,
 }: {
   canAcceptShadow: boolean;
   canManageApprovers: boolean;
+  canUpdateFindings: boolean;
   canRelease: boolean;
+  onMonitorQueued: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<AzureBillingTab>(() => azureBillingTabFromPath(window.location.pathname) ?? 'runs');
   const [runs, setRuns] = useState<AzureBillingRunSummary[]>([]);
@@ -25196,7 +26316,6 @@ function AzureBillingWorkspace({
     nerdioAccounts: [],
   });
   const [releases, setReleases] = useState<AzureBillingReleaseHistory[]>([]);
-  const [utilization, setUtilization] = useState<AzureUtilizationReportResponse | null>(null);
   const [billingMonth, setBillingMonth] = useState(new Date().toISOString().slice(0, 7));
   const [ingramReadiness, setIngramReadiness] = useState<AzureBillingIngramReadiness | null>(null);
   const [message, setMessage] = useState('Loading Azure billing runs...');
@@ -25232,6 +26351,9 @@ function AzureBillingWorkspace({
   useEffect(() => {
     const handlePopState = () => setTab(azureBillingTabFromPath(window.location.pathname) ?? 'runs');
     window.addEventListener('popstate', handlePopState);
+    if (normalizePathname(window.location.pathname).toLowerCase() === '/azure-billing/costmanagement') {
+      window.history.replaceState({ view: 'azure-billing', azureBillingTab: 'monitor' }, '', azureBillingPathForTab('monitor'));
+    }
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
@@ -25298,13 +26420,6 @@ function AzureBillingWorkspace({
       setMessage(error instanceof Error ? error.message : 'Unable to load Azure billing.');
     });
   }, []);
-
-  useEffect(() => {
-    if (tab !== 'utilization' || utilization) return;
-    void fetchAzureUtilizationReport()
-      .then(setUtilization)
-      .catch((error) => setMessage(error instanceof Error ? error.message : 'Unable to load Azure utilization.'));
-  }, [tab, utilization]);
 
   useEffect(() => {
     let active = true;
@@ -25528,7 +26643,7 @@ function AzureBillingWorkspace({
           ['runs', 'Monthly runs'],
           ['review', 'Client review'],
           ['release', 'Billing release'],
-          ['utilization', 'Resource utilization'],
+          ['monitor', 'Cost monitor'],
           ['policies', 'Policies & mappings'],
         ] as const).map(([id, label]) => (
           <button
@@ -26383,37 +27498,432 @@ function AzureBillingWorkspace({
         </section>
       ) : null}
 
-      {tab === 'utilization' ? (
-        <section className="work-surface">
-          <header className="surface-header"><div><span className="section-kicker">Azure Cost Management detail</span><h2>Resources and devices</h2></div></header>
-          {!utilization ? <div className="empty-state"><strong>Loading Azure resource cost detail...</strong></div> : (
-            <div className="azure-resource-table-wrap">
-              <table className="data-table azure-resource-table">
-                <thead><tr><th>Subscription</th><th>Resource/device</th><th>Resource group</th><th>Service</th><th>Power / activity</th><th>Usage</th><th>Cost</th></tr></thead>
-                <tbody>
-                  {utilization.subscriptions.flatMap((subscription) => subscription.resources.map((resource) => (
-                    <tr key={`${subscription.subscriptionId}:${resource.resourceId}`}>
-                      <td>{subscription.subscriptionName ?? subscription.subscriptionId}</td>
-                      <td><strong>{resource.resourceName}</strong><small>{resource.resourceId}</small></td>
-                      <td>{resource.resourceGroup ?? '—'}</td>
-                      <td>{resource.serviceName}</td>
-                      <td>
-                        {resource.powerState ?? (resource.activeSessions !== undefined ? `${formatCount(resource.activeSessions)} active sessions` : '—')}
-                        {resource.averageCpu !== undefined ? <small>CPU avg {resource.averageCpu.toFixed(1)}% · max {(resource.maximumCpu ?? 0).toFixed(1)}%</small> : null}
-                        {resource.availableMemoryBytes !== undefined ? <small>Available memory {(resource.availableMemoryBytes / 1073741824).toFixed(1)} GB</small> : null}
-                      </td>
-                      <td>{formatCount(resource.usageQuantity)}</td>
-                      <td>{formatCurrency(resource.retailCost)} {subscription.currency}</td>
-                    </tr>
-                  )))}
-                </tbody>
-              </table>
-            </div>
+      {tab === 'monitor' ? (
+        <AzureCostMonitorWorkspace
+          canManage={canManageApprovers}
+          canUpdateFindings={canUpdateFindings}
+          onMonitorQueued={onMonitorQueued}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function AzureCostMonitorWorkspace({
+  canManage,
+  canUpdateFindings,
+  onMonitorQueued,
+}: {
+  canManage: boolean;
+  canUpdateFindings: boolean;
+  onMonitorQueued: () => Promise<void>;
+}) {
+  type MonitorView = 'findings' | 'history' | 'monthly' | 'advisor';
+  const [view, setView] = useState<MonitorView>('findings');
+  const [dashboard, setDashboard] = useState<AzureCostMonitorDashboardResponse | null>(null);
+  const [monitorRuns, setMonitorRuns] = useState<AzureCostMonitorRun[]>([]);
+  const [monthlyCosts, setMonthlyCosts] = useState<AzureMonthlyCostRow[]>([]);
+  const [advisorRecommendations, setAdvisorRecommendations] = useState<AzureAdvisorRecommendation[]>([]);
+  const [utilization, setUtilization] = useState<AzureUtilizationReportResponse | null>(null);
+  const [advisorCategory, setAdvisorCategory] = useState('Cost');
+  const [ruleDraft, setRuleDraft] = useState<AzureCostMonitorRule[]>([]);
+  const [settingsDraft, setSettingsDraft] = useState<AzureCostMonitorSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [message, setMessage] = useState('Loading the latest Azure monitoring results...');
+
+  const loadMonitor = async (showLoading = true) => {
+    if (showLoading) setLoading(true);
+    try {
+      const [nextDashboard, runResponse, monthResponse, advisorResponse, resourceReport] = await Promise.all([
+        azureBillingJson<AzureCostMonitorDashboardResponse>('/api/azure-billing/monitor'),
+        azureBillingJson<{ runs: AzureCostMonitorRun[] }>('/api/azure-billing/monitor/runs?limit=30'),
+        azureBillingJson<{ months: AzureMonthlyCostRow[] }>('/api/azure-billing/monthly-costs'),
+        azureBillingJson<{ recommendations: AzureAdvisorRecommendation[] }>('/api/azure-billing/advisor-recommendations'),
+        fetchAzureUtilizationReport().catch(() => null),
+      ]);
+      setDashboard(nextDashboard);
+      setMonitorRuns(runResponse.runs);
+      setMonthlyCosts(monthResponse.months);
+      setAdvisorRecommendations(advisorResponse.recommendations);
+      setUtilization(resourceReport);
+      setRuleDraft(nextDashboard.rules.map((rule) => ({ ...rule })));
+      setSettingsDraft({ ...nextDashboard.settings });
+      setMessage(nextDashboard.latestRun
+        ? `Last evaluation completed ${formatDateTime(nextDashboard.latestRun.completedAt ?? nextDashboard.latestRun.startedAt)}.`
+        : 'No monitoring run has completed yet. Start a manual run or wait for the next scheduled sync.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to load Azure cost monitoring.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadMonitor();
+  }, []);
+
+  const groupedFindings = useMemo(() => {
+    const groups = new Map<string, { label: string; subscription: string; findings: AzureCostMonitorFinding[] }>();
+    for (const finding of dashboard?.findings ?? []) {
+      const key = `${finding.customerId ?? finding.customerName ?? 'unmapped'}:${finding.subscriptionId}`;
+      const group = groups.get(key) ?? {
+        label: finding.customerName ?? 'Unmapped client',
+        subscription: finding.subscriptionName ?? finding.subscriptionId,
+        findings: [],
+      };
+      group.findings.push(finding);
+      groups.set(key, group);
+    }
+    return [...groups.entries()];
+  }, [dashboard]);
+
+  const advisorCategories = useMemo(() => [
+    'All',
+    ...Array.from(new Set(advisorRecommendations.map((item) => item.category))).sort(),
+  ], [advisorRecommendations]);
+  const visibleAdvisor = advisorRecommendations.filter((item) =>
+    advisorCategory === 'All' || item.category.toLowerCase() === advisorCategory.toLowerCase());
+
+  const runManualMonitor = async () => {
+    setBusy('run');
+    try {
+      const response = await azureBillingJson<{ jobId: string }>('/api/azure-billing/monitor/runs', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await onMonitorQueued();
+      setMessage(`Azure cost and resource synchronization queued as job ${response.jobId}. Findings will refresh when it completes.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to queue Azure monitoring.');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const updateFinding = async (
+    finding: AzureCostMonitorFinding,
+    action: 'acknowledge' | 'snooze' | 'resolve',
+  ) => {
+    const note = window.prompt(
+      action === 'resolve' ? 'Resolution note:' : action === 'snooze' ? 'Snooze note (optional):' : 'Acknowledgement note (optional):',
+    );
+    if (note === null) return;
+    setBusy(`finding:${finding.id}`);
+    try {
+      await azureBillingJson(`/api/azure-billing/monitor/findings/${encodeURIComponent(finding.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          action,
+          note: note.trim() || undefined,
+          snoozedUntil: action === 'snooze'
+            ? new Date(Date.now() + (7 * 24 * 60 * 60 * 1000)).toISOString()
+            : undefined,
+        }),
+      });
+      await loadMonitor(false);
+      setMessage(action === 'snooze' ? 'Finding snoozed for seven days.' : `Finding ${action}d.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update the finding.');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const saveRules = async () => {
+    if (!settingsDraft) return;
+    setBusy('rules');
+    try {
+      const response = await azureBillingJson<{ settings: AzureCostMonitorSettings; rules: AzureCostMonitorRule[] }>(
+        '/api/azure-billing/monitor/rules',
+        {
+          method: 'PUT',
+          body: JSON.stringify({ settings: settingsDraft, rules: ruleDraft }),
+        },
+      );
+      setSettingsDraft(response.settings);
+      setRuleDraft(response.rules);
+      setDashboard((current) => current ? { ...current, settings: response.settings, rules: response.rules } : current);
+      setMessage('Azure monitor thresholds and overrides saved.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to save Azure monitor rules.');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const updateRule = (index: number, changes: Partial<AzureCostMonitorRule>) => {
+    setRuleDraft((current) => current.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...changes } : rule));
+  };
+
+  if (loading && !dashboard) {
+    return <section className="work-surface"><div className="empty-state"><RefreshCcw size={20} /><strong>Loading Azure cost monitor...</strong></div></section>;
+  }
+
+  return (
+    <section className="azure-cost-monitor-workspace" aria-label="Azure cost monitoring dashboard">
+      <section className="work-surface azure-monitor-hero">
+        <header className="surface-header">
+          <div>
+            <span className="section-kicker">Operational cost control</span>
+            <h2>Azure Cost Monitor</h2>
+            <p>Estimated Azure actual cost, settled by a two-day lag and compared with the preceding window.</p>
+          </div>
+          <div className="azure-monitor-header-actions">
+            <button className="button compact" disabled={loading || Boolean(busy)} onClick={() => void loadMonitor()} type="button">
+              <RefreshCcw size={16} /> Refresh
+            </button>
+            {canManage ? (
+              <button className="button primary" disabled={Boolean(busy)} onClick={() => void runManualMonitor()} type="button">
+                <Activity size={16} /> {busy === 'run' ? 'Queueing...' : 'Run monitor'}
+              </button>
+            ) : null}
+          </div>
+        </header>
+        <p className={`inline-message${/failed|unable|error/i.test(message) ? ' error' : ''}`}>{message}</p>
+      </section>
+
+      <section className="metric-grid report-metrics azure-monitor-metrics" aria-label="Current Azure monitoring summary">
+        <MetricCard icon={AlertTriangle} label="Active findings" tone="warn" value={formatCount(dashboard?.summary.activeFindingCount ?? 0)} />
+        <MetricCard icon={Activity} label="Critical" tone="warn" value={formatCount(dashboard?.summary.criticalFindingCount ?? 0)} />
+        <MetricCard icon={Building2} label="Subscriptions affected" tone="approved" value={formatCount(dashboard?.summary.affectedSubscriptionCount ?? 0)} />
+        <MetricCard icon={Clock3} label="Idle VMs" tone="ready" value={formatCount(dashboard?.summary.idleVmCount ?? 0)} />
+        <MetricCard icon={CircleDollarSign} label="Detected window increase" tone="money" value={formatAzureMonitorCurrency(dashboard?.summary.estimatedWeeklyIncrease ?? 0, 'USD')} />
+      </section>
+
+      <div className="azure-monitor-view-tabs" role="tablist" aria-label="Cost monitor views">
+        {([
+          ['findings', 'Active findings'],
+          ['history', 'Monitoring history'],
+          ['monthly', 'Monthly costs'],
+          ['advisor', 'Advisor'],
+        ] as const).map(([id, label]) => (
+          <button aria-selected={view === id} className={view === id ? 'active' : ''} key={id} onClick={() => setView(id)} role="tab" type="button">
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'findings' ? (
+        <>
+          <section className="work-surface azure-monitor-panel">
+            <header className="surface-header">
+              <div><span className="section-kicker">Needs review</span><h3>Active findings by client and subscription</h3></div>
+              <span className="status-pill ready">{formatCount(dashboard?.findings.length ?? 0)} active</span>
+            </header>
+            {groupedFindings.length === 0 ? (
+              <div className="empty-state"><Check size={20} /><strong>No active Azure cost findings.</strong><span>The next scheduled run will continue evaluating costs and running VMs.</span></div>
+            ) : groupedFindings.map(([key, group]) => (
+              <section className="azure-monitor-finding-group" key={key}>
+                <header><div><strong>{group.label}</strong><span>{group.subscription}</span></div><span>{group.findings.length} finding{group.findings.length === 1 ? '' : 's'}</span></header>
+                <div className="azure-monitor-finding-list">
+                  {group.findings.map((finding) => {
+                    const averageCpu = azureMonitorEvidenceNumber(finding.evidence, 'averageCpu');
+                    const maximumCpu = azureMonitorEvidenceNumber(finding.evidence, 'maximumCpu');
+                    return (
+                      <article className={`azure-monitor-finding ${finding.priority}`} key={finding.id}>
+                        <div className="azure-monitor-finding-main">
+                          <div className="azure-monitor-finding-title">
+                            <span className={`status-chip ${finding.priority}`}>{finding.priority}</span>
+                            <span className={`status-chip ${finding.status}`}>{azureBillingStatusLabel(finding.status)}</span>
+                            <strong>{finding.targetName}</strong>
+                          </div>
+                          <p>{azureCostFindingDescription(finding)}</p>
+                          <small>
+                            {azureBillingStatusLabel(finding.detectorType)} · {azureBillingStatusLabel(finding.scopeType)}
+                            {finding.chargeType ? ` · ${finding.chargeType}` : ''} · last seen {formatDateTime(finding.lastDetectedAt)}
+                          </small>
+                          {finding.detectorType === 'idle-vm' && averageCpu !== undefined ? (
+                            <small>Previous complete day CPU: {averageCpu.toFixed(1)}% average · {(maximumCpu ?? 0).toFixed(1)}% maximum</small>
+                          ) : null}
+                        </div>
+                        <div className="azure-monitor-finding-actions">
+                          {canUpdateFindings ? <>
+                            <button className="button compact" disabled={Boolean(busy)} onClick={() => void updateFinding(finding, 'acknowledge')} type="button">Acknowledge</button>
+                            <button className="button compact" disabled={Boolean(busy)} onClick={() => void updateFinding(finding, 'snooze')} type="button">Snooze 7d</button>
+                            <button className="button compact" disabled={Boolean(busy)} onClick={() => void updateFinding(finding, 'resolve')} type="button">Resolve</button>
+                          </> : <span className="field-help">Approver access required to update.</span>}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </section>
+
+          <details className="work-surface azure-monitor-resource-detail">
+            <summary><span><strong>Resource drill-down</strong><small>Power state, CPU, AVD sessions, usage, and estimated actual cost</small></span><ChevronRight size={18} /></summary>
+            {!utilization ? <div className="empty-state"><strong>No resource detail is available yet.</strong></div> : (
+              <div className="azure-resource-table-wrap">
+                <table className="data-table azure-resource-table">
+                  <thead><tr><th>Subscription</th><th>Resource/device</th><th>Resource group</th><th>Service</th><th>Power / activity</th><th>Usage</th><th>Estimated actual cost</th></tr></thead>
+                  <tbody>
+                    {utilization.subscriptions.flatMap((subscription) => subscription.resources.map((resource) => (
+                      <tr key={`${subscription.subscriptionId}:${resource.resourceId}`}>
+                        <td>{subscription.subscriptionName ?? subscription.subscriptionId}</td>
+                        <td><strong>{resource.resourceName}</strong><small>{resource.resourceId}</small></td>
+                        <td>{resource.resourceGroup ?? '—'}</td><td>{resource.serviceName}</td>
+                        <td>{resource.powerState ?? (resource.activeSessions !== undefined ? `${formatCount(resource.activeSessions)} active sessions` : '—')}{resource.averageCpu !== undefined ? <small>CPU avg {resource.averageCpu.toFixed(1)}% · max {(resource.maximumCpu ?? 0).toFixed(1)}%</small> : null}</td>
+                        <td>{formatCount(resource.usageQuantity)}</td><td>{formatAzureMonitorCurrency(resource.azureEstimatedActualCost, subscription.currency)}</td>
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </details>
+
+          <details className="work-surface azure-monitor-settings">
+            <summary><span><strong>Thresholds and overrides</strong><small>Global defaults with subscription, service, resource, and charge-type exceptions</small></span><Settings2 size={18} /></summary>
+            {!settingsDraft ? null : (
+              <div className="azure-monitor-settings-body">
+                <div className="azure-monitor-settings-grid">
+                  <label>Comparison days<input disabled={!canManage} max="30" min="2" onChange={(event) => setSettingsDraft({ ...settingsDraft, comparisonDays: Number(event.target.value) })} type="number" value={settingsDraft.comparisonDays} /></label>
+                  <label>Settling lag days<input disabled={!canManage} max="7" min="1" onChange={(event) => setSettingsDraft({ ...settingsDraft, settlingLagDays: Number(event.target.value) })} type="number" value={settingsDraft.settlingLagDays} /></label>
+                  <label>Idle CPU average %<input disabled={!canManage} min="0" onChange={(event) => setSettingsDraft({ ...settingsDraft, idleAverageCpuPercent: Number(event.target.value) })} step="0.1" type="number" value={settingsDraft.idleAverageCpuPercent} /></label>
+                  <label>Idle CPU maximum %<input disabled={!canManage} min="0" onChange={(event) => setSettingsDraft({ ...settingsDraft, idleMaximumCpuPercent: Number(event.target.value) })} step="0.1" type="number" value={settingsDraft.idleMaximumCpuPercent} /></label>
+                  <label>Clean checks to resolve<input disabled={!canManage} max="10" min="1" onChange={(event) => setSettingsDraft({ ...settingsDraft, cleanChecksToResolve: Number(event.target.value) })} type="number" value={settingsDraft.cleanChecksToResolve} /></label>
+                </div>
+                <div className="azure-monitor-rule-table-wrap">
+                  <table className="data-table azure-monitor-rule-table">
+                    <thead><tr><th>Scope</th><th>Subscription override</th><th>Service / resource target</th><th>Charge type</th><th>Increase %</th><th>Increase $</th><th>New spend $</th><th>Enabled</th><th>Exclude idle</th><th /></tr></thead>
+                    <tbody>{ruleDraft.map((rule, index) => {
+                      const isGlobal = !rule.subscriptionId && !rule.targetKey && !rule.chargeType;
+                      return <tr key={rule.id || `rule-${index}`}>
+                        <td><select disabled={!canManage} onChange={(event) => updateRule(index, { ruleLevel: event.target.value as AzureCostMonitorRule['ruleLevel'] })} value={rule.ruleLevel}><option value="subscription">Subscription</option><option value="service">Service</option><option value="resource">Resource</option></select></td>
+                        <td><input disabled={!canManage} onChange={(event) => updateRule(index, { subscriptionId: event.target.value || undefined })} placeholder="All subscriptions" value={rule.subscriptionId ?? ''} /></td>
+                        <td><input disabled={!canManage || rule.ruleLevel === 'subscription'} onChange={(event) => updateRule(index, { targetKey: event.target.value || undefined })} placeholder="Inherited" value={rule.targetKey ?? ''} /></td>
+                        <td><input disabled={!canManage} onChange={(event) => updateRule(index, { chargeType: event.target.value || undefined })} placeholder="Positive spend" value={rule.chargeType ?? ''} /></td>
+                        <td><input disabled={!canManage} min="0" onChange={(event) => updateRule(index, { percentIncrease: Number(event.target.value) })} type="number" value={rule.percentIncrease} /></td>
+                        <td><input disabled={!canManage} min="0" onChange={(event) => updateRule(index, { dollarIncrease: Number(event.target.value) })} type="number" value={rule.dollarIncrease} /></td>
+                        <td><input disabled={!canManage} min="0" onChange={(event) => updateRule(index, { newSpendFloor: Number(event.target.value) })} type="number" value={rule.newSpendFloor} /></td>
+                        <td><input checked={rule.enabled} disabled={!canManage} onChange={(event) => updateRule(index, { enabled: event.target.checked })} type="checkbox" /></td>
+                        <td><input checked={rule.idleExcluded} disabled={!canManage || rule.ruleLevel !== 'resource'} onChange={(event) => updateRule(index, { idleExcluded: event.target.checked })} type="checkbox" /></td>
+                        <td>{canManage && !isGlobal ? <button aria-label="Reset override" className="icon-button" onClick={() => setRuleDraft((current) => current.filter((_, ruleIndex) => ruleIndex !== index))} title="Reset to inherited rule" type="button"><Undo2 size={15} /></button> : null}</td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>
+                {canManage ? <div className="azure-monitor-rule-actions"><button className="button compact" onClick={() => setRuleDraft((current) => [...current, { id: '', ruleLevel: 'resource', percentIncrease: 50, dollarIncrease: 25, newSpendFloor: 25, enabled: true, idleExcluded: false }])} type="button"><Plus size={15} /> Add override</button><button className="button primary" disabled={busy === 'rules'} onClick={() => void saveRules()} type="button"><Save size={15} /> Save thresholds</button></div> : <p className="field-help">Admin access is required to edit monitoring thresholds.</p>}
+              </div>
+            )}
+          </details>
+        </>
+      ) : null}
+
+      {view === 'history' ? (
+        <section className="work-surface azure-monitor-panel">
+          <header className="surface-header"><div><span className="section-kicker">Scheduled evaluations</span><h3>Monitoring history</h3><p>One row per subscription and currency for each completed monitoring run.</p></div></header>
+          {monitorRuns.length === 0 ? <div className="empty-state"><History size={20} /><strong>No monitoring history yet.</strong></div> : (
+            <div className="azure-monitor-table-wrap"><table className="data-table azure-monitor-history-table"><thead><tr><th>Run / windows</th><th>Client / subscription</th><th>Current</th><th>Baseline</th><th>Change</th><th>Status</th><th>Idle / coverage</th></tr></thead><tbody>
+              {monitorRuns.flatMap((run) => (run.evaluations ?? []).map((evaluation) => (
+                <tr key={`${run.id}:${evaluation.id}`}>
+                  <td><strong>{formatDateTime(run.completedAt ?? run.startedAt)}</strong><small>{run.currentWindowStart}–{run.currentWindowEnd}<br />vs {run.baselineWindowStart}–{run.baselineWindowEnd}</small></td>
+                  <td><strong>{evaluation.customerName ?? 'Unmapped client'}</strong><small>{evaluation.subscriptionName ?? evaluation.subscriptionId}</small><AzureMonitorContributorDetails currency={evaluation.currency} details={evaluation.details} /></td>
+                  <td>{formatAzureMonitorCurrency(evaluation.currentCost, evaluation.currency)}</td><td>{formatAzureMonitorCurrency(evaluation.baselineCost, evaluation.currency)}</td>
+                  <td className={evaluation.costChange > 0 ? 'money-negative' : 'money-positive'}>{formatSignedAzureMonitorCurrency(evaluation.costChange, evaluation.currency)}<small>{evaluation.percentChange === undefined ? 'New spend' : `${evaluation.percentChange >= 0 ? '+' : ''}${evaluation.percentChange.toFixed(1)}%`}</small></td>
+                  <td><span className={`status-chip ${evaluation.status}`}>{azureBillingStatusLabel(evaluation.status)}</span><small>{evaluation.findingCount} findings</small></td>
+                  <td>{evaluation.idleVmCount} idle<small>{evaluation.telemetryWarningCount ? `${evaluation.telemetryWarningCount} missing CPU` : 'CPU covered'}</small></td>
+                </tr>
+              )))}
+            </tbody></table></div>
+          )}
+        </section>
+      ) : null}
+
+      {view === 'monthly' ? (
+        <section className="work-surface azure-monitor-panel">
+          <header className="surface-header"><div><span className="section-kicker">Final billing comparison</span><h3>Monthly costs</h3><p>Azure estimated actual cost is aligned to each Ingram line-item billing period. Currencies remain separate.</p></div></header>
+          {monthlyCosts.length === 0 ? <div className="empty-state"><CircleDollarSign size={20} /><strong>No monthly Azure cost data yet.</strong></div> : (
+            <div className="azure-monitor-month-list">{monthlyCosts.map((row) => (
+              <details className="azure-monitor-month-row" key={`${row.billingMonth}:${row.customerId ?? row.customerName}:${row.currency}`}>
+                <summary>
+                  <span><strong>{row.customerName}</strong><small>{row.billingMonth} · {row.currency} · {row.subscriptions.length} subscription{row.subscriptions.length === 1 ? '' : 's'}</small></span>
+                  <span><small>Azure estimated actual</small><strong>{formatAzureMonitorCurrency(row.azureEstimatedCost, row.currency)}</strong></span>
+                  <span><small>Ingram billed</small><strong>{row.ingramBilledCost === undefined ? '—' : formatAzureMonitorCurrency(row.ingramBilledCost, row.currency)}</strong></span>
+                  <span><small>Difference</small><strong>{row.variance === undefined ? '—' : formatSignedAzureMonitorCurrency(row.variance, row.currency)}</strong></span>
+                  <span className={`status-chip ${row.dataStatus}`}>{azureBillingStatusLabel(row.dataStatus)}</span>
+                </summary>
+                <div className="azure-monitor-month-detail">
+                  <p>Invoice {row.invoiceNumbers.join(', ') || 'not received'} · period {row.periodStart ?? '—'} to {row.periodEnd ?? '—'}{row.inferredPeriod ? ' · period inferred from invoice date' : ''}{row.variancePercent === undefined ? '' : ` · ${row.variancePercent >= 0 ? '+' : ''}${row.variancePercent.toFixed(1)}%`}</p>
+                  <table className="data-table"><thead><tr><th>Azure subscription</th><th>Estimated actual cost</th></tr></thead><tbody>{row.subscriptions.map((subscription) => <tr key={subscription.subscriptionId}><td><strong>{subscription.subscriptionName ?? subscription.subscriptionId}</strong><small>{subscription.subscriptionId}</small></td><td>{formatAzureMonitorCurrency(subscription.azureEstimatedCost, row.currency)}</td></tr>)}</tbody></table>
+                </div>
+              </details>
+            ))}</div>
+          )}
+        </section>
+      ) : null}
+
+      {view === 'advisor' ? (
+        <section className="work-surface azure-monitor-panel">
+          <header className="surface-header"><div><span className="section-kicker">Cached Azure guidance</span><h3>Advisor recommendations</h3><p>Read-only recommendations from the latest successful Lighthouse synchronization.</p></div><label className="azure-monitor-advisor-filter">Category<select onChange={(event) => setAdvisorCategory(event.target.value)} value={advisorCategory}>{advisorCategories.map((category) => <option key={category} value={category}>{category}</option>)}</select></label></header>
+          {visibleAdvisor.length === 0 ? <div className="empty-state"><Info size={20} /><strong>No {advisorCategory === 'All' ? '' : `${advisorCategory} `}Advisor recommendations are available.</strong></div> : (
+            <div className="azure-monitor-advisor-list">{visibleAdvisor.map((item) => (
+              <article key={item.id}>
+                <header><div><span className={`status-chip ${item.impact?.toLowerCase() ?? 'ready'}`}>{item.impact ?? 'Unrated'}</span><span className="status-chip ready">{item.category}</span></div>{item.annualSavings !== undefined ? <strong>{formatAzureMonitorCurrency(item.annualSavings, item.currency ?? 'USD')} / year</strong> : null}</header>
+                <h4>{item.shortDescription}</h4><p>{item.problem ?? item.solution ?? 'Open the recommendation in Azure Advisor for full details.'}</p>
+                <small>{item.customerName ?? 'Unmapped client'} · {item.subscriptionName ?? item.subscriptionId}{item.impactedResourceId ? ` · ${item.impactedResourceId}` : ''}</small>
+              </article>
+            ))}</div>
           )}
         </section>
       ) : null}
     </section>
   );
+}
+
+function azureMonitorEvidenceNumber(evidence: Record<string, unknown>, key: string) {
+  const value = evidence[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function AzureMonitorContributorDetails({ currency, details }: { currency: string; details: Record<string, unknown> }) {
+  type Contributor = { targetKey: string; targetName: string; baselineCost: number; currentCost: number; costChange: number };
+  const rawContributors = details.contributors;
+  const contributors = rawContributors && typeof rawContributors === 'object' && !Array.isArray(rawContributors)
+    ? rawContributors as Record<string, unknown>
+    : {};
+  const parse = (value: unknown): Contributor[] => Array.isArray(value)
+    ? value.filter((item): item is Contributor => Boolean(
+      item && typeof item === 'object'
+      && typeof (item as Contributor).targetName === 'string'
+      && typeof (item as Contributor).costChange === 'number',
+    ))
+    : [];
+  const services = parse(contributors.services);
+  const resources = parse(contributors.resources);
+  if (!services.length && !resources.length) return null;
+  return (
+    <details className="azure-monitor-contributors">
+      <summary>Top contributors</summary>
+      {services.length ? <div><strong>Services</strong><ul>{services.map((item) => <li key={item.targetKey}><span>{item.targetName}</span><span>{formatSignedAzureMonitorCurrency(item.costChange, currency)}</span></li>)}</ul></div> : null}
+      {resources.length ? <div><strong>Resources</strong><ul>{resources.map((item) => <li key={item.targetKey}><span>{item.targetName}</span><span>{formatSignedAzureMonitorCurrency(item.costChange, currency)}</span></li>)}</ul></div> : null}
+    </details>
+  );
+}
+
+function azureCostFindingDescription(finding: AzureCostMonitorFinding) {
+  if (finding.detectorType === 'idle-vm') {
+    return `Running VM met the low-activity thresholds${finding.consecutiveBreaches > 1 ? ` on ${finding.consecutiveBreaches} consecutive checks` : ''}.`;
+  }
+  if (finding.detectorType === 'new-spend') {
+    return `New spend reached ${formatAzureMonitorCurrency(finding.currentCost ?? 0, finding.currency ?? 'USD')} from a baseline below $1.`;
+  }
+  return `${formatAzureMonitorCurrency(finding.currentCost ?? 0, finding.currency ?? 'USD')} in the current window, ${formatSignedAzureMonitorCurrency(finding.costChange ?? 0, finding.currency ?? 'USD')} (${finding.percentChange?.toFixed(1) ?? '—'}%) from baseline.`;
+}
+
+function formatAzureMonitorCurrency(value: number, currency: string) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}
+
+function formatSignedAzureMonitorCurrency(value: number, currency: string) {
+  if (Math.abs(value) < 0.005) return formatAzureMonitorCurrency(0, currency);
+  return `${value > 0 ? '+' : '−'}${formatAzureMonitorCurrency(Math.abs(value), currency)}`;
 }
 
 function AzureBillingClientReviewTable({
@@ -27119,7 +28629,7 @@ function AzureUtilizationReportView(props: {
   report: AzureUtilizationReportResponse | null;
 }) {
   const { loadMessage, loadState, onRefresh, report } = props;
-  const maxCost = Math.max(1, ...(report?.subscriptions.map((subscription) => subscription.retailCost) ?? [0]));
+  const maxCost = Math.max(1, ...(report?.subscriptions.map((subscription) => subscription.azureEstimatedActualCost) ?? [0]));
 
   return (
     <section className="reports-page azure-utilization-page" aria-label="Azure utilization report">
@@ -27152,11 +28662,11 @@ function AzureUtilizationReportView(props: {
           tone="approved"
           value={`${formatCount(report?.summary.mappedSubscriptionCount ?? 0)} / ${formatCount(report?.summary.subscriptionCount ?? 0)}`}
         />
-        <MetricCard icon={BarChart3} label="Azure retail cost" tone="money" value={formatMoneyValue(report?.summary.retailCost ?? 0)} />
+        <MetricCard icon={BarChart3} label="Azure estimated actual cost" tone="money" value={formatMoneyValue(report?.summary.azureEstimatedActualCost ?? 0)} />
         <MetricCard icon={CircleDollarSign} label="Ingram cost" tone="warn" value={formatMoneyValue(report?.summary.ingramCost ?? 0)} />
         <MetricCard
           icon={Activity}
-          label="Retail minus Ingram"
+          label="Azure estimate minus Ingram"
           tone={(report?.summary.variance ?? 0) >= 0 ? 'ready' : 'warn'}
           value={formatMoneyValue(report?.summary.variance ?? 0)}
         />
@@ -27167,7 +28677,7 @@ function AzureUtilizationReportView(props: {
           <div className="empty-state report-empty">
             <BarChart3 size={20} />
             <strong>No Azure utilization loaded.</strong>
-            <span>Configure Microsoft Azure, run Cost and resource usage, then generate this report.</span>
+            <span>Configure Azure - Lighthouse, run Cost and resource usage, then generate this report.</span>
           </div>
         </section>
       ) : (
@@ -27176,7 +28686,7 @@ function AzureUtilizationReportView(props: {
             <div className="surface-header">
               <div>
                 <span className="section-kicker">Cost distribution</span>
-                <h3>Retail cost by subscription</h3>
+                <h3>Estimated actual cost by subscription</h3>
               </div>
               <span className="status-pill ready">{report.summary.currency}</span>
             </div>
@@ -27187,10 +28697,10 @@ function AzureUtilizationReportView(props: {
                     <strong>{subscription.subscriptionName ?? subscription.subscriptionId}</strong>
                     <small>{subscription.customerName ?? 'Unmapped subscription'}</small>
                   </div>
-                  <div className="azure-cost-bar-track" title={`${subscription.subscriptionName ?? subscription.subscriptionId}: ${formatMoneyValue(subscription.retailCost)}`}>
-                    <span style={{ width: `${Math.max(1, (subscription.retailCost / maxCost) * 100)}%` }} />
+                  <div className="azure-cost-bar-track" title={`${subscription.subscriptionName ?? subscription.subscriptionId}: ${formatMoneyValue(subscription.azureEstimatedActualCost)}`}>
+                    <span style={{ width: `${Math.max(1, (subscription.azureEstimatedActualCost / maxCost) * 100)}%` }} />
                   </div>
-                  <strong>{formatMoneyValue(subscription.retailCost)}</strong>
+                  <strong>{formatMoneyValue(subscription.azureEstimatedActualCost)}</strong>
                 </div>
               ))}
             </div>
@@ -27213,7 +28723,7 @@ function AzureUtilizationReportView(props: {
                     <th>Customer</th>
                     <th>Subscription</th>
                     <th>Top services</th>
-                    <th>Azure retail</th>
+                    <th>Azure estimated actual</th>
                     <th>Ingram cost</th>
                     <th>Variance</th>
                   </tr>
@@ -27227,7 +28737,7 @@ function AzureUtilizationReportView(props: {
                         <small>{subscription.subscriptionId}</small>
                       </td>
                       <td>{subscription.services.slice(0, 3).map((service) => service.serviceName).join(', ') || '—'}</td>
-                      <td>{formatMoneyValue(subscription.retailCost)}</td>
+                      <td>{formatMoneyValue(subscription.azureEstimatedActualCost)}</td>
                       <td>{formatMoneyValue(subscription.ingramCost)}</td>
                       <td className={subscription.variance >= 0 ? 'money-positive' : 'money-negative'}>
                         {formatMoneyValue(subscription.variance)}

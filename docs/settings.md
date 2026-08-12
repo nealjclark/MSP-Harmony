@@ -33,7 +33,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Microsoft 365 | `mspharmony-microsoft365-client-secret` |
 | AppRiver - OpenText | `mspharmony-opentext-appriver-client-secret`, `mspharmony-opentext-appriver-refresh-token` |
 | Huntress | none for manual invoice imports |
-| Microsoft Azure | `mspharmony-azure-client-secret` |
+| Azure - Lighthouse | `mspharmony-azure-client-secret` |
 | Pax8 | `mspharmony-pax8-client-secret` |
 | Email delivery (Graph) | `mspharmony-email-graph-client-secret` |
 
@@ -51,7 +51,7 @@ Use these Key Vault secret names for the first implementation pass:
 | Microsoft 365 | `endpoint`, `clientId`, `tenantId` |
 | AppRiver - OpenText | `endpoint`, `clientId` |
 | Huntress | none for manual invoice imports |
-| Microsoft Azure | `endpoint`, `tenantId`, `clientId`, `subscriptionId` |
+| Azure - Lighthouse | `endpoint`, `tenantId`, `clientId`, `subscriptionId` |
 | Pax8 | `endpoint`, `clientId` |
 
 ## Data Source Shapes
@@ -178,9 +178,9 @@ The application must have Microsoft Graph application permissions for `Directory
 
 Microsoft 365 product subscription snapshots are stored in `microsoft365_subscription_snapshots`. These rows are one per tenant SKU and include assigned, unassigned, enabled, suspended, warning, locked-out, total license counts, subscription IDs, commerce subscription IDs, trial status, and `nextLifecycleDateTime` when Graph returns it. Billing cadence fields such as monthly, annual, or annual billed monthly are nullable in v1 because Microsoft Graph does not return those fields from `/subscribedSkus` or `/directory/subscriptions`; raw Graph payloads are retained so a later Partner Center or invoice enrichment can backfill them.
 
-## Microsoft Azure Lighthouse and Cost Management
+## Azure - Lighthouse and Cost Management
 
-The Microsoft Azure integration uses one app registration in the MSP managing tenant. Customer subscriptions are delegated to that tenant with Azure Lighthouse; MSP Harmony then discovers the delegated subscriptions through Azure Resource Manager and queries the Cost Management API for daily service/resource usage.
+The Azure - Lighthouse integration uses one app registration in the MSP managing tenant. Customer subscriptions are delegated to that tenant with Azure Lighthouse; MSP Harmony then discovers the delegated subscriptions through Azure Resource Manager and queries the Cost Management API for daily service/resource usage.
 
 ### App settings
 
@@ -190,6 +190,8 @@ The Microsoft Azure integration uses one app registration in the MSP managing te
 - Key Vault secret `mspharmony-azure-client-secret` (or local `AZURE_CLIENT_SECRET`)
 - `AZURE_SUBSCRIPTION_IDS` (optional): comma- or line-separated allowlist; blank syncs every delegated subscription visible to the app
 - `AZURE_LOOKBACK_DAYS` (optional): defaults to 35 so late billing adjustments are refreshed
+
+Azure reporting calls do not require Microsoft Graph permissions on the app registration. The application authenticates with the settings above, while its subscription access is granted to its Enterprise Application object ID by an Azure RBAC authorization in the approved Lighthouse template.
 
 ## Ingram Micro Cloud
 
@@ -217,19 +219,11 @@ Nerdio invoice charges and live account usage are separate synchronization opera
 
 Use the Azure Billing workspace to map Ingram subscription IDs and Nerdio account IDs directly to a ConnectWise customer, agreement, and addition. Fuzzy or first-word customer matching is not used.
 
-The app does not need a credential in each customer tenant. Deploy [`../infra/azure/lighthouse-cost-management.json`](../infra/azure/lighthouse-cost-management.json) at each customer subscription. Supply the MSP tenant ID and the object ID of an MSP security group containing the Harmony service principal. The template always grants **Cost Management Reader**, grants **Reader** by default for subscription/resource inventory, and can optionally grant **Monitoring Reader** for future Azure Monitor metrics.
+The app does not need a credential in each customer tenant. An MSP Harmony Admin publishes the approved subscription-scope ARM JSON through **Integrations → Azure - Lighthouse → Configure → Approved Lighthouse ARM template**. The stored template is versioned and date-stamped; a later upload replaces the current file for future onboardings without changing previously deployed client subscriptions.
 
-Example deployment while signed into the customer tenant:
+Technicians download that approved file, open the client tenant's **Azure Service Providers** page, select **Service provider offers → Add offer → Add via template**, upload the JSON, and choose the subscription to manage. The customer-side user performing this action normally needs **Owner** on the subscription. The technician then maps the subscription ID to a ConnectWise customer, agreement, and active agreement addition in MSP Harmony and verifies the delegation. A pending mapping activates only after live Lighthouse discovery, Cost Management, and resource-inventory checks pass; Azure Monitor is also tested when a VM is available.
 
-```powershell
-az deployment sub create `
-  --location eastus `
-  --subscription <customer-subscription-id> `
-  --template-file infra/azure/lighthouse-cost-management.json `
-  --parameters managedByTenantId=<msp-tenant-id> principalId=<msp-security-group-object-id>
-```
-
-Run **Test** from the Microsoft Azure Configure modal after delegation. It should list the delegated subscriptions. Map each subscription ID to its ConnectWise customer/agreement, enable API Sync, then run **Cost and resource usage**. The sync stores daily rows in `vendor_usage_snapshots` with the subscription ID as `external_account_id`; cost, currency, service, resource ID, and usage date are stored in dimensions.
+The template itself is the source of truth for delegated principals and roles. MSP Harmony validates and displays those authorizations but does not silently change them. Enable API Sync in **Configure**, then run **Cost and resource usage**. The sync stores daily rows in `vendor_usage_snapshots` with the subscription ID as `external_account_id` and the selected `agreement_addition_id`; cost, currency, service, resource ID, and usage date are stored in dimensions. These line items are reporting evidence only: Azure - Lighthouse has no generic product mapping, invoice import, or quantity-reconciliation workflow. Ingram remains the invoice cost source and Azure Billing policies remain the separate reviewed write workflow. See [Azure Lighthouse client onboarding](azure-lighthouse.md) for the publishing, technician, permission, and troubleshooting runbook.
 
 ### Ingram invoice cross-reference
 

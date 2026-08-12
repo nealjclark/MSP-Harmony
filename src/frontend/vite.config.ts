@@ -1,10 +1,9 @@
 import { defineConfig } from 'vite';
 import { readFileSync } from 'node:fs';
-import { request } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const localFunctionUrls = ['http://127.0.0.1:7071', 'http://127.0.0.1:7072'];
+const localFunctionsUrl = 'http://127.0.0.1:7072';
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 type LocalSettings = {
@@ -13,36 +12,9 @@ type LocalSettings = {
 
 let localSettings: LocalSettings | undefined;
 
-function hasCurrentFunctionsHost(baseUrl: string) {
-  return new Promise<boolean>((resolve) => {
-    const req = request(`${baseUrl}/api/integrations`, { method: 'GET', timeout: 3000 }, (response) => {
-      response.resume();
-      resolve(response.statusCode !== 404 && (response.statusCode ?? 500) < 500);
-    });
-
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(false);
-    });
-    req.end();
-  });
-}
-
-async function resolveFunctionsUrl() {
+function resolveFunctionsUrl() {
   const configuredUrl = process.env.VITE_FUNCTIONS_URL ?? process.env.FUNCTIONS_URL;
-
-  if (configuredUrl) {
-    return configuredUrl;
-  }
-
-  for (const baseUrl of localFunctionUrls) {
-    if (await hasCurrentFunctionsHost(baseUrl)) {
-      return baseUrl;
-    }
-  }
-
-  return localFunctionUrls[0];
+  return configuredUrl ?? localFunctionsUrl;
 }
 
 function readLocalSetting(name: string) {
@@ -89,8 +61,8 @@ function localAuthHeaders() {
   };
 }
 
-export default defineConfig(async () => {
-  const functionsUrl = await resolveFunctionsUrl();
+export default defineConfig(() => {
+  const functionsUrl = resolveFunctionsUrl();
   const authHeaders = localAuthHeaders();
 
   return {
@@ -98,6 +70,8 @@ export default defineConfig(async () => {
       include: ['@e965/xlsx'],
     },
     server: {
+      port: 5274,
+      strictPort: true,
       fs: {
         allow: [workspaceRoot],
       },

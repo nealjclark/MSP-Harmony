@@ -164,9 +164,9 @@ async function run() {
   });
 
   assert.equal(accountQueries.length, 2);
-  assert.match(accountQueries[0]?.sql ?? '', /case when \$10::text is null/);
-  assert.equal(accountQueries[0]?.values?.[9], 'reviewer@example.com');
-  assert.equal(accountQueries[0]?.values?.[11], true);
+  assert.match(accountQueries[0]?.sql ?? '', /case when \$11::text is null/);
+  assert.equal(accountQueries[0]?.values?.[10], 'reviewer@example.com');
+  assert.equal(accountQueries[0]?.values?.[12], true);
   assert.match(accountQueries[1]?.sql ?? '', /update vendor_usage_snapshots/);
   assert.deepEqual(accountQueries[1]?.values, ['cove', '2379363']);
 
@@ -180,7 +180,7 @@ async function run() {
   assert.equal(accountQueries.length, 4);
   assert.equal(accountQueries[2]?.values?.[3], 'customer-2');
   assert.equal(accountQueries[2]?.values?.[4], null);
-  assert.equal(accountQueries[2]?.values?.[11], true);
+  assert.equal(accountQueries[2]?.values?.[12], true);
   assert.deepEqual(accountQueries[3]?.values, ['cove', '2379364']);
 
   const workflow = mappingWorkflowDatabase([
@@ -235,7 +235,7 @@ async function run() {
   assert.equal(approveSuggestedResult.skippedExisting, 1);
   assert.equal(accountInsertQueries.length, 1);
   assert.equal(accountInsertQueries[0]?.values?.[1], '303');
-  assert.equal(accountInsertQueries[0]?.values?.[9], 'bulk-reviewer@example.com');
+  assert.equal(accountInsertQueries[0]?.values?.[10], 'bulk-reviewer@example.com');
 
   const appRiverAccountQueries: Array<{ sql: string; values?: unknown[] }> = [];
   const appRiverAccountDatabase: Queryable = {

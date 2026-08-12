@@ -1,7 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import { config as loadDotEnv } from 'dotenv';
 import { getIntegrationSettingsDefinition, type IntegrationId } from '../../shared/integrationSettings';
-import { isVendorKey, type VendorKey } from '../../shared/vendorDatapoints';
+import { isVendorKey, vendorSupportsMapping, type VendorKey } from '../../shared/vendorDatapoints';
 import {
   applyReconciliationAgreementAdditionUpdates,
   type ReconciliationAgreementAdditionUpdateInput,
@@ -1044,7 +1044,7 @@ app.http('listInvestigationTicketTimeEntries', {
 });
 
 function parseReconciliationVendorId(value: string | undefined): VendorKey | undefined {
-  return value && isVendorKey(value) ? value : undefined;
+  return value && isVendorKey(value) && vendorSupportsMapping(value) ? value : undefined;
 }
 
 function parseIntegrationId(value: string | undefined): IntegrationId | undefined {

@@ -189,7 +189,6 @@ assert.deepEqual(integrationIdsWithCapability('invoice-import'), [
   'microsoft-365',
   'opentext-appriver',
   'huntress',
-  'microsoft-azure',
   'ingram-micro',
   'pax8',
   'custom-table',
@@ -210,7 +209,10 @@ assert.equal(integrationDataSourceRequiresCustomerMapping('reseller-product-tota
 
 const microsoftAzure = getIntegrationSettingsDefinition('microsoft-azure');
 assert.ok(microsoftAzure);
+assert.equal(microsoftAzure.displayName, 'Azure - Lighthouse');
 assert.equal(integrationHasCapability('microsoft-azure', 'live-api'), true);
+assert.equal(integrationHasCapability('microsoft-azure', 'mapping'), false);
+assert.equal(integrationHasCapability('microsoft-azure', 'invoice-import'), false);
 assert.deepEqual(listIntegrationApiOperations('microsoft-azure').map((operation) => operation.key), ['azure-cost-usage']);
 assert.equal(microsoftAzure.requiredNonSecrets.some((setting) => setting.key === 'subscriptionId'), false);
 assert.equal(microsoftAzure.optionalNonSecrets?.find((setting) => setting.key === 'lookbackDays')?.defaultValue, '35');

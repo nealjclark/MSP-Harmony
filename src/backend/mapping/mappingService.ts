@@ -909,6 +909,7 @@ export async function updateAccountMapping(
     status: MappingStatus;
     customerId?: string;
     agreementId?: string;
+    agreementAdditionId?: string;
     externalAccountName?: string;
     reviewedBy?: string;
   },
@@ -944,6 +945,7 @@ export async function updateAccountMapping(
     externalAccountName: sourceName,
     customerId: input.customerId,
     agreementId: input.agreementId,
+    agreementAdditionId: input.agreementAdditionId,
     status: input.status,
     confidence: 'manual',
     matchScore: 100,
@@ -3723,7 +3725,7 @@ function nerdioProductDisplayName(key: string, fallback: string) {
   return fallback;
 }
 
-async function loadConnectWiseCustomers(database: Queryable): Promise<ConnectWiseCustomerCandidate[]> {
+export async function loadConnectWiseCustomers(database: Queryable): Promise<ConnectWiseCustomerCandidate[]> {
   const result = await database.query<CustomerAgreementRow>(
     `select
        customers.id as customer_id,
@@ -3951,6 +3953,7 @@ async function countUnmappedSnapshots(database: Queryable, vendorId: VendorKey) 
 async function upsertAccountMapping(
   database: Queryable,
   input: AccountMappingCandidate & {
+    agreementAdditionId?: string;
     mappingSource: string;
     reviewedBy?: string;
   },
@@ -3966,6 +3969,7 @@ async function upsertAccountMapping(
        external_account_name,
        customer_id,
        agreement_id,
+       agreement_addition_id,
        mapping_status,
        confidence,
        match_score,
@@ -3977,12 +3981,13 @@ async function upsertAccountMapping(
        active,
        updated_at
      )
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $10::text is null then null else now() end, now(), $11::jsonb, $12, now())
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, case when $11::text is null then null else now() end, now(), $12::jsonb, $13, now())
      on conflict (vendor_id, external_account_id)
      do update set
        external_account_name = excluded.external_account_name,
        customer_id = excluded.customer_id,
        agreement_id = excluded.agreement_id,
+       agreement_addition_id = excluded.agreement_addition_id,
        mapping_status = excluded.mapping_status,
        confidence = excluded.confidence,
        match_score = excluded.match_score,
@@ -3999,6 +4004,7 @@ async function upsertAccountMapping(
       input.externalAccountName,
       input.customerId,
       input.agreementId ?? null,
+      input.agreementAdditionId ?? null,
       input.status,
       input.confidence,
       input.matchScore,
@@ -4022,7 +4028,8 @@ async function applyApprovedAccountMappingToSnapshots(
   await database.query(
     `update vendor_usage_snapshots
      set customer_id = vendor_account_mappings.customer_id,
-         agreement_id = vendor_account_mappings.agreement_id
+         agreement_id = vendor_account_mappings.agreement_id,
+         agreement_addition_id = vendor_account_mappings.agreement_addition_id
      from vendor_account_mappings
      where vendor_usage_snapshots.vendor_id = $1
        and vendor_usage_snapshots.external_account_id = $2
@@ -4031,7 +4038,8 @@ async function applyApprovedAccountMappingToSnapshots(
        and vendor_account_mappings.active = true
        and vendor_account_mappings.mapping_status = 'approved'
        and (vendor_usage_snapshots.customer_id is distinct from vendor_account_mappings.customer_id
-         or vendor_usage_snapshots.agreement_id is distinct from vendor_account_mappings.agreement_id)`,
+         or vendor_usage_snapshots.agreement_id is distinct from vendor_account_mappings.agreement_id
+         or vendor_usage_snapshots.agreement_addition_id is distinct from vendor_account_mappings.agreement_addition_id)`,
     [vendorId, externalAccountId],
   );
   if (vendorId === 'ncentral') {

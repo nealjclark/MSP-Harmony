@@ -5,12 +5,18 @@ import {
 } from '../../config/settingsProvider';
 import type { SyncProgressReporter } from '../../shared/syncProgress';
 import {
+  runAzureCostMonitor,
+  storeAzureAdvisorRecommendations,
+  upsertAzureDailyCost,
+} from '../../azureMonitoring/azureCostMonitorService';
+import {
   AzureCostManagementClient,
   azureCredentialsFromSettings,
   azureIntegrationId,
   azureSubscriptionAllowlist,
   type AzureCostUsageRow,
   type AzureSubscription,
+  type AzureTenant,
 } from './client';
 
 export type Queryable = {
@@ -19,23 +25,20 @@ export type Queryable = {
 
 export type AzureUsageClient = {
   listSubscriptions: AzureCostManagementClient['listSubscriptions'];
+  listTenants?: AzureCostManagementClient['listTenants'];
   queryCostUsage: AzureCostManagementClient['queryCostUsage'];
   listResources?: AzureCostManagementClient['listResources'];
   getVmInstanceView?: AzureCostManagementClient['getVmInstanceView'];
   queryDailyMetrics?: AzureCostManagementClient['queryDailyMetrics'];
   getAvdActivity?: AzureCostManagementClient['getAvdActivity'];
+  listAdvisorRecommendations?: AzureCostManagementClient['listAdvisorRecommendations'];
 };
 
 type AccountMappingRow = {
   external_account_id: string;
   customer_id: string;
   agreement_id: string | null;
-};
-
-type ProductMappingRow = {
-  vendor_product_key: string;
-  connectwise_product_code: string;
-  connectwise_product_name: string;
+  agreement_addition_id: string | null;
 };
 
 export async function testAzureConnection(input: {
@@ -47,13 +50,18 @@ export async function testAzureConnection(input: {
   const settings = await provider.getIntegrationSettings(azureIntegrationId);
   assertAzureReady(settings);
   const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
-  const subscriptions = filterSubscriptions(await client.listSubscriptions(5), settings);
+  const tenantDiscovery = await discoverAzureTenants(client);
+  const subscriptions = filterSubscriptions(
+    enrichSubscriptionsWithTenants(await client.listSubscriptions(5), tenantDiscovery.tenantsById),
+    settings,
+  );
 
   return {
     integrationId: azureIntegrationId,
     testedAt: input.now ?? new Date().toISOString(),
     subscriptionCount: subscriptions.length,
     sampleSubscriptions: subscriptions.slice(0, 10).map(subscriptionSummary),
+    tenantLookupWarning: tenantDiscovery.warning,
     runtimeSettings: {
       definition: settings.definition,
       nonSecrets: settings.nonSecrets,
@@ -76,14 +84,15 @@ export async function syncAzureCostUsage(input: {
   const now = input.now ? new Date(input.now) : new Date();
   const window = azureQueryWindow(settings, now);
   const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
-  const subscriptions = filterSubscriptions(await client.listSubscriptions(100), settings);
+  const tenantDiscovery = await discoverAzureTenants(client);
+  const subscriptions = filterSubscriptions(
+    enrichSubscriptionsWithTenants(await client.listSubscriptions(100), tenantDiscovery.tenantsById),
+    settings,
+  );
   const syncRunId = await startSyncRun(input.pool, window, subscriptions.length);
 
   try {
-    const [accountMappings, productMappings] = await Promise.all([
-      loadAccountMappings(input.pool),
-      loadProductMappings(input.pool),
-    ]);
+    const accountMappings = await loadAccountMappings(input.pool);
     let recordsRead = 0;
     let recordsWritten = 0;
     let mappedSnapshots = 0;
@@ -91,15 +100,24 @@ export async function syncAzureCostUsage(input: {
     let totalCost = 0;
     let resourceSnapshots = 0;
     let metricSnapshots = 0;
+    let advisorRecommendations = 0;
+    const advisorFailures: Array<{ subscriptionId: string; error: string }> = [];
     const failures: Array<{ subscriptionId: string; error: string }> = [];
+    const progressTotal = subscriptions.length + 1;
 
-    await input.onProgress?.({ completed: 0, total: subscriptions.length, unitLabel: 'subscriptions' });
+    await input.onProgress?.({
+      completed: 0,
+      total: progressTotal,
+      currentItem: 'Discovering delegated subscriptions',
+      unitLabel: 'monitoring steps',
+    });
     for (const [index, subscription] of subscriptions.entries()) {
       await input.onProgress?.({
         completed: index,
-        total: subscriptions.length,
-        currentItem: subscription.displayName ?? subscription.subscriptionId,
-        unitLabel: 'subscriptions',
+        total: progressTotal,
+        failed: failures.length,
+        currentItem: `Collecting ${subscription.displayName ?? subscription.subscriptionId}`,
+        unitLabel: 'monitoring steps',
       });
 
       try {
@@ -114,8 +132,7 @@ export async function syncAzureCostUsage(input: {
           if (row.cost === 0 && row.usageQuantity === 0) continue;
           const mapping = accountMappings.get(subscription.subscriptionId.toLowerCase());
           const productKey = azureProductKey(row);
-          const product = productMappings.get(productKey.toLowerCase());
-          if (mapping?.customerId) mappedSnapshots += 1;
+          if (mapping?.customerId && mapping.agreementId && mapping.agreementAdditionId) mappedSnapshots += 1;
           else unmappedSnapshots += 1;
           totalCost += row.cost;
 
@@ -125,10 +142,28 @@ export async function syncAzureCostUsage(input: {
             row,
             customerId: mapping?.customerId,
             agreementId: mapping?.agreementId,
+            agreementAdditionId: mapping?.agreementAdditionId,
             vendorProductKey: productKey,
-            productCode: product?.productCode ?? productKey,
-            productName: product?.productName ?? row.serviceName ?? 'Azure consumption',
+            productCode: productKey,
+            productName: row.serviceName ?? row.meterCategory ?? 'Azure consumption',
           });
+          if (row.usageDate) {
+            await upsertAzureDailyCost(input.pool, {
+              syncRunId,
+              subscriptionId: subscription.subscriptionId,
+              usageDate: row.usageDate,
+              serviceName: row.serviceName,
+              resourceId: row.resourceId,
+              resourceGroup: row.resourceGroup,
+              resourceType: row.resourceType,
+              meterCategory: row.meterCategory,
+              chargeType: row.chargeType,
+              currency: row.currency,
+              actualCost: row.cost,
+              usageQuantity: row.usageQuantity,
+              raw: row.raw,
+            });
+          }
           recordsWritten += 1;
         }
         if (client.listResources) {
@@ -136,6 +171,18 @@ export async function syncAzureCostUsage(input: {
           resourceSnapshots += inventory.resourceSnapshots;
           metricSnapshots += inventory.metricSnapshots;
           recordsWritten += inventory.resourceSnapshots + inventory.metricSnapshots;
+        }
+        if (client.listAdvisorRecommendations) {
+          try {
+            const recommendations = await client.listAdvisorRecommendations(subscription.subscriptionId, 100);
+            await storeAzureAdvisorRecommendations(input.pool, syncRunId, subscription.subscriptionId, recommendations);
+            advisorRecommendations += recommendations.length;
+          } catch (error) {
+            advisorFailures.push({
+              subscriptionId: subscription.subscriptionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
       } catch (error) {
         failures.push({
@@ -147,8 +194,10 @@ export async function syncAzureCostUsage(input: {
 
     await input.onProgress?.({
       completed: subscriptions.length,
-      total: subscriptions.length,
-      unitLabel: 'subscriptions',
+      total: progressTotal,
+      failed: failures.length,
+      currentItem: 'Evaluating cost changes, idle VMs, and Advisor results',
+      unitLabel: 'monitoring steps',
     });
 
     if (subscriptions.length > 0 && failures.length === subscriptions.length) {
@@ -166,6 +215,28 @@ export async function syncAzureCostUsage(input: {
       totalCost: roundMoney(totalCost),
       resourceSnapshots,
       metricSnapshots,
+      advisorRecommendations,
+      advisorFailures,
+      tenantLookupWarning: tenantDiscovery.warning,
+    });
+
+    let monitoring:
+      | Awaited<ReturnType<typeof runAzureCostMonitor>>
+      | undefined;
+    let monitoringWarning: string | undefined;
+    try {
+      monitoring = await runAzureCostMonitor({ database: input.pool, syncRunId, now });
+    } catch (error) {
+      monitoringWarning = error instanceof Error ? error.message : String(error);
+    }
+    await input.onProgress?.({
+      completed: progressTotal,
+      total: progressTotal,
+      failed: failures.length,
+      currentItem: monitoringWarning
+        ? 'Azure Cost Monitor completed with an evaluation warning'
+        : 'Azure Cost Monitor complete',
+      unitLabel: 'monitoring steps',
     });
 
     return {
@@ -180,6 +251,11 @@ export async function syncAzureCostUsage(input: {
       totalCost: roundMoney(totalCost),
       resourceSnapshots,
       metricSnapshots,
+      advisorRecommendations,
+      advisorFailures,
+      tenantLookupWarning: tenantDiscovery.warning,
+      monitoring,
+      monitoringWarning,
       queryWindow: window,
     };
   } catch (error) {
@@ -308,7 +384,7 @@ function powerStateFromInstanceView(instanceView: Record<string, unknown>) {
 export function assertAzureReady(settings: IntegrationRuntimeSettings) {
   if (settings.validation.missingSecrets.length === 0 && settings.validation.missingNonSecrets.length === 0) return;
   throw new Error(
-    `Microsoft Azure settings are not connected. Missing secrets: ${settings.validation.missingSecrets
+    `Azure - Lighthouse settings are not connected. Missing secrets: ${settings.validation.missingSecrets
       .map((secret) => secret.keyVaultSecretName)
       .join(', ') || 'none'}. Missing non-secrets: ${settings.validation.missingNonSecrets
       .map((setting) => setting.envVar)
@@ -335,8 +411,39 @@ function subscriptionSummary(subscription: AzureSubscription) {
     subscriptionId: subscription.subscriptionId,
     displayName: subscription.displayName,
     tenantId: subscription.tenantId,
+    tenantName: subscription.tenantName,
+    tenantDefaultDomain: subscription.tenantDefaultDomain,
     state: subscription.state,
   };
+}
+
+async function discoverAzureTenants(client: AzureUsageClient) {
+  const tenantsById = new Map<string, AzureTenant>();
+  if (!client.listTenants) return { tenantsById, warning: undefined as string | undefined };
+  try {
+    const tenants = await client.listTenants(100);
+    for (const tenant of tenants) tenantsById.set(tenant.tenantId.toLowerCase(), tenant);
+    return { tenantsById, warning: undefined as string | undefined };
+  } catch (error) {
+    return {
+      tenantsById,
+      warning: `Tenant names could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function enrichSubscriptionsWithTenants(
+  subscriptions: AzureSubscription[],
+  tenantsById: Map<string, AzureTenant>,
+) {
+  return subscriptions.map((subscription) => {
+    const tenant = subscription.tenantId ? tenantsById.get(subscription.tenantId.toLowerCase()) : undefined;
+    return {
+      ...subscription,
+      tenantName: tenant?.displayName ?? subscription.tenantId,
+      tenantDefaultDomain: tenant?.defaultDomain,
+    };
+  });
 }
 
 function azureQueryWindow(settings: IntegrationRuntimeSettings, now: Date) {
@@ -349,7 +456,7 @@ function azureQueryWindow(settings: IntegrationRuntimeSettings, now: Date) {
 
 async function loadAccountMappings(database: Queryable) {
   const result = await database.query<AccountMappingRow>(
-    `select external_account_id, customer_id, agreement_id
+    `select external_account_id, customer_id, agreement_id, agreement_addition_id
      from vendor_account_mappings
      where vendor_id = $1
        and active = true
@@ -359,27 +466,10 @@ async function loadAccountMappings(database: Queryable) {
   return new Map(
     result.rows.map((row) => [
       row.external_account_id.toLowerCase(),
-      { customerId: row.customer_id, agreementId: row.agreement_id ?? undefined },
-    ]),
-  );
-}
-
-async function loadProductMappings(database: Queryable) {
-  const result = await database.query<ProductMappingRow>(
-    `select vendor_product_key, connectwise_product_code, connectwise_product_name
-     from vendor_product_mappings
-     where vendor_id = $1
-       and active = true
-       and mapping_status = 'approved'
-     order by target_index`,
-    [azureIntegrationId],
-  );
-  return new Map(
-    result.rows.map((row) => [
-      row.vendor_product_key.toLowerCase(),
       {
-        productCode: row.connectwise_product_code,
-        productName: row.connectwise_product_name,
+        customerId: row.customer_id,
+        agreementId: row.agreement_id ?? undefined,
+        agreementAdditionId: row.agreement_addition_id ?? undefined,
       },
     ]),
   );
@@ -397,7 +487,7 @@ async function startSyncRun(
     [azureIntegrationId, JSON.stringify({ entity: 'azure-cost-usage', queryWindow: window, subscriptionCount })],
   );
   const id = result.rows[0]?.id;
-  if (!id) throw new Error('Unable to create Microsoft Azure cost usage sync run.');
+  if (!id) throw new Error('Unable to create Azure - Lighthouse cost usage sync run.');
   return id;
 }
 
@@ -409,6 +499,7 @@ async function insertSnapshot(
     row: AzureCostUsageRow;
     customerId?: string;
     agreementId?: string;
+    agreementAdditionId?: string;
     vendorProductKey: string;
     productCode: string;
     productName: string;
@@ -419,15 +510,16 @@ async function insertSnapshot(
     : new Date().toISOString();
   await database.query(
     `insert into vendor_usage_snapshots (
-       sync_run_id, vendor_id, customer_id, agreement_id, external_account_id,
+       sync_run_id, vendor_id, customer_id, agreement_id, agreement_addition_id, external_account_id,
        vendor_product_key, product_code, product_name, quantity, observed_at, dimensions, raw_payload
      )
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)`,
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)`,
     [
       input.syncRunId,
       azureIntegrationId,
       input.customerId ?? null,
       input.agreementId ?? null,
+      input.agreementAdditionId ?? null,
       input.subscription.subscriptionId,
       input.vendorProductKey,
       input.productCode,
@@ -441,11 +533,15 @@ async function insertSnapshot(
         subscriptionId: input.subscription.subscriptionId,
         subscriptionName: input.subscription.displayName,
         tenantId: input.subscription.tenantId,
+        tenantName: input.subscription.tenantName,
+        tenantDefaultDomain: input.subscription.tenantDefaultDomain,
         usageDate: input.row.usageDate,
         serviceName: input.row.serviceName,
         resourceId: input.row.resourceId,
         resourceGroup: input.row.resourceGroup,
         meterCategory: input.row.meterCategory,
+        resourceType: input.row.resourceType,
+        chargeType: input.row.chargeType,
         cost: input.row.cost,
         currency: input.row.currency,
       }),

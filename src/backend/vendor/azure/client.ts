@@ -14,8 +14,19 @@ export type AzureSubscription = {
   subscriptionId: string;
   displayName?: string;
   tenantId?: string;
+  tenantName?: string;
+  tenantDefaultDomain?: string;
   state?: string;
   raw: unknown;
+};
+
+export type AzureTenant = {
+  tenantId: string;
+  displayName?: string;
+  defaultDomain?: string;
+  domains: string[];
+  tenantCategory?: string;
+  raw: Record<string, unknown>;
 };
 
 export type AzureCostUsageRow = {
@@ -24,11 +35,28 @@ export type AzureCostUsageRow = {
   serviceName?: string;
   resourceId?: string;
   resourceGroup?: string;
+  resourceType?: string;
   meterCategory?: string;
+  chargeType?: string;
   cost: number;
   usageQuantity: number;
   currency?: string;
   raw: unknown;
+};
+
+export type AzureAdvisorRecommendation = {
+  recommendationId: string;
+  category?: string;
+  impact?: string;
+  impactedResourceId?: string;
+  impactedResourceType?: string;
+  resourceGroup?: string;
+  shortDescription?: string;
+  problem?: string;
+  solution?: string;
+  annualSavings?: number;
+  currency?: string;
+  raw: Record<string, unknown>;
 };
 
 export type AzureResource = {
@@ -74,7 +102,8 @@ type CostQueryResponse = {
 };
 
 const authorityHost = 'https://login.microsoftonline.com';
-const maxRetryCount = 3;
+const maxRetryCount = 5;
+const costManagementMinimumRequestIntervalMs = 1_000;
 
 export class AzureApiError extends Error {
   constructor(
@@ -90,6 +119,7 @@ export class AzureApiError extends Error {
 export class AzureCostManagementClient {
   private readonly baseUrl: string;
   private token?: { accessToken: string; tokenType: string; expiresOn?: number };
+  private nextCostManagementRequestAt = 0;
 
   constructor(private readonly credentials: AzureCredentials) {
     this.baseUrl = normalizeEndpoint(credentials.endpoint);
@@ -152,46 +182,123 @@ export class AzureCostManagementClient {
     return subscriptions;
   }
 
+  async listTenants(maxPages = 100): Promise<AzureTenant[]> {
+    const tenants: AzureTenant[] = [];
+    let nextUrl: string | undefined = '/tenants?api-version=2022-12-01';
+
+    for (let page = 0; nextUrl && page < Math.max(1, maxPages); page += 1) {
+      const response: AzureCollection<Record<string, unknown>> = await this.request(nextUrl);
+      tenants.push(
+        ...(response.value ?? [])
+          .map(parseTenant)
+          .filter((tenant): tenant is AzureTenant => Boolean(tenant)),
+      );
+      nextUrl = response.nextLink;
+    }
+
+    return tenants;
+  }
+
   async queryCostUsage(input: {
     subscriptionId: string;
     from: string;
     to: string;
   }): Promise<AzureCostUsageRow[]> {
-    const body = {
-      type: 'Usage',
-      timeframe: 'Custom',
-      timePeriod: {
-        from: input.from,
-        to: input.to,
-      },
-      dataset: {
-        granularity: 'Daily',
-        aggregation: {
-          totalCost: { name: 'PreTaxCost', function: 'Sum' },
-          totalUsage: { name: 'UsageQuantity', function: 'Sum' },
-        },
-        grouping: [
-          { type: 'Dimension', name: 'ServiceName' },
-          { type: 'Dimension', name: 'ResourceId' },
-        ],
-      },
-    };
-    const rows: AzureCostUsageRow[] = [];
-    let nextUrl: string | undefined =
-      `/subscriptions/${encodeURIComponent(input.subscriptionId)}` +
-      '/providers/Microsoft.CostManagement/query?api-version=2025-03-01';
+    // Azure exposes different Cost Management column names for modern MCA/CSP
+    // subscriptions and legacy EA-style subscriptions. Try the current billing
+    // schema first, then retry the legacy schema only for a column-validation
+    // failure. This keeps Lighthouse discovery portable across customer offers.
+    const columnSets = [
+      [
+        'CostInBillingCurrency',
+        'Quantity',
+        'Product',
+        'InstanceName',
+        'ConsumedService',
+        'ResourceGroup',
+        'MeterCategory',
+        'ChargeType',
+        'Date',
+        'BillingCurrencyCode',
+      ],
+      [
+        'PreTaxCost',
+        'UsageQuantity',
+        'ServiceName',
+        'ResourceId',
+        'ResourceType',
+        'MeterCategory',
+        'ChargeType',
+        'UsageDate',
+        'Currency',
+      ],
+    ];
+    let columnError: unknown;
 
-    while (nextUrl) {
-      const response: CostQueryResponse = await this.request(nextUrl, {
-        method: 'POST',
-        body: JSON.stringify(body),
-        headers: { 'Content-Type': 'application/json' },
-      });
-      rows.push(...parseCostRows(input.subscriptionId, response));
-      nextUrl = response.properties?.nextLink;
+    for (const columns of columnSets) {
+      const body = {
+        type: 'ActualCost',
+        timeframe: 'Custom',
+        timePeriod: {
+          from: input.from,
+          to: input.to,
+        },
+        dataset: {
+          granularity: 'Daily',
+          configuration: { columns },
+        },
+      };
+      const rows: AzureCostUsageRow[] = [];
+      let nextUrl: string | undefined =
+        `/subscriptions/${encodeURIComponent(input.subscriptionId)}` +
+        '/providers/Microsoft.CostManagement/query?api-version=2025-03-01';
+
+      try {
+        while (nextUrl) {
+          await this.waitForCostManagementRequestSlot();
+          const response: CostQueryResponse = await this.request(nextUrl, {
+            method: 'POST',
+            body: JSON.stringify(body),
+            headers: { 'Content-Type': 'application/json' },
+          });
+          rows.push(...parseCostRows(input.subscriptionId, response));
+          nextUrl = response.properties?.nextLink;
+        }
+        return rows;
+      } catch (error) {
+        if (!isInvalidCostColumnError(error)) throw error;
+        columnError = error;
+      }
     }
 
-    return rows;
+    throw columnError;
+  }
+
+  private async waitForCostManagementRequestSlot() {
+    const now = Date.now();
+    const waitMs = Math.max(0, this.nextCostManagementRequestAt - now);
+    this.nextCostManagementRequestAt = Math.max(now, this.nextCostManagementRequestAt) +
+      costManagementMinimumRequestIntervalMs;
+    if (waitMs > 0) {
+      await delay(waitMs);
+    }
+  }
+
+  async listAdvisorRecommendations(subscriptionId: string, maxPages = 100): Promise<AzureAdvisorRecommendation[]> {
+    const recommendations: AzureAdvisorRecommendation[] = [];
+    let nextUrl: string | undefined =
+      `/subscriptions/${encodeURIComponent(subscriptionId)}` +
+      "/providers/Microsoft.Advisor/recommendations?api-version=2025-01-01";
+    for (let page = 0; nextUrl && page < Math.max(1, maxPages); page += 1) {
+      const response: AzureCollection<Record<string, unknown>> = await this.request(nextUrl);
+      recommendations.push(
+        ...(response.value ?? [])
+          .map(parseAdvisorRecommendation)
+          .filter((item): item is AzureAdvisorRecommendation => Boolean(item)),
+      );
+      nextUrl = response.nextLink;
+    }
+    return recommendations;
   }
 
   async listResources(subscriptionId: string, maxPages = 100): Promise<AzureResource[]> {
@@ -378,26 +485,93 @@ function parseResource(record: Record<string, unknown>): AzureResource | undefin
   };
 }
 
+function parseTenant(record: Record<string, unknown>): AzureTenant | undefined {
+  const idParts = stringValue(record.id)?.split('/').filter(Boolean) ?? [];
+  const tenantId = stringValue(record.tenantId) ?? idParts[idParts.length - 1];
+  if (!tenantId) return undefined;
+  return {
+    tenantId,
+    displayName: stringValue(record.displayName),
+    defaultDomain: stringValue(record.defaultDomain),
+    domains: Array.isArray(record.domains)
+      ? record.domains.map(stringValue).filter((domain): domain is string => Boolean(domain))
+      : [],
+    tenantCategory: stringValue(record.tenantCategory),
+    raw: record,
+  };
+}
+
 function parseCostRows(subscriptionId: string, response: CostQueryResponse): AzureCostUsageRow[] {
   const columns = response.properties?.columns ?? [];
   const names = columns.map((column) => String(column.name ?? '').toLowerCase());
 
   return (response.properties?.rows ?? []).map((values) => {
     const value = (name: string) => values[names.indexOf(name.toLowerCase())];
-    const resourceId = stringValue(value('ResourceId'));
+    const resourceId = stringValue(value('ResourceId')) ?? stringValue(value('InstanceName'));
     return {
       subscriptionId,
-      usageDate: usageDateValue(value('UsageDate')),
-      serviceName: stringValue(value('ServiceName')),
+      usageDate: usageDateValue(value('UsageDate') ?? value('Date')),
+      serviceName:
+        stringValue(value('ServiceName')) ??
+        stringValue(value('Product')) ??
+        stringValue(value('ServiceFamily')),
       resourceId,
-      resourceGroup: resourceGroupFromId(resourceId),
+      resourceGroup: stringValue(value('ResourceGroup')) ?? resourceGroupFromId(resourceId),
+      resourceType: stringValue(value('ResourceType')) ?? stringValue(value('ConsumedService')),
       meterCategory: stringValue(value('MeterCategory')),
-      cost: numberValue(value('PreTaxCost')) ?? numberValue(value('Cost')) ?? numberValue(value('totalCost')) ?? 0,
-      usageQuantity: numberValue(value('UsageQuantity')) ?? numberValue(value('totalUsage')) ?? 0,
-      currency: stringValue(value('Currency')),
+      chargeType: stringValue(value('ChargeType')),
+      cost:
+        numberValue(value('PreTaxCost')) ??
+        numberValue(value('CostInBillingCurrency')) ??
+        numberValue(value('Cost')) ??
+        numberValue(value('totalCost')) ??
+        0,
+      usageQuantity:
+        numberValue(value('UsageQuantity')) ??
+        numberValue(value('Quantity')) ??
+        numberValue(value('totalUsage')) ??
+        0,
+      currency: stringValue(value('Currency')) ?? stringValue(value('BillingCurrencyCode')),
       raw: Object.fromEntries(columns.map((column, index) => [column.name ?? `column${index}`, values[index]])),
     };
   });
+}
+
+function isInvalidCostColumnError(error: unknown) {
+  if (!(error instanceof AzureApiError)) return false;
+  return `${error.message}\n${error.responseText ?? ''}`.toLowerCase().includes('invalid dataset configuration columns');
+}
+
+function parseAdvisorRecommendation(record: Record<string, unknown>): AzureAdvisorRecommendation | undefined {
+  const properties = recordValue(record.properties);
+  const shortDescription = recordValue(properties.shortDescription);
+  const extended = recordValue(properties.extendedProperties);
+  const impactedResourceId = stringValue(
+    properties.resourceMetadataResourceId ??
+    extended.resourceId ??
+    (String(properties.impactedField ?? '').toLowerCase() === 'microsoft.compute/virtualmachines'
+      ? properties.impactedValue
+      : undefined),
+  );
+  const recommendationId = stringValue(record.id) ?? stringValue(record.name);
+  if (!recommendationId) return undefined;
+  return {
+    recommendationId,
+    category: stringValue(properties.category),
+    impact: stringValue(properties.impact),
+    impactedResourceId,
+    impactedResourceType: stringValue(properties.impactedField),
+    resourceGroup: stringValue(properties.resourceGroup) ?? resourceGroupFromId(impactedResourceId),
+    shortDescription: stringValue(shortDescription.solution) ?? stringValue(shortDescription.problem),
+    problem: stringValue(shortDescription.problem),
+    solution: stringValue(shortDescription.solution),
+    annualSavings:
+      numberValue(extended.annualSavingsAmount) ??
+      numberValue(extended.annualSavings) ??
+      numberValue(extended.savingsAmount),
+    currency: stringValue(extended.currency) ?? stringValue(extended.savingsCurrency),
+    raw: record,
+  };
 }
 
 function usageDateValue(value: unknown) {
@@ -430,8 +604,48 @@ function shouldRetry(status: number) {
 }
 
 function retryDelayMs(response: Response, retryCount: number) {
-  const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
-  return Number.isFinite(retryAfter) ? retryAfter * 1000 : 500 * 2 ** retryCount;
+  const serviceRetrySeconds = [
+    'x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after',
+    'x-ms-ratelimit-microsoft.costmanagement-entity-retry-after',
+    'x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after',
+    'x-ms-ratelimit-microsoft.costmanagement-client-retry-after',
+  ]
+    .map((header) => numericHeader(response, header))
+    .filter((value): value is number => value !== undefined)
+    .map((seconds) => seconds * 1_000);
+  const retryAfterMs = numericHeader(response, 'retry-after-ms');
+  const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
+  const serverDelays = [
+    ...serviceRetrySeconds,
+    retryAfterMs,
+    retryAfter,
+  ].filter((value): value is number => value !== undefined);
+
+  if (serverDelays.length > 0) {
+    return Math.max(...serverDelays);
+  }
+
+  // Cost Management's shortest documented quota window is ten seconds. A
+  // longer fallback keeps headerless 429 responses from exhausting every
+  // retry inside the same throttling window.
+  return response.status === 429
+    ? Math.min(60_000, 2_000 * 2 ** retryCount)
+    : Math.min(30_000, 500 * 2 ** retryCount);
+}
+
+function numericHeader(response: Response, header: string) {
+  const raw = response.headers.get(header);
+  if (!raw?.trim()) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function retryAfterDelayMs(value: string | null) {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const retryAt = Date.parse(value);
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
 }
 
 function delay(ms: number) {
@@ -474,6 +688,6 @@ function tokenExpiresSoon(token: { expiresOn?: number }) {
 }
 
 function requiredValue(value: string | undefined, name: string) {
-  if (!value?.trim()) throw new Error(`Missing Microsoft Azure setting: ${name}.`);
+  if (!value?.trim()) throw new Error(`Missing Azure - Lighthouse setting: ${name}.`);
   return value.trim();
 }

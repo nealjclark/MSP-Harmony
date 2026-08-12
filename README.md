@@ -281,8 +281,8 @@ Useful commands:
 
 - `git checkout -b feature/setup`
 - `npm install`
-- `npm run dev` for frontend
-- `func start` for backend locally (if using Azure Functions Core Tools)
+- `npm run dev` for the frontend at `http://localhost:5274`
+- `npm run functions:start` for the backend at `http://localhost:7072` (requires Azure Functions Core Tools)
 - `az staticwebapp create` or GitHub Actions for deploy
 
 ### Local development auth

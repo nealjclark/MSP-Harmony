@@ -280,6 +280,122 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS azure_lighthouse_templates (
+  template_key text PRIMARY KEY CHECK (template_key = 'current'),
+  version integer NOT NULL DEFAULT 1 CHECK (version > 0),
+  file_name text NOT NULL,
+  template_json jsonb NOT NULL,
+  sha256 text NOT NULL,
+  offer_name text,
+  offer_description text,
+  managed_by_tenant_id text,
+  authorizations jsonb NOT NULL DEFAULT '[]'::jsonb,
+  uploaded_by text NOT NULL,
+  uploaded_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO azure_lighthouse_templates (
+  template_key,
+  file_name,
+  template_json,
+  sha256,
+  offer_name,
+  offer_description,
+  managed_by_tenant_id,
+  authorizations,
+  uploaded_by
+)
+VALUES (
+  'current',
+  'template (1).json',
+  $lighthouse_template${
+    "$schema": "https://schema.management.azure.com/schemas/2019-08-01/subscriptionDeploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "mspOfferName": {
+        "type": "string",
+        "metadata": { "description": "Specify a unique name for your offer" },
+        "defaultValue": "BMB Azure Management"
+      },
+      "mspOfferDescription": {
+        "type": "string",
+        "metadata": { "description": "Name of the Managed Service Provider offering" },
+        "defaultValue": ""
+      }
+    },
+    "variables": {
+      "mspRegistrationName": "[guid(parameters('mspOfferName'))]",
+      "mspAssignmentName": "[guid(parameters('mspOfferName'))]",
+      "managedByTenantId": "30a502d2-8570-4207-9b98-ec48dd176588",
+      "authorizations": [
+        {
+          "principalId": "a02badf9-02c7-4254-93cb-42ae82215300",
+          "roleDefinitionId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+          "principalIdDisplayName": "BMB Lighthosue"
+        },
+        {
+          "principalId": "0800ddab-4459-495a-81e6-aa6b2ac930a3",
+          "roleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+          "principalIdDisplayName": "BMB Azure Reporting"
+        }
+      ]
+    },
+    "resources": [
+      {
+        "type": "Microsoft.ManagedServices/registrationDefinitions",
+        "apiVersion": "2022-10-01",
+        "name": "[variables('mspRegistrationName')]",
+        "properties": {
+          "registrationDefinitionName": "[parameters('mspOfferName')]",
+          "description": "[parameters('mspOfferDescription')]",
+          "managedByTenantId": "[variables('managedByTenantId')]",
+          "authorizations": "[variables('authorizations')]"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedServices/registrationAssignments",
+        "apiVersion": "2022-10-01",
+        "name": "[variables('mspAssignmentName')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
+        ],
+        "properties": {
+          "registrationDefinitionId": "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
+        }
+      }
+    ],
+    "outputs": {
+      "mspOfferName": {
+        "type": "string",
+        "value": "[concat('Managed by', ' ', parameters('mspOfferName'))]"
+      },
+      "authorizations": {
+        "type": "array",
+        "value": "[variables('authorizations')]"
+      }
+    }
+  }$lighthouse_template$::jsonb,
+  '0d47be82d5b356c6f079565f9c198e7328ac93352f57f1a3aa2a1034a2ea3f4b',
+  'BMB Azure Management',
+  '',
+  '30a502d2-8570-4207-9b98-ec48dd176588',
+  $lighthouse_authorizations$[
+    {
+      "principalId": "a02badf9-02c7-4254-93cb-42ae82215300",
+      "roleDefinitionId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+      "principalIdDisplayName": "BMB Lighthosue"
+    },
+    {
+      "principalId": "0800ddab-4459-495a-81e6-aa6b2ac930a3",
+      "roleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+      "principalIdDisplayName": "BMB Azure Reporting"
+    }
+  ]$lighthouse_authorizations$::jsonb,
+  'Initial approved template'
+)
+ON CONFLICT (template_key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS app_users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   aad_user_id text,
@@ -327,6 +443,7 @@ CREATE TABLE IF NOT EXISTS vendor_usage_snapshots (
   vendor_id text NOT NULL,
   customer_id uuid REFERENCES customers(id),
   agreement_id uuid REFERENCES agreements(id),
+  agreement_addition_id uuid REFERENCES agreement_additions(id),
   external_account_id text,
   vendor_product_key text,
   product_code text NOT NULL,
@@ -859,6 +976,8 @@ ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS reviewed_at timesta
 ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
 ALTER TABLE vendor_account_mappings ADD COLUMN IF NOT EXISTS match_evidence jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE vendor_account_mappings ALTER COLUMN agreement_id DROP NOT NULL;
+ALTER TABLE vendor_account_mappings
+  ADD COLUMN IF NOT EXISTS agreement_addition_id uuid REFERENCES agreement_additions(id);
 
 ALTER TABLE vendor_product_mappings DROP CONSTRAINT IF EXISTS vendor_product_mappings_vendor_id_vendor_product_key_key;
 ALTER TABLE vendor_product_mappings ADD COLUMN IF NOT EXISTS target_index integer NOT NULL DEFAULT 0;
@@ -934,8 +1053,16 @@ CREATE INDEX IF NOT EXISTS idx_vendor_product_link_rules_vendor
   WHERE active;
 
 ALTER TABLE vendor_usage_snapshots ADD COLUMN IF NOT EXISTS vendor_product_key text;
+ALTER TABLE vendor_usage_snapshots
+  ADD COLUMN IF NOT EXISTS agreement_addition_id uuid REFERENCES agreement_additions(id);
 CREATE INDEX IF NOT EXISTS idx_vendor_snapshots_mapping
   ON vendor_usage_snapshots(vendor_id, external_account_id, vendor_product_key);
+CREATE INDEX IF NOT EXISTS idx_vendor_account_mappings_addition
+  ON vendor_account_mappings(agreement_addition_id)
+  WHERE agreement_addition_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_vendor_usage_snapshots_addition
+  ON vendor_usage_snapshots(agreement_addition_id)
+  WHERE agreement_addition_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_microsoft365_subscription_snapshots_sync
   ON microsoft365_subscription_snapshots(sync_run_id);
 CREATE INDEX IF NOT EXISTS idx_microsoft365_subscription_snapshots_tenant
@@ -1323,6 +1450,286 @@ CREATE TABLE IF NOT EXISTS azure_resource_metric_daily (
 
 CREATE INDEX IF NOT EXISTS idx_azure_resource_metrics_lookup
   ON azure_resource_metric_daily(resource_id, metric_date DESC, metric_name);
+
+-- Canonical Azure cost history. Vendor snapshots remain immutable sync evidence,
+-- while this table is rerated in-place when Cost Management revises recent days.
+CREATE TABLE IF NOT EXISTS azure_cost_daily (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscription_id text NOT NULL,
+  usage_date date NOT NULL,
+  service_name text NOT NULL DEFAULT '',
+  resource_id text NOT NULL DEFAULT '',
+  resource_group text NOT NULL DEFAULT '',
+  resource_type text NOT NULL DEFAULT '',
+  meter_category text NOT NULL DEFAULT '',
+  charge_type text NOT NULL DEFAULT '',
+  currency text NOT NULL DEFAULT 'USD',
+  actual_cost numeric(18, 6) NOT NULL DEFAULT 0,
+  usage_quantity numeric(18, 6) NOT NULL DEFAULT 0,
+  last_sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (
+    subscription_id, usage_date, service_name, resource_id,
+    resource_group, resource_type, meter_category, charge_type, currency
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_cost_daily_subscription_date
+  ON azure_cost_daily(subscription_id, usage_date DESC);
+CREATE INDEX IF NOT EXISTS idx_azure_cost_daily_service_date
+  ON azure_cost_daily(service_name, usage_date DESC);
+CREATE INDEX IF NOT EXISTS idx_azure_cost_daily_resource_date
+  ON azure_cost_daily(resource_id, usage_date DESC)
+  WHERE resource_id <> '';
+
+CREATE TABLE IF NOT EXISTS azure_cost_monitor_settings (
+  settings_key text PRIMARY KEY DEFAULT 'default' CHECK (settings_key = 'default'),
+  comparison_days smallint NOT NULL DEFAULT 7 CHECK (comparison_days BETWEEN 2 AND 30),
+  settling_lag_days smallint NOT NULL DEFAULT 2 CHECK (settling_lag_days BETWEEN 1 AND 7),
+  idle_average_cpu_percent numeric(8, 3) NOT NULL DEFAULT 5 CHECK (idle_average_cpu_percent >= 0),
+  idle_maximum_cpu_percent numeric(8, 3) NOT NULL DEFAULT 20 CHECK (idle_maximum_cpu_percent >= 0),
+  clean_checks_to_resolve smallint NOT NULL DEFAULT 2 CHECK (clean_checks_to_resolve BETWEEN 1 AND 10),
+  updated_by text NOT NULL DEFAULT 'migration',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO azure_cost_monitor_settings (settings_key)
+VALUES ('default')
+ON CONFLICT (settings_key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS azure_cost_monitor_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_level text NOT NULL CHECK (rule_level IN ('subscription', 'service', 'resource')),
+  subscription_id text,
+  target_key text,
+  charge_type text,
+  percent_increase numeric(10, 4) NOT NULL CHECK (percent_increase >= 0),
+  dollar_increase numeric(18, 4) NOT NULL CHECK (dollar_increase >= 0),
+  new_spend_floor numeric(18, 4) NOT NULL DEFAULT 25 CHECK (new_spend_floor >= 0),
+  enabled boolean NOT NULL DEFAULT true,
+  idle_excluded boolean NOT NULL DEFAULT false,
+  created_by text NOT NULL DEFAULT 'migration',
+  updated_by text NOT NULL DEFAULT 'migration',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_azure_cost_monitor_rule_scope
+  ON azure_cost_monitor_rules (
+    rule_level,
+    coalesce(lower(subscription_id), ''),
+    coalesce(lower(target_key), ''),
+    coalesce(lower(charge_type), '')
+  );
+
+INSERT INTO azure_cost_monitor_rules (
+  rule_level, percent_increase, dollar_increase, new_spend_floor
+)
+SELECT defaults.rule_level, defaults.percent_increase, defaults.dollar_increase, 25
+FROM (VALUES
+  ('subscription'::text, 20::numeric, 100::numeric),
+  ('service'::text, 25::numeric, 50::numeric),
+  ('resource'::text, 50::numeric, 25::numeric)
+) defaults(rule_level, percent_increase, dollar_increase)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM azure_cost_monitor_rules rules
+  WHERE rules.rule_level = defaults.rule_level
+    AND rules.subscription_id IS NULL
+    AND rules.target_key IS NULL
+    AND rules.charge_type IS NULL
+);
+
+CREATE TABLE IF NOT EXISTS azure_cost_monitor_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'complete', 'partial', 'failed')),
+  current_window_start date NOT NULL,
+  current_window_end date NOT NULL,
+  baseline_window_start date NOT NULL,
+  baseline_window_end date NOT NULL,
+  subscription_count integer NOT NULL DEFAULT 0,
+  finding_count integer NOT NULL DEFAULT 0,
+  idle_vm_count integer NOT NULL DEFAULT 0,
+  telemetry_warning_count integer NOT NULL DEFAULT 0,
+  error_message text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz,
+  UNIQUE (source_sync_run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_cost_monitor_runs_completed
+  ON azure_cost_monitor_runs(completed_at DESC NULLS LAST, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_cost_monitor_evaluations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  monitor_run_id uuid NOT NULL REFERENCES azure_cost_monitor_runs(id) ON DELETE CASCADE,
+  subscription_id text NOT NULL,
+  subscription_name text,
+  customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  customer_name text,
+  currency text NOT NULL DEFAULT 'USD',
+  baseline_cost numeric(18, 6) NOT NULL DEFAULT 0,
+  current_cost numeric(18, 6) NOT NULL DEFAULT 0,
+  cost_change numeric(18, 6) NOT NULL DEFAULT 0,
+  percent_change numeric(18, 6),
+  status text NOT NULL DEFAULT 'clear' CHECK (status IN ('clear', 'finding', 'coverage-warning')),
+  finding_count integer NOT NULL DEFAULT 0,
+  idle_vm_count integer NOT NULL DEFAULT 0,
+  telemetry_warning_count integer NOT NULL DEFAULT 0,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (monitor_run_id, subscription_id, currency)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_cost_monitor_evaluations_subscription
+  ON azure_cost_monitor_evaluations(subscription_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_cost_monitor_findings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  fingerprint text NOT NULL UNIQUE,
+  detector_type text NOT NULL CHECK (detector_type IN ('cost-increase', 'new-spend', 'idle-vm')),
+  scope_type text NOT NULL CHECK (scope_type IN ('subscription', 'service', 'resource')),
+  subscription_id text NOT NULL,
+  subscription_name text,
+  customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  customer_name text,
+  target_key text NOT NULL,
+  target_name text NOT NULL,
+  charge_type text,
+  status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'acknowledged', 'snoozed', 'resolved')),
+  priority text NOT NULL DEFAULT 'warning' CHECK (priority IN ('warning', 'critical')),
+  baseline_cost numeric(18, 6),
+  current_cost numeric(18, 6),
+  cost_change numeric(18, 6),
+  percent_change numeric(18, 6),
+  currency text,
+  evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  first_detected_at timestamptz NOT NULL DEFAULT now(),
+  last_detected_at timestamptz NOT NULL DEFAULT now(),
+  last_detected_run_id uuid REFERENCES azure_cost_monitor_runs(id) ON DELETE SET NULL,
+  consecutive_breaches integer NOT NULL DEFAULT 1,
+  clean_check_count integer NOT NULL DEFAULT 0,
+  acknowledged_by text,
+  acknowledged_at timestamptz,
+  snoozed_until timestamptz,
+  resolved_by text,
+  resolved_at timestamptz,
+  resolution_note text,
+  connectwise_ticket_id bigint,
+  ticket_created_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_cost_monitor_findings_queue
+  ON azure_cost_monitor_findings(status, priority, last_detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_azure_cost_monitor_findings_subscription
+  ON azure_cost_monitor_findings(subscription_id, last_detected_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_advisor_recommendation_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_run_id uuid NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  subscription_id text NOT NULL,
+  recommendation_id text NOT NULL,
+  category text,
+  impact text,
+  impacted_resource_id text,
+  impacted_resource_type text,
+  resource_group text,
+  short_description text,
+  problem text,
+  solution text,
+  annual_savings numeric(18, 4),
+  currency text,
+  raw_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  observed_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (sync_run_id, subscription_id, recommendation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_advisor_recommendations_latest
+  ON azure_advisor_recommendation_snapshots(subscription_id, observed_at DESC, category);
+
+-- Preserve historical Azure evidence while selecting only the newest sync for
+-- each cost dimension and usage date.
+INSERT INTO azure_cost_daily (
+  subscription_id, usage_date, service_name, resource_id, resource_group,
+  resource_type, meter_category, charge_type, currency, actual_cost,
+  usage_quantity, last_sync_run_id, raw_payload, updated_at
+)
+SELECT DISTINCT ON (
+  snapshots.external_account_id,
+  snapshots.dimensions->>'usageDate',
+  coalesce(snapshots.dimensions->>'serviceName', ''),
+  coalesce(snapshots.dimensions->>'resourceId', ''),
+  coalesce(snapshots.dimensions->>'resourceGroup', ''),
+  coalesce(snapshots.dimensions->>'resourceType', ''),
+  coalesce(snapshots.dimensions->>'meterCategory', ''),
+  coalesce(snapshots.dimensions->>'chargeType', ''),
+  coalesce(snapshots.dimensions->>'currency', 'USD')
+)
+  snapshots.external_account_id,
+  (snapshots.dimensions->>'usageDate')::date,
+  coalesce(snapshots.dimensions->>'serviceName', ''),
+  coalesce(snapshots.dimensions->>'resourceId', ''),
+  coalesce(snapshots.dimensions->>'resourceGroup', ''),
+  coalesce(snapshots.dimensions->>'resourceType', ''),
+  coalesce(snapshots.dimensions->>'meterCategory', ''),
+  coalesce(snapshots.dimensions->>'chargeType', ''),
+  coalesce(snapshots.dimensions->>'currency', 'USD'),
+  CASE
+    WHEN coalesce(snapshots.dimensions->>'cost', '') ~ '^-?[0-9]+([.][0-9]+)?$'
+    THEN (snapshots.dimensions->>'cost')::numeric
+    ELSE 0
+  END,
+  snapshots.quantity,
+  snapshots.sync_run_id,
+  snapshots.raw_payload,
+  coalesce(runs.completed_at, runs.started_at, now())
+FROM vendor_usage_snapshots snapshots
+JOIN sync_runs runs ON runs.id = snapshots.sync_run_id
+WHERE snapshots.vendor_id = 'microsoft-azure'
+  AND snapshots.dimensions->>'usageDate' ~ '^\d{4}-\d{2}-\d{2}$'
+ORDER BY
+  snapshots.external_account_id,
+  snapshots.dimensions->>'usageDate',
+  coalesce(snapshots.dimensions->>'serviceName', ''),
+  coalesce(snapshots.dimensions->>'resourceId', ''),
+  coalesce(snapshots.dimensions->>'resourceGroup', ''),
+  coalesce(snapshots.dimensions->>'resourceType', ''),
+  coalesce(snapshots.dimensions->>'meterCategory', ''),
+  coalesce(snapshots.dimensions->>'chargeType', ''),
+  coalesce(snapshots.dimensions->>'currency', 'USD'),
+  coalesce(runs.completed_at, runs.started_at) DESC NULLS LAST
+ON CONFLICT (
+  subscription_id, usage_date, service_name, resource_id,
+  resource_group, resource_type, meter_category, charge_type, currency
+)
+DO UPDATE SET
+  actual_cost = excluded.actual_cost,
+  usage_quantity = excluded.usage_quantity,
+  last_sync_run_id = excluded.last_sync_run_id,
+  raw_payload = excluded.raw_payload,
+  updated_at = excluded.updated_at;
+
+INSERT INTO integration_sync_schedules (
+  integration_id, operation_key, frequency, scheduled_hour,
+  weekdays, day_of_month, time_zone
+)
+SELECT
+  'microsoft-azure', 'azure-cost-usage', 'weekly', 6,
+  '[1, 3, 5]'::jsonb, 1, 'America/New_York'
+WHERE EXISTS (
+  SELECT 1 FROM integration_settings WHERE integration_id = 'microsoft-azure'
+)
+AND NOT EXISTS (
+  SELECT 1 FROM integration_sync_schedules WHERE integration_id = 'microsoft-azure'
+)
+ON CONFLICT (integration_id, operation_key) DO NOTHING;
 ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_at timestamptz;
 ALTER TABLE appriver_license_cleanup_actions
