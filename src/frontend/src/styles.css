@@ -13248,6 +13248,98 @@ h2 {
   }
 }
 
+.client-exclusions-config {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.client-exclusions-heading,
+.client-exclusions-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.client-exclusions-heading .config-note,
+.client-exclusions-actions .config-note {
+  margin: 4px 0 0;
+}
+
+.client-exclusions-search {
+  width: min(100%, 420px);
+}
+
+.client-exclusions-list {
+  display: grid;
+  max-height: 310px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.client-exclusion-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.client-exclusion-row:last-child {
+  border-bottom: 0;
+}
+
+.client-exclusion-row:hover,
+.client-exclusion-row.excluded {
+  background: #f7fbf8;
+}
+
+.client-exclusion-row.excluded {
+  box-shadow: inset 3px 0 0 var(--teal);
+}
+
+.client-exclusion-row > input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--teal);
+}
+
+.client-exclusion-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.client-exclusion-copy strong,
+.client-exclusion-copy small,
+.client-exclusion-copy em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-exclusion-copy small,
+.client-exclusion-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.client-exclusion-copy em {
+  color: #a23f2d;
+  font-size: 0.74rem;
+  font-style: normal;
+}
+
+.client-exclusion-meta {
+  max-width: 170px;
+  text-align: right;
+}
+
 /* Persistent N-central software inventory reports */
 .software-inventory-page {
   display: grid;
@@ -13255,7 +13347,8 @@ h2 {
 }
 
 .software-inventory-toolbar {
-  grid-template-columns: minmax(240px, 1.25fr) minmax(220px, 1fr) auto;
+  display: grid;
+  grid-template-columns: minmax(240px, 1.25fr) minmax(220px, 1fr) auto minmax(280px, 1fr);
   align-items: end;
 }
 
@@ -13265,20 +13358,24 @@ h2 {
 }
 
 .software-inventory-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 16px;
-  align-items: start;
-}
-
-.software-inventory-results,
-.software-inventory-history {
   min-width: 0;
 }
 
-.software-inventory-header,
-.software-inventory-report-actions,
+.software-inventory-results {
+  min-width: 0;
+}
+
+.software-inventory-history-select {
+  min-width: 0;
+}
+
+.software-inventory-toolbar .report-select {
+  width: 100%;
+  min-width: 0;
+}
+
 .software-inventory-table-tools,
+.software-inventory-table-actions,
 .software-inventory-pagination,
 .software-inventory-pagination > div,
 .active-job-footer {
@@ -13286,12 +13383,6 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-}
-
-.software-inventory-header p {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 0.8rem;
 }
 
 .software-inventory-progress {
@@ -13346,33 +13437,6 @@ h2 {
   border-color: #edc6bc;
   background: #fff4f0;
   color: #983c29;
-}
-
-.software-inventory-summary {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line);
-}
-
-.software-inventory-summary article {
-  display: grid;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface-soft);
-}
-
-.software-inventory-summary span {
-  color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 750;
-}
-
-.software-inventory-summary strong {
-  font-size: 1.12rem;
 }
 
 .software-inventory-table-tools {
@@ -13447,7 +13511,11 @@ h2 {
 }
 
 .software-inventory-table.details {
-  min-width: 1280px;
+  min-width: 1120px;
+}
+
+.software-inventory-table.counts {
+  min-width: 760px;
 }
 
 .software-inventory-table th,
@@ -13482,6 +13550,29 @@ h2 {
   color: #a23f2d !important;
 }
 
+.software-inventory-device-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--teal-dark);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 850;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.software-inventory-device-link:hover {
+  color: var(--teal);
+}
+
+.software-inventory-device-link:focus-visible {
+  border-radius: 3px;
+  outline: 3px solid rgba(13, 143, 128, 0.24);
+  outline-offset: 3px;
+}
+
 .software-inventory-table-empty {
   min-height: 220px;
 }
@@ -13492,77 +13583,39 @@ h2 {
   font-size: 0.78rem;
 }
 
-.software-inventory-history {
-  position: sticky;
-  top: 0;
+.software-inventory-device-modal {
+  width: min(1100px, 100%);
+  max-height: min(88vh, 760px);
 }
 
-.software-inventory-history-list {
-  display: grid;
-  gap: 6px;
-  padding: 10px;
+.software-inventory-device-modal > .surface-header {
+  border-bottom: 1px solid var(--line);
 }
 
-.software-inventory-history-list > p {
+.software-inventory-device-modal-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.software-inventory-device-modal-body > p {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
   color: var(--muted);
-  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 750;
 }
 
-.software-inventory-history-list button {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: #fff;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
+.software-inventory-device-modal-table {
+  overflow-x: auto;
 }
 
-.software-inventory-history-list button.active {
-  border-color: var(--teal);
-  background: #f2fbf8;
+.software-inventory-device-modal-table .software-inventory-table {
+  min-width: 900px;
 }
-
-.software-inventory-history-list button > span {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.software-inventory-history-list button > span:last-child {
-  justify-items: end;
-}
-
-.software-inventory-history-list strong,
-.software-inventory-history-list small,
-.software-inventory-history-list time,
-.software-inventory-history-list em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.software-inventory-history-list small,
-.software-inventory-history-list time {
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-
-.software-inventory-history-list em {
-  font-size: 0.66rem;
-  font-style: normal;
-  font-weight: 850;
-  text-transform: uppercase;
-}
-
-.software-inventory-history-list em.approved { color: #28653d; }
-.software-inventory-history-list em.needs-review { color: #87630e; }
-.software-inventory-history-list em.blocked { color: #9d3c28; }
-.software-inventory-history-list em.ready { color: var(--teal-dark); }
 
 /* The former sync indicator is now the universal, always-visible Active jobs surface. */
 .sync-tracker-trigger.warning {
@@ -13585,6 +13638,41 @@ h2 {
   color: #795d16;
 }
 
+.active-job-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.active-job-dismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.active-job-dismiss:hover {
+  border-color: #c58e82;
+  color: #9d3c28;
+}
+
+.active-job-dismiss:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.sync-tracker-dismiss-message {
+  margin: 0 12px 10px;
+  color: #9d3c28;
+  font-size: 0.78rem;
+}
+
 .active-job-footer a {
   display: inline-flex;
   align-items: center;
@@ -13600,14 +13688,13 @@ h2 {
 }
 
 @media (max-width: 1120px) {
-  .software-inventory-layout { grid-template-columns: 1fr; }
-  .software-inventory-history { position: static; }
+  .software-inventory-toolbar { grid-template-columns: minmax(220px, 1fr) minmax(200px, 1fr) auto; }
+  .software-inventory-history-select { grid-column: 1 / -1; }
 }
 
 @media (max-width: 760px) {
-  .software-inventory-toolbar,
-  .software-inventory-summary { grid-template-columns: 1fr; }
-  .software-inventory-table-tools,
-  .software-inventory-header { align-items: stretch; flex-direction: column; }
+  .software-inventory-toolbar { grid-template-columns: 1fr; }
+  .software-inventory-table-tools { align-items: stretch; flex-direction: column; }
+  .software-inventory-table-actions { align-items: stretch; flex-wrap: wrap; }
   .software-inventory-table-tools form { width: 100%; min-width: 0; }
 }

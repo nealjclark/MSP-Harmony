@@ -44,6 +44,7 @@ export type IntegrationSyncJob = {
   completedAt?: string;
   syncRunId?: string;
   error?: string;
+  warnings?: string[];
   progress?: {
     completed: number;
     total: number;

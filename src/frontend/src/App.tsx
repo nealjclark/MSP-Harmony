@@ -472,6 +472,7 @@ type BackgroundJob = {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  warning?: string;
   progress?: {
     completed: number;
     total: number;
@@ -483,6 +484,22 @@ type BackgroundJob = {
     label: string;
     path: string;
   };
+};
+
+type IntegrationClientCandidate = {
+  externalClientId: string;
+  displayName: string;
+  excluded: boolean;
+  excludedBy?: string;
+  excludedAt?: string;
+  lastSeenAt?: string;
+  latestError?: string;
+};
+
+type IntegrationClientExclusionsResponse = {
+  integrationId: Extract<IntegrationId, 'microsoft-365' | 'opentext-appriver'>;
+  excludedCount: number;
+  clients: IntegrationClientCandidate[];
 };
 
 type ManagedAppUser = {
@@ -4618,6 +4635,50 @@ async function fetchBackgroundJobs() {
   return (body as { jobs?: BackgroundJob[] }).jobs ?? [];
 }
 
+async function dismissBackgroundJobsRequest(payload: {
+  source?: BackgroundJob['source'];
+  jobId?: string;
+  allCompleted?: boolean;
+}) {
+  const response = await fetch('/api/jobs/dismiss', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.reason ?? body.error ?? `Active job dismissal failed with HTTP ${response.status}.`));
+  }
+  return (body as { jobs?: BackgroundJob[] }).jobs ?? [];
+}
+
+async function fetchIntegrationClientExclusions(
+  integrationId: Extract<IntegrationId, 'microsoft-365' | 'opentext-appriver'>,
+) {
+  const response = await fetch(`/api/integrations/${encodeURIComponent(integrationId)}/client-exclusions`);
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Client exclusions load failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as IntegrationClientExclusionsResponse;
+}
+
+async function saveIntegrationClientExclusions(
+  integrationId: Extract<IntegrationId, 'microsoft-365' | 'opentext-appriver'>,
+  excludedClientIds: string[],
+) {
+  const response = await fetch(`/api/integrations/${encodeURIComponent(integrationId)}/client-exclusions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ excludedClientIds }),
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Client exclusions save failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as IntegrationClientExclusionsResponse;
+}
+
 async function fetchManagedUsers() {
   const response = await fetch('/api/users');
   const body = await responseJson(response);
@@ -7234,6 +7295,8 @@ function App() {
   const [syncJobs, setSyncJobs] = useState<IntegrationSyncJob[]>([]);
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([]);
   const [jobsTrackerOpen, setJobsTrackerOpen] = useState(false);
+  const [jobsTrackerMessage, setJobsTrackerMessage] = useState('');
+  const [dismissingBackgroundJobKey, setDismissingBackgroundJobKey] = useState<string | null>(null);
   const [integrationLoadState, setIntegrationLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [integrationLoadMessage, setIntegrationLoadMessage] = useState<string>('Loading live integration status...');
   const [vendorDatapoints, setVendorDatapoints] = useState<VendorDatapointRecord[]>([]);
@@ -11015,6 +11078,7 @@ function App() {
   );
   const canQueueAppRiverLicenseCleanup = currentUserRoles.some((role) => role === 'Admin' || role === 'LicenseAdmin');
   const activeBackgroundJobs = backgroundJobs.filter((job) => job.status === 'queued' || job.status === 'running');
+  const completedBackgroundJobs = backgroundJobs.filter((job) => job.status !== 'queued' && job.status !== 'running');
   const latestBackgroundJob = backgroundJobs.find((job) => job.status !== 'queued' && job.status !== 'running');
   const revealQueuedSyncJob = async () => {
     setJobsTrackerOpen(true);
@@ -11025,6 +11089,29 @@ function App() {
       setBackgroundJobs(jobs);
     } catch {
       // The persisted job will be discovered by the background tracker poll.
+    }
+  };
+  const dismissBackgroundJobLine = async (job: BackgroundJob) => {
+    const key = `${job.source}:${job.id}`;
+    setDismissingBackgroundJobKey(key);
+    setJobsTrackerMessage('');
+    try {
+      setBackgroundJobs(await dismissBackgroundJobsRequest({ source: job.source, jobId: job.id }));
+    } catch (error) {
+      setJobsTrackerMessage(error instanceof Error ? error.message : 'Unable to dismiss the job.');
+    } finally {
+      setDismissingBackgroundJobKey(null);
+    }
+  };
+  const dismissAllCompletedBackgroundJobs = async () => {
+    setDismissingBackgroundJobKey('all');
+    setJobsTrackerMessage('');
+    try {
+      setBackgroundJobs(await dismissBackgroundJobsRequest({ allCompleted: true }));
+    } catch (error) {
+      setJobsTrackerMessage(error instanceof Error ? error.message : 'Unable to dismiss completed jobs.');
+    } finally {
+      setDismissingBackgroundJobKey(null);
     }
   };
 
@@ -11119,7 +11206,7 @@ function App() {
                 title={activeBackgroundJobs.length > 0 ? `${activeBackgroundJobs.length} active background job${activeBackgroundJobs.length === 1 ? '' : 's'}` : 'View recent background jobs'}
                 type="button"
               >
-                <Activity className={activeBackgroundJobs.length > 0 ? 'sync-tracker-spin' : undefined} size={18} />
+                <RefreshCcw className={activeBackgroundJobs.length > 0 ? 'sync-tracker-spin' : undefined} size={18} />
                 <span>{activeBackgroundJobs.length > 0 ? `${activeBackgroundJobs.length} active` : 'Active jobs'}</span>
               </button>
               {jobsTrackerOpen ? (
@@ -11133,7 +11220,21 @@ function App() {
                       <article className={`sync-tracker-job ${job.status}`} key={`${job.source}:${job.id}`}>
                         <div className="sync-tracker-job-heading">
                           <div><strong>{job.title}</strong><span>{job.operation}</span></div>
-                          <span className={`sync-tracker-status ${job.status}`}>{backgroundJobStatusLabel(job.status)}</span>
+                          <div className="active-job-heading-actions">
+                            <span className={`sync-tracker-status ${job.status}`}>{backgroundJobStatusLabel(job.status)}</span>
+                            {job.status !== 'queued' && job.status !== 'running' ? (
+                              <button
+                                aria-label={`Dismiss ${job.title} ${job.operation}`}
+                                className="active-job-dismiss"
+                                disabled={dismissingBackgroundJobKey === `${job.source}:${job.id}` || dismissingBackgroundJobKey === 'all'}
+                                onClick={() => void dismissBackgroundJobLine(job)}
+                                title="Hide this completed job"
+                                type="button"
+                              >
+                                <X size={14} />
+                              </button>
+                            ) : null}
+                          </div>
                         </div>
                         {job.progress ? (
                           <div className="sync-tracker-progress">
@@ -11152,6 +11253,18 @@ function App() {
                       </article>
                     )) : <p className="sync-tracker-empty">No active or recent jobs to show.</p>}
                   </div>
+                  {jobsTrackerMessage ? <p className="sync-tracker-dismiss-message">{jobsTrackerMessage}</p> : null}
+                  {completedBackgroundJobs.length > 0 ? (
+                    <button
+                      className="button secondary compact sync-tracker-dismiss"
+                      disabled={dismissingBackgroundJobKey != null}
+                      onClick={() => void dismissAllCompletedBackgroundJobs()}
+                      type="button"
+                    >
+                      <X size={15} />
+                      {dismissingBackgroundJobKey === 'all' ? 'Dismissing…' : 'Dismiss all completed and failed'}
+                    </button>
+                  ) : null}
                 </section>
               ) : null}
             </div>
@@ -12961,6 +13074,7 @@ function backgroundJobStatusLabel(status: BackgroundJob['status']) {
 
 function backgroundJobSummary(job: BackgroundJob) {
   if (job.error) return job.error;
+  if (job.warning) return job.warning;
   if (job.progress?.currentItem) return job.progress.currentItem;
   if (job.status === 'queued') return 'Waiting for a background worker.';
   if (job.status === 'running') return 'Background processing is in progress.';
@@ -25107,6 +25221,129 @@ function AzureLighthouseTemplateConfiguration(props: { canManage: boolean }) {
   );
 }
 
+function IntegrationClientExclusions(props: {
+  integrationId: Extract<IntegrationId, 'microsoft-365' | 'opentext-appriver'>;
+}) {
+  const [clients, setClients] = useState<IntegrationClientCandidate[]>([]);
+  const [selectedClientIds, setSelectedClientIds] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [message, setMessage] = useState('Loading discovered clients…');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadState('loading');
+    setMessage('Loading discovered clients…');
+    fetchIntegrationClientExclusions(props.integrationId)
+      .then((response) => {
+        if (cancelled) return;
+        setClients(response.clients);
+        setSelectedClientIds(response.clients.filter((client) => client.excluded).map((client) => client.externalClientId));
+        setDirty(false);
+        setLoadState('ready');
+        setMessage(response.clients.length > 0
+          ? `${response.excludedCount.toLocaleString()} of ${response.clients.length.toLocaleString()} clients excluded from future scans.`
+          : 'Run a sync once to discover clients that can be excluded.');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLoadState('failed');
+        setMessage(error instanceof Error ? error.message : 'Unable to load discovered clients.');
+      });
+    return () => { cancelled = true; };
+  }, [props.integrationId]);
+
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredClients = clients.filter((client) =>
+    !normalizedQuery
+    || client.displayName.toLocaleLowerCase().includes(normalizedQuery)
+    || client.externalClientId.toLocaleLowerCase().includes(normalizedQuery)
+    || client.latestError?.toLocaleLowerCase().includes(normalizedQuery),
+  );
+  const selected = new Set(selectedClientIds.map((id) => id.toLocaleLowerCase()));
+  const toggleClient = (clientId: string, excluded: boolean) => {
+    const key = clientId.toLocaleLowerCase();
+    setSelectedClientIds((current) => excluded
+      ? current.some((id) => id.toLocaleLowerCase() === key) ? current : [...current, clientId]
+      : current.filter((id) => id.toLocaleLowerCase() !== key));
+    setDirty(true);
+  };
+  const save = async () => {
+    setSaving(true);
+    setMessage('Saving client exclusions…');
+    try {
+      const response = await saveIntegrationClientExclusions(props.integrationId, selectedClientIds);
+      setClients(response.clients);
+      setSelectedClientIds(response.clients.filter((client) => client.excluded).map((client) => client.externalClientId));
+      setDirty(false);
+      setLoadState('ready');
+      setMessage(`${response.excludedCount.toLocaleString()} client${response.excludedCount === 1 ? '' : 's'} will be skipped by future syncs.`);
+    } catch (error) {
+      setLoadState('failed');
+      setMessage(error instanceof Error ? error.message : 'Unable to save client exclusions.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="integration-settings-section client-exclusions-config">
+      <div className="client-exclusions-heading">
+        <div>
+          <h3 className="integration-settings-section-title">Client scan exclusions</h3>
+          <p className="config-note">
+            Selected clients are skipped before customer or tenant detail requests, preventing their known API failures from recurring.
+          </p>
+        </div>
+        <span className="status-pill ready">{selectedClientIds.length.toLocaleString()} excluded</span>
+      </div>
+      {clients.length > 6 ? (
+        <label className="search-field client-exclusions-search">
+          <Search size={15} />
+          <input
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search clients or errors"
+            type="search"
+            value={query}
+          />
+        </label>
+      ) : null}
+      {loadState === 'loading' ? <div className="empty-inline">Loading clients…</div> : null}
+      {loadState !== 'loading' && filteredClients.length > 0 ? (
+        <div className="client-exclusions-list">
+          {filteredClients.map((client) => (
+            <label className={`client-exclusion-row${selected.has(client.externalClientId.toLocaleLowerCase()) ? ' excluded' : ''}`} key={client.externalClientId}>
+              <input
+                checked={selected.has(client.externalClientId.toLocaleLowerCase())}
+                disabled={saving}
+                onChange={(event) => toggleClient(client.externalClientId, event.target.checked)}
+                type="checkbox"
+              />
+              <span className="client-exclusion-copy">
+                <strong>{client.displayName}</strong>
+                <small>{client.externalClientId}</small>
+                {client.latestError ? <em title={client.latestError}>{client.latestError}</em> : null}
+              </span>
+              {client.excluded && client.excludedBy ? <small className="client-exclusion-meta">Excluded by {client.excludedBy}</small> : null}
+            </label>
+          ))}
+        </div>
+      ) : null}
+      {loadState !== 'loading' && filteredClients.length === 0 ? (
+        <div className="empty-inline">{clients.length > 0 ? 'No clients match this search.' : 'No clients have been discovered yet.'}</div>
+      ) : null}
+      <div className="client-exclusions-actions">
+        <p className={loadState === 'failed' ? 'config-note error' : 'config-note'}>{message}</p>
+        <button className="button secondary compact" disabled={!dirty || saving || loadState === 'loading'} onClick={() => void save()} type="button">
+          <Save size={15} /> {saving ? 'Saving…' : 'Save exclusions'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function IntegrationModal(props: {
   canManageAzureTemplate: boolean;
   integration: Integration;
@@ -25271,6 +25508,9 @@ function IntegrationModal(props: {
                 </div>
               </div>
             ))}
+            {integration.id === 'microsoft-365' || integration.id === 'opentext-appriver' ? (
+              <IntegrationClientExclusions integrationId={integration.id} />
+            ) : null}
             {integration.id === 'microsoft-azure' ? (
               <AzureLighthouseTemplateConfiguration canManage={canManageAzureTemplate} />
             ) : null}

@@ -71,6 +71,17 @@ export type SoftwareInventoryDetailRow = {
   collectionError?: string;
 };
 
+export type SoftwareInventoryApplicationDeviceRow = {
+  customerName: string;
+  siteName?: string;
+  deviceId: string;
+  deviceName: string;
+  deviceClass?: string;
+  lastUser?: string;
+  publishers: string[];
+  versions: string[];
+};
+
 export type PagedResult<T> = {
   rows: T[];
   page: number;
@@ -314,7 +325,11 @@ export async function collectSoftwareInventoryBatch(
       if (!item) return;
       try {
         const assets = await client.getDeviceAssets(Number(item.device_id));
-        await saveDeviceApplications(database, item, parseSoftwareApplications(assets));
+        const applications = parseSoftwareApplications(assets);
+        if (applications.length === 0 && hasSoftwareApplicationPayloadRows(assets)) {
+          throw new Error('N-central returned application assets, but none contained a recognized software name.');
+        }
+        await saveDeviceApplications(database, item, applications);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unable to collect N-central device assets.';
         await markDeviceFailed(database, item.report_id, item.device_id, message);
@@ -449,6 +464,48 @@ export async function getSoftwareInventoryCounts(
   };
 }
 
+export async function getSoftwareInventoryApplicationDevices(
+  database: Pool,
+  reportId: string,
+  applicationName: string,
+): Promise<SoftwareInventoryApplicationDeviceRow[]> {
+  const normalizedName = normalizeApplicationName(applicationName);
+  if (!normalizedName) return [];
+  const result = await database.query<{
+    customer_name: string;
+    site_name: string | null;
+    device_id: string;
+    device_name: string;
+    device_class: string | null;
+    last_user: string | null;
+    publishers: string[] | null;
+    versions: string[] | null;
+  }>(
+    `select devices.customer_name, devices.site_name, devices.device_id, devices.device_name,
+            devices.device_class, devices.last_user,
+            array_remove(array_agg(distinct applications.publisher order by applications.publisher), null) as publishers,
+            array_remove(array_agg(distinct applications.version order by applications.version), null) as versions
+       from ncentral_software_inventory_applications applications
+       join ncentral_software_inventory_devices devices
+         on devices.report_id = applications.report_id and devices.device_id = applications.device_id
+      where applications.report_id = $1::uuid and applications.normalized_name = $2
+      group by devices.customer_name, devices.site_name, devices.device_id, devices.device_name,
+               devices.device_class, devices.last_user
+      order by lower(devices.device_name), devices.device_id`,
+    [reportId, normalizedName],
+  );
+  return result.rows.map((row) => ({
+    customerName: row.customer_name,
+    siteName: row.site_name ?? undefined,
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    deviceClass: row.device_class ?? undefined,
+    lastUser: row.last_user ?? undefined,
+    publishers: row.publishers ?? [],
+    versions: row.versions ?? [],
+  }));
+}
+
 export async function getSoftwareInventoryDetails(
   database: Pool,
   reportId: string,
@@ -542,8 +599,7 @@ export async function cleanupExpiredSoftwareInventoryReports(database: Pool) {
 }
 
 export function parseSoftwareApplications(assets: NcentralDeviceAssets): ApplicationRecord[] {
-  const applicationValue = caseInsensitiveValue(assets, ['application', 'applications']);
-  const records = recordsFromApplicationValue(applicationValue);
+  const records = applicationRecordsFromAssets(assets);
   const seen = new Set<string>();
   const applications: ApplicationRecord[] = [];
   for (const raw of records) {
@@ -551,7 +607,13 @@ export function parseSoftwareApplications(assets: NcentralDeviceAssets): Applica
     if (!applicationName) continue;
     const publisher = textValue(caseInsensitiveValue(raw, ['publisher', 'vendor', 'manufacturer']));
     const version = textValue(caseInsensitiveValue(raw, ['version', 'displayVersion']));
-    const installDate = textValue(caseInsensitiveValue(raw, ['installDate', 'installdate', 'installedDate']));
+    const installDate = textValue(caseInsensitiveValue(raw, [
+      'installDate',
+      'installdate',
+      'installedDate',
+      'installationDate',
+      'installationdate',
+    ]));
     const installLocation = textValue(caseInsensitiveValue(raw, ['installLocation', 'installlocation', 'location']));
     const normalizedName = normalizeApplicationName(applicationName);
     const applicationKey = createHash('sha256')
@@ -562,6 +624,19 @@ export function parseSoftwareApplications(assets: NcentralDeviceAssets): Applica
     applications.push({ applicationKey, applicationName, normalizedName, publisher, version, installDate, installLocation, raw });
   }
   return applications;
+}
+
+export function hasSoftwareApplicationPayloadRows(assets: NcentralDeviceAssets) {
+  return applicationRecordsFromAssets(assets).length > 0;
+}
+
+function applicationRecordsFromAssets(assets: NcentralDeviceAssets) {
+  const extra = caseInsensitiveValue(assets, ['_extra', 'extra']);
+  if (isRecord(extra)) {
+    const enrichedRecords = recordsFromApplicationValue(caseInsensitiveValue(extra, ['application', 'applications']));
+    if (enrichedRecords.length > 0) return enrichedRecords;
+  }
+  return recordsFromApplicationValue(caseInsensitiveValue(assets, ['application', 'applications']));
 }
 
 export function normalizeApplicationName(value: string) {
@@ -655,7 +730,7 @@ async function markDeviceFailed(database: Pool, reportId: string, deviceId: stri
 function recordsFromApplicationValue(value: unknown): Record<string, unknown>[] {
   if (Array.isArray(value)) return value.filter(isRecord);
   if (!isRecord(value)) return [];
-  const nested = caseInsensitiveValue(value, ['items', 'data', 'applications']);
+  const nested = caseInsensitiveValue(value, ['list', 'items', 'data', 'applications']);
   if (Array.isArray(nested)) return nested.filter(isRecord);
   const objectValues = Object.values(value);
   if (objectValues.length > 0 && objectValues.every(isRecord)) return objectValues as Record<string, unknown>[];

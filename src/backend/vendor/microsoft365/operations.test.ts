@@ -286,6 +286,36 @@ async function run() {
   assert.equal(licenseMetadata.dataset, 'licenses');
   assert.equal(licenseMetadata.productSubscriptionsWritten, 1);
 
+  const tenantDetailRequests: string[] = [];
+  const exclusionClient = {
+    ...client,
+    async listTenantUsers(tenantId: string) {
+      tenantDetailRequests.push(tenantId);
+      return client.listTenantUsers(tenantId);
+    },
+    async listTenantSubscribedSkus(tenantId: string) {
+      tenantDetailRequests.push(tenantId);
+      return client.listTenantSubscribedSkus(tenantId);
+    },
+  };
+  const exclusionDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from integration_client_exclusions')) {
+        return { rows: [{ external_client_id: 'tenant-no-consent' } as T] };
+      }
+      return database.query<T>(sql, values);
+    },
+  };
+  const excludedSyncResult = await syncMicrosoft365UserLicenseSnapshots({
+    pool: exclusionDatabase,
+    provider,
+    client: exclusionClient,
+    now: '2026-06-19T15:00:00.000Z',
+  });
+  assert.equal(excludedSyncResult.tenantsRead, 1);
+  assert.equal(excludedSyncResult.failedTenants, 0);
+  assert.equal(tenantDetailRequests.includes('tenant-no-consent'), false);
+
   const ruleSet = await loadMicrosoft365RuleSet(database);
   const businessPremiumRule = ruleSet.rules.find((rule) => rule.vendorProductKey === 'SPB');
   assert.equal(businessPremiumRule?.productCode, 'CW-M365-BUSINESS-PREMIUM');

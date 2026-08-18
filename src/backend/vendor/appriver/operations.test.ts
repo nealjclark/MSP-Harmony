@@ -205,7 +205,7 @@ type QueuedWorkItem = {
   result_payload: unknown;
 };
 
-function createQueuedDatabase() {
+function createQueuedDatabase(excludedClientIds: string[] = []) {
   const workItems: QueuedWorkItem[] = [];
   const snapshots: unknown[][] = [];
   const completed: unknown[][] = [];
@@ -213,6 +213,10 @@ function createQueuedDatabase() {
 
   const queuedDatabase: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('from integration_client_exclusions')) {
+        return { rows: excludedClientIds.map((external_client_id) => ({ external_client_id } as T)) };
+      }
+
       if (sql.includes('from sync_runs') && sql.includes("status = 'running'")) {
         return { rows: [] as T[] };
       }
@@ -488,6 +492,16 @@ async function run() {
   assert.equal(queuedMetadata.mode, 'queued-customers');
   assert.equal(queuedMetadata.customersRead, 3);
   assert.equal(queuedMetadata.failedSubscriptions, 1);
+
+  const excludedQueue = createQueuedDatabase(['customer-2']);
+  const excludedQueueStart = await startAppRiverQueuedSubscriptionSync({
+    pool: excludedQueue.database,
+    provider,
+    client,
+  });
+  assert.equal(excludedQueueStart.excludedCustomers, 1);
+  assert.equal(excludedQueueStart.queuedCustomers, 1);
+  assert.deepEqual(excludedQueue.workItems.map((item) => item.external_customer_id), ['customer-1']);
 
   const ruleSet = await loadAppRiverRuleSet(database);
   const businessPremiumRule = ruleSet.rules.find((rule) => rule.vendorProductKey === mappedProductKey);

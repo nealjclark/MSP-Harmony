@@ -4,10 +4,11 @@ import { hasCapability, hasLicenseActionRole, hasMinimumRole } from '../function
 import type { PostgresIntegrationSettingsRepository } from '../config/integrationSettingsRepository';
 
 export type BackgroundJobStatus = 'queued' | 'running' | 'complete' | 'complete-with-warnings' | 'failed';
+export type BackgroundJobSource = 'integration-sync' | 'software-inventory' | 'appriver-license-cleanup' | 'sales-quote';
 
 export type BackgroundJob = {
   id: string;
-  source: 'integration-sync' | 'software-inventory' | 'appriver-license-cleanup' | 'sales-quote';
+  source: BackgroundJobSource;
   title: string;
   operation: string;
   status: BackgroundJobStatus;
@@ -16,6 +17,7 @@ export type BackgroundJob = {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  warning?: string;
   progress?: {
     completed: number;
     total: number;
@@ -74,6 +76,7 @@ export async function listBackgroundJobs(input: {
   integrationRepository: PostgresIntegrationSettingsRepository;
   principal: AuthPrincipal;
   recentLimit?: number;
+  includeDismissed?: boolean;
 }) {
   const sources: Array<Promise<BackgroundJob[]>> = [];
   if (hasMinimumRole(input.principal, 'Analyst')) {
@@ -88,14 +91,61 @@ export async function listBackgroundJobs(input: {
   }
 
   const jobs = (await Promise.all(sources)).flat();
-  const active = jobs
+  const dismissed = input.includeDismissed
+    ? new Set<string>()
+    : await loadDismissedJobKeys(input.database, principalKey(input.principal));
+  const visibleJobs = jobs.filter((job) =>
+    job.status === 'queued'
+    || job.status === 'running'
+    || !dismissed.has(backgroundJobKey(job.source, job.id)),
+  );
+  const active = visibleJobs
     .filter((job) => job.status === 'queued' || job.status === 'running')
     .sort(compareJobs);
-  const recent = jobs
+  const recent = visibleJobs
     .filter((job) => job.status !== 'queued' && job.status !== 'running')
     .sort(compareJobs)
     .slice(0, Math.max(1, Math.min(input.recentLimit ?? 10, 50)));
   return [...active, ...recent];
+}
+
+export async function dismissBackgroundJob(input: {
+  database: Pool;
+  integrationRepository: PostgresIntegrationSettingsRepository;
+  principal: AuthPrincipal;
+  source: BackgroundJobSource;
+  jobId: string;
+}) {
+  const jobs = await listBackgroundJobs({
+    ...input,
+    recentLimit: 50,
+    includeDismissed: true,
+  });
+  const job = jobs.find((candidate) => candidate.source === input.source && candidate.id === input.jobId);
+  if (!job) {
+    return { dismissed: false, reason: 'The job is no longer available or is not visible to this user.' };
+  }
+  if (job.status === 'queued' || job.status === 'running') {
+    return { dismissed: false, reason: 'Running and queued jobs remain visible until they finish.' };
+  }
+
+  await saveDismissals(input.database, input.principal, [job]);
+  return { dismissed: true };
+}
+
+export async function dismissCompletedBackgroundJobs(input: {
+  database: Pool;
+  integrationRepository: PostgresIntegrationSettingsRepository;
+  principal: AuthPrincipal;
+}) {
+  const jobs = await listBackgroundJobs({
+    ...input,
+    recentLimit: 50,
+    includeDismissed: true,
+  });
+  const completed = jobs.filter((job) => job.status !== 'queued' && job.status !== 'running');
+  await saveDismissals(input.database, input.principal, completed);
+  return { dismissedCount: completed.length };
 }
 
 async function listIntegrationJobs(repository: PostgresIntegrationSettingsRepository): Promise<BackgroundJob[]> {
@@ -105,7 +155,7 @@ async function listIntegrationJobs(repository: PostgresIntegrationSettingsReposi
     source: 'integration-sync',
     title: job.integrationName,
     operation: job.operationLabel,
-    status: job.status === 'complete' && (job.progress?.failed ?? 0) > 0
+    status: job.status === 'complete' && ((job.progress?.failed ?? 0) > 0 || (job.warnings?.length ?? 0) > 0)
       ? 'complete-with-warnings'
       : job.status,
     requestedBy: job.requestedBy,
@@ -113,6 +163,7 @@ async function listIntegrationJobs(repository: PostgresIntegrationSettingsReposi
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     error: job.error,
+    warning: job.warnings?.join(' • '),
     progress: job.progress,
     destination: { label: 'View integration', path: '/integrations' },
   }));
@@ -242,6 +293,37 @@ function mapSalesStatus(status: string): BackgroundJobStatus {
 
 function compareJobs(left: BackgroundJob, right: BackgroundJob) {
   return Date.parse(right.requestedAt) - Date.parse(left.requestedAt);
+}
+
+async function loadDismissedJobKeys(database: Pool, userKey: string) {
+  const result = await database.query<{ source: string; job_id: string }>(
+    `select source, job_id
+       from background_job_dismissals
+      where principal_key = $1`,
+    [userKey],
+  );
+  return new Set(result.rows.map((row) => backgroundJobKey(row.source as BackgroundJobSource, row.job_id)));
+}
+
+async function saveDismissals(database: Pool, principal: AuthPrincipal, jobs: BackgroundJob[]) {
+  if (jobs.length === 0) return;
+  const userKey = principalKey(principal);
+  await database.query(
+    `insert into background_job_dismissals (principal_key, source, job_id, dismissed_by, dismissed_at)
+     select $1, dismissed.source, dismissed.job_id, $4, now()
+       from unnest($2::text[], $3::text[]) as dismissed(source, job_id)
+     on conflict (principal_key, source, job_id)
+     do update set dismissed_by = excluded.dismissed_by, dismissed_at = now()`,
+    [userKey, jobs.map((job) => job.source), jobs.map((job) => job.id), principal.name],
+  );
+}
+
+function principalKey(principal: AuthPrincipal) {
+  return (principal.email ?? principal.name).trim().toLocaleLowerCase();
+}
+
+function backgroundJobKey(source: BackgroundJobSource, id: string) {
+  return `${source}:${id}`;
 }
 
 function isoDate(value: Date | string) {

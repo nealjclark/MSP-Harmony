@@ -6,6 +6,7 @@ import {
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
 import { KeyVaultIntegrationSecretWriter } from '../../config/settingsUpdater';
+import { loadIntegrationClientExclusionIds } from '../../integrations/clientExclusions';
 import {
   AppRiverApiError,
   AppRiverClient,
@@ -69,6 +70,7 @@ export type AppRiverSubscriptionSnapshotSyncResult = {
   mappedSnapshots: number;
   unmappedSnapshots: number;
   skippedPartnerCustomers: number;
+  excludedCustomers: number;
   failedCustomers: number;
   failedSubscriptions: number;
   productSnapshots: Record<string, number>;
@@ -80,6 +82,7 @@ export type AppRiverQueuedSubscriptionSyncStartResult = {
   customersRead: number;
   queuedCustomers: number;
   skippedPartnerCustomers: number;
+  excludedCustomers: number;
 };
 
 export type AppRiverQueuedCustomerProcessResult = {
@@ -179,6 +182,7 @@ const defaultAppRiverQueuedMaxAttempts = 3;
 
 export async function testAppRiverConnection(input: {
   provider?: IntegrationSettingsProvider;
+  pool?: Queryable;
   client?: AppRiverSecureCloudClient;
   now?: string;
 } = {}): Promise<AppRiverConnectionTestResult> {
@@ -189,9 +193,15 @@ export async function testAppRiverConnection(input: {
   const client = input.client ?? createAppRiverClient(settings);
   await client.authenticate();
   const customers = await client.listCustomers({ pageSize: 1000, maxPages: 1 });
-  const firstCustomer = customers.find((customer) => !isPartnerCustomer(customer)) ?? customers[0];
+  const excludedClientIds = input.pool
+    ? await loadIntegrationClientExclusionIds(input.pool, appRiverIntegrationId)
+    : new Set<string>();
+  const includedCustomers = customers.filter((customer) =>
+    !excludedClientIds.has(normalizeExternalClientId(customer.customerId)),
+  );
+  const firstCustomer = includedCustomers.find((customer) => !isPartnerCustomer(customer)) ?? includedCustomers[0];
   if (!firstCustomer) {
-    throw new Error('AppRiver - OpenText did not return any SecureCloud customers.');
+    throw new Error('AppRiver - OpenText did not return any non-excluded SecureCloud customers.');
   }
   const firstCustomerSubscriptions = isPartnerCustomer(firstCustomer)
     ? []
@@ -234,13 +244,14 @@ export async function syncAppRiverSubscriptionSnapshots(input: {
   const client = input.client ?? createAppRiverClient(settings);
 
   try {
-    const [accountMappings, productMappings, customers] = await Promise.all([
+    const [accountMappings, productMappings, customers, excludedClientIds] = await Promise.all([
       loadAppRiverAccountMappings(input.pool),
       loadAppRiverProductMappings(input.pool),
       client.listCustomers({
         pageSize: input.pageSize,
         maxPages: input.maxPages,
       }),
+      loadIntegrationClientExclusionIds(input.pool, appRiverIntegrationId),
     ]);
 
     let recordsRead = 0;
@@ -249,11 +260,16 @@ export async function syncAppRiverSubscriptionSnapshots(input: {
     let mappedSnapshots = 0;
     let unmappedSnapshots = 0;
     let skippedPartnerCustomers = 0;
+    let excludedCustomers = 0;
     const productSnapshots: Record<string, number> = {};
     const failedCustomerDetails: AppRiverSyncError[] = [];
     const failedSubscriptionDetails: AppRiverSyncError[] = [];
 
     for (const customer of customers) {
+      if (excludedClientIds.has(normalizeExternalClientId(customer.customerId))) {
+        excludedCustomers += 1;
+        continue;
+      }
       if (isPartnerCustomer(customer)) {
         skippedPartnerCustomers += 1;
         continue;
@@ -327,6 +343,7 @@ export async function syncAppRiverSubscriptionSnapshots(input: {
       mappedSnapshots,
       unmappedSnapshots,
       skippedPartnerCustomers,
+      excludedCustomers,
       failedCustomers: failedCustomerDetails.length,
       failedCustomerDetails,
       failedSubscriptions: failedSubscriptionDetails.length,
@@ -343,6 +360,7 @@ export async function syncAppRiverSubscriptionSnapshots(input: {
       mappedSnapshots,
       unmappedSnapshots,
       skippedPartnerCustomers,
+      excludedCustomers,
       failedCustomers: failedCustomerDetails.length,
       failedSubscriptions: failedSubscriptionDetails.length,
       productSnapshots,
@@ -389,12 +407,19 @@ async function startAppRiverQueuedSubscriptionSyncWithLock(input: {
   const client = input.client ?? createAppRiverClient(settings);
 
   try {
-    const customers = await client.listCustomers({
-      pageSize: input.pageSize,
-      maxPages: input.maxPages,
-    });
-    const billableCustomers = customers.filter((customer) => !isPartnerCustomer(customer));
-    const skippedPartnerCustomers = customers.length - billableCustomers.length;
+    const [customers, excludedClientIds] = await Promise.all([
+      client.listCustomers({
+        pageSize: input.pageSize,
+        maxPages: input.maxPages,
+      }),
+      loadIntegrationClientExclusionIds(input.pool, appRiverIntegrationId),
+    ]);
+    const nonPartnerCustomers = customers.filter((customer) => !isPartnerCustomer(customer));
+    const billableCustomers = nonPartnerCustomers.filter((customer) =>
+      !excludedClientIds.has(normalizeExternalClientId(customer.customerId)),
+    );
+    const skippedPartnerCustomers = customers.length - nonPartnerCustomers.length;
+    const excludedCustomers = nonPartnerCustomers.length - billableCustomers.length;
 
     for (const customer of billableCustomers) {
       await insertAppRiverSyncWorkItem(input.pool, syncRunId, customer);
@@ -406,6 +431,7 @@ async function startAppRiverQueuedSubscriptionSyncWithLock(input: {
       customersRead: customers.length,
       queuedCustomers: billableCustomers.length,
       skippedPartnerCustomers,
+      excludedCustomers,
     });
 
     if (billableCustomers.length === 0) {
@@ -417,6 +443,7 @@ async function startAppRiverQueuedSubscriptionSyncWithLock(input: {
         mappedSnapshots: 0,
         unmappedSnapshots: 0,
         skippedPartnerCustomers,
+        excludedCustomers,
         failedCustomers: 0,
         failedCustomerDetails: [],
         failedSubscriptions: 0,
@@ -430,6 +457,7 @@ async function startAppRiverQueuedSubscriptionSyncWithLock(input: {
         customersRead: customers.length,
         queuedCustomers: 0,
         skippedPartnerCustomers,
+        excludedCustomers,
       };
     }
 
@@ -439,6 +467,7 @@ async function startAppRiverQueuedSubscriptionSyncWithLock(input: {
       customersRead: customers.length,
       queuedCustomers: billableCustomers.length,
       skippedPartnerCustomers,
+      excludedCustomers,
     };
   } catch (error) {
     await failAppRiverSyncRun(input.pool, syncRunId, error);
@@ -1289,6 +1318,10 @@ async function failAppRiverSyncRun(database: Queryable, syncRunId: string, error
 
 function isPartnerCustomer(customer: AppRiverCustomer) {
   return /partner/i.test(customer.customerType ?? '');
+}
+
+function normalizeExternalClientId(value: string) {
+  return value.trim().toLocaleLowerCase();
 }
 
 function customerFromWorkItem(workItem: AppRiverSyncWorkItemRow): AppRiverCustomer {

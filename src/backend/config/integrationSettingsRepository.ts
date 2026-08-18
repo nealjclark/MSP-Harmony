@@ -70,6 +70,7 @@ type IntegrationSyncJobRow = {
   progress_failed: number;
   progress_current_item: string | null;
   progress_unit_label: string | null;
+  sync_metadata?: unknown;
 };
 
 type IntegrationSyncScheduleRow = {
@@ -403,12 +404,14 @@ export class PostgresIntegrationSettingsRepository
 
   async listRecentSyncJobs(limit = 20): Promise<IntegrationSyncJob[]> {
     const result = await this.database.query<IntegrationSyncJobRow>(
-      `select id, integration_id, operation_key, operation_label, status, requested_by, requested_at,
-              started_at, completed_at, sync_run_id, error_message, progress_completed, progress_total,
-              progress_failed, progress_current_item, progress_unit_label
-       from integration_sync_jobs
-       where status in ('queued', 'running') or requested_at >= now() - interval '24 hours'
-       order by requested_at desc
+      `select jobs.id, jobs.integration_id, jobs.operation_key, jobs.operation_label, jobs.status,
+              jobs.requested_by, jobs.requested_at, jobs.started_at, jobs.completed_at, jobs.sync_run_id,
+              jobs.error_message, jobs.progress_completed, jobs.progress_total, jobs.progress_failed,
+              jobs.progress_current_item, jobs.progress_unit_label, runs.metadata as sync_metadata
+       from integration_sync_jobs jobs
+       left join sync_runs runs on runs.id = jobs.sync_run_id
+       where jobs.status in ('queued', 'running') or jobs.requested_at >= now() - interval '24 hours'
+       order by jobs.requested_at desc
        limit $1`,
       [limit],
     );
@@ -436,6 +439,11 @@ export class PostgresIntegrationSettingsRepository
           };
         }
       }
+      const warnings = syncFailureDetails(row.integration_id, row.sync_metadata)
+        ?.slice(0, 5)
+        .map((failure) =>
+          `${failure.itemName ?? failure.itemId}${failure.relatedId ? ` / ${failure.relatedId}` : ''}: ${failure.message}`,
+        );
       return {
         id: row.id,
         integrationId: row.integration_id,
@@ -449,6 +457,7 @@ export class PostgresIntegrationSettingsRepository
         completedAt: isoDate(row.completed_at) ?? undefined,
         syncRunId: row.sync_run_id ?? undefined,
         error: row.error_message ?? undefined,
+        warnings,
         progress,
       };
     }));

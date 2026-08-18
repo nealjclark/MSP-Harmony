@@ -340,6 +340,41 @@ async function run() {
     { subscriptionId: subscriptions[0]?.subscriptionId ?? '', from: '2026-06-01T00:00:00.000Z' },
     { subscriptionId: secondSubscription.subscriptionId, from: '2026-06-01T00:00:00.000Z' },
   ]);
+
+  const stagedEvents: string[] = [];
+  await syncAzureCostUsage({
+    pool: emptyDatabase,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return [...subscriptions, secondSubscription];
+      },
+      async queryCostUsage() {
+        throw new Error('The staged Azure client should not use the combined query method.');
+      },
+      async requestCostUsageReport(input) {
+        stagedEvents.push(`request:${input.subscriptionId}`);
+        return {
+          subscriptionId: input.subscriptionId,
+          state: 'pending',
+          location: `https://management.azure.com/operations/${input.subscriptionId}`,
+          nextPollAt: 0,
+          pollCount: 0,
+        };
+      },
+      async collectCostUsageReport(request) {
+        stagedEvents.push(`collect:${request.subscriptionId}`);
+        return [];
+      },
+    },
+    now: '2026-08-13T12:00:00.000Z',
+  });
+  assert.deepEqual(stagedEvents, [
+    `request:${subscriptions[0]?.subscriptionId ?? ''}`,
+    `request:${secondSubscription.subscriptionId}`,
+    `collect:${subscriptions[0]?.subscriptionId ?? ''}`,
+    `collect:${secondSubscription.subscriptionId}`,
+  ]);
   assert.equal(azureProductKey({ serviceName: 'Azure SQL Database' }), 'azure:azure-sql-database');
 
   console.log('azure operations tests passed');

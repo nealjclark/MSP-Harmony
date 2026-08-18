@@ -17,6 +17,7 @@ import {
   discoverDelegatedAzureTenants,
   enrichSubscriptionsWithTenants,
   type AzureCostUsageRow,
+  type AzureCostReportRequest,
   type AzureSubscription,
 } from './client';
 
@@ -30,6 +31,8 @@ export type AzureUsageClient = {
   listLighthouseDelegations?: AzureCostManagementClient['listLighthouseDelegations'];
   listLighthouseDelegationsForSubscription?: AzureCostManagementClient['listLighthouseDelegationsForSubscription'];
   queryCostUsage: AzureCostManagementClient['queryCostUsage'];
+  requestCostUsageReport?: AzureCostManagementClient['requestCostUsageReport'];
+  collectCostUsageReport?: AzureCostManagementClient['collectCostUsageReport'];
   listResources?: AzureCostManagementClient['listResources'];
   getVmInstanceView?: AzureCostManagementClient['getVmInstanceView'];
   queryDailyMetrics?: AzureCostManagementClient['queryDailyMetrics'];
@@ -311,8 +314,65 @@ export async function syncAzureCostUsage(input: {
       currentItem: 'Discovering delegated subscriptions',
       unitLabel: 'subscriptions',
     });
+    const reportProgress = (
+      planIndex: number,
+      progressPrefix: string,
+    ) => async (progress: { message: string }) => input.onProgress?.({
+      completed: Math.min(planIndex, progressTotal - 1),
+      total: progressTotal,
+      failed: failures.length,
+      currentItem: `${progressPrefix} · ${progress.message}`,
+      unitLabel: 'subscriptions',
+    });
+    const recordCostQueryFailure = async (
+      planIndex: number,
+      plan: (typeof plans)[number],
+      queryWindow: AzureCostCheckpointWindow,
+      progressPrefix: string,
+      error: unknown,
+    ) => {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push({
+        subscriptionId: plan.subscription.subscriptionId,
+        subscriptionName: plan.subscription.displayName,
+        customerName: plan.mapping?.customerName ?? plan.subscription.displayName,
+        error: message,
+      });
+      plan.failed = true;
+      const retry = azureRetryState(error, now);
+      await markAzureCostSyncFailure(input.pool, {
+        subscriptionId: plan.subscription.subscriptionId,
+        mode,
+        syncRunId,
+        window: queryWindow,
+        error: message,
+        nextRetryAt: retry?.nextRetryAt,
+      });
+      await input.onProgress?.({
+        completed: Math.min(planIndex, progressTotal - 1),
+        total: progressTotal,
+        failed: failures.length,
+        currentItem: `${progressPrefix} · Failed: ${message}`,
+        unitLabel: 'subscriptions',
+      });
+      if (retry?.shared) sharedThrottleUntil = retry.nextRetryAt;
+    };
+    const supportsStagedCostReports = Boolean(
+      client.requestCostUsageReport && client.collectCostUsageReport,
+    );
     const maxWindowCount = Math.max(0, ...plans.map((plan) => plan.windows.length));
     for (let windowIndex = 0; windowIndex < maxWindowCount; windowIndex += 1) {
+      const submittedReports: Array<{
+        planIndex: number;
+        plan: (typeof plans)[number];
+        queryWindow: AzureCostCheckpointWindow;
+        progressPrefix: string;
+        request?: AzureCostReportRequest;
+      }> = [];
+
+      // Submit every report in this window before polling or downloading any
+      // one of them. Azure can generate the reports in parallel while the
+      // remaining subscription requests are being issued.
       for (const [planIndex, plan] of plans.entries()) {
         const queryWindow = plan.windows[windowIndex];
         if (!queryWindow || plan.failed || plan.skipReason) continue;
@@ -348,18 +408,34 @@ export async function syncAzureCostUsage(input: {
         });
 
         try {
-          const rows = await client.queryCostUsage({
-            subscriptionId: plan.subscription.subscriptionId,
-            from: queryWindow.from,
-            to: queryWindow.to,
-            onProgress: async (reportProgress) => input.onProgress?.({
-              completed: Math.min(planIndex, progressTotal - 1),
-              total: progressTotal,
-              failed: failures.length,
-              currentItem: `${progressPrefix} · ${reportProgress.message}`,
-              unitLabel: 'subscriptions',
-            }),
-          });
+          const request = supportsStagedCostReports
+            ? await client.requestCostUsageReport?.({
+                subscriptionId: plan.subscription.subscriptionId,
+                from: queryWindow.from,
+                to: queryWindow.to,
+                onProgress: reportProgress(planIndex, progressPrefix),
+              })
+            : undefined;
+          submittedReports.push({ planIndex, plan, queryWindow, progressPrefix, request });
+        } catch (error) {
+          await recordCostQueryFailure(planIndex, plan, queryWindow, progressPrefix, error);
+        }
+      }
+
+      for (const submission of submittedReports) {
+        const { planIndex, plan, queryWindow, progressPrefix, request } = submission;
+        if (plan.failed) continue;
+        try {
+          const rows = request && client.collectCostUsageReport
+            ? await client.collectCostUsageReport(request, {
+                onProgress: reportProgress(planIndex, progressPrefix),
+              })
+            : await client.queryCostUsage({
+                subscriptionId: plan.subscription.subscriptionId,
+                from: queryWindow.from,
+                to: queryWindow.to,
+                onProgress: reportProgress(planIndex, progressPrefix),
+              });
           recordsRead += rows.length;
 
           if (rows.length > 0) {
@@ -430,31 +506,7 @@ export async function syncAzureCostUsage(input: {
           plan.costQuerySucceeded = true;
           costQueryWindowsCompleted += 1;
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          failures.push({
-            subscriptionId: plan.subscription.subscriptionId,
-            subscriptionName: plan.subscription.displayName,
-            customerName: plan.mapping?.customerName ?? plan.subscription.displayName,
-            error: message,
-          });
-          plan.failed = true;
-          const retry = azureRetryState(error, now);
-          await markAzureCostSyncFailure(input.pool, {
-            subscriptionId: plan.subscription.subscriptionId,
-            mode,
-            syncRunId,
-            window: queryWindow,
-            error: message,
-            nextRetryAt: retry?.nextRetryAt,
-          });
-          await input.onProgress?.({
-            completed: Math.min(planIndex, progressTotal - 1),
-            total: progressTotal,
-            failed: failures.length,
-            currentItem: `${progressPrefix} · Failed: ${message}`,
-            unitLabel: 'subscriptions',
-          });
-          if (retry?.shared) sharedThrottleUntil = retry.nextRetryAt;
+          await recordCostQueryFailure(planIndex, plan, queryWindow, progressPrefix, error);
         }
       }
     }

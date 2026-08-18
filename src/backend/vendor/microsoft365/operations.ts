@@ -5,6 +5,7 @@ import {
   type IntegrationSettingsProvider,
 } from '../../config/settingsProvider';
 import type { SyncProgressReporter } from '../../shared/syncProgress';
+import { loadIntegrationClientExclusionIds } from '../../integrations/clientExclusions';
 import {
   Microsoft365Client,
   microsoft365CredentialsFromSettings,
@@ -413,7 +414,10 @@ export async function syncMicrosoft365ProductSubscriptionSnapshots(input: {
     await input.onProgress?.({
       completed: tenants.length,
       total: tenants.length,
-      failed: failedTenantDetails.length,
+      failed: new Set([
+        ...failedTenantDetails.map((failure) => failure.tenantId),
+        ...failedProductSubscriptionDetails.map((failure) => failure.tenantId),
+      ]).size,
       unitLabel: 'tenants',
     });
     await completeMicrosoft365SyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
@@ -518,7 +522,11 @@ async function loadMicrosoft365TenantTargets(client: Microsoft365LicenseClient, 
     }
   }
 
-  return [...tenantsById.values()];
+  if (!database) return [...tenantsById.values()];
+  const excludedClientIds = await loadIntegrationClientExclusionIds(database, 'microsoft-365');
+  return [...tenantsById.values()].filter((tenant) =>
+    !excludedClientIds.has(tenant.tenantId.trim().toLocaleLowerCase()),
+  );
 }
 
 function looksLikeExternalAccountGuid(value: string | null | undefined) {

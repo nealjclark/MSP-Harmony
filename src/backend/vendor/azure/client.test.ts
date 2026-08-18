@@ -209,6 +209,29 @@ async function run() {
     assert.ok(reportProgress.some((status) => status.startsWith('parsing:')));
     assert.ok(reportProgress.some((status) => status.includes('complete:Cost report loaded · 1 rows')));
 
+    const stagedClient = new AzureCostManagementClient({
+      endpoint: 'https://management.azure.com',
+      tenantId: 'msp-tenant',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+    });
+    const stagedRequest = await stagedClient.requestCostUsageReport({
+      subscriptionId: 'sub-staged',
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-25T00:00:00.000Z',
+    });
+    assert.equal(stagedRequest.state, 'pending');
+    assert.equal(
+      requests.some((request) => request.url.includes('costDetailsOperationResults/sub-staged')),
+      false,
+    );
+    const stagedRows = await stagedClient.collectCostUsageReport(stagedRequest);
+    assert.equal(stagedRows.length, 1);
+    assert.equal(
+      requests.some((request) => request.url.includes('costDetailsOperationResults/sub-staged')),
+      true,
+    );
+
     const legacyRows = await client.queryCostUsage({
       subscriptionId: 'sub-legacy',
       from: '2026-07-01T00:00:00.000Z',

@@ -9,6 +9,7 @@ import {
   createSoftwareInventoryReport,
   discoverSoftwareInventoryDevices,
   failSoftwareInventoryReport,
+  getSoftwareInventoryApplicationDevices,
   getSoftwareInventoryCounts,
   getSoftwareInventoryDetails,
   getSoftwareInventoryReport,
@@ -171,6 +172,25 @@ export async function getSoftwareInventoryDetailsHttp(
   )));
 }
 
+export async function getSoftwareInventoryApplicationDevicesHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const applicationName = text(request.query.get('applicationName'));
+  if (!applicationName) return jsonResponse(400, { error: 'Choose a software application to view its devices.' });
+  return withDatabase(context, async (database) => {
+    const reportId = request.params.reportId ?? '';
+    const report = await getSoftwareInventoryReport(database, reportId);
+    if (!report) return jsonResponse(404, { error: 'Software inventory report was not found.' });
+    return jsonResponse(200, {
+      applicationName,
+      devices: await getSoftwareInventoryApplicationDevices(database, reportId, applicationName),
+    });
+  });
+}
+
 export async function exportSoftwareInventoryReportHttp(
   request: HttpRequest,
   context: InvocationContext,
@@ -299,6 +319,9 @@ app.http('getNcentralSoftwareInventoryCounts', {
 });
 app.http('getNcentralSoftwareInventoryDetails', {
   methods: ['GET'], authLevel: 'anonymous', route: 'reports/ncentral-software-inventory/{reportId:guid}/details', handler: getSoftwareInventoryDetailsHttp,
+});
+app.http('getNcentralSoftwareInventoryApplicationDevices', {
+  methods: ['GET'], authLevel: 'anonymous', route: 'reports/ncentral-software-inventory/{reportId:guid}/application-devices', handler: getSoftwareInventoryApplicationDevicesHttp,
 });
 app.http('exportNcentralSoftwareInventoryReport', {
   methods: ['GET'], authLevel: 'anonymous', route: 'reports/ncentral-software-inventory/{reportId:guid}/export', handler: exportSoftwareInventoryReportHttp,

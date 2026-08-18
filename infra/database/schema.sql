@@ -280,6 +280,19 @@ CREATE TABLE IF NOT EXISTS integration_settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS integration_client_exclusions (
+  integration_id text NOT NULL,
+  external_client_id text NOT NULL,
+  display_name text NOT NULL,
+  excluded_by text NOT NULL,
+  excluded_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (integration_id, external_client_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_client_exclusions_lookup
+  ON integration_client_exclusions(integration_id, lower(external_client_id));
+
 CREATE TABLE IF NOT EXISTS azure_lighthouse_templates (
   template_key text PRIMARY KEY CHECK (template_key = 'current'),
   version integer NOT NULL DEFAULT 1 CHECK (version > 0),
@@ -603,6 +616,18 @@ CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_activity
   ON integration_sync_jobs(status, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_integration_sync_jobs_integration
   ON integration_sync_jobs(integration_id, operation_key, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS background_job_dismissals (
+  principal_key text NOT NULL,
+  source text NOT NULL,
+  job_id text NOT NULL,
+  dismissed_by text NOT NULL,
+  dismissed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (principal_key, source, job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_job_dismissals_principal
+  ON background_job_dismissals(principal_key, dismissed_at DESC);
 
 CREATE TABLE IF NOT EXISTS integration_sync_schedules (
   integration_id text NOT NULL,

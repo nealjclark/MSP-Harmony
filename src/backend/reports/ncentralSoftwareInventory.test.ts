@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
+import type { Pool } from 'pg';
 import {
+  getSoftwareInventoryApplicationDevices,
+  hasSoftwareApplicationPayloadRows,
   isSoftwareInventoryDevice,
   normalizeApplicationName,
   parseSoftwareApplications,
 } from './ncentralSoftwareInventory';
 
-function run() {
+async function run() {
   assert.equal(normalizeApplicationName('  Microsoft   Edge  '), 'microsoft edge');
 
   const arrayPayload = parseSoftwareApplications({
@@ -72,13 +75,88 @@ function run() {
   assert.deepEqual(columnPayload.map((application) => application.applicationName), ['Firefox', 'VLC media player']);
   assert.deepEqual(columnPayload.map((application) => application.publisher), ['Mozilla', 'VideoLAN']);
 
+  const ncentralAssetPayload = parseSoftwareApplications({
+    _extra: {
+      application: {
+        list: [
+          {
+            _index: 0,
+            displayname: 'Microsoft 365 Apps for enterprise',
+            installationdate: '20260810',
+            publisher: 'Microsoft Corporation',
+            version: '16.0.19127.20202',
+          },
+        ],
+      },
+    },
+    application: {
+      list: [{ _index: 0, displayname: 'Microsoft 365 Apps for enterprise' }],
+    },
+  });
+  assert.equal(ncentralAssetPayload.length, 1, 'the enriched N-central application list should take precedence');
+  assert.deepEqual(
+    {
+      name: ncentralAssetPayload[0]?.applicationName,
+      publisher: ncentralAssetPayload[0]?.publisher,
+      version: ncentralAssetPayload[0]?.version,
+      installDate: ncentralAssetPayload[0]?.installDate,
+    },
+    {
+      name: 'Microsoft 365 Apps for enterprise',
+      publisher: 'Microsoft Corporation',
+      version: '16.0.19127.20202',
+      installDate: '20260810',
+    },
+  );
+
+  const ncentralRootListPayload = parseSoftwareApplications({
+    application: { list: [{ displayname: 'Google Chrome' }] },
+  });
+  assert.equal(ncentralRootListPayload[0]?.applicationName, 'Google Chrome');
+  assert.equal(hasSoftwareApplicationPayloadRows({ application: { list: [{ unexpectedName: 'Chrome' }] } }), true);
+  assert.equal(hasSoftwareApplicationPayloadRows({ application: { list: [] } }), false);
+
   assert.equal(isSoftwareInventoryDevice({ deviceClass: 'Windows Workstation' }), true);
   assert.equal(isSoftwareInventoryDevice({ supportedOs: 'Microsoft Windows Server 2022' }), true);
   assert.equal(isSoftwareInventoryDevice({ deviceClass: 'MacBook', supportedOs: 'macOS Sonoma' }), true);
   assert.equal(isSoftwareInventoryDevice({ deviceClass: 'Linux Server', supportedOs: 'Ubuntu 24.04' }), false);
   assert.equal(isSoftwareInventoryDevice({ deviceClass: 'Network Device', osId: 'Cisco IOS' }), false);
 
+  let applicationDeviceQuery: { sql: string; values?: unknown[] } | undefined;
+  const applicationDevices = await getSoftwareInventoryApplicationDevices({
+    query: async (sql: string, values?: unknown[]) => {
+      applicationDeviceQuery = { sql, values };
+      return {
+        rows: [{
+          customer_name: 'Acme',
+          site_name: 'HQ',
+          device_id: '101',
+          device_name: 'PC-01',
+          device_class: 'Workstations - Windows',
+          last_user: 'ACME\\jane',
+          publishers: ['Microsoft Corporation'],
+          versions: ['126.0'],
+        }],
+      };
+    },
+  } as unknown as Pool, '00000000-0000-0000-0000-000000000001', '  Microsoft   Edge  ');
+  assert.match(applicationDeviceQuery?.sql ?? '', /applications\.normalized_name = \$2/);
+  assert.deepEqual(applicationDeviceQuery?.values, ['00000000-0000-0000-0000-000000000001', 'microsoft edge']);
+  assert.deepEqual(applicationDevices, [{
+    customerName: 'Acme',
+    siteName: 'HQ',
+    deviceId: '101',
+    deviceName: 'PC-01',
+    deviceClass: 'Workstations - Windows',
+    lastUser: 'ACME\\jane',
+    publishers: ['Microsoft Corporation'],
+    versions: ['126.0'],
+  }]);
+
   console.log('ncentral software inventory tests passed');
 }
 
-run();
+void run().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

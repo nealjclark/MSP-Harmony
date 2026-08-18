@@ -59,12 +59,21 @@ import {
   type IntegrationSyncRequest as SyncBody,
   type SyncableIntegrationId,
 } from '../integrations/syncQueue';
+import {
+  isClientExclusionIntegrationId,
+  listIntegrationClientCandidates,
+  replaceIntegrationClientExclusions,
+} from '../integrations/clientExclusions';
 
 loadDotEnv({ override: false });
 
 type TestBody = {
   nonSecrets?: Record<string, string | undefined>;
   secrets?: Record<string, string | undefined>;
+};
+
+type ClientExclusionsBody = {
+  excludedClientIds?: unknown;
 };
 
 type AppRiverSyncQueueMessage = {
@@ -114,6 +123,91 @@ export async function listIntegrationsHttp(
   }
 }
 
+export async function listIntegrationClientExclusionsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+
+  const integrationId = request.params.integrationId;
+  if (!isClientExclusionIntegrationId(integrationId)) {
+    return jsonResponse(400, {
+      error: 'Client exclusions are currently supported for AppRiver and Microsoft 365.',
+    });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Client exclusions need PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const clients = await listIntegrationClientCandidates(repositoryContext.pool, integrationId);
+    return jsonResponse(200, {
+      integrationId,
+      excludedCount: clients.filter((client) => client.excluded).length,
+      clients,
+    });
+  } catch (error) {
+    return serverErrorResponse(context, error, 'Unable to load integration client exclusions.', 'client_exclusions_load_failed');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function replaceIntegrationClientExclusionsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Admin');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+
+  const integrationId = request.params.integrationId;
+  if (!isClientExclusionIntegrationId(integrationId)) {
+    return jsonResponse(400, {
+      error: 'Client exclusions are currently supported for AppRiver and Microsoft 365.',
+    });
+  }
+  const bodyResult = await readJsonBody<ClientExclusionsBody>(request, { fallback: {} });
+  if (!bodyResult.ok) return bodyResult.response;
+  if (!Array.isArray(bodyResult.body.excludedClientIds)
+      || bodyResult.body.excludedClientIds.some((value) => typeof value !== 'string' || !value.trim())) {
+    return jsonResponse(400, { error: 'excludedClientIds must be an array of non-empty client IDs.' });
+  }
+
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool) {
+    return jsonResponse(400, {
+      error: 'Client exclusions need PostgreSQL settings.',
+      missingDatabaseSettings: repositoryContext.missingDatabaseSettings,
+    });
+  }
+
+  try {
+    const clients = await replaceIntegrationClientExclusions({
+      database: repositoryContext.pool,
+      integrationId,
+      excludedClientIds: bodyResult.body.excludedClientIds as string[],
+      actor: auth.principal.name,
+    });
+    return jsonResponse(200, {
+      integrationId,
+      excludedCount: clients.filter((client) => client.excluded).length,
+      clients,
+    });
+  } catch (error) {
+    return serverErrorResponse(context, error, 'Unable to save integration client exclusions.', 'client_exclusions_save_failed');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function testIntegrationHttp(
   request: HttpRequest,
   _context: InvocationContext,
@@ -148,7 +242,6 @@ export async function testIntegrationHttp(
 
   const repositoryContext = await createOptionalPostgresSettingsRepository();
   const savedProvider = createIntegrationSettingsProvider({
-    loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
   });
   const bodyResult = await readJsonBody<TestBody>(request, { fallback: {} });
@@ -241,7 +334,7 @@ export async function testIntegrationHttp(
     }
 
     if (integrationId === 'opentext-appriver') {
-      const result = await testAppRiverConnection({ provider });
+      const result = await testAppRiverConnection({ provider, pool: repositoryContext.pool });
 
       await saveTestResult('success');
 
@@ -349,7 +442,7 @@ export async function testIntegrationHttp(
     });
   } catch (error) {
     await saveTestResult('failure').catch(() => undefined);
-    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} test failed.`);
+    return integrationErrorResponse(error, `${integrationDisplayName(integrationId)} settings test failed.`);
   } finally {
     await repositoryContext.close();
   }
@@ -463,7 +556,6 @@ export async function processIntegrationSyncQueueMessage(
   const syncJobRepository = repositoryContext.repository;
 
   const provider = createIntegrationSettingsProvider({
-    loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
   });
 
@@ -705,7 +797,6 @@ export async function processAppRiverSyncQueueMessage(
   }
 
   const provider = createIntegrationSettingsProvider({
-    loadLocalEnv: true,
     metadataReader: repositoryContext.repository,
   });
 
@@ -755,6 +846,20 @@ app.http('testIntegration', {
   authLevel: 'anonymous',
   route: 'integrations/{integrationId}/test',
   handler: testIntegrationHttp,
+});
+
+app.http('listIntegrationClientExclusions', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'integrations/{integrationId}/client-exclusions',
+  handler: listIntegrationClientExclusionsHttp,
+});
+
+app.http('replaceIntegrationClientExclusions', {
+  methods: ['PUT'],
+  authLevel: 'anonymous',
+  route: 'integrations/{integrationId}/client-exclusions',
+  handler: replaceIntegrationClientExclusionsHttp,
 });
 
 app.http('syncIntegration', {
@@ -866,7 +971,7 @@ function integrationErrorResponse(error: unknown, fallback: string) {
   }
 
   return jsonResponse(400, {
-    error: error instanceof Error ? error.message : fallback,
+    error: error instanceof Error ? error.message || fallback : fallback,
   });
 }
 

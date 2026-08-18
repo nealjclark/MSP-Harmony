@@ -8,6 +8,7 @@ async function run() {
   const source = readFileSync(new URL('./ncentralSoftwareInventoryFunction.ts', import.meta.url), 'utf8');
   assert.match(source, /route: 'reports\/ncentral-software-inventory\/scopes'/);
   assert.match(source, /route: 'reports\/ncentral-software-inventory\/\{reportId:guid\}'/);
+  assert.match(source, /route: 'reports\/ncentral-software-inventory\/\{reportId:guid\}\/application-devices'/);
 
   const workbook = XLSX.utils.book_new();
   const counts = XLSX.utils.json_to_sheet([

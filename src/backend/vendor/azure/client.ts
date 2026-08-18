@@ -73,6 +73,24 @@ export type AzureCostReportProgress = {
   rowCount?: number;
 };
 
+export type AzureCostReportRequest =
+  | {
+      subscriptionId: string;
+      state: 'no-data';
+    }
+  | {
+      subscriptionId: string;
+      state: 'pending';
+      location: string;
+      nextPollAt: number;
+      pollCount: number;
+    }
+  | {
+      subscriptionId: string;
+      state: 'ready';
+      blobs: Array<{ blobLink: string; byteCount?: number }>;
+    };
+
 export type AzureAdvisorRecommendation = {
   recommendationId: string;
   category?: string;
@@ -285,12 +303,25 @@ export class AzureCostManagementClient {
     to: string;
     onProgress?: (progress: AzureCostReportProgress) => void | Promise<void>;
   }): Promise<AzureCostUsageRow[]> {
+    const request = await this.requestCostUsageReport(input);
+    return this.collectCostUsageReport(request, { onProgress: input.onProgress });
+  }
+
+  async requestCostUsageReport(input: {
+    subscriptionId: string;
+    from: string;
+    to: string;
+    onProgress?: (progress: AzureCostReportProgress) => void | Promise<void>;
+  }): Promise<AzureCostReportRequest> {
     // Sync windows use an exclusive `to` boundary. Cost Details uses inclusive
     // calendar dates, so send the day immediately before that boundary. This
     // preserves the checkpoint contract and prevents partial current-day data.
     const start = reportDate(input.from);
     const end = shiftReportDate(reportDate(input.to), -1);
-    if (end < start) return [];
+    if (end < start) {
+      await input.onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
+      return { subscriptionId: input.subscriptionId, state: 'no-data' };
+    }
 
     const path =
       `/subscriptions/${encodeURIComponent(input.subscriptionId)}` +
@@ -300,7 +331,7 @@ export class AzureCostManagementClient {
       message: 'Requesting the cost details report from Azure',
     });
     await this.waitForCostManagementRequestSlot();
-    let response = await this.requestResponse(path, {
+    const response = await this.requestResponse(path, {
       method: 'POST',
       body: JSON.stringify({
         metric: 'ActualCost',
@@ -311,97 +342,127 @@ export class AzureCostManagementClient {
         'Content-Type': 'application/json',
       },
     });
+    return this.readCostUsageReportResponse(response, input.subscriptionId, 0, input.onProgress);
+  }
 
-    for (let pollCount = 0; pollCount <= costDetailsReportMaxPollCount; pollCount += 1) {
-      if (response.status === 204) {
-        await input.onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
-        return [];
-      }
-      if (response.status === 200) {
-        const result = await parseResponseJson<CostDetailsOperationResult>(response);
-        if (result.status === 'NoDataFound') {
-          await input.onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
-          return [];
-        }
-        if (result.status === 'Failed') {
-          throw new Error(
-            result.error?.message ?? result.error?.code ?? 'Azure Cost Details report generation failed.',
-          );
-        }
-        if (result.status && result.status !== 'Completed') {
-          throw new Error(`Azure Cost Details report returned unexpected status "${result.status}".`);
-        }
-        if (result.manifest?.dataFormat && result.manifest.dataFormat.toLowerCase() !== 'csv') {
-          throw new Error(`Azure Cost Details report returned unsupported format "${result.manifest.dataFormat}".`);
-        }
-        if (!result.manifest) {
-          throw new Error('Azure Cost Details report completed without a manifest.');
-        }
-        const blobs = result.manifest.blobs?.filter(
-          (blob): blob is { blobLink: string; byteCount?: number } => Boolean(blob.blobLink),
-        ) ?? [];
-        if (blobs.length === 0) {
-          throw new Error('Azure Cost Details report completed without a downloadable CSV blob.');
-        }
-        await input.onProgress?.({
-          phase: 'ready',
-          message: `Azure report ready · ${blobs.length} CSV ${blobs.length === 1 ? 'file' : 'files'}`,
-          blobCount: blobs.length,
-        });
-        const rows: AzureCostUsageRow[] = [];
-        for (const [blobIndex, blob] of blobs.entries()) {
-          await input.onProgress?.({
-            phase: 'downloading',
-            message: `Downloading cost CSV ${blobIndex + 1} of ${blobs.length}`,
-            blobIndex: blobIndex + 1,
-            blobCount: blobs.length,
-          });
-          const csv = await this.downloadCostDetailsBlob(blob.blobLink);
-          await input.onProgress?.({
-            phase: 'parsing',
-            message: `Reading cost CSV ${blobIndex + 1} of ${blobs.length}`,
-            blobIndex: blobIndex + 1,
-            blobCount: blobs.length,
-          });
-          rows.push(...parseCostDetailsCsv(input.subscriptionId, csv));
-        }
-        await input.onProgress?.({
-          phase: 'complete',
-          message: `Cost report loaded · ${rows.length.toLocaleString('en-US')} rows`,
-          rowCount: rows.length,
-          blobCount: blobs.length,
-        });
-        return rows;
-      }
-      if (response.status !== 202) {
-        throw new Error(`Azure Cost Details report returned unexpected HTTP ${response.status}.`);
-      }
-      if (pollCount === costDetailsReportMaxPollCount) {
-        throw new Error('Azure Cost Details report did not finish before the polling limit.');
-      }
-      const location = response.headers.get('location');
-      if (!location) throw new Error('Azure Cost Details report returned HTTP 202 without a Location header.');
-      assertArmOperationUrl(location, this.baseUrl);
-      const retryAfterMs = costDetailsPollDelayMs(response);
-      await input.onProgress?.({
-        phase: 'waiting',
-        message: `Azure is generating the report · checking again in ${formatWaitDuration(retryAfterMs)}`,
-        pollCount: pollCount + 1,
-        retryAfterMs,
-      });
-      await delay(retryAfterMs);
+  async collectCostUsageReport(
+    initialRequest: AzureCostReportRequest,
+    input: { onProgress?: (progress: AzureCostReportProgress) => void | Promise<void> } = {},
+  ): Promise<AzureCostUsageRow[]> {
+    let request = initialRequest;
+    while (request.state === 'pending') {
+      await delay(Math.max(0, request.nextPollAt - Date.now()));
+      const pollCount = request.pollCount + 1;
       await input.onProgress?.({
         phase: 'polling',
-        message: `Checking Azure report status · attempt ${pollCount + 1}`,
-        pollCount: pollCount + 1,
+        message: `Checking Azure report status · attempt ${pollCount}`,
+        pollCount,
       });
       await this.waitForCostManagementRequestSlot();
-      response = await this.requestResponse(location, {
+      const response = await this.requestResponse(request.location, {
         headers: { ClientType: costManagementClientType },
       });
+      request = await this.readCostUsageReportResponse(
+        response,
+        request.subscriptionId,
+        pollCount,
+        input.onProgress,
+      );
     }
 
-    throw new Error('Azure Cost Details report did not return a result.');
+    if (request.state === 'no-data') return [];
+    const rows: AzureCostUsageRow[] = [];
+    for (const [blobIndex, blob] of request.blobs.entries()) {
+      await input.onProgress?.({
+        phase: 'downloading',
+        message: `Downloading cost CSV ${blobIndex + 1} of ${request.blobs.length}`,
+        blobIndex: blobIndex + 1,
+        blobCount: request.blobs.length,
+      });
+      const csv = await this.downloadCostDetailsBlob(blob.blobLink);
+      await input.onProgress?.({
+        phase: 'parsing',
+        message: `Reading cost CSV ${blobIndex + 1} of ${request.blobs.length}`,
+        blobIndex: blobIndex + 1,
+        blobCount: request.blobs.length,
+      });
+      rows.push(...parseCostDetailsCsv(request.subscriptionId, csv));
+    }
+    await input.onProgress?.({
+      phase: 'complete',
+      message: `Cost report loaded · ${rows.length.toLocaleString('en-US')} rows`,
+      rowCount: rows.length,
+      blobCount: request.blobs.length,
+    });
+    return rows;
+  }
+
+  private async readCostUsageReportResponse(
+    response: Response,
+    subscriptionId: string,
+    pollCount: number,
+    onProgress?: (progress: AzureCostReportProgress) => void | Promise<void>,
+  ): Promise<AzureCostReportRequest> {
+    if (response.status === 204) {
+      await onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
+      return { subscriptionId, state: 'no-data' };
+    }
+    if (response.status === 200) {
+      const result = await parseResponseJson<CostDetailsOperationResult>(response);
+      if (result.status === 'NoDataFound') {
+        await onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
+        return { subscriptionId, state: 'no-data' };
+      }
+      if (result.status === 'Failed') {
+        throw new Error(
+          result.error?.message ?? result.error?.code ?? 'Azure Cost Details report generation failed.',
+        );
+      }
+      if (result.status && result.status !== 'Completed') {
+        throw new Error(`Azure Cost Details report returned unexpected status "${result.status}".`);
+      }
+      if (result.manifest?.dataFormat && result.manifest.dataFormat.toLowerCase() !== 'csv') {
+        throw new Error(`Azure Cost Details report returned unsupported format "${result.manifest.dataFormat}".`);
+      }
+      if (!result.manifest) {
+        throw new Error('Azure Cost Details report completed without a manifest.');
+      }
+      const blobs = result.manifest.blobs?.filter(
+        (blob): blob is { blobLink: string; byteCount?: number } => Boolean(blob.blobLink),
+      ) ?? [];
+      if (blobs.length === 0) {
+        throw new Error('Azure Cost Details report completed without a downloadable CSV blob.');
+      }
+      await onProgress?.({
+        phase: 'ready',
+        message: `Azure report ready · ${blobs.length} CSV ${blobs.length === 1 ? 'file' : 'files'}`,
+        blobCount: blobs.length,
+      });
+      return { subscriptionId, state: 'ready', blobs };
+    }
+    if (response.status !== 202) {
+      throw new Error(`Azure Cost Details report returned unexpected HTTP ${response.status}.`);
+    }
+    if (pollCount >= costDetailsReportMaxPollCount) {
+      throw new Error('Azure Cost Details report did not finish before the polling limit.');
+    }
+    const location = response.headers.get('location');
+    if (!location) throw new Error('Azure Cost Details report returned HTTP 202 without a Location header.');
+    assertArmOperationUrl(location, this.baseUrl);
+    const retryAfterMs = costDetailsPollDelayMs(response);
+    await onProgress?.({
+      phase: 'waiting',
+      message: `Azure is generating the report · checking again in ${formatWaitDuration(retryAfterMs)}`,
+      pollCount: pollCount + 1,
+      retryAfterMs,
+    });
+    return {
+      subscriptionId,
+      state: 'pending',
+      location,
+      nextPollAt: Date.now() + retryAfterMs,
+      pollCount,
+    };
   }
 
   private async downloadCostDetailsBlob(blobLink: string, retryCount = 0): Promise<string> {
