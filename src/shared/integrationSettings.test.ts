@@ -211,11 +211,14 @@ const microsoftAzure = getIntegrationSettingsDefinition('microsoft-azure');
 assert.ok(microsoftAzure);
 assert.equal(microsoftAzure.displayName, 'Azure - Lighthouse');
 assert.equal(integrationHasCapability('microsoft-azure', 'live-api'), true);
-assert.equal(integrationHasCapability('microsoft-azure', 'mapping'), false);
+assert.equal(integrationHasCapability('microsoft-azure', 'mapping'), true);
 assert.equal(integrationHasCapability('microsoft-azure', 'invoice-import'), false);
-assert.deepEqual(listIntegrationApiOperations('microsoft-azure').map((operation) => operation.key), ['azure-cost-usage']);
+assert.deepEqual(listIntegrationApiOperations('microsoft-azure').map((operation) => operation.key), [
+  'azure-cost-usage',
+  'azure-cost-monthly',
+]);
 assert.equal(microsoftAzure.requiredNonSecrets.some((setting) => setting.key === 'subscriptionId'), false);
-assert.equal(microsoftAzure.optionalNonSecrets?.find((setting) => setting.key === 'lookbackDays')?.defaultValue, '35');
+assert.equal(microsoftAzure.optionalNonSecrets?.find((setting) => setting.key === 'monthlyBackfillMonths')?.defaultValue, '3');
 assert.equal(
   getIntegrationDataSource('microsoft-azure', 'customer-product-breakdown')?.ingestionMethods.includes('live-api'),
   true,

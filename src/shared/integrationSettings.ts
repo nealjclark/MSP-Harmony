@@ -120,7 +120,8 @@ const integrationApiOperations: Partial<Record<IntegrationId, IntegrationApiOper
     { key: 'usage-snapshots', label: 'Organization product usage', dataSourceKey: 'huntress-organization-product-usage' },
   ],
   'microsoft-azure': [
-    { key: 'azure-cost-usage', label: 'Azure Cost Monitor', dataSourceKey: 'azure-subscription-consumption' },
+    { key: 'azure-cost-usage', label: 'Daily charges', dataSourceKey: 'azure-subscription-consumption' },
+    { key: 'azure-cost-monthly', label: 'Completed-month backfill', dataSourceKey: 'azure-subscription-consumption' },
   ],
   'ingram-micro': [
     { key: 'ingram-invoices', label: 'Microsoft invoice reports', dataSourceKey: 'ingram-azure-invoices' },
@@ -534,7 +535,7 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     displayName: 'Azure - Lighthouse',
     category: 'Cloud',
     authMode: 'oauth2',
-    capabilities: ['live-api'],
+    capabilities: ['live-api', 'mapping'],
     dataSources: [
       dataSource(
         'azure-subscription-consumption',
@@ -556,21 +557,12 @@ export const integrationSettingsRegistry: IntegrationSettingsDefinition[] = [
     ],
     optionalNonSecrets: [
       optionalNonSecret(
-        'subscriptionIds',
-        'Subscription allowlist',
-        'AZURE_SUBSCRIPTION_IDS',
-        undefined,
-        'textarea',
-        'Optional comma- or line-separated subscription IDs. Leave blank to sync every subscription delegated through Azure Lighthouse.',
-        'Azure Cost Management',
-      ),
-      optionalNonSecret(
-        'lookbackDays',
-        'Usage lookback days',
-        'AZURE_LOOKBACK_DAYS',
-        '35',
+        'monthlyBackfillMonths',
+        'Completed months to backfill',
+        'AZURE_MONTHLY_BACKFILL_MONTHS',
+        '3',
         'text',
-        'Daily Cost Management window to refresh on each sync. Use at least 35 days to cover late adjustments.',
+        'How many fully completed months the monthly job re-pulls. The current partial month is never included.',
         'Azure Cost Management',
       ),
     ],

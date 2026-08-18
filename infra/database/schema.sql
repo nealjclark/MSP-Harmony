@@ -2433,3 +2433,124 @@ CREATE TABLE IF NOT EXISTS sales_quote_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_sales_quote_decisions_request
   ON sales_quote_decisions(quote_request_id, revision DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS azure_lighthouse_tenants (
+  tenant_id text PRIMARY KEY,
+  tenant_name text,
+  tenant_default_domain text,
+  subscription_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  subscription_names jsonb NOT NULL DEFAULT '{}'::jsonb,
+  subscription_count integer NOT NULL DEFAULT 0,
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE azure_lighthouse_tenants
+  ADD COLUMN IF NOT EXISTS subscription_names jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+-- Per-subscription Azure Cost Management coverage. Unlike azure_cost_daily,
+-- this records successful empty responses so zero-cost subscriptions do not
+-- get queried repeatedly. Daily rows use covered_through as the last complete
+-- usage date checked. Monthly rows use cursor_date as the next month to query.
+CREATE TABLE IF NOT EXISTS azure_cost_sync_checkpoints (
+  subscription_id text NOT NULL,
+  sync_mode text NOT NULL CHECK (sync_mode IN ('daily', 'monthly')),
+  covered_from date,
+  covered_through date,
+  cursor_date date,
+  last_window_from date,
+  last_window_to date,
+  last_attempt_at timestamptz,
+  last_success_at timestamptz,
+  last_row_count integer NOT NULL DEFAULT 0 CHECK (last_row_count >= 0),
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'success', 'failed')),
+  next_retry_at timestamptz,
+  last_error text,
+  last_sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (subscription_id, sync_mode)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_cost_sync_checkpoints_due
+  ON azure_cost_sync_checkpoints(sync_mode, next_retry_at, covered_through, cursor_date);
+
+CREATE TABLE IF NOT EXISTS ncentral_software_inventory_reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  scope_type text NOT NULL CHECK (scope_type IN ('customer', 'site')),
+  customer_id text NOT NULL,
+  customer_name text NOT NULL,
+  site_id text,
+  site_name text,
+  status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'complete', 'partial', 'failed')),
+  requested_by text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '90 days',
+  total_devices integer NOT NULL DEFAULT 0,
+  completed_devices integer NOT NULL DEFAULT 0,
+  failed_devices integer NOT NULL DEFAULT 0,
+  application_count integer NOT NULL DEFAULT 0,
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((scope_type = 'site' AND site_id IS NOT NULL) OR scope_type = 'customer')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ncentral_software_inventory_active_scope
+  ON ncentral_software_inventory_reports(scope_type, customer_id, coalesce(site_id, ''))
+  WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS idx_ncentral_software_inventory_reports_recent
+  ON ncentral_software_inventory_reports(requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ncentral_software_inventory_reports_expiry
+  ON ncentral_software_inventory_reports(expires_at);
+
+CREATE TABLE IF NOT EXISTS ncentral_software_inventory_devices (
+  report_id uuid NOT NULL REFERENCES ncentral_software_inventory_reports(id) ON DELETE CASCADE,
+  device_id text NOT NULL,
+  customer_id text NOT NULL,
+  customer_name text NOT NULL,
+  site_id text,
+  site_name text,
+  device_name text NOT NULL,
+  device_class text,
+  last_user text,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'complete', 'failed')),
+  attempts integer NOT NULL DEFAULT 0,
+  lease_expires_at timestamptz,
+  started_at timestamptz,
+  completed_at timestamptz,
+  error_message text,
+  raw_device jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (report_id, device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ncentral_software_inventory_devices_work
+  ON ncentral_software_inventory_devices(report_id, status, lease_expires_at, device_name);
+
+CREATE TABLE IF NOT EXISTS ncentral_software_inventory_applications (
+  id bigserial PRIMARY KEY,
+  report_id uuid NOT NULL REFERENCES ncentral_software_inventory_reports(id) ON DELETE CASCADE,
+  device_id text NOT NULL,
+  application_key text NOT NULL,
+  application_name text NOT NULL,
+  normalized_name text NOT NULL,
+  publisher text,
+  version text,
+  install_date text,
+  install_location text,
+  raw_application jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (report_id, device_id)
+    REFERENCES ncentral_software_inventory_devices(report_id, device_id) ON DELETE CASCADE,
+  UNIQUE (report_id, device_id, application_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ncentral_software_inventory_applications_report_name
+  ON ncentral_software_inventory_applications(report_id, normalized_name, application_name);
+CREATE INDEX IF NOT EXISTS idx_ncentral_software_inventory_applications_report_device
+  ON ncentral_software_inventory_applications(report_id, device_id);

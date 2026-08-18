@@ -3,6 +3,9 @@ import { getIntegrationSettingsDefinition, type IntegrationSettingsValidation } 
 import type { IntegrationRuntimeSettings, IntegrationSettingsProvider } from '../../config/settingsProvider';
 import type { AzureSubscription } from './client';
 import {
+  azureCheckpointCostWindows,
+  azureCostMonthWindows,
+  azureCostQueryWindow,
   azureProductKey,
   syncAzureCostUsage,
   testAzureConnection,
@@ -22,7 +25,7 @@ const provider: IntegrationSettingsProvider = {
         endpoint: 'https://management.azure.com',
         tenantId: 'msp-tenant',
         clientId: 'client-id',
-        lookbackDays: '35',
+        monthlyBackfillMonths: '3',
       },
       secrets: { clientSecret: 'client-secret' },
       secretSource: 'environment',
@@ -59,6 +62,12 @@ const client: AzureUsageClient = {
     throw new Error('Tenant projection is temporarily unavailable');
   },
   async queryCostUsage(input) {
+    await input.onProgress?.({
+      phase: 'waiting',
+      message: 'Azure is generating the report · checking again in 20 seconds',
+      pollCount: 1,
+      retryAfterMs: 20_000,
+    });
     return [
       {
         subscriptionId: input.subscriptionId,
@@ -95,6 +104,7 @@ async function run() {
             {
               external_account_id: subscriptions[0]?.subscriptionId,
               customer_id: 'customer-1',
+              customer_name: 'Northstar Legal',
               agreement_id: 'agreement-1',
               agreement_addition_id: 'agreement-addition-1',
             } as T,
@@ -120,6 +130,98 @@ async function run() {
     },
   };
 
+  const dailyWindow = azureCostQueryWindow({
+    mode: 'daily',
+    now: new Date('2026-08-13T12:00:00.000Z'),
+  });
+  assert.equal(dailyWindow.from, '2026-08-01T00:00:00.000Z');
+  assert.equal(dailyWindow.to, '2026-08-13T00:00:00.000Z');
+
+  const firstOfMonthWindow = azureCostQueryWindow({
+    mode: 'daily',
+    now: new Date('2026-08-01T12:00:00.000Z'),
+  });
+  assert.equal(firstOfMonthWindow.from, '2026-07-31T00:00:00.000Z');
+  assert.equal(firstOfMonthWindow.to, '2026-08-01T00:00:00.000Z');
+
+  const monthlyWindow = azureCostQueryWindow({
+    mode: 'monthly',
+    now: new Date('2026-08-13T12:00:00.000Z'),
+    monthlyBackfillMonths: 3,
+  });
+  assert.equal(monthlyWindow.from, '2026-05-01T00:00:00.000Z');
+  assert.equal(monthlyWindow.to, '2026-08-01T00:00:00.000Z');
+  assert.equal(monthlyWindow.months, 3);
+  assert.deepEqual(
+    azureCostMonthWindows(monthlyWindow.from, monthlyWindow.to),
+    [
+      { from: '2026-05-01T00:00:00.000Z', to: '2026-06-01T00:00:00.000Z' },
+      { from: '2026-06-01T00:00:00.000Z', to: '2026-07-01T00:00:00.000Z' },
+      { from: '2026-07-01T00:00:00.000Z', to: '2026-08-01T00:00:00.000Z' },
+    ],
+  );
+  assert.deepEqual(
+    azureCheckpointCostWindows({
+      mode: 'daily',
+      fullWindow: dailyWindow,
+      checkpoint: {
+        subscriptionId: subscriptions[0]?.subscriptionId ?? '',
+        syncMode: 'daily',
+        coveredThrough: '2026-08-10',
+        lastRowCount: 0,
+        status: 'success',
+      },
+    }),
+    [{
+      from: '2026-08-08T00:00:00.000Z',
+      to: '2026-08-13T00:00:00.000Z',
+      coveredThrough: '2026-08-12',
+    }],
+  );
+  assert.deepEqual(
+    azureCheckpointCostWindows({
+      mode: 'daily',
+      fullWindow: dailyWindow,
+      checkpoint: {
+        subscriptionId: subscriptions[0]?.subscriptionId ?? '',
+        syncMode: 'daily',
+        coveredThrough: '2026-08-12',
+        lastRowCount: 0,
+        status: 'success',
+      },
+    }),
+    [],
+  );
+  assert.deepEqual(
+    azureCheckpointCostWindows({
+      mode: 'monthly',
+      fullWindow: monthlyWindow,
+      checkpoint: {
+        subscriptionId: subscriptions[0]?.subscriptionId ?? '',
+        syncMode: 'monthly',
+        coveredFrom: '2026-05-01',
+        coveredThrough: '2026-05-31',
+        cursorDate: '2026-06-01',
+        lastRowCount: 0,
+        status: 'success',
+      },
+    }),
+    [
+      {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-07-01T00:00:00.000Z',
+        coveredThrough: '2026-06-30',
+        cursorDate: '2026-07-01',
+      },
+      {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-08-01T00:00:00.000Z',
+        coveredThrough: '2026-07-31',
+        cursorDate: '2026-08-01',
+      },
+    ],
+  );
+
   const connection = await testAzureConnection({
     provider,
     client,
@@ -142,6 +244,9 @@ async function run() {
   assert.equal(result.recordsWritten, 1);
   assert.equal(result.mappedSnapshots, 1);
   assert.equal(result.totalCost, 12.34);
+  assert.equal(result.mode, 'daily');
+  assert.equal(result.queryWindow.from, '2026-07-01T00:00:00.000Z');
+  assert.equal(result.queryWindow.to, '2026-07-25T00:00:00.000Z');
   assert.equal(inserted[0]?.[1], 'microsoft-azure');
   assert.equal(inserted[0]?.[2], 'customer-1');
   assert.equal(inserted[0]?.[4], 'agreement-addition-1');
@@ -155,11 +260,86 @@ async function run() {
   assert.equal(canonicalCosts[0]?.[7], 'Usage');
   assert.equal(canonicalCosts[0]?.[9], 12.34);
   assert.equal(JSON.parse(String(completed[0]?.[3])).successfulSubscriptions, 1);
-  assert.equal(progress[0]?.total, 2);
-  assert.equal(progress[0]?.unitLabel, 'monitoring steps');
+  assert.equal(progress[0]?.total, 1);
+  assert.equal(progress[0]?.unitLabel, 'subscriptions');
+  const reportStatus = progress.find((item) => item.currentItem?.includes('Azure is generating the report'));
+  assert.match(reportStatus?.currentItem ?? '', /Collecting Northstar Legal/);
+  assert.ok(progress.some((item) => item.currentItem?.includes('Storing cost rows 1 of 1')));
   assert.match(progress.find((item) => item.completed === 1)?.currentItem ?? '', /Evaluating cost changes/);
-  assert.equal(progress[progress.length - 1]?.completed, 2);
-  assert.equal(progress[progress.length - 1]?.total, 2);
+  assert.equal(progress[progress.length - 1]?.completed, 1);
+  assert.equal(progress[progress.length - 1]?.total, 1);
+  const monthly = await syncAzureCostUsage({
+    pool: database,
+    provider,
+    client,
+    now: '2026-08-13T12:00:00.000Z',
+    operationKey: 'azure-cost-monthly',
+  });
+  assert.equal(monthly.mode, 'monthly');
+  assert.equal(monthly.operationKey, 'azure-cost-monthly');
+  assert.equal(monthly.queryWindow.from, '2026-05-01T00:00:00.000Z');
+  assert.equal(monthly.queryWindow.to, '2026-08-01T00:00:00.000Z');
+
+  const emptyCheckpointWrites: Array<{ sql: string; values: unknown[] }> = [];
+  const emptyDatabase: Queryable = {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      if (sql.includes('insert into sync_runs')) {
+        return { rows: [{ id: 'azure-empty-sync' } as T] };
+      }
+      if (sql.includes('insert into azure_cost_sync_checkpoints')) {
+        emptyCheckpointWrites.push({ sql, values: values ?? [] });
+      }
+      return { rows: [] as T[] };
+    },
+  };
+  const emptyResult = await syncAzureCostUsage({
+    pool: emptyDatabase,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return subscriptions;
+      },
+      async queryCostUsage() {
+        return [];
+      },
+    },
+    now: '2026-08-13T12:00:00.000Z',
+  });
+  assert.equal(emptyResult.recordsRead, 0);
+  const emptySuccess = emptyCheckpointWrites.find((write) => write.sql.includes('last_success_at'));
+  assert.ok(emptySuccess);
+  assert.equal(emptySuccess.values[3], '2026-08-12');
+  assert.equal(emptySuccess.values[5], 0);
+
+  const roundRobinCalls: Array<{ subscriptionId: string; from: string }> = [];
+  const secondSubscription: AzureSubscription = {
+    subscriptionId: '22222222-2222-2222-2222-222222222222',
+    displayName: 'Southstar Azure',
+    tenantId: 'second-customer-tenant',
+    state: 'Enabled',
+    raw: {},
+  };
+  await syncAzureCostUsage({
+    pool: emptyDatabase,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return [...subscriptions, secondSubscription];
+      },
+      async queryCostUsage(input) {
+        roundRobinCalls.push({ subscriptionId: input.subscriptionId, from: input.from });
+        return [];
+      },
+    },
+    now: '2026-08-13T12:00:00.000Z',
+    operationKey: 'azure-cost-monthly',
+  });
+  assert.deepEqual(roundRobinCalls.slice(0, 4), [
+    { subscriptionId: subscriptions[0]?.subscriptionId ?? '', from: '2026-05-01T00:00:00.000Z' },
+    { subscriptionId: secondSubscription.subscriptionId, from: '2026-05-01T00:00:00.000Z' },
+    { subscriptionId: subscriptions[0]?.subscriptionId ?? '', from: '2026-06-01T00:00:00.000Z' },
+    { subscriptionId: secondSubscription.subscriptionId, from: '2026-06-01T00:00:00.000Z' },
+  ]);
   assert.equal(azureProductKey({ serviceName: 'Azure SQL Database' }), 'azure:azure-sql-database');
 
   console.log('azure operations tests passed');

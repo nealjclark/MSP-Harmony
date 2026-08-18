@@ -19,6 +19,22 @@ export type NcentralDeviceFilter = {
   raw: unknown;
 };
 
+export type NcentralCustomer = {
+  customerId: string;
+  customerName: string;
+  parentId?: string;
+  raw: unknown;
+};
+
+export type NcentralSite = {
+  siteId: string;
+  siteName: string;
+  customerId?: string;
+  raw: unknown;
+};
+
+export type NcentralDeviceAssets = Record<string, unknown>;
+
 export type NcentralDeviceSummary = {
   deviceId: number;
   uri?: string;
@@ -133,6 +149,29 @@ export class NcentralClient {
     return rows.map(parseDeviceFilter).filter((filter): filter is NcentralDeviceFilter => Boolean(filter));
   }
 
+  async listCustomers(options: NcentralListOptions = {}): Promise<NcentralCustomer[]> {
+    const rows = await this.listPaged<Record<string, unknown>>('/customers', options);
+    return rows.map(parseCustomer).filter((customer): customer is NcentralCustomer => Boolean(customer));
+  }
+
+  async listSites(options: NcentralListOptions = {}): Promise<NcentralSite[]> {
+    const rows = await this.listPaged<Record<string, unknown>>('/sites', options);
+    return rows.map(parseSite).filter((site): site is NcentralSite => Boolean(site));
+  }
+
+  async listDevices(options: NcentralListOptions = {}): Promise<NcentralDeviceSummary[]> {
+    const rows = await this.listPaged<Record<string, unknown>>('/devices', options);
+    return rows.map(parseDeviceSummary).filter((device): device is NcentralDeviceSummary => Boolean(device));
+  }
+
+  async listDevicesByOrgUnit(orgUnitId: string, options: NcentralListOptions = {}): Promise<NcentralDeviceSummary[]> {
+    const rows = await this.listPaged<Record<string, unknown>>(
+      `/org-units/${encodeURIComponent(orgUnitId)}/devices`,
+      options,
+    );
+    return rows.map(parseDeviceSummary).filter((device): device is NcentralDeviceSummary => Boolean(device));
+  }
+
   async listDevicesByFilter(filterId: string, options: NcentralListOptions = {}): Promise<NcentralDeviceSummary[]> {
     const rows = await this.listPaged<Record<string, unknown>>('/devices', options, {
       filterId,
@@ -154,6 +193,14 @@ export class NcentralClient {
       licenseMode: stringValue(record.licenseMode),
       lastApplianceCheckinTime: stringValue(record.lastApplianceCheckinTime),
     };
+  }
+
+  async getDeviceAssets(deviceId: number): Promise<NcentralDeviceAssets> {
+    const record = await this.request<unknown>(`/devices/${encodeURIComponent(String(deviceId))}/assets`);
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      throw new NcentralApiError(`N-central device ${deviceId} did not return a valid asset payload.`);
+    }
+    return record as NcentralDeviceAssets;
   }
 
   async enrichDevicesWithDetails(
@@ -273,14 +320,28 @@ export class NcentralClient {
       ...(options.authenticated && this.tokens?.accessToken ? { Authorization: `Bearer ${this.tokens.accessToken}` } : {}),
     };
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: options.body,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: options.body,
+      });
+    } catch (error) {
+      if ((options.retryCount ?? 0) < maxRetryCount) {
+        await delay(transientRetryDelayMs(options.retryCount ?? 0));
+        return this.rawRequest<T>(path, {
+          ...options,
+          retryCount: (options.retryCount ?? 0) + 1,
+        });
+      }
+      throw new NcentralApiError(
+        error instanceof Error ? `N-central request failed: ${error.message}` : 'N-central request failed.',
+      );
+    }
     const responseText = await response.text();
 
-    if (response.status === 429 && (options.retryCount ?? 0) < maxRetryCount) {
+    if ((response.status === 429 || response.status >= 500) && (options.retryCount ?? 0) < maxRetryCount) {
       await delay(retryDelayMs(response, options.retryCount ?? 0));
       return this.rawRequest<T>(path, {
         ...options,
@@ -342,6 +403,30 @@ function parseDeviceFilter(record: Record<string, unknown>): NcentralDeviceFilte
     filterId,
     filterName,
     description: stringValue(record.description),
+    raw: record,
+  };
+}
+
+function parseCustomer(record: Record<string, unknown>): NcentralCustomer | undefined {
+  const customerId = stringValue(record.customerId ?? record.orgUnitId);
+  const customerName = stringValue(record.customerName ?? record.orgUnitName ?? record.name);
+  if (!customerId || !customerName) return undefined;
+  return {
+    customerId,
+    customerName,
+    parentId: stringValue(record.parentId ?? record.soId),
+    raw: record,
+  };
+}
+
+function parseSite(record: Record<string, unknown>): NcentralSite | undefined {
+  const siteId = stringValue(record.siteId ?? record.orgUnitId);
+  const siteName = stringValue(record.siteName ?? record.orgUnitName ?? record.name);
+  if (!siteId || !siteName) return undefined;
+  return {
+    siteId,
+    siteName,
+    customerId: stringValue(record.customerId ?? record.parentId),
     raw: record,
   };
 }
@@ -427,7 +512,11 @@ function retryDelayMs(response: Response, retryCount: number) {
     }
   }
 
-  return 250 * 2 ** retryCount;
+  return transientRetryDelayMs(retryCount);
+}
+
+function transientRetryDelayMs(retryCount: number) {
+  return 250 * 2 ** retryCount + Math.floor(Math.random() * 100);
 }
 
 function delay(ms: number) {

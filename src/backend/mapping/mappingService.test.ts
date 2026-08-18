@@ -1053,6 +1053,37 @@ async function run() {
     true,
   );
 
+  const azureMappingQueries: Array<{ sql: string; values?: unknown[] }> = [];
+  const azureMappingState = await listMappingState(azureMappingStateDatabase(azureMappingQueries), 'microsoft-azure');
+  const barketTenant = azureMappingState.accountCandidates.find(
+    (candidate) => candidate.externalAccountId === '5e92ae25-fd41-4bac-8a93-d20e728b1b94',
+  );
+  assert.equal(barketTenant?.externalAccountName, 'Barket Epstein Microsoft Tenant');
+  assert.deepEqual(barketTenant?.azureSubscriptions, [
+    {
+      subscriptionId: '20fdd538-8100-4f7f-9ad3-4ee03f54464b',
+      subscriptionName: 'Barket Epstein Main Subscription',
+    },
+  ]);
+  const gentileTenant = azureMappingState.accountMappings.find(
+    (mapping) => mapping.externalAccountId === 'e1937383-1831-4f27-87a7-e9734822c612',
+  );
+  assert.equal(gentileTenant?.externalAccountName, 'e1937383-1831-4f27-87a7-e9734822c612');
+  assert.deepEqual(gentileTenant?.azureSubscriptions, [
+    {
+      subscriptionId: '4b157b0c-f850-49df-9e12-c0a199dd1cb5',
+      subscriptionName: 'Azure subscription 1',
+    },
+  ]);
+  assert.equal(
+    azureMappingQueries.some(
+      (query) => query.sql.includes('subscription_rows as') && query.sql.includes('subscription_names'),
+    ),
+    true,
+  );
+  const azureTenantSourceSql = azureMappingQueries.find((query) => query.sql.includes('all_tenants as'))?.sql ?? '';
+  assert.equal(azureTenantSourceSql.includes('max(all_tenants.subscription_name)'), false);
+
   console.log('mapping service tests passed');
 }
 
@@ -1107,6 +1138,121 @@ function mappingWorkflowDatabase(existingMappings: unknown[]) {
   return {
     database: workflowDatabase,
     queries: workflowQueries,
+  };
+}
+
+function azureMappingStateDatabase(queries: Array<{ sql: string; values?: unknown[] }>): Queryable {
+  return {
+    async query<T = unknown>(sql: string, values?: unknown[]) {
+      queries.push({ sql, values });
+
+      if (sql.includes('update vendor_account_mappings') && sql.includes('resolved_names')) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('subscription_rows as')) {
+        return {
+          rows: [
+            {
+              tenant_id: '5e92ae25-fd41-4bac-8a93-d20e728b1b94',
+              subscription_id: '20fdd538-8100-4f7f-9ad3-4ee03f54464b',
+              subscription_name: 'Barket Epstein Main Subscription',
+            },
+            {
+              tenant_id: 'e1937383-1831-4f27-87a7-e9734822c612',
+              subscription_id: '4b157b0c-f850-49df-9e12-c0a199dd1cb5',
+              subscription_name: 'Azure subscription 1',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('from vendor_account_mappings') && sql.includes('inner join customers')) {
+        return {
+          rows: [
+            {
+              id: 'azure-gentile-mapping',
+              vendor_id: 'microsoft-azure',
+              external_account_id: 'e1937383-1831-4f27-87a7-e9734822c612',
+              external_account_name: '4b157b0c-f850-49df-9e12-c0a199dd1cb5',
+              customer_id: 'customer-gentile',
+              customer_name: 'Gentile Brengel and Lin LLP',
+              agreement_id: null,
+              agreement_name: null,
+              mapping_status: 'approved',
+              confidence: 'manual',
+              match_score: 100,
+              mapping_source: 'manual',
+              active: true,
+              reviewed_by: 'reviewer',
+              reviewed_at: '2026-08-14T00:00:00.000Z',
+              last_seen_at: '2026-08-14T00:00:00.000Z',
+              match_evidence: [],
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('all_tenants as')) {
+        return {
+          rows: [
+            {
+              external_account_id: '5e92ae25-fd41-4bac-8a93-d20e728b1b94',
+              external_account_name: 'Barket Epstein Microsoft Tenant',
+              row_count: 1,
+              product_codes: [],
+              last_seen_at: '2026-08-14T00:00:00.000Z',
+            },
+            {
+              external_account_id: 'e1937383-1831-4f27-87a7-e9734822c612',
+              external_account_name: 'e1937383-1831-4f27-87a7-e9734822c612',
+              row_count: 1,
+              product_codes: [],
+              last_seen_at: '2026-08-14T00:00:00.000Z',
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes("where mappings.vendor_id = 'microsoft-365'")) {
+        return { rows: [] as T[] };
+      }
+
+      if (sql.includes('from customers')) {
+        return {
+          rows: [
+            {
+              customer_id: 'customer-barket',
+              connectwise_company_id: '1001',
+              customer_name: 'Barket Epstein Kearon Aldea & LoTurco, LLP',
+              aliases: [],
+              agreement_id: null,
+              agreement_name: null,
+              agreement_status: null,
+              addition_count: 0,
+              product_codes: [],
+            },
+            {
+              customer_id: 'customer-gentile',
+              connectwise_company_id: '1002',
+              customer_name: 'Gentile Brengel and Lin LLP',
+              aliases: [],
+              agreement_id: null,
+              agreement_name: null,
+              agreement_status: null,
+              addition_count: 0,
+              product_codes: [],
+            },
+          ] as T[],
+        };
+      }
+
+      if (sql.includes('select count(*) as count')) {
+        return { rows: [{ count: 0 }] as T[] };
+      }
+
+      return { rows: [] as T[] };
+    },
   };
 }
 

@@ -34,6 +34,11 @@ export type VendorAccountSource = {
   lastSeenAt?: string;
 };
 
+export type AzureMappingSubscription = {
+  subscriptionId: string;
+  subscriptionName?: string;
+};
+
 export type AgreementCandidate = {
   agreementId: string;
   agreementName: string;
@@ -54,6 +59,7 @@ export type AccountMappingCandidate = {
   vendorId: VendorKey;
   externalAccountId: string;
   externalAccountName: string;
+  azureSubscriptions?: AzureMappingSubscription[];
   customerId?: string;
   customerName?: string;
   agreementId?: string;
@@ -745,6 +751,9 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
   if (vendorId === 'microsoft-365') {
     await refreshMicrosoft365AccountMappingNames(database);
   }
+  if (vendorId === 'microsoft-azure') {
+    await refreshAzureLighthouseAccountMappingNames(database);
+  }
 
   const [
     accountMappings,
@@ -774,12 +783,47 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     loadConnectWiseCustomers(database),
   ]);
 
+  const tenantAccountIds = new Set(accountCandidates.map((candidate) => candidate.externalAccountId.toLowerCase()));
+  const visibleAccountMappings = vendorId === 'microsoft-azure'
+    ? accountMappings.filter((mapping) => tenantAccountIds.has(mapping.externalAccountId.toLowerCase()))
+    : accountMappings;
+  const azureTenantById = new Map(
+    accountCandidates.map((candidate) => [candidate.externalAccountId.toLowerCase(), candidate] as const),
+  );
+  const azureSubscriptionsByTenantId = vendorId === 'microsoft-azure'
+    ? await loadAzureMappingSubscriptions(database)
+    : new Map<string, AzureMappingSubscription[]>();
+  const decorateAzureTenantRow = <T extends AccountMappingCandidate>(row: T): T => {
+    const source = azureTenantById.get(row.externalAccountId.toLowerCase());
+    if (!source) return row;
+    const azureSubscriptions = azureSubscriptionsByTenantId.get(row.externalAccountId.toLowerCase()) ?? [];
+    const subscriptionCount = source.evidence.find((item) => item.label === 'Vendor rows' || item.label === 'Subscriptions')?.value
+      ?? source.evidence.find((item) => item.label === 'Subscriptions')?.value;
+    return {
+      ...row,
+      externalAccountName: readableAzureMappingName(source.externalAccountName, row.externalAccountId)
+        ?? readableAzureMappingName(row.externalAccountName, row.externalAccountId)
+        ?? source.externalAccountName
+        ?? row.externalAccountName,
+      azureSubscriptions,
+      evidence: [
+        ...row.evidence.filter((item) => item.label !== 'Subscriptions' && item.label !== 'Vendor rows'),
+        ...(typeof subscriptionCount === 'number' ? [{ label: 'Subscriptions', value: subscriptionCount }] : []),
+      ],
+    };
+  };
+  const namedAccountMappings = vendorId === 'microsoft-azure'
+    ? visibleAccountMappings.map(decorateAzureTenantRow)
+    : visibleAccountMappings;
   const mappedAccountIds = new Set(
-    accountMappings
+    namedAccountMappings
       .filter((mapping) => mapping.status === 'approved' && mapping.active)
       .map((mapping) => mapping.externalAccountId),
   );
-  const unmappedCandidates = accountCandidates.filter((candidate) => !mappedAccountIds.has(candidate.externalAccountId));
+  const unmappedCandidates = (vendorId === 'microsoft-azure'
+    ? accountCandidates.map(decorateAzureTenantRow)
+    : accountCandidates
+  ).filter((candidate) => !mappedAccountIds.has(candidate.externalAccountId));
   const mappedProductKeys = new Set(
     productMappings
       .filter((mapping) => mapping.status === 'approved' && mapping.active)
@@ -796,8 +840,8 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
   return {
     vendorId,
     summary: {
-      accountMappings: accountMappings.length,
-      approvedAccountMappings: accountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length,
+      accountMappings: namedAccountMappings.length,
+      approvedAccountMappings: namedAccountMappings.filter((mapping) => mapping.status === 'approved' && mapping.active).length,
       accountCandidates: unmappedCandidates.length,
       accountCandidatesNeedingReview: unmappedCandidates.filter((candidate) => candidate.status !== 'approved').length,
       productMappings: productMappings.length,
@@ -808,7 +852,7 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
       linkedProductRules: productLinkRules.filter((rule) => rule.status === 'approved' && rule.active).length,
       unmappedSnapshots,
     },
-    accountMappings,
+    accountMappings: namedAccountMappings,
     accountCandidates: unmappedCandidates,
     productMappings,
     productCandidates: unmappedProductCandidates,
@@ -820,6 +864,70 @@ export async function listMappingState(database: Queryable, vendorId: VendorKey)
     ncentralSiteOptions,
     customerOptions,
   };
+}
+
+export async function loadAzureMappingSubscriptions(database: Queryable) {
+  const result = await database.query<{
+    tenant_id: string;
+    subscription_id: string;
+    subscription_name: string | null;
+  }>(
+    `with latest_azure_sync as (
+       select id
+       from sync_runs
+       where integration_id = 'microsoft-azure'
+         and status = 'complete'
+       order by completed_at desc nulls last, started_at desc
+       limit 1
+     ),
+     subscription_rows as (
+       select
+         trim(dimensions->>'tenantId') as tenant_id,
+         trim(coalesce(nullif(dimensions->>'subscriptionId', ''), external_account_id)) as subscription_id,
+         ${sqlFriendlyLabel("dimensions->>'subscriptionName'", "coalesce(nullif(dimensions->>'subscriptionId', ''), external_account_id)")} as subscription_name
+       from vendor_usage_snapshots
+       where vendor_id = 'microsoft-azure'
+         and sync_run_id = (select id from latest_azure_sync)
+         and nullif(trim(dimensions->>'tenantId'), '') is not null
+       union all
+       select
+         trim(lighthouse.tenant_id) as tenant_id,
+         trim(subscription_id) as subscription_id,
+         ${sqlFriendlyLabel("lighthouse.subscription_names->>lower(subscription_id)", 'subscription_id')} as subscription_name
+       from azure_lighthouse_tenants lighthouse
+       cross join lateral jsonb_array_elements_text(coalesce(lighthouse.subscription_ids, '[]'::jsonb)) as subscription_row(subscription_id)
+     ),
+     deduplicated as (
+       select distinct on (lower(tenant_id), lower(subscription_id))
+         tenant_id,
+         subscription_id,
+         subscription_name
+       from subscription_rows
+       where nullif(tenant_id, '') is not null
+         and nullif(subscription_id, '') is not null
+       order by
+         lower(tenant_id),
+         lower(subscription_id),
+         (subscription_name is not null) desc
+     )
+     select tenant_id, subscription_id, subscription_name
+     from deduplicated
+     order by lower(tenant_id), lower(coalesce(subscription_name, subscription_id))`,
+  );
+
+  const subscriptionsByTenantId = new Map<string, AzureMappingSubscription[]>();
+  for (const row of result.rows) {
+    const tenantKey = row.tenant_id.trim().toLowerCase();
+    const subscriptionId = row.subscription_id.trim();
+    if (!tenantKey || !subscriptionId) continue;
+    const subscriptions = subscriptionsByTenantId.get(tenantKey) ?? [];
+    subscriptions.push({
+      subscriptionId,
+      subscriptionName: readableAzureMappingName(row.subscription_name, subscriptionId),
+    });
+    subscriptionsByTenantId.set(tenantKey, subscriptions);
+  }
+  return subscriptionsByTenantId;
 }
 
 export async function runAccountAutomap(
@@ -2795,7 +2903,74 @@ export async function generateAccountMappingCandidates(
     loadPreferredProductCodes(database, vendorId),
   ]);
 
-  return buildAccountMappingCandidates(vendorId, sources, customers, preferredProductCodes);
+  const candidates = buildAccountMappingCandidates(vendorId, sources, customers, preferredProductCodes, {
+    requireAgreement: vendorId !== 'microsoft-azure',
+  });
+  if (vendorId !== 'microsoft-azure') return candidates;
+  return applyAzureTenantMappingHints(database, candidates);
+}
+
+async function applyAzureTenantMappingHints(
+  database: Queryable,
+  candidates: AccountMappingCandidate[],
+): Promise<AccountMappingCandidate[]> {
+  const result = await database.query<{
+    external_account_id: string;
+    external_account_name: string | null;
+    customer_id: string;
+    customer_name: string;
+    agreement_id: string | null;
+    agreement_name: string | null;
+  }>(
+    `select
+       mappings.external_account_id,
+       mappings.external_account_name,
+       mappings.customer_id,
+       customers.name as customer_name,
+       mappings.agreement_id,
+       agreements.name as agreement_name
+     from vendor_account_mappings mappings
+     join customers on customers.id = mappings.customer_id
+     left join agreements on agreements.id = mappings.agreement_id
+     where mappings.vendor_id = 'microsoft-365'
+       and mappings.active = true
+       and mappings.mapping_status = 'approved'`,
+  );
+  const byTenantId = new Map(
+    result.rows.map((row) => [row.external_account_id.toLowerCase(), row] as const),
+  );
+  return candidates.map((candidate) => {
+    const hint = byTenantId.get(candidate.externalAccountId.toLowerCase());
+    if (!hint) return candidate;
+    const hintedName = readableAzureMappingName(hint.external_account_name, candidate.externalAccountId);
+    return {
+      ...candidate,
+      externalAccountName: readableAzureMappingName(candidate.externalAccountName, candidate.externalAccountId)
+        ?? hintedName
+        ?? candidate.externalAccountName,
+      customerId: hint.customer_id,
+      customerName: hint.customer_name,
+      agreementId: hint.agreement_id ?? undefined,
+      agreementName: hint.agreement_name ?? undefined,
+      status: 'approved' as const,
+      confidence: 'manual',
+      matchScore: 100,
+      activeRecommended: true,
+      reason: 'Matched the existing Microsoft 365 tenant mapping.',
+      evidence: [
+        ...candidate.evidence,
+        { label: 'Microsoft 365 tenant', value: hint.customer_name },
+      ],
+    };
+  });
+}
+
+function readableAzureMappingName(name: string | null | undefined, tenantId: string) {
+  const trimmed = name?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.toLowerCase() === tenantId.toLowerCase()) return undefined;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) return undefined;
+  return trimmed;
 }
 
 export function buildAccountMappingCandidates(
@@ -2803,7 +2978,9 @@ export function buildAccountMappingCandidates(
   sources: VendorAccountSource[],
   customers: ConnectWiseCustomerCandidate[],
   preferredProductCodes: string[] = [],
+  options: { requireAgreement?: boolean } = {},
 ): AccountMappingCandidate[] {
+  const requireAgreement = options.requireAgreement !== false;
   return sources.map((source) => {
     const rankedCustomers = customers
       .map((customer) => {
@@ -2841,7 +3018,7 @@ export function buildAccountMappingCandidates(
     const activeRecommended =
       best.score >= aggressiveAutoMapThreshold &&
       (!secondDistinct || best.score - secondDistinct.score >= ambiguityMargin) &&
-      agreementChoice.status === 'selected';
+      (!requireAgreement || agreementChoice.status === 'selected');
     const status: MappingStatus = activeRecommended ? 'approved' : 'needs-review';
 
     return {
@@ -2850,15 +3027,15 @@ export function buildAccountMappingCandidates(
       externalAccountName: source.externalAccountName,
       customerId: best.customer.customerId,
       customerName: best.customer.customerName,
-      agreementId: agreementChoice.agreement?.agreementId,
-      agreementName: agreementChoice.agreement?.agreementName,
+      agreementId: requireAgreement ? agreementChoice.agreement?.agreementId : undefined,
+      agreementName: requireAgreement ? agreementChoice.agreement?.agreementName : undefined,
       status,
       confidence: best.confidence,
       matchScore: best.score,
       activeRecommended,
       reason: activeRecommended
-        ? `${agreementChoice.reason} Unique customer match was strong enough to auto-approve.`
-        : agreementChoice.reason,
+        ? `${requireAgreement ? `${agreementChoice.reason} ` : ''}Unique customer match was strong enough to auto-approve.`
+        : requireAgreement ? agreementChoice.reason : 'Choose the ConnectWise customer for this Microsoft tenant.',
       evidence: [
         { label: 'Vendor rows', value: source.rowCount },
         { label: 'Best customer score', value: best.score },
@@ -2874,6 +3051,10 @@ export async function generateProductMappingCandidates(
   database: Queryable,
   vendorId: VendorKey,
 ): Promise<ProductMappingCandidate[]> {
+  if (vendorId === 'microsoft-azure') {
+    return [];
+  }
+
   const classes = productClassesForVendor(vendorId);
   if (classes.length === 0) {
     return generateDynamicProductMappingCandidates(database, vendorId);
@@ -3367,6 +3548,105 @@ export async function listIgnoredVendorProducts(
 }
 
 async function loadVendorAccountSources(database: Queryable, vendorId: VendorKey): Promise<VendorAccountSource[]> {
+  if (vendorId === 'microsoft-azure') {
+    const result = await database.query<AccountSourceRow>(
+      `with latest_azure_sync as (
+         select id
+         from sync_runs
+         where integration_id = 'microsoft-azure'
+           and status = 'complete'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       ),
+       sync_tenants as (
+         select
+           lower(trim(dimensions->>'tenantId')) as tenant_key,
+            min(trim(dimensions->>'tenantId')) as tenant_id,
+            max(${sqlFriendlyLabel("dimensions->>'tenantName'", "dimensions->>'tenantId'")}) as tenant_name,
+            max(${sqlFriendlyLabel("dimensions->>'tenantDefaultDomain'", "dimensions->>'tenantId'")}) as tenant_default_domain,
+            max(${sqlFriendlyLabel("dimensions->>'subscriptionName'", "coalesce(nullif(dimensions->>'subscriptionId', ''), external_account_id)")}) as subscription_name,
+            count(distinct coalesce(nullif(dimensions->>'subscriptionId', ''), external_account_id))::int as subscription_count,
+           max(observed_at) as last_seen_at
+         from vendor_usage_snapshots
+         where vendor_id = 'microsoft-azure'
+           and sync_run_id = (select id from latest_azure_sync)
+           and nullif(trim(dimensions->>'tenantId'), '') is not null
+         group by 1
+       ),
+       lighthouse_tenants as (
+         select
+           lower(trim(tenant_id)) as tenant_key,
+            tenant_id,
+            ${sqlFriendlyLabel('tenant_name', 'tenant_id')} as tenant_name,
+            ${sqlFriendlyLabel('tenant_default_domain', 'tenant_id')} as tenant_default_domain,
+            (
+              select max(${sqlFriendlyLabel('subscription_entry.value', 'subscription_entry.key')})
+              from jsonb_each_text(coalesce(subscription_names, '{}'::jsonb)) as subscription_entry
+            ) as subscription_name,
+            subscription_count,
+           last_seen_at
+         from azure_lighthouse_tenants
+       ),
+       m365_mapping_names as (
+         select
+           lower(trim(external_account_id)) as tenant_key,
+           max(${sqlFriendlyLabel('external_account_name', 'external_account_id')}) as tenant_name
+         from vendor_account_mappings
+         where vendor_id = 'microsoft-365'
+           and active = true
+           and mapping_status = 'approved'
+         group by 1
+       ),
+       m365_snapshot_names as (
+         select
+           lower(trim(microsoft365_subscription_snapshots.external_account_id)) as tenant_key,
+           coalesce(
+             max(${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_name', 'microsoft365_subscription_snapshots.external_account_id')}),
+             max(${sqlFriendlyLabel('microsoft365_subscription_snapshots.tenant_default_domain_name', 'microsoft365_subscription_snapshots.external_account_id')})
+           ) as tenant_name
+         from microsoft365_subscription_snapshots
+         where sync_run_id = (
+           select id
+           from sync_runs
+           where integration_id = 'microsoft-365'
+             and status = 'complete'
+           order by completed_at desc nulls last, started_at desc
+           limit 1
+         )
+         group by 1
+       ),
+       all_tenants as (
+          select tenant_key, tenant_id, tenant_name, tenant_default_domain, subscription_name, subscription_count, last_seen_at from sync_tenants
+          union all
+          select tenant_key, tenant_id, tenant_name, tenant_default_domain, subscription_name, subscription_count, last_seen_at from lighthouse_tenants
+       )
+       select
+         min(all_tenants.tenant_id) as external_account_id,
+         coalesce(
+           max(all_tenants.tenant_name),
+            max(m365_snapshot_names.tenant_name),
+            max(m365_mapping_names.tenant_name),
+            max(all_tenants.tenant_default_domain),
+            min(all_tenants.tenant_id)
+         ) as external_account_name,
+         max(all_tenants.subscription_count)::int as row_count,
+         '[]'::jsonb as product_codes,
+         max(all_tenants.last_seen_at) as last_seen_at
+       from all_tenants
+       left join m365_mapping_names on m365_mapping_names.tenant_key = all_tenants.tenant_key
+       left join m365_snapshot_names on m365_snapshot_names.tenant_key = all_tenants.tenant_key
+       group by all_tenants.tenant_key
+       order by 2`,
+    );
+    return result.rows.map((row) => ({
+      externalAccountId: row.external_account_id,
+      externalAccountName: row.external_account_name ?? row.external_account_id,
+      rowCount: integerValue(row.row_count),
+      productCodes: [],
+      lastSeenAt: isoDate(row.last_seen_at),
+    }));
+  }
+
   if (vendorId === 'nerdio') {
     const result = await database.query<AccountSourceRow>(
       `with latest_invoice_sync as (
@@ -4032,11 +4312,27 @@ async function applyApprovedAccountMappingToSnapshots(
          agreement_addition_id = vendor_account_mappings.agreement_addition_id
      from vendor_account_mappings
      where vendor_usage_snapshots.vendor_id = $1
-       and vendor_usage_snapshots.external_account_id = $2
        and vendor_account_mappings.vendor_id = $1
        and vendor_account_mappings.external_account_id = $2
        and vendor_account_mappings.active = true
        and vendor_account_mappings.mapping_status = 'approved'
+       and (
+         vendor_usage_snapshots.external_account_id = $2
+         or lower(coalesce(vendor_usage_snapshots.dimensions->>'tenantId', '')) = lower($2)
+         or (
+           $1 = 'microsoft-azure'
+           and exists (
+             select 1
+             from azure_lighthouse_tenants lighthouse
+             where lower(lighthouse.tenant_id) = lower($2)
+               and exists (
+                 select 1
+                 from jsonb_array_elements_text(coalesce(lighthouse.subscription_ids, '[]'::jsonb)) as sub_id
+                 where lower(sub_id) = lower(vendor_usage_snapshots.external_account_id)
+               )
+           )
+         )
+       )
        and (vendor_usage_snapshots.customer_id is distinct from vendor_account_mappings.customer_id
          or vendor_usage_snapshots.agreement_id is distinct from vendor_account_mappings.agreement_id
          or vendor_usage_snapshots.agreement_addition_id is distinct from vendor_account_mappings.agreement_addition_id)`,
@@ -4078,6 +4374,75 @@ async function loadExternalAccountName(database: Queryable, vendorId: VendorKey,
   );
 
   return result.rows[0]?.external_account_name ?? externalAccountId;
+}
+
+async function refreshAzureLighthouseAccountMappingNames(database: Queryable) {
+  await database.query(
+    `with m365_names as (
+       select
+         lower(trim(external_account_id)) as tenant_key,
+         max(${sqlFriendlyLabel('external_account_name', 'external_account_id')}) as tenant_name
+       from vendor_account_mappings
+       where vendor_id = 'microsoft-365'
+         and active = true
+         and mapping_status = 'approved'
+       group by 1
+     ),
+     m365_snapshot_names as (
+       select
+         lower(trim(external_account_id)) as tenant_key,
+         coalesce(
+           max(${sqlFriendlyLabel('tenant_name', 'external_account_id')}),
+           max(${sqlFriendlyLabel('tenant_default_domain_name', 'external_account_id')})
+         ) as tenant_name
+       from microsoft365_subscription_snapshots
+       where sync_run_id = (
+         select id
+         from sync_runs
+         where integration_id = 'microsoft-365'
+           and status = 'complete'
+         order by completed_at desc nulls last, started_at desc
+         limit 1
+       )
+       group by 1
+     ),
+     sync_names as (
+       select
+         lower(trim(dimensions->>'tenantId')) as tenant_key,
+         max(${sqlFriendlyLabel("dimensions->>'tenantName'", "dimensions->>'tenantId'")}) as tenant_name,
+         max(${sqlFriendlyLabel("dimensions->>'tenantDefaultDomain'", "dimensions->>'tenantId'")}) as tenant_default_domain
+       from vendor_usage_snapshots
+       where vendor_id = 'microsoft-azure'
+         and nullif(trim(dimensions->>'tenantId'), '') is not null
+       group by 1
+     ),
+     resolved_names as (
+       select
+         mappings.id,
+         coalesce(
+           ${sqlFriendlyLabel('tenants.tenant_name', 'mappings.external_account_id')},
+           sync_names.tenant_name,
+           m365_snapshot_names.tenant_name,
+           m365_names.tenant_name,
+           ${sqlFriendlyLabel('tenants.tenant_default_domain', 'mappings.external_account_id')},
+           sync_names.tenant_default_domain
+         ) as external_account_name
+       from vendor_account_mappings mappings
+       left join azure_lighthouse_tenants tenants
+         on lower(tenants.tenant_id) = lower(mappings.external_account_id)
+       left join m365_names on m365_names.tenant_key = lower(mappings.external_account_id)
+       left join m365_snapshot_names on m365_snapshot_names.tenant_key = lower(mappings.external_account_id)
+       left join sync_names on sync_names.tenant_key = lower(mappings.external_account_id)
+       where mappings.vendor_id = 'microsoft-azure'
+     )
+     update vendor_account_mappings
+     set external_account_name = resolved_names.external_account_name,
+         updated_at = now()
+     from resolved_names
+     where vendor_account_mappings.id = resolved_names.id
+       and nullif(resolved_names.external_account_name, '') is not null
+       and vendor_account_mappings.external_account_name is distinct from resolved_names.external_account_name`,
+  );
 }
 
 async function refreshMicrosoft365AccountMappingNames(database: Queryable) {

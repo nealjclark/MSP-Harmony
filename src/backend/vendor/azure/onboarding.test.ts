@@ -7,6 +7,7 @@ import {
   azureServiceProvidersPortalUrl,
   listAzureOnboardingState,
   prepareAzureOnboardingPackage,
+  refreshAzureLighthouseTenants,
   uploadAzureLighthouseTemplate,
   verifyAzureOnboarding,
 } from './onboarding';
@@ -85,6 +86,7 @@ function database(options: {
   templateRow?: typeof storedTemplateRow;
 } = {}) {
   const mappingStatuses: string[] = [];
+  const tenantInserts: Array<{ tenantId: string; tenantName: string | null }> = [];
   const templateRow = options.templateRow ?? storedTemplateRow;
   const pool: Queryable = {
     async query<T = unknown>(sql: string, values?: unknown[]) {
@@ -107,7 +109,17 @@ function database(options: {
           } as T],
         };
       }
+      if (sql.includes('insert into azure_lighthouse_tenants')) {
+        tenantInserts.push({
+          tenantId: String(values?.[0]),
+          tenantName: (values?.[1] as string | null) ?? null,
+        });
+        return { rows: [] as T[] };
+      }
       if (sql.includes('from vendor_account_mappings mappings')) {
+        return { rows: (options.mappingRows ?? []) as T[] };
+      }
+      if (sql.includes('select vendor_id, external_account_id, customer_id, agreement_id')) {
         return { rows: (options.mappingRows ?? []) as T[] };
       }
       if (sql.includes('select active, mapping_status') && sql.includes('from vendor_account_mappings')) {
@@ -130,7 +142,7 @@ function database(options: {
       return { rows: [] as T[] };
     },
   };
-  return { pool, mappingStatuses };
+  return { pool, mappingStatuses, tenantInserts };
 }
 
 const onboarding = {
@@ -276,6 +288,43 @@ async function run() {
   assert.equal(state.subscriptions[0]?.tenantName, 'Northstar Legal');
   assert.equal(state.subscriptions[0]?.additionName, 'Azure Consumption');
 
+  const lighthouseNamed = await listAzureOnboardingState({
+    pool: database().pool,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return [{
+          subscriptionId: ids.subscription,
+          displayName: 'Azure subscription 1',
+          tenantId: ids.customerTenant,
+          state: 'Enabled',
+          raw: {},
+        }];
+      },
+      async listTenants() {
+        return [{
+          tenantId: ids.managingTenant,
+          displayName: 'BMB Solutions',
+          defaultDomain: 'bmb.example',
+          domains: ['bmb.example'],
+          raw: {},
+        }];
+      },
+      async listLighthouseDelegations() {
+        return [{
+          subscriptionId: ids.subscription,
+          manageeTenantId: ids.customerTenant,
+          manageeTenantName: 'Callaghan CPA LLP',
+          managedByTenantId: ids.managingTenant,
+          managedByTenantName: 'BMB Solutions',
+        }];
+      },
+      async queryCostUsage() { return []; },
+    },
+  });
+  assert.equal(lighthouseNamed.subscriptions[0]?.tenantName, 'Callaghan CPA LLP');
+  assert.equal(lighthouseNamed.subscriptions[0]?.tenantId, ids.customerTenant);
+
   let discoveryCalls = 0;
   const fastState = await listAzureOnboardingState({
     pool: database({
@@ -312,6 +361,49 @@ async function run() {
   assert.equal(fastState.customerOptions.length, 0);
   assert.equal(fastState.readiness.discoveryAttempted, false);
   assert.equal(fastState.subscriptions[0]?.tenantName, 'Northstar Legal');
+
+  const refreshDatabase = database({
+    mappingRows: [{
+      vendor_id: 'microsoft-365',
+      external_account_id: ids.customerTenant,
+      customer_id: ids.customer,
+      agreement_id: ids.agreement,
+    }],
+  });
+  const refreshed = await refreshAzureLighthouseTenants({
+    pool: refreshDatabase.pool,
+    provider,
+    actor: 'tech@example.com',
+    client: {
+      async listSubscriptions() {
+        return [{
+          subscriptionId: ids.subscription,
+          displayName: 'Northstar Azure',
+          tenantId: ids.customerTenant,
+          state: 'Enabled',
+          raw: {},
+        }];
+      },
+      async listTenants() {
+        return [{
+          tenantId: ids.customerTenant,
+          displayName: 'Northstar Legal',
+          defaultDomain: 'northstar.example',
+          domains: ['northstar.example'],
+          tenantCategory: 'ProjectedBy',
+          raw: {},
+        }];
+      },
+      async queryCostUsage() { return []; },
+      async listResources() { return []; },
+    },
+  });
+  assert.equal(refreshed.tenantCount, 1);
+  assert.equal(refreshed.mappedCount, 1);
+  assert.equal(refreshed.unmappedCount, 0);
+  assert.equal(refreshDatabase.tenantInserts[0]?.tenantId, ids.customerTenant);
+  assert.equal(refreshDatabase.tenantInserts[0]?.tenantName, 'Northstar Legal');
+  assert.equal(refreshDatabase.mappingStatuses[0], 'approved');
 
   console.log('azure onboarding tests passed');
 }

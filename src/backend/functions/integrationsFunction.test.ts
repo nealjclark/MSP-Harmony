@@ -45,8 +45,7 @@ const envKeys = [
   'AZURE_TENANT_ID',
   'AZURE_CLIENT_ID',
   'AZURE_CLIENT_SECRET',
-  'AZURE_SUBSCRIPTION_IDS',
-  'AZURE_LOOKBACK_DAYS',
+  'AZURE_MONTHLY_BACKFILL_MONTHS',
 ] as const;
 
 async function run() {

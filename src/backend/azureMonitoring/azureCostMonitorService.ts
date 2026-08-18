@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { sqlAzureAccountMappingLateral, sqlAzureSubscriptionDisplayName } from '../shared/azureAccountMappingSql';
 
 export type Queryable = {
   query: <T = unknown>(sql: string, values?: unknown[]) => Promise<{ rows: T[] }>;
@@ -387,17 +388,48 @@ export async function runAzureCostMonitor(input: {
     settings.comparisonDays,
     settings.settlingLagDays,
   );
-  const runResult = await input.database.query<{ id: string }>(
-    `insert into azure_cost_monitor_runs (
-       source_sync_run_id, status, current_window_start, current_window_end,
-       baseline_window_start, baseline_window_end
-     ) values ($1::uuid, 'running', $2::date, $3::date, $4::date, $5::date)
-     on conflict (source_sync_run_id) do update set
-       status = 'running', error_message = null, started_at = now(), completed_at = null
-     returning id`,
-    [input.syncRunId, window.currentStart, window.currentEnd, window.baselineStart, window.baselineEnd],
+  const existingRun = await input.database.query<{ id: string }>(
+    `select id
+     from azure_cost_monitor_runs
+     where current_window_start = $1::date
+       and current_window_end = $2::date
+       and baseline_window_start = $3::date
+       and baseline_window_end = $4::date
+     order by completed_at desc nulls last, started_at desc
+     limit 1`,
+    [window.currentStart, window.currentEnd, window.baselineStart, window.baselineEnd],
   );
-  const monitorRunId = runResult.rows[0]?.id;
+  let monitorRunId = existingRun.rows[0]?.id;
+  if (monitorRunId) {
+    await input.database.query(
+      `update azure_cost_monitor_runs
+       set source_sync_run_id = case
+             when exists (
+               select 1 from azure_cost_monitor_runs other
+               where other.source_sync_run_id = $2::uuid and other.id <> $1::uuid
+             ) then azure_cost_monitor_runs.source_sync_run_id
+             else $2::uuid
+           end,
+           status = 'running',
+           error_message = null,
+           started_at = now(),
+           completed_at = null
+       where id = $1::uuid`,
+      [monitorRunId, input.syncRunId],
+    );
+  } else {
+    const runResult = await input.database.query<{ id: string }>(
+      `insert into azure_cost_monitor_runs (
+         source_sync_run_id, status, current_window_start, current_window_end,
+         baseline_window_start, baseline_window_end
+       ) values ($1::uuid, 'running', $2::date, $3::date, $4::date, $5::date)
+       on conflict (source_sync_run_id) do update set
+         status = 'running', error_message = null, started_at = now(), completed_at = null
+       returning id`,
+      [input.syncRunId, window.currentStart, window.currentEnd, window.baselineStart, window.baselineEnd],
+    );
+    monitorRunId = runResult.rows[0]?.id;
+  }
   if (!monitorRunId) throw new Error('Unable to create the Azure cost monitoring run.');
 
   try {
@@ -733,8 +765,17 @@ export async function getAzureCostMonitorDashboard(database: Queryable, filters:
 
 export async function listAzureCostMonitorRuns(database: Queryable, limit = 24) {
   const runs = await database.query<Record<string, unknown>>(
-    `select * from azure_cost_monitor_runs
-     order by completed_at desc nulls last, started_at desc limit $1`,
+    `select * from (
+       select distinct on (
+         current_window_start, current_window_end, baseline_window_start, baseline_window_end
+       )
+         azure_cost_monitor_runs.*
+       from azure_cost_monitor_runs
+       order by current_window_start, current_window_end, baseline_window_start, baseline_window_end,
+                completed_at desc nulls last, started_at desc
+     ) runs
+     order by completed_at desc nulls last, started_at desc
+     limit $1`,
     [Math.min(Math.max(limit, 1), 100)],
   );
   const ids = runs.rows.map((row) => String(row.id));
@@ -819,13 +860,10 @@ export async function listAzureMonthlyCosts(database: Queryable) {
       `select to_char(date_trunc('month', costs.usage_date), 'YYYY-MM') as billing_month,
               mappings.customer_id, max(customers.name) as customer_name,
               costs.subscription_id,
-              max(nullif(mappings.external_account_name, '')) as subscription_name,
+              max(${sqlAzureSubscriptionDisplayName('costs.subscription_id')}) as subscription_name,
               costs.currency, sum(costs.actual_cost) as azure_cost
        from azure_cost_daily costs
-       left join vendor_account_mappings mappings
-         on mappings.vendor_id = 'microsoft-azure'
-        and lower(mappings.external_account_id) = lower(costs.subscription_id)
-        and mappings.active = true and mappings.mapping_status = 'approved'
+       ${sqlAzureAccountMappingLateral('costs.subscription_id', 'mappings')}
        left join customers on customers.id = mappings.customer_id
        group by billing_month, mappings.customer_id, costs.subscription_id, costs.currency
        order by billing_month desc, customer_name nulls last, costs.subscription_id`,
@@ -960,15 +998,12 @@ export async function listAzureAdvisorRecommendations(database: Queryable) {
        from azure_advisor_recommendation_snapshots
        order by subscription_id, observed_at desc
      )
-     select snapshots.*, mappings.external_account_name as subscription_name,
+     select snapshots.*, ${sqlAzureSubscriptionDisplayName('snapshots.subscription_id')} as subscription_name,
             mappings.customer_id, customers.name as customer_name
      from azure_advisor_recommendation_snapshots snapshots
      join latest on latest.subscription_id = snapshots.subscription_id
                 and latest.sync_run_id = snapshots.sync_run_id
-     left join vendor_account_mappings mappings
-       on mappings.vendor_id = 'microsoft-azure'
-      and lower(mappings.external_account_id) = lower(snapshots.subscription_id)
-      and mappings.active = true and mappings.mapping_status = 'approved'
+     ${sqlAzureAccountMappingLateral('snapshots.subscription_id', 'mappings')}
      left join customers on customers.id = mappings.customer_id
      order by case lower(coalesce(snapshots.category, '')) when 'cost' then 0 else 1 end,
               case lower(coalesce(snapshots.impact, '')) when 'high' then 0 when 'medium' then 1 else 2 end,
@@ -999,16 +1034,13 @@ export async function listAzureAdvisorRecommendations(database: Queryable) {
 async function loadCostRows(database: Queryable, window: MonitorWindow) {
   const result = await database.query<CostRow>(
     `select costs.subscription_id,
-            max(nullif(mappings.external_account_name, '')) over (partition by costs.subscription_id) as subscription_name,
+            ${sqlAzureSubscriptionDisplayName('costs.subscription_id')} as subscription_name,
             mappings.customer_id, customers.name as customer_name,
             costs.usage_date, costs.service_name, costs.resource_id, costs.resource_group,
             costs.resource_type, costs.meter_category, costs.charge_type,
             costs.currency, costs.actual_cost
      from azure_cost_daily costs
-     left join vendor_account_mappings mappings
-       on mappings.vendor_id = 'microsoft-azure'
-      and lower(mappings.external_account_id) = lower(costs.subscription_id)
-      and mappings.active = true and mappings.mapping_status = 'approved'
+     ${sqlAzureAccountMappingLateral('costs.subscription_id', 'mappings')}
      left join customers on customers.id = mappings.customer_id
      where costs.usage_date between $1::date and $2::date`,
     [window.baselineStart, window.currentEnd],
@@ -1090,7 +1122,7 @@ async function evaluateIdleVms(input: {
   const [result, hostPools] = await Promise.all([
     input.database.query<VmRow>(
       `select resources.subscription_id,
-            mappings.external_account_name as subscription_name,
+            max(${sqlAzureSubscriptionDisplayName('resources.subscription_id')}) as subscription_name,
             mappings.customer_id, customers.name as customer_name,
             resources.resource_id, resources.resource_name, resources.power_state,
             resources.tags, resources.properties,
@@ -1101,15 +1133,11 @@ async function evaluateIdleVms(input: {
        on metrics.sync_run_id = resources.sync_run_id
       and lower(metrics.resource_id) = lower(resources.resource_id)
       and metrics.metric_date = $2::date
-     left join vendor_account_mappings mappings
-       on mappings.vendor_id = 'microsoft-azure'
-      and lower(mappings.external_account_id) = lower(resources.subscription_id)
-      and mappings.active = true and mappings.mapping_status = 'approved'
+     ${sqlAzureAccountMappingLateral('resources.subscription_id', 'mappings')}
      left join customers on customers.id = mappings.customer_id
      where resources.sync_run_id = $1::uuid
        and lower(coalesce(resources.resource_type, '')) = 'microsoft.compute/virtualmachines'
-     group by resources.subscription_id, mappings.external_account_name,
-              mappings.customer_id, customers.name, resources.resource_id,
+     group by resources.subscription_id, mappings.customer_id, customers.name, resources.resource_id,
               resources.resource_name, resources.power_state, resources.tags, resources.properties`,
       [input.syncRunId, input.metricDate],
     ),

@@ -12,6 +12,7 @@ import {
   CircleDollarSign,
   ClipboardCheck,
   Clock3,
+  Copy,
   Database,
   Download,
   ExternalLink,
@@ -152,6 +153,7 @@ import {
   preferredReconciliationCountSource,
   type ReconciliationCountSource,
 } from './preferredReconciliationCountSource';
+import { settleWithConcurrency } from './settleWithConcurrency';
 import {
   defaultCommunicationSettings,
   defaultInvoiceNoticeTemplates,
@@ -169,6 +171,7 @@ import {
   type InvoiceNoticeType,
 } from '../../shared/communicationSettings';
 import { SalesWorkspace } from './SalesWorkspace';
+import { SoftwareInventoryReportView } from './SoftwareInventoryReportView';
 
 type View = 'reconcile' | 'discrepancies' | 'integrations' | 'mappings' | 'reports' | 'azure-billing' | 'invoices' | 'agreements' | 'sales' | 'settings';
 type AzureBillingTab = 'runs' | 'review' | 'release' | 'monitor' | 'policies';
@@ -201,7 +204,7 @@ type IssueStatus =
   | 'skipped';
 type IntegrationStatus = 'connected' | 'degraded' | 'not-configured';
 type IntegrationWorkflowTab = 'api' | 'manual' | 'invoice';
-type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'azure-utilization' | 'customer-license';
+type ReportSection = 'raw-sync' | 'change-report' | 'product-profitability' | 'azure-utilization' | 'customer-license' | 'software-inventory';
 type MappingStatus = 'candidate' | 'approved' | 'needs-review' | 'rejected';
 type MappingSectionId = 'labor' | 'investigation-tickets' | 'monthly-review-exclusions' | 'ncentral-sites' | 'reconciliation-options' | 'ncentral' | 'device-exclusions' | 'customer' | 'product' | 'ignored-products' | 'linked-counts' | 'bundles' | 'cross-vendor-bundles' | 'usage-overrides';
 type AppliedReconciliationUpdate = {
@@ -458,6 +461,30 @@ type IntegrationSyncJob = {
   };
 };
 
+type BackgroundJob = {
+  id: string;
+  source: 'integration-sync' | 'software-inventory' | 'appriver-license-cleanup' | 'sales-quote';
+  title: string;
+  operation: string;
+  status: 'queued' | 'running' | 'complete' | 'complete-with-warnings' | 'failed';
+  requestedBy: string;
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  progress?: {
+    completed: number;
+    total: number;
+    failed: number;
+    currentItem?: string;
+    unitLabel: string;
+  };
+  destination?: {
+    label: string;
+    path: string;
+  };
+};
+
 type ManagedAppUser = {
   id: string;
   aadUserId?: string;
@@ -491,7 +518,7 @@ type RawSyncRun = {
 
 type RawSyncDataset = 'users' | 'licenses';
 type DattoSyncTarget = 'datto-saas' | 'datto-bcdr' | 'datto-saas-bcdr';
-type IntegrationSyncTarget = RawSyncDataset | DattoSyncTarget;
+type IntegrationSyncTarget = RawSyncDataset | DattoSyncTarget | 'azure-cost-usage' | 'azure-cost-monthly';
 type DattoMappingDataset = 'saas' | 'bcdr';
 type HuntressMappingDataset = 'edr' | 'itdr' | 'sat' | 'siem' | 'ispm' | 'siem-extended-retention';
 
@@ -933,6 +960,16 @@ type AzureOnboardingForm = {
   subscriptionId: string;
   subscriptionName?: string;
 };
+
+function azureTenantHeading(name: string | undefined, tenantId: string) {
+  const trimmed = name?.trim();
+  if (!trimmed) return 'Tenant name unavailable';
+  if (trimmed.toLowerCase() === tenantId.toLowerCase()) return 'Tenant name unavailable';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return 'Tenant name unavailable';
+  }
+  return trimmed;
+}
 
 type AzureOnboardingPackage = {
   integrationId: 'microsoft-azure';
@@ -1640,6 +1677,8 @@ type ReconciliationRunMeta = {
   productCheckCount: number;
 };
 
+type ReconciliationLoadState = 'idle' | 'loading' | 'ready' | 'partial' | 'failed';
+
 type InvoiceImportSummary = {
   id: string;
   vendorId: VendorKey;
@@ -2245,10 +2284,16 @@ type MappingEvidence = {
   value: string | number | boolean;
 };
 
+type AzureMappingSubscription = {
+  subscriptionId: string;
+  subscriptionName?: string;
+};
+
 type AccountMappingCandidate = {
   vendorId: IntegrationId;
   externalAccountId: string;
   externalAccountName: string;
+  azureSubscriptions?: AzureMappingSubscription[];
   customerId?: string;
   customerName?: string;
   agreementId?: string;
@@ -2269,6 +2314,25 @@ type AccountMapping = AccountMappingCandidate & {
   reviewedAt?: string;
   lastSeenAt?: string;
 };
+
+function azureMappingSubscriptionSummary(
+  subscriptions: AzureMappingSubscription[] | undefined,
+  tenantHeading: string,
+) {
+  if (!subscriptions?.length) return undefined;
+  const headingKey = tenantHeading.trim().toLowerCase();
+  const labels = [...new Set(subscriptions.flatMap((subscription) => {
+    const name = subscription.subscriptionName?.trim();
+    if (!name || name.toLowerCase() === subscription.subscriptionId.toLowerCase()) return [];
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name)) return [];
+    if (name.toLowerCase() === headingKey) return [];
+    return [name];
+  }))];
+  if (subscriptions.length === 1) {
+    return labels[0] ? `Subscription · ${labels[0]}` : '1 subscription';
+  }
+  return `${subscriptions.length.toLocaleString()} subscriptions${labels.length > 0 ? ` · ${labels.join(' · ')}` : ''}`;
+}
 
 type MappingCustomerOption = {
   customerId: string;
@@ -2706,7 +2770,7 @@ type ProductMappingCustomerReview = {
   customers: ProductMappingCustomer[];
 };
 
-type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-bcdr' | 'sync-datto-saas-bcdr';
+type IntegrationAction = 'test' | 'sync' | 'sync-users' | 'sync-licenses' | 'sync-datto-saas' | 'sync-datto-bcdr' | 'sync-datto-saas-bcdr' | 'sync-azure-cost-usage' | 'sync-azure-cost-monthly';
 type IntegrationActionKey = `${IntegrationId}:${IntegrationAction}`;
 
 const clientProfiles: Record<string, ClientProfile> = {};
@@ -2866,7 +2930,22 @@ const reportSections: Array<{ id: ReportSection; label: string; enabled: boolean
     enabled: true,
     description: 'Generate customer-facing license counts and product details on demand',
   },
+  {
+    id: 'software-inventory',
+    label: 'Software Inventory',
+    enabled: true,
+    description: 'Run persistent N-central software inventory reports by customer or site',
+  },
 ];
+
+const reportSectionPaths: Record<ReportSection, string> = {
+  'raw-sync': '/reports',
+  'change-report': '/reports/change-report',
+  'product-profitability': '/reports/product-profitability',
+  'azure-utilization': '/reports/azure-utilization',
+  'customer-license': '/reports/customer-license',
+  'software-inventory': '/reports/software-inventory',
+};
 
 const reconciliationVendorIds: IntegrationId[] = integrationSettingsRegistry
   .filter((integration) => integration.integrationId !== 'connectwise' && integration.capabilities.includes('mapping'))
@@ -2953,7 +3032,7 @@ function isEnabledReconciliationDatapoint(datapoint: VendorDatapointRecord) {
 }
 
 function isEnabledReconciliationIntegration(integration: Integration) {
-  if (integration.id === 'connectwise' || !integrationHasCapability(integration.id, 'mapping')) {
+  if (integration.id === 'connectwise' || integration.id === 'microsoft-azure' || !integrationHasCapability(integration.id, 'mapping')) {
     return false;
   }
 
@@ -4192,6 +4271,10 @@ function initialSettingsSection(): SettingsSection {
   return settingsSectionFromPath(window.location.pathname) ?? defaultSettingsSection;
 }
 
+function initialReportSection(): ReportSection {
+  return reportSectionFromPath(window.location.pathname) ?? 'raw-sync';
+}
+
 function isVendorKey(value: string | null): value is VendorKey {
   return Boolean(value && (isIntegrationId(value) || isVendorDatapointId(value)));
 }
@@ -4213,6 +4296,9 @@ function viewFromLocation(location: Location): View {
 
 function viewFromPath(pathname: string): View | null {
   const normalizedPath = normalizePathname(pathname);
+  if (reportSectionFromPath(normalizedPath)) {
+    return 'reports';
+  }
   if (normalizedPath === '/sales' || normalizedPath.startsWith('/sales/quotes/')) {
     return 'sales';
   }
@@ -4234,6 +4320,12 @@ function viewFromPath(pathname: string): View | null {
 
   const matchedEntry = Object.entries(viewPaths).find(([, path]) => path === normalizedPath);
   return matchedEntry ? (matchedEntry[0] as View) : normalizedPath === '/' ? defaultView : null;
+}
+
+function reportSectionFromPath(pathname: string): ReportSection | null {
+  const normalized = normalizePathname(pathname).toLowerCase();
+  const entry = Object.entries(reportSectionPaths).find(([, path]) => path.toLowerCase() === normalized);
+  return entry ? entry[0] as ReportSection : null;
 }
 
 function reconcileWorkspaceTabFromPath(pathname: string): ReconcileWorkspaceTab | null {
@@ -4517,6 +4609,15 @@ async function fetchRuntimeIntegrations() {
   } satisfies RuntimeIntegrationsResponse;
 }
 
+async function fetchBackgroundJobs() {
+  const response = await fetch('/api/jobs?recentLimit=10');
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Active jobs load failed with HTTP ${response.status}.`));
+  }
+  return (body as { jobs?: BackgroundJob[] }).jobs ?? [];
+}
+
 async function fetchManagedUsers() {
   const response = await fetch('/api/users');
   const body = await responseJson(response);
@@ -4777,6 +4878,22 @@ function fetchAzureLighthouseTemplateRequest() {
     () => { azureLighthouseTemplateRequest = undefined; },
   );
   return azureLighthouseTemplateRequest;
+}
+
+async function refreshAzureLighthouseTenantsRequest() {
+  const response = await fetch('/api/integrations/microsoft-azure/onboarding/tenants/refresh', {
+    method: 'POST',
+  });
+  const body = await responseJson(response);
+  if (!response.ok) {
+    throw new Error(String(body.error ?? `Azure Lighthouse tenant refresh failed with HTTP ${response.status}.`));
+  }
+  return body as unknown as {
+    tenantCount: number;
+    mappedCount: number;
+    unmappedCount: number;
+    tenantLookupWarning?: string;
+  };
 }
 
 async function prepareAzureOnboardingPackageRequest(payload: AzureOnboardingForm) {
@@ -5413,21 +5530,37 @@ async function fetchProductMappingCustomers(integrationId: VendorKey, vendorProd
   return body as unknown as ProductMappingCustomerReview;
 }
 
-async function fetchReconciliationRun(vendorId: VendorKey) {
-  const response = await fetch(`/api/reconciliation/${encodeURIComponent(vendorId)}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({}),
-  });
-  const body = await responseJson(response);
+const reconciliationRequestConcurrency = 2;
+const reconciliationRequestMaxAttempts = 2;
 
-  if (!response.ok) {
-    throw new Error(String(body.error ?? `Reconciliation failed with HTTP ${response.status}.`));
+async function fetchReconciliationRun(vendorId: VendorKey, attempt = 1): Promise<ReconciliationRunResponse> {
+  try {
+    const response = await fetch(`/api/reconciliation/${encodeURIComponent(vendorId)}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    const body = await responseJson(response);
+
+    if (!response.ok) {
+      const retryable = response.status === 429 || response.status >= 500;
+      if (retryable && attempt < reconciliationRequestMaxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 750 * attempt));
+        return fetchReconciliationRun(vendorId, attempt + 1);
+      }
+      throw new Error(String(body.error ?? `Reconciliation failed with HTTP ${response.status}.`));
+    }
+
+    return body as unknown as ReconciliationRunResponse;
+  } catch (error) {
+    if (attempt < reconciliationRequestMaxAttempts && error instanceof TypeError) {
+      await new Promise((resolve) => setTimeout(resolve, 750 * attempt));
+      return fetchReconciliationRun(vendorId, attempt + 1);
+    }
+    throw error;
   }
-
-  return body as unknown as ReconciliationRunResponse;
 }
 
 async function monthlyReviewJson<T>(path: string, init?: RequestInit) {
@@ -6624,6 +6757,12 @@ function syncRequestBodyForIntegration(integrationId: IntegrationId, target?: In
     };
   }
 
+  if (integrationId === 'microsoft-azure') {
+    return {
+      operationKey: target === 'azure-cost-monthly' ? 'azure-cost-monthly' : 'azure-cost-usage',
+    };
+  }
+
   return {
     pageSize: 100,
     maxPages: 50,
@@ -6640,6 +6779,10 @@ function syncActionKey(integrationId: IntegrationId, target?: IntegrationSyncTar
     return target === 'datto-saas-bcdr' ? `${integrationId}:sync-datto-saas-bcdr` : `${integrationId}:sync-datto-saas`;
   }
 
+  if (integrationId === 'microsoft-azure') {
+    return target === 'azure-cost-monthly' ? `${integrationId}:sync-azure-cost-monthly` : `${integrationId}:sync-azure-cost-usage`;
+  }
+
   return `${integrationId}:sync`;
 }
 
@@ -6651,6 +6794,12 @@ function syncStartingMessage(integrationId: IntegrationId, target?: IntegrationS
   if (integrationId === 'datto') {
     if (target === 'datto-bcdr') return 'Starting Datto BCDR sync...';
     return target === 'datto-saas-bcdr' ? 'Starting Datto SaaS and BCDR sync...' : 'Starting Datto SaaS sync...';
+  }
+
+  if (integrationId === 'microsoft-azure') {
+    return target === 'azure-cost-monthly'
+      ? 'Starting Azure completed-month backfill...'
+      : 'Starting Azure daily charge sync...';
   }
 
   return 'Starting sync...';
@@ -7083,8 +7232,8 @@ function App() {
   const [savingIntegrationId, setSavingIntegrationId] = useState<IntegrationId | null>(null);
   const [runtimeIntegrations, setRuntimeIntegrations] = useState<RuntimeIntegrationSummary[] | null>(null);
   const [syncJobs, setSyncJobs] = useState<IntegrationSyncJob[]>([]);
-  const [showSyncTracker, setShowSyncTracker] = useState(false);
-  const [syncTrackerOpen, setSyncTrackerOpen] = useState(false);
+  const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([]);
+  const [jobsTrackerOpen, setJobsTrackerOpen] = useState(false);
   const [integrationLoadState, setIntegrationLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [integrationLoadMessage, setIntegrationLoadMessage] = useState<string>('Loading live integration status...');
   const [vendorDatapoints, setVendorDatapoints] = useState<VendorDatapointRecord[]>([]);
@@ -7097,7 +7246,7 @@ function App() {
   const appRiverSyncPollRef = useRef(0);
   const integrationOperationPollRef = useRef<Record<string, number>>({});
   const [busyIntegrationAction, setBusyIntegrationAction] = useState<IntegrationActionKey | null>(null);
-  const [reportSection, setReportSection] = useState<ReportSection>('raw-sync');
+  const [reportSection, setReportSection] = useState<ReportSection>(() => initialReportSection());
   const [selectedRawSyncIntegrationId, setSelectedRawSyncIntegrationId] = useState<IntegrationId | ''>('');
   const [selectedRawSyncDataset, setSelectedRawSyncDataset] = useState<RawSyncDataset>('users');
   const [rawSyncRuns, setRawSyncRuns] = useState<RawSyncRun[]>([]);
@@ -7174,7 +7323,7 @@ function App() {
   const [mappingLoadState, setMappingLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [mappingMessage, setMappingMessage] = useState('Load an integration to review account and product mappings.');
   const [busyMappingAction, setBusyMappingAction] = useState<string | null>(null);
-  const [reconciliationLoadState, setReconciliationLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [reconciliationLoadState, setReconciliationLoadState] = useState<ReconciliationLoadState>('idle');
   const [reconciliationMessage, setReconciliationMessage] = useState('Choose a vendor.');
   const [reconciliationRunMetaByVendor, setReconciliationRunMetaByVendor] =
     useState<Partial<Record<VendorKey, ReconciliationRunMeta>>>({});
@@ -7256,6 +7405,15 @@ function App() {
     updateRouteForView('settings', selectedMappingIntegrationId, section);
   };
 
+  const navigateToReportSection = (section: ReportSection) => {
+    setView('reports');
+    setReportSection(section);
+    const nextPath = reportSectionPaths[section];
+    if (normalizePathname(window.location.pathname) !== nextPath || window.location.search) {
+      window.history.pushState({ view: 'reports', reportSection: section }, '', nextPath);
+    }
+  };
+
   const selectReconcileWorkspaceTab = (tab: ReconcileWorkspaceTab) => {
     setView('reconcile');
     setReconcileWorkspaceTab(tab);
@@ -7282,9 +7440,6 @@ function App() {
       const response = await fetchRuntimeIntegrations();
       setRuntimeIntegrations(response.integrations);
       setSyncJobs(response.syncJobs);
-      if (response.syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) {
-        setShowSyncTracker(true);
-      }
       setIntegrationLoadState('ready');
       setIntegrationLoadMessage('Live integration status loaded.');
 
@@ -8666,7 +8821,9 @@ function App() {
       setMappingState(state);
       setMappingLoadState('ready');
       setMappingMessage(
-        `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings, ${state.summary.productMappings.toLocaleString()} product mappings, ${(state.summary.productBundles ?? 0).toLocaleString()} product bundles, and ${(state.summary.linkedProductRules ?? 0).toLocaleString()} linked count rules.`,
+        integrationId === 'microsoft-azure'
+          ? `Loaded ${state.summary.approvedAccountMappings.toLocaleString()} mapped Microsoft tenant${state.summary.approvedAccountMappings === 1 ? '' : 's'} and ${state.summary.accountCandidates.toLocaleString()} unmapped.`
+          : `Loaded ${state.summary.accountMappings.toLocaleString()} account mappings, ${state.summary.productMappings.toLocaleString()} product mappings, ${(state.summary.productBundles ?? 0).toLocaleString()} product bundles, and ${(state.summary.linkedProductRules ?? 0).toLocaleString()} linked count rules.`,
       );
       return state;
     } catch (error) {
@@ -8798,11 +8955,31 @@ function App() {
     }
   };
 
-  const refreshMappingWorkspace = async (integrationId: VendorKey) => {
+  const refreshMappingWorkspace = async (
+    integrationId: VendorKey,
+    options: { discoverAzure?: boolean } = {},
+  ) => {
+    let azureRefreshSummary: string | undefined;
+    if (integrationId === 'microsoft-azure' && options.discoverAzure) {
+      setMappingLoadState('loading');
+      setMappingMessage('Refreshing delegated tenants from Azure Lighthouse...');
+      try {
+        const refreshed = await refreshAzureLighthouseTenantsRequest();
+        azureRefreshSummary = [
+          `Azure refresh complete. ${refreshed.tenantCount} tenant${refreshed.tenantCount === 1 ? '' : 's'} found, ${refreshed.unmappedCount} unmapped.`,
+          refreshed.tenantLookupWarning,
+        ].filter(Boolean).join(' ');
+      } catch (error) {
+        azureRefreshSummary = error instanceof Error ? error.message : 'Unable to refresh Azure Lighthouse tenants.';
+      }
+    }
     const isLaborOnly = integrationId === 'connectwise';
     const state = isLaborOnly
       ? null
       : await loadMappings(integrationId);
+    if (integrationId === 'microsoft-azure' && azureRefreshSummary && state) {
+      setMappingMessage(azureRefreshSummary);
+    }
     if (!isLaborOnly) {
       await loadUsageOverrides(integrationId);
       await loadDeviceMatchExclusions(integrationId);
@@ -8913,11 +9090,34 @@ function App() {
     setReconciliationComparisonRequested(true);
     setReconciliationLoadState('loading');
     setReconciliationMessage(
-      `Comparing ${uniqueVendorIds.map((vendorId) => reconcileVendorDisplayName(vendorId, vendorDatapoints)).join(', ')} against ConnectWise additions...`,
+      `Comparing ${uniqueVendorIds.length.toLocaleString()} vendor${uniqueVendorIds.length === 1 ? '' : 's'} against ConnectWise additions, with up to ${Math.min(reconciliationRequestConcurrency, uniqueVendorIds.length)} running at a time...`,
     );
 
     try {
-      const runs = await Promise.all(uniqueVendorIds.map((vendorId) => fetchReconciliationRun(vendorId)));
+      const outcomes = await settleWithConcurrency(
+        uniqueVendorIds,
+        reconciliationRequestConcurrency,
+        (vendorId) => fetchReconciliationRun(vendorId),
+        ({ completed, total }) => {
+          setReconciliationMessage(
+            `Completed ${completed.toLocaleString()} of ${total.toLocaleString()} vendor comparisons. Successful results are kept if another vendor fails.`,
+          );
+        },
+      );
+      const runs = outcomes.flatMap((outcome) => outcome.status === 'fulfilled' ? [outcome.value] : []);
+      const failures = outcomes.flatMap((outcome) => outcome.status === 'rejected'
+        ? [{
+            vendorId: outcome.input,
+            message: outcome.reason instanceof Error ? outcome.reason.message : 'Unknown reconciliation error.',
+          }]
+        : []);
+      if (runs.length === 0) {
+        throw new Error(
+          failures.length === 1
+            ? failures[0].message
+            : `All ${failures.length.toLocaleString()} vendor comparisons failed. ${failures.map((failure) => `${reconcileVendorDisplayName(failure.vendorId, vendorDatapoints)}: ${failure.message}`).join(' ')}`,
+        );
+      }
       const nextIssues = runs.flatMap((run) =>
         reconcileIssuesFromRun(run, reconcileVendorDisplayName(run.vendorId, vendorDatapoints)),
       );
@@ -8946,17 +9146,18 @@ function App() {
         >,
       );
       setExpandedClientNames(firstSelectedIssue?.customer ? [firstSelectedIssue.customer] : []);
-      setReconciliationLoadState('ready');
-      setReconciliationMessage(
-        nextReviewIssues.length > 0
+      setReconciliationLoadState(failures.length > 0 ? 'partial' : 'ready');
+      setReconciliationMessage(failures.length > 0
+        ? `Compared ${runs.length.toLocaleString()} of ${uniqueVendorIds.length.toLocaleString()} vendors. ${failures.map((failure) => `${reconcileVendorDisplayName(failure.vendorId, vendorDatapoints)} failed after retry: ${failure.message}`).join(' ')} Successful results remain available below.`
+        : nextReviewIssues.length > 0
           ? `${nextReviewIssues.length.toLocaleString()} discrepancies ready for review.`
           : runs.some((run) => run.syncRunId && run.snapshotCount === 0)
             ? 'Latest sync has no customer-mapped snapshots. Approve account mappings, refresh the device import, then compare again.'
             : runs.some((run) => run.syncRunId)
               ? 'No selected vendor discrepancies found in the latest syncs.'
-              : 'No completed sync is available for the selected vendors yet.',
+              : 'No completed sync is available for the selected vendors yet.'
       );
-      void loadInvestigationTicketPresence(uniqueVendorIds).then(setInvestigationTicketPresence);
+      void loadInvestigationTicketPresence(runs.map((run) => run.vendorId)).then(setInvestigationTicketPresence);
       return runs;
     } catch (error) {
       setIssues([]);
@@ -9006,14 +9207,21 @@ function App() {
         .then((response) => {
           setRuntimeIntegrations(response.integrations);
           setSyncJobs(response.syncJobs);
-          if (response.syncJobs.some((job) => job.status === 'queued' || job.status === 'running')) {
-            setShowSyncTracker(true);
-          }
         })
         .catch(() => undefined);
     }, hasActiveSyncJobs ? 3000 : 15000);
     return () => window.clearInterval(timer);
   }, [syncJobs.map((job) => `${job.id}:${job.status}`).join('|')]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void fetchBackgroundJobs().then(setBackgroundJobs).catch(() => undefined);
+    };
+    refresh();
+    const hasActiveJobs = backgroundJobs.some((job) => job.status === 'queued' || job.status === 'running');
+    const timer = window.setInterval(refresh, hasActiveJobs ? 3000 : 15000);
+    return () => window.clearInterval(timer);
+  }, [backgroundJobs.map((job) => `${job.source}:${job.id}:${job.status}:${job.progress?.completed ?? 0}`).join('|')]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -9023,6 +9231,7 @@ function App() {
       setView(nextView);
       setReconcileWorkspaceTab(reconcileWorkspaceTabFromPath(window.location.pathname) ?? 'spotcheck');
       setSettingsSection(settingsSectionFromPath(window.location.pathname) ?? defaultSettingsSection);
+      setReportSection(reportSectionFromPath(window.location.pathname) ?? 'raw-sync');
       if (nextMappingIntegrationId) {
         setSelectedMappingIntegrationId(nextMappingIntegrationId);
         setMappingState(null);
@@ -9864,7 +10073,10 @@ function App() {
         ...messages,
         [integrationId]: formatIntegrationSyncSuccess(integrationId, body),
       }));
-      if (queuedSync) setShowSyncTracker(true);
+      if (queuedSync) {
+        setJobsTrackerOpen(true);
+        void fetchBackgroundJobs().then(setBackgroundJobs).catch(() => undefined);
+      }
       await refreshRuntimeIntegrations();
       if (queuedSync && integrationId === 'opentext-appriver') {
         const queuedAt = typeof body.queuedAt === 'string' ? body.queuedAt : new Date().toISOString();
@@ -10802,15 +11014,15 @@ function App() {
     (state) => state.comparisonId === selectedDiscrepancyPairId,
   );
   const canQueueAppRiverLicenseCleanup = currentUserRoles.some((role) => role === 'Admin' || role === 'LicenseAdmin');
-  const activeSyncJobs = syncJobs.filter((job) => job.status === 'queued' || job.status === 'running');
-  const latestTrackedSyncJobs = syncJobs.slice(0, 10);
-  const latestSyncJobsFailed = latestTrackedSyncJobs.some((job) => job.status === 'failed');
+  const activeBackgroundJobs = backgroundJobs.filter((job) => job.status === 'queued' || job.status === 'running');
+  const latestBackgroundJob = backgroundJobs.find((job) => job.status !== 'queued' && job.status !== 'running');
   const revealQueuedSyncJob = async () => {
-    setShowSyncTracker(true);
+    setJobsTrackerOpen(true);
     try {
-      const response = await fetchRuntimeIntegrations();
+      const [response, jobs] = await Promise.all([fetchRuntimeIntegrations(), fetchBackgroundJobs()]);
       setRuntimeIntegrations(response.integrations);
       setSyncJobs(response.syncJobs);
+      setBackgroundJobs(jobs);
     } catch {
       // The persisted job will be discovered by the background tracker poll.
     }
@@ -10855,7 +11067,7 @@ function App() {
                         className={reportSection === report.id ? 'nav-subitem active' : 'nav-subitem'}
                         disabled={!report.enabled}
                         key={report.id}
-                        onClick={() => setReportSection(report.id)}
+                        onClick={() => navigateToReportSection(report.id)}
                         title={report.description}
                         type="button"
                       >
@@ -10898,69 +11110,51 @@ function App() {
             <h1>{pageTitle(view, settingsSection)}</h1>
           </div>
           <div className="top-actions">
-            {showSyncTracker ? (
-              <div className="sync-tracker">
-                <button
-                  aria-expanded={syncTrackerOpen}
-                  aria-haspopup="dialog"
-                  className={`sync-tracker-trigger${activeSyncJobs.length > 0 ? ' active' : latestSyncJobsFailed ? ' failed' : ' complete'}`}
-                  onClick={() => setSyncTrackerOpen((open) => !open)}
-                  title={activeSyncJobs.length > 0 ? `${activeSyncJobs.length} sync job${activeSyncJobs.length === 1 ? '' : 's'} active` : 'Sync jobs finished'}
-                  type="button"
-                >
-                  <RefreshCcw className={activeSyncJobs.length > 0 ? 'sync-tracker-spin' : undefined} size={18} />
-                  <span>{activeSyncJobs.length > 0 ? `${activeSyncJobs.length} syncing` : latestSyncJobsFailed ? 'Sync failed' : 'Sync complete'}</span>
-                </button>
-                {syncTrackerOpen ? (
-                  <section aria-label="Sync job status" className="sync-tracker-popover" role="dialog">
-                    <header className="sync-tracker-header">
-                      <div>
-                        <span className="section-kicker">Background activity</span>
-                        <h2>Sync jobs</h2>
-                      </div>
-                      <button aria-label="Close sync job status" className="icon-button" onClick={() => setSyncTrackerOpen(false)} type="button">
-                        <X size={17} />
-                      </button>
-                    </header>
-                    <div className="sync-tracker-list">
-                      {latestTrackedSyncJobs.length > 0 ? latestTrackedSyncJobs.map((job) => (
-                        <article className={`sync-tracker-job ${job.status}`} key={job.id}>
-                          <div className="sync-tracker-job-heading">
-                            <div><strong>{job.integrationName}</strong><span>{job.operationLabel}</span></div>
-                            <span className={`sync-tracker-status ${job.status}`}>{syncJobStatusLabel(job.status)}</span>
-                          </div>
-                          {job.progress ? (
-                            <div className="sync-tracker-progress">
-                              <div className="sync-tracker-progress-label">
-                                <span>
-                                  {job.progress.completed.toLocaleString()} of {job.progress.total.toLocaleString()} {job.progress.unitLabel}
-                                  {' · '}{Math.max(0, job.progress.total - job.progress.completed).toLocaleString()} remaining
-                                </span>
-                                <strong>{syncJobProgressPercent(job.progress.completed, job.progress.total)}%</strong>
-                              </div>
-                              <div className="sync-tracker-progress-rail" aria-hidden="true">
-                                <span style={{ width: `${syncJobProgressPercent(job.progress.completed, job.progress.total)}%` }} />
-                              </div>
-                              {job.progress.currentItem ? <p>Current: {job.progress.currentItem}</p> : null}
-                              {job.progress.failed > 0 ? <p className="sync-tracker-error">{job.progress.failed.toLocaleString()} failed</p> : null}
+            <div className="sync-tracker active-jobs-tracker">
+              <button
+                aria-expanded={jobsTrackerOpen}
+                aria-haspopup="dialog"
+                className={`sync-tracker-trigger${activeBackgroundJobs.length > 0 ? ' active' : latestBackgroundJob?.status === 'failed' ? ' failed' : latestBackgroundJob?.status === 'complete-with-warnings' ? ' warning' : ' complete'}`}
+                onClick={() => setJobsTrackerOpen((open) => !open)}
+                title={activeBackgroundJobs.length > 0 ? `${activeBackgroundJobs.length} active background job${activeBackgroundJobs.length === 1 ? '' : 's'}` : 'View recent background jobs'}
+                type="button"
+              >
+                <Activity className={activeBackgroundJobs.length > 0 ? 'sync-tracker-spin' : undefined} size={18} />
+                <span>{activeBackgroundJobs.length > 0 ? `${activeBackgroundJobs.length} active` : 'Active jobs'}</span>
+              </button>
+              {jobsTrackerOpen ? (
+                <section aria-label="Active job status" className="sync-tracker-popover" role="dialog">
+                  <header className="sync-tracker-header">
+                    <div><span className="section-kicker">Persistent background work</span><h2>Active jobs</h2></div>
+                    <button aria-label="Close active job status" className="icon-button" onClick={() => setJobsTrackerOpen(false)} type="button"><X size={17} /></button>
+                  </header>
+                  <div className="sync-tracker-list">
+                    {backgroundJobs.length > 0 ? backgroundJobs.map((job) => (
+                      <article className={`sync-tracker-job ${job.status}`} key={`${job.source}:${job.id}`}>
+                        <div className="sync-tracker-job-heading">
+                          <div><strong>{job.title}</strong><span>{job.operation}</span></div>
+                          <span className={`sync-tracker-status ${job.status}`}>{backgroundJobStatusLabel(job.status)}</span>
+                        </div>
+                        {job.progress ? (
+                          <div className="sync-tracker-progress">
+                            <div className="sync-tracker-progress-label">
+                              <span>{job.progress.completed.toLocaleString()} of {job.progress.total.toLocaleString()} {job.progress.unitLabel}{job.progress.failed > 0 ? ` · ${job.progress.failed.toLocaleString()} failed` : ''}</span>
+                              <strong>{syncJobProgressPercent(job.progress.completed, job.progress.total)}%</strong>
                             </div>
-                          ) : <p className="sync-tracker-detail">{syncJobDetail(job)}</p>}
-                          {job.error ? <p className="sync-tracker-error">{job.error}</p> : null}
-                          <time dateTime={job.completedAt ?? job.startedAt ?? job.requestedAt}>
-                            {formatDateTime(job.completedAt ?? job.startedAt ?? job.requestedAt)}
-                          </time>
-                        </article>
-                      )) : <p className="sync-tracker-empty">No sync jobs to show.</p>}
-                    </div>
-                    {activeSyncJobs.length === 0 ? (
-                      <button className="button secondary sync-tracker-dismiss" onClick={() => { setSyncTrackerOpen(false); setShowSyncTracker(false); }} type="button">
-                        Dismiss completed jobs
-                      </button>
-                    ) : null}
-                  </section>
-                ) : null}
-              </div>
-            ) : null}
+                            <div className="sync-tracker-progress-rail" aria-hidden="true"><span style={{ width: `${syncJobProgressPercent(job.progress.completed, job.progress.total)}%` }} /></div>
+                            <p className={job.error || job.progress.failed > 0 ? 'sync-tracker-error' : undefined}>{backgroundJobSummary(job)}</p>
+                          </div>
+                        ) : <p className={job.error ? 'sync-tracker-error' : 'sync-tracker-detail'}>{backgroundJobSummary(job)}</p>}
+                        <div className="active-job-footer">
+                          <time dateTime={job.completedAt ?? job.startedAt ?? job.requestedAt}>{formatDateTime(job.completedAt ?? job.startedAt ?? job.requestedAt)}</time>
+                          {job.destination ? <a href={job.destination.path} onClick={() => setJobsTrackerOpen(false)}>{job.destination.label}<ArrowRight size={13} /></a> : null}
+                        </div>
+                      </article>
+                    )) : <p className="sync-tracker-empty">No active or recent jobs to show.</p>}
+                  </div>
+                </section>
+              ) : null}
+            </div>
             {view === 'reconcile' && reconcileWorkspaceTab === 'spotcheck' ? (
               queuedAgreementUpdateIssues.length > 0 ? (
                 <button
@@ -11250,7 +11444,7 @@ function App() {
               onProductLinkRuleActiveChange={setProductLinkRuleActive}
               onProductLinkRuleDelete={deleteProductLinkRule}
               onProductLinkRuleSave={saveProductLinkRule}
-              onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId)}
+              onRefresh={() => refreshMappingWorkspace(selectedMappingIntegrationId, { discoverAzure: true })}
               onDeviceExclusionDeactivate={async (exclusion) => {
                 setBusyMappingAction(`device-exclusion:${exclusion.id}`);
                 try {
@@ -11382,6 +11576,12 @@ function App() {
               selectedVendorId={selectedCustomerLicenseVendorId}
               vendorOptions={customerLicenseVendorIds}
             />
+          )}
+          {view === 'reports' && reportSection === 'software-inventory' && (
+            <SoftwareInventoryReportView onJobQueued={() => {
+              setJobsTrackerOpen(true);
+              void fetchBackgroundJobs().then(setBackgroundJobs).catch(() => undefined);
+            }} />
           )}
           {view === 'invoices' && (
             <InvoicesView
@@ -12751,23 +12951,27 @@ function formatAppRiverSyncProgress(status: RuntimeIntegrationSummary['operation
   return `AppRiver sync running. Progress: ${count}${current}${failed}.`;
 }
 
-function syncJobStatusLabel(status: IntegrationSyncJob['status']) {
+function backgroundJobStatusLabel(status: BackgroundJob['status']) {
+  if (status === 'complete-with-warnings') return 'Warnings';
   if (status === 'complete') return 'Complete';
   if (status === 'failed') return 'Failed';
   if (status === 'running') return 'Running';
   return 'Queued';
 }
 
+function backgroundJobSummary(job: BackgroundJob) {
+  if (job.error) return job.error;
+  if (job.progress?.currentItem) return job.progress.currentItem;
+  if (job.status === 'queued') return 'Waiting for a background worker.';
+  if (job.status === 'running') return 'Background processing is in progress.';
+  if (job.status === 'complete-with-warnings') return 'Finished with warnings. Open the destination for details.';
+  if (job.status === 'failed') return 'The job stopped before it completed.';
+  return 'Finished successfully.';
+}
+
 function syncJobProgressPercent(completed: number, total: number) {
   if (total <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
-}
-
-function syncJobDetail(job: IntegrationSyncJob) {
-  if (job.status === 'queued') return 'Waiting for a background worker.';
-  if (job.status === 'running') return 'Worker is processing the outer sync loop.';
-  if (job.status === 'failed') return 'The sync stopped before all results were saved.';
-  return 'All sync results have been saved and are ready to load.';
 }
 
 function AppRiverCleanupActionsModal(props: {
@@ -15019,7 +15223,7 @@ function ReconcileView(props: {
   onSyncIntegration: (integrationId: IntegrationId) => void;
   pendingCount: number;
   query: string;
-  reconciliationLoadState: 'idle' | 'loading' | 'ready' | 'failed';
+  reconciliationLoadState: ReconciliationLoadState;
   reconciliationIntegrations: ReconciliationVendorOption[];
   reconciliationMessage: string;
   selectedReconciliationIntegrationIds: VendorKey[];
@@ -15160,11 +15364,13 @@ function ReconcileView(props: {
           <strong>
             {reconciliationLoadState === 'failed'
               ? `${selectedSourceName} reconciliation issue`
-              : reconciliationLoadState === 'loading'
-                ? `Comparing ${selectedSourceName}`
-                : hasSelectedReconciliationVendors
-                  ? `${selectedSourceName} vs ConnectWise`
-                  : selectedSourceName}
+              : reconciliationLoadState === 'partial'
+                ? `${selectedSourceName} comparison incomplete`
+                : reconciliationLoadState === 'loading'
+                  ? `Comparing ${selectedSourceName}`
+                  : hasSelectedReconciliationVendors
+                    ? `${selectedSourceName} vs ConnectWise`
+                    : selectedSourceName}
           </strong>
           {reconciliationLoadState !== 'ready' || !hasSelectedReconciliationVendors ? (
             <span>{reconciliationMessage}</span>
@@ -17477,7 +17683,10 @@ function IntegrationsView(props: {
 
       {azureOnboardingOpen ? (
         <AzureOnboardingErrorBoundary onClose={() => setAzureOnboardingOpen(false)}>
-          <AzureOnboardingWizard onClose={() => setAzureOnboardingOpen(false)} />
+          <AzureOnboardingWizard
+            onClose={() => setAzureOnboardingOpen(false)}
+            onOpenMappings={() => onOpenMappings('microsoft-azure')}
+          />
         </AzureOnboardingErrorBoundary>
       ) : null}
     </section>
@@ -17526,203 +17735,30 @@ class AzureOnboardingErrorBoundary extends Component<
   }
 }
 
-function AzureOnboardingWizard(props: { onClose: () => void }) {
-  const { onClose } = props;
-  const [step, setStep] = useState(1);
-  const [state, setState] = useState<AzureOnboardingState | null>(null);
-  const [customerOptions, setCustomerOptions] = useState<MappingCustomerOption[]>([]);
-  const [customerQuery, setCustomerQuery] = useState('');
-  const [form, setForm] = useState<AzureOnboardingForm>({
-    customerId: '',
-    agreementId: '',
-    agreementAdditionId: '',
-    subscriptionId: '',
-    subscriptionName: '',
-  });
-  const [agreementAdditions, setAgreementAdditions] = useState<AgreementAddition[]>([]);
-  const [additionLoadState, setAdditionLoadState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
-  const [editingSubscriptionId, setEditingSubscriptionId] = useState<string | null>(null);
-  const [onboardingPackage, setOnboardingPackage] = useState<AzureOnboardingPackage | null>(null);
-  const [verification, setVerification] = useState<AzureOnboardingVerification | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [loadingState, setLoadingState] = useState(true);
-  const [loadingCustomers, setLoadingCustomers] = useState(false);
-  const [refreshingAzure, setRefreshingAzure] = useState(false);
-  const [message, setMessage] = useState('Opening the onboarding workspace...');
-  const selectedCustomer = customerOptions.find((customer) => customer.customerId === form.customerId);
-  const visibleCustomerOptions = useMemo(() => {
-    const query = customerQuery.trim().toLowerCase();
-    const matches = query
-      ? customerOptions.filter((customer) => [
-          customer.customerName,
-          customer.connectWiseCompanyId,
-          ...customer.aliases,
-        ].some((value) => value?.toLowerCase().includes(query)))
-      : customerOptions;
-    const visible = matches.slice(0, 50);
-    if (selectedCustomer && !visible.some((customer) => customer.customerId === selectedCustomer.customerId)) {
-      visible.unshift(selectedCustomer);
-    }
-    return visible;
-  }, [customerOptions, customerQuery, selectedCustomer]);
-  const currentTemplate = state?.currentTemplate;
-  const detailsComplete = Boolean(
-    form.customerId && form.agreementId && form.agreementAdditionId && form.subscriptionId.trim(),
-  );
+function AzureOnboardingWizard(props: { onClose: () => void; onOpenMappings: () => void }) {
+  const { onClose, onOpenMappings } = props;
+  const [currentTemplate, setCurrentTemplate] = useState<AzureLighthouseTemplate | undefined>();
+  const [portalUrl, setPortalUrl] = useState(azureServiceProvidersPortalUrlFallback);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('Loading the ARM template...');
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
 
-  const loadState = async (options: { discoverAzure?: boolean; includeCustomers?: boolean } = {}) => {
-    if (options.discoverAzure) setRefreshingAzure(true);
-    else setLoadingState(true);
-    try {
-      const onboarding = await fetchAzureOnboardingStateWithOptions(options);
-      setState(onboarding);
-      if (options.includeCustomers) setCustomerOptions(onboarding.customerOptions ?? []);
-      if (options.discoverAzure) {
-        setMessage(onboarding.readiness.connectionError
-          ? `Azure refresh failed: ${onboarding.readiness.connectionError}`
-          : `Azure refresh complete. ${onboarding.subscriptions.filter((subscription) => subscription.delegated).length} delegated subscription${onboarding.subscriptions.filter((subscription) => subscription.delegated).length === 1 ? '' : 's'} found.`);
-      } else {
-        setMessage(onboarding.currentTemplate
-          ? `Approved template version ${onboarding.currentTemplate.version} is ready to use.`
+  useEffect(() => {
+    void (async () => {
+      try {
+        const result = await fetchAzureLighthouseTemplateRequest();
+        setCurrentTemplate(result.currentTemplate);
+        setPortalUrl(result.portalUrl);
+        setMessage(result.currentTemplate
+          ? 'Download the template, deploy it in the client tenant, then map the Microsoft tenant.'
           : 'An administrator must upload an approved ARM template under Azure - Lighthouse Configuration.');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Unable to load the ARM template.');
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to load Azure onboarding.');
-    } finally {
-      setLoadingState(false);
-      setRefreshingAzure(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadState();
+    })();
   }, []);
-
-  const loadCustomerOptions = async () => {
-    if (customerOptions.length > 0 || loadingCustomers) return;
-    setLoadingCustomers(true);
-    setMessage('Loading ConnectWise customers and active agreements...');
-    try {
-      const onboarding = await fetchAzureOnboardingStateWithOptions({ includeCustomers: true });
-      setCustomerOptions(onboarding.customerOptions ?? []);
-      setMessage('Choose a customer, agreement, active addition, and Azure subscription ID.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to load ConnectWise customers.');
-    } finally {
-      setLoadingCustomers(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!form.agreementId) {
-      setAgreementAdditions([]);
-      setAdditionLoadState('idle');
-      return;
-    }
-    let cancelled = false;
-    setAdditionLoadState('loading');
-    fetchAgreementAdditions(form.agreementId)
-      .then((response) => {
-        if (cancelled) return;
-        setAgreementAdditions(response.additions);
-        setAdditionLoadState('ready');
-        setForm((current) => response.additions.some((addition) => addition.id === current.agreementAdditionId)
-          ? current
-          : { ...current, agreementAdditionId: '' });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setAgreementAdditions([]);
-        setAdditionLoadState('failed');
-      });
-    return () => { cancelled = true; };
-  }, [form.agreementId]);
-
-  const preparePackage = async () => {
-    if (!detailsComplete) {
-      setMessage('Choose a ConnectWise customer, agreement, active addition, and Azure subscription ID.');
-      return;
-    }
-    setBusy(true);
-    setMessage(editingSubscriptionId ? 'Saving the subscription mapping...' : 'Saving the pending customer subscription...');
-    try {
-      if (editingSubscriptionId) {
-        await saveAzureSubscriptionMappingRequest(editingSubscriptionId, form);
-        const edited = state?.subscriptions.find((subscription) => subscription.subscriptionId === editingSubscriptionId);
-        setMessage(edited?.active
-          ? 'Subscription mapping updated.'
-          : 'Subscription mapping updated. Verify delegated access when Azure is ready.');
-        await loadState();
-        if (edited?.active) {
-          setEditingSubscriptionId(null);
-          setStep(1);
-        } else {
-          setStep(3);
-        }
-        return;
-      }
-      const result = await prepareAzureOnboardingPackageRequest(form);
-      setOnboardingPackage(result);
-      setStep(3);
-      setMessage('Pending client saved. Verify after Azure finishes the Lighthouse delegation.');
-      await loadState();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to prepare the Azure onboarding package.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const verify = async () => {
-    setBusy(true);
-    setVerification(null);
-    setMessage('Checking Lighthouse visibility and Cost Management access...');
-    try {
-      const result = await verifyAzureOnboardingRequest(form);
-      setVerification(result);
-      setMessage(result.message);
-      if (result.activated) {
-        await loadState();
-      }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to verify this Azure subscription.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const resetForAnother = () => {
-    setForm((current) => ({
-      ...current,
-      agreementId: '',
-      agreementAdditionId: '',
-      subscriptionId: '',
-      subscriptionName: '',
-    }));
-    setEditingSubscriptionId(null);
-    setCustomerQuery('');
-    setOnboardingPackage(null);
-    setVerification(null);
-    setStep(1);
-    setMessage('Download the approved template for the next client.');
-  };
-
-  const editSubscriptionMapping = (subscription: AzureOnboardingState['subscriptions'][number]) => {
-    setEditingSubscriptionId(subscription.subscriptionId);
-    setForm({
-      customerId: subscription.customerId ?? '',
-      agreementId: subscription.agreementId ?? '',
-      agreementAdditionId: subscription.agreementAdditionId ?? '',
-      subscriptionId: subscription.subscriptionId,
-      subscriptionName: subscription.subscriptionName,
-    });
-    setCustomerQuery(subscription.customerName ?? '');
-    setOnboardingPackage(null);
-    setVerification(null);
-    setStep(2);
-    setMessage(`Editing the ConnectWise target for ${subscription.subscriptionName}.`);
-    void loadCustomerOptions();
-  };
 
   const downloadTemplate = () => {
     if (!currentTemplate) return;
@@ -17737,9 +17773,9 @@ function AzureOnboardingWizard(props: { onClose: () => void }) {
   };
 
   const copyPortalLink = async () => {
-    if (!state?.portalUrl) return;
+    if (!portalUrl) return;
     try {
-      await navigator.clipboard.writeText(state.portalUrl);
+      await navigator.clipboard.writeText(portalUrl);
       setMessage('Azure Service Providers link copied.');
     } catch {
       setMessage('Unable to copy automatically. Open the link and copy it from the browser address bar.');
@@ -17748,338 +17784,112 @@ function AzureOnboardingWizard(props: { onClose: () => void }) {
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <div aria-labelledby="azure-onboarding-title" className="modal-card azure-onboarding-modal" role="dialog">
+      <div aria-labelledby="azure-onboarding-title" className="modal-card azure-onboarding-modal azure-onboarding-compact" role="dialog">
         <div className="modal-header">
           <div>
             <h2 id="azure-onboarding-title"><UserPlus size={20} /> Azure - Lighthouse</h2>
-            <p>Delegate subscriptions and map each one to a reporting-only ConnectWise agreement addition.</p>
+            <p>Deploy the ARM template in the client tenant, then map the Microsoft tenant in Mapping.</p>
           </div>
           <button className="modal-close" onClick={onClose} title="Close" type="button">
             <X size={18} />
           </button>
         </div>
 
-        <ol className="azure-onboarding-steps" aria-label="Onboarding progress">
-          {['Deploy in Azure', 'Record client', 'Verify access'].map((label, index) => (
-            <li className={step === index + 1 ? 'active' : step > index + 1 ? 'complete' : ''} key={label}>
-              <span>{step > index + 1 ? <Check size={14} /> : index + 1}</span>
-              {label}
-            </li>
-          ))}
-        </ol>
-
         <div className="azure-onboarding-body">
-          {step === 1 ? (
-            <>
-              <section className="azure-onboarding-panel">
-                <div className="azure-onboarding-panel-heading">
-                  <div>
-                    <h3>Approved ARM template</h3>
-                    <p>Template upload and replacement are managed under Azure - Lighthouse Configuration.</p>
-                  </div>
-                  {currentTemplate ? <span>Version {currentTemplate.version}</span> : null}
-                </div>
-                {currentTemplate ? (
-                  <div className="azure-template-summary">
-                    <div><small>Offer</small><strong>{currentTemplate.offerName ?? 'Azure Lighthouse offer'}</strong></div>
-                    <div><small>File</small><strong>{currentTemplate.fileName}</strong></div>
-                    <div><small>Uploaded</small><strong>{formatDateTime(currentTemplate.uploadedAt)}</strong></div>
-                    <div><small>Uploaded by</small><strong>{currentTemplate.uploadedBy}</strong></div>
-                    <div>
-                      <small>Managing tenant</small>
-                      <strong>{state?.readiness.managingTenantName ?? currentTemplate.managedByTenantId ?? 'Not detected'}</strong>
-                      {currentTemplate.managedByTenantId ? <code>{currentTemplate.managedByTenantId}</code> : null}
-                    </div>
-                    <div className="azure-template-hash"><small>SHA-256</small><code title={currentTemplate.sha256}>{currentTemplate.sha256}</code></div>
-                  </div>
-                ) : (
-                  <div className="empty-inline">No approved Azure Lighthouse template has been uploaded.</div>
-                )}
-                <div className="azure-onboarding-package-actions">
-                  <button className="button primary compact" disabled={!currentTemplate || busy} onClick={downloadTemplate} type="button">
-                    <Download size={16} /> Download ARM template
-                  </button>
-                  <a className="button secondary compact" href={state?.portalUrl} rel="noreferrer" target="_blank">
-                    <ExternalLink size={16} /> Open Azure Service Providers
-                  </a>
-                  <button className="button secondary compact" disabled={!state?.portalUrl} onClick={() => void copyPortalLink()} type="button">
-                    <Link2 size={16} /> Copy portal link
-                  </button>
-                </div>
-                {currentTemplate?.authorizations.length ? (
-                  <div className="azure-template-authorizations">
-                    <h4>Access included in this template</h4>
-                    {currentTemplate.authorizations.map((authorization) => (
-                      <div key={`${authorization.principalId}-${authorization.roleDefinitionId}`}>
-                        <strong>{authorization.principalDisplayName ?? authorization.principalId}</strong>
-                        <span>{authorization.roleName ?? authorization.roleDefinitionId}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </section>
-              {state?.readiness.tenantLookupWarning ? (
-                <div className="notice neutral">{state.readiness.tenantLookupWarning} Tenant IDs remain available as a fallback.</div>
-              ) : null}
-              <section className="azure-onboarding-panel azure-portal-guide">
-                <h3>Client portal steps</h3>
-                <ol>
-                  <li><span>1</span><div><strong>Sign in to the client tenant</strong><small>Use an account that is Owner on the subscription being delegated.</small></div></li>
-                  <li><span>2</span><div><strong>Open Azure Service Providers</strong><small>Use the button above, then select <b>Service provider offers</b>.</small></div></li>
-                  <li><span>3</span><div><strong>Add the offer</strong><small>Select <b>Add offer</b>, then <b>Add via template</b>.</small></div></li>
-                  <li><span>4</span><div><strong>Upload the downloaded JSON file</strong><small>Choose the subscription to manage, validate, and create the delegation.</small></div></li>
-                </ol>
-                <div className="notice neutral">Azure Lighthouse visibility can take several minutes after the deployment succeeds.</div>
-              </section>
-              <AzureOnboardingSubscriptions
-                onEdit={editSubscriptionMapping}
-                onRefresh={() => void loadState({ discoverAzure: true })}
-                refreshing={refreshingAzure}
-                subscriptions={state?.subscriptions ?? []}
-              />
-            </>
-          ) : null}
-
-          {step === 2 ? (
-            <section className="azure-onboarding-panel">
-              <h3>{editingSubscriptionId ? 'Edit subscription mapping' : 'Customer, addition, and subscription'}</h3>
-              <p>{editingSubscriptionId
-                ? 'Change the reporting association without redeploying the Lighthouse template.'
-                : 'After the client deploys the template, map the entire subscription to one ConnectWise agreement addition.'}</p>
-              <div className="azure-onboarding-form-grid">
-                <label>
-                  <span>Find ConnectWise customer</span>
-                  <input
-                    disabled={loadingCustomers}
-                    onChange={(event) => setCustomerQuery(event.target.value)}
-                    placeholder="Search name, alias, or company ID"
-                    value={customerQuery}
-                  />
-                  <small>
-                    {loadingCustomers
-                      ? 'Loading customer directory...'
-                      : `Showing ${visibleCustomerOptions.length} of ${customerOptions.length} customers`}
-                  </small>
-                </label>
-                <label>
-                  <span>ConnectWise customer</span>
-                  <select
-                    disabled={loadingCustomers}
-                    value={form.customerId}
-                    onChange={(event) => setForm((current) => ({
-                      ...current,
-                      customerId: event.target.value,
-                      agreementId: '',
-                      agreementAdditionId: '',
-                    }))}
-                  >
-                    <option value="">{loadingCustomers ? 'Loading customers...' : 'Select customer'}</option>
-                    {visibleCustomerOptions.map((customer) => (
-                      <option key={customer.customerId} value={customer.customerId}>{customer.customerName}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>Agreement</span>
-                  <select
-                    disabled={!selectedCustomer}
-                    value={form.agreementId}
-                    onChange={(event) => setForm((current) => ({
-                      ...current,
-                      agreementId: event.target.value,
-                      agreementAdditionId: '',
-                    }))}
-                  >
-                    <option value="">Select agreement</option>
-                    {(selectedCustomer?.agreements ?? []).map((agreement) => (
-                      <option key={agreement.agreementId} value={agreement.agreementId}>{agreement.agreementName}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>Agreement addition</span>
-                  <select
-                    disabled={!form.agreementId || additionLoadState === 'loading'}
-                    value={form.agreementAdditionId}
-                    onChange={(event) => setForm((current) => ({ ...current, agreementAdditionId: event.target.value }))}
-                  >
-                    <option value="">
-                      {additionLoadState === 'loading' ? 'Loading additions...' : 'Select active addition'}
-                    </option>
-                    {agreementAdditions.map((addition) => (
-                      <option key={addition.id} value={addition.id}>
-                        {addition.productName} ({addition.productCode}) · CW {addition.connectWiseAdditionId}
-                      </option>
-                    ))}
-                  </select>
-                  {additionLoadState === 'failed' ? <small className="error-message">Unable to load active additions.</small> : null}
-                </label>
-                <label>
-                  <span>Subscription ID</span>
-                  <input disabled={Boolean(editingSubscriptionId)} value={form.subscriptionId} onChange={(event) => setForm((current) => ({ ...current, subscriptionId: event.target.value }))} placeholder="00000000-0000-0000-0000-000000000000" />
-                </label>
-                <label>
-                  <span>Subscription name</span>
-                  <input value={form.subscriptionName} onChange={(event) => setForm((current) => ({ ...current, subscriptionName: event.target.value }))} placeholder="Customer Azure subscription" />
-                </label>
-              </div>
-              <div className="notice neutral">
-                Cost line items stay available for reporting only. They do not create product mappings or enter quantity reconciliation.
-              </div>
-            </section>
-          ) : null}
-
-          {step === 3 ? (
-            <section className="azure-onboarding-panel">
-              <h3>Verify delegated access</h3>
-              <p>MSP Harmony will check Azure Lighthouse visibility, cost data, resource inventory, and monitoring access.</p>
-              <button className="button primary" disabled={busy} onClick={() => void verify()} type="button">
-                <RefreshCcw className={busy ? 'spin' : ''} size={16} />
-                {busy ? 'Verifying...' : 'Verify and activate'}
+          <section className="azure-onboarding-panel azure-onboarding-compact-panel">
+            <div className="azure-onboarding-inline-heading">
+              <h3>ARM Template</h3>
+              <strong>{loading ? 'Loading…' : (currentTemplate?.offerName ?? 'No approved template')}</strong>
+              {currentTemplate ? <span>v{currentTemplate.version}</span> : null}
+            </div>
+            <div className="azure-onboarding-package-actions">
+              <button className="button primary compact" disabled={!currentTemplate} onClick={downloadTemplate} type="button">
+                <Download size={16} /> Download ARM template
               </button>
-              {verification ? (
-                <div className="azure-verification-result">
-                  {verification.tenantId ? (
-                    <AzureReadinessRow
-                      ready
-                      label="Customer tenant"
-                      detail={`${verification.tenantName ?? verification.tenantId} · ${verification.tenantId}`}
-                    />
-                  ) : null}
-                  <AzureReadinessRow ready={verification.delegated} label="Lighthouse visibility" detail={verification.delegated ? 'Subscription found' : 'Not visible yet'} />
-                  <AzureReadinessRow ready={verification.costManagementAccessible} label="Cost Management query" detail={verification.costManagementAccessible ? `${verification.sampleRowCount ?? 0} recent usage rows returned` : verification.costManagementError ?? 'Not accessible'} />
-                  <AzureReadinessRow ready={verification.resourceInventoryAccessible} label="Resource inventory query" detail={verification.resourceInventoryAccessible ? `${verification.sampleResourceCount ?? 0} resources returned on the first page` : verification.resourceInventoryError ?? 'Not accessible'} />
-                  {verification.monitoringMetricsTested ? (
-                    <AzureReadinessRow ready={verification.monitoringMetricsAccessible} label="Azure Monitor metrics query" detail={verification.monitoringMetricsAccessible ? 'VM metrics are accessible' : verification.monitoringMetricsError ?? 'Not accessible'} />
-                  ) : null}
-                </div>
-              ) : null}
-              {verification?.activated ? (
-                <div className="azure-onboarding-success">
-                  <BadgeCheck size={36} />
-                  <div>
-                    <h3>{verification.subscriptionName ?? form.subscriptionName ?? form.subscriptionId} is active</h3>
-                    <p>The reporting access checks passed and the ConnectWise mapping is approved.</p>
+              <a className="button secondary compact" href={portalUrl} rel="noreferrer" target="_blank">
+                <ExternalLink size={16} /> Open Azure Service Providers
+              </a>
+              <button
+                className="icon-button"
+                disabled={!portalUrl}
+                onClick={() => void copyPortalLink()}
+                title="Copy Azure Service Providers Link"
+                type="button"
+              >
+                <Copy size={16} />
+              </button>
+              <button
+                className="azure-text-action"
+                onClick={() => setInstructionsOpen(true)}
+                title="Client portal steps"
+                type="button"
+              >
+                Instructions
+              </button>
+            </div>
+            {currentTemplate?.authorizations.length ? (
+              <div className="azure-template-authorizations azure-template-authorizations-compact">
+                <h4>Access included</h4>
+                {currentTemplate.authorizations.map((authorization) => (
+                  <div key={`${authorization.principalId}-${authorization.roleDefinitionId}`}>
+                    <strong>{authorization.principalDisplayName ?? authorization.principalId}</strong>
+                    <span>{authorization.roleName ?? authorization.roleDefinitionId}</span>
                   </div>
-                </div>
-              ) : null}
-              {onboardingPackage ? (
-                <small>Recorded with approved template version {onboardingPackage.templateVersion}.</small>
-              ) : null}
-            </section>
-          ) : null}
+                ))}
+              </div>
+            ) : null}
+          </section>
         </div>
 
         <div className="azure-onboarding-footer">
-          <span className={message.toLowerCase().includes('unable') || message.toLowerCase().includes('missing') ? 'error-message' : ''}>{message}</span>
+          <span className={message.toLowerCase().includes('unable') ? 'error-message' : ''}>{message}</span>
           <div>
-            {step > 1 ? (
-              <button className="button secondary" disabled={busy} onClick={() => setStep((current) => Math.max(1, current - 1))} type="button">Back</button>
-            ) : null}
-            {step === 1 ? (
-              <button
-                className="button primary"
-                disabled={!currentTemplate || busy || loadingState}
-                onClick={() => {
-                  setEditingSubscriptionId(null);
-                  setCustomerQuery('');
-                  setForm({ customerId: '', agreementId: '', agreementAdditionId: '', subscriptionId: '', subscriptionName: '' });
-                  setStep(2);
-                  void loadCustomerOptions();
-                }}
-                type="button"
-              >
-                Client deployment completed
-              </button>
-            ) : null}
-            {step === 2 ? (
-              <button className="button primary" disabled={!detailsComplete || busy} onClick={() => void preparePackage()} type="button">
-                {busy ? 'Saving...' : editingSubscriptionId ? 'Save mapping' : 'Save pending client'}
-              </button>
-            ) : null}
-            {step === 3 ? (
-              <>
-                {verification?.activated ? <button className="button secondary" onClick={resetForAnother} type="button">Onboard another</button> : null}
-                <button className="button primary" onClick={onClose} type="button">Done</button>
-              </>
-            ) : null}
+            <button className="button secondary" onClick={onClose} type="button">Close</button>
+            <button
+              className="button primary"
+              onClick={() => {
+                onOpenMappings();
+                onClose();
+              }}
+              type="button"
+            >
+              Clients onboarded — proceed to mapping
+            </button>
           </div>
         </div>
       </div>
-    </div>
-  );
-}
 
-function AzureReadinessRow(props: { ready: boolean; label: string; detail: string }) {
-  return (
-    <div className={props.ready ? 'ready' : 'not-ready'}>
-      <span>{props.ready ? <Check size={15} /> : <X size={15} />}</span>
-      <div><strong>{props.label}</strong><small>{props.detail}</small></div>
-    </div>
-  );
-}
-
-function AzureOnboardingSubscriptions(props: {
-  onEdit: (subscription: AzureOnboardingState['subscriptions'][number]) => void;
-  onRefresh: () => void;
-  refreshing: boolean;
-  subscriptions: AzureOnboardingState['subscriptions'];
-}) {
-  return (
-    <section className="azure-onboarding-panel">
-      <div className="azure-onboarding-panel-heading">
-        <div>
-          <h3>Subscription mappings</h3>
-          <p>Saved mappings load immediately. Refresh from Azure only when you need current delegation or tenant details.</p>
-        </div>
-        <div className="azure-subscription-heading-actions">
-          <span>{props.subscriptions.length}</span>
-          <button className="button secondary compact" disabled={props.refreshing} onClick={props.onRefresh} type="button">
-            <RefreshCcw className={props.refreshing ? 'spin' : ''} size={15} />
-            {props.refreshing ? 'Refreshing Azure...' : 'Refresh from Azure'}
-          </button>
-        </div>
-      </div>
-      {props.subscriptions.length === 0 ? (
-        <div className="empty-inline">No delegated or pending Azure subscriptions yet.</div>
-      ) : (
-        <div className="azure-subscription-list">
-          {props.subscriptions.map((subscription) => (
-            <div key={subscription.subscriptionId}>
-              <span className={`live-dot ${subscription.active && subscription.mappingComplete ? 'ready' : subscription.delegated ? 'loading' : 'failed'}`} />
+      {instructionsOpen ? (
+        <div className="modal-backdrop azure-instructions-backdrop" role="presentation">
+          <section className="modal-card azure-instructions-card" role="dialog" aria-labelledby="azure-instructions-title">
+            <div className="modal-header">
               <div>
-                <strong>{subscription.subscriptionName}</strong>
-                <small>{subscription.tenantName ?? subscription.tenantId ?? 'Tenant unavailable'}{subscription.tenantId ? ` · ${subscription.tenantId}` : ''}</small>
-                <small>{subscription.subscriptionId}</small>
-                <small>
-                  {subscription.customerName ?? 'ConnectWise mapping pending'}
-                  {subscription.agreementName ? ` · ${subscription.agreementName}` : ''}
-                  {subscription.additionName
-                    ? ` · ${subscription.additionName} (${subscription.additionCode ?? 'addition'})`
-                    : ' · Addition required'}
-                </small>
+                <h2 id="azure-instructions-title">Client portal steps</h2>
+                <p>Azure Lighthouse visibility can take several minutes after the deployment succeeds.</p>
               </div>
-              <div className="azure-subscription-actions">
-                <span className={`integration-status ${subscription.active && subscription.mappingComplete ? 'connected' : 'degraded'}`}>
-                  {subscription.active && subscription.mappingComplete
-                    ? 'Active'
-                    : subscription.active
-                      ? 'Needs addition'
-                      : subscription.delegated
-                        ? 'Ready to verify'
-                        : 'Pending approval'}
-                </span>
-                <button className="icon-button table-icon" onClick={() => props.onEdit(subscription)} title="Edit subscription mapping" type="button">
-                  <Pencil size={15} />
-                </button>
-              </div>
+              <button className="modal-close" onClick={() => setInstructionsOpen(false)} title="Close" type="button">
+                <X size={18} />
+              </button>
             </div>
-          ))}
+            <ol className="azure-instructions-list">
+              <li><strong>Sign in to the client tenant</strong><span>Use an account that is Owner on the subscription being delegated.</span></li>
+              <li><strong>Open Azure Service Providers</strong><span>Use the button in this window, then select Service provider offers.</span></li>
+              <li><strong>Add the offer</strong><span>Select Add offer, then Add via template.</span></li>
+              <li><strong>Upload the downloaded JSON file</strong><span>Choose the subscription to manage, validate, and create the delegation.</span></li>
+            </ol>
+            <div className="azure-onboarding-footer">
+              <span />
+              <button className="button primary" onClick={() => setInstructionsOpen(false)} type="button">Close</button>
+            </div>
+          </section>
         </div>
-      )}
-    </section>
+      ) : null}
+    </div>
   );
 }
+
+const azureServiceProvidersPortalUrlFallback =
+  'https://portal.azure.com/#blade/Microsoft_Azure_CustomerHub/ServiceProvidersBladeV2/providers';
 
 function CompactManualImportsPanel(props: {
   datapoints: VendorDatapointRecord[];
@@ -20017,6 +19827,8 @@ function MappingsView(props: {
   const isDattoMappingWorkspace = selectedIntegrationId === 'datto';
   const isHuntressMappingWorkspace = selectedIntegrationId === 'huntress';
   const isLaborOnlyMappingWorkspace = selectedIntegrationId === 'connectwise';
+  const isAzureMappingWorkspace = selectedIntegrationId === 'microsoft-azure';
+  const showProductMappingWorkspace = !isLaborOnlyMappingWorkspace && !isAzureMappingWorkspace;
   const monthlyReviewProductExclusions = mappingState?.monthlyReviewProductExclusions ?? [];
   const ncentralSiteMappings = mappingState?.ncentralSiteMappings ?? [];
   const ncentralSiteOptions = mappingState?.ncentralSiteOptions ?? [];
@@ -21004,11 +20816,15 @@ function MappingsView(props: {
   return (
     <section className="mappings-page" aria-label="Mapping review">
       <div className="integrations-live-bar">
-        <div>
-          <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
-          <strong>{loadState === 'failed' ? 'Mapping issue' : loadState === 'loading' ? 'Loading mappings' : 'Mapping workspace'}</strong>
-          <span>{loadMessage}</span>
-        </div>
+        {isAzureMappingWorkspace ? (
+          <div />
+        ) : (
+          <div>
+            <span className={`live-dot ${loadState === 'failed' ? 'failed' : loadState === 'loading' ? 'loading' : 'ready'}`} />
+            <strong>{loadState === 'failed' ? 'Mapping issue' : loadState === 'loading' ? 'Loading mappings' : 'Mapping workspace'}</strong>
+            <span>{loadMessage}</span>
+          </div>
+        )}
         <div className="integrations-live-meta">
           <label className="mapping-integration-select">
             <span>Vendor</span>
@@ -21029,16 +20845,25 @@ function MappingsView(props: {
               ))}
             </select>
           </label>
-          <button className="button secondary compact" disabled={loadState === 'loading'} onClick={() => void onRefresh()} type="button">
-            <RefreshCcw size={16} />
-            Refresh
-          </button>
-          {!isLaborOnlyMappingWorkspace ? (
-            <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
-              <Zap size={16} />
-              {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
-            </button>
-          ) : null}
+          {isAzureMappingWorkspace ? null : (
+            <>
+              <button
+                className="button secondary compact"
+                disabled={loadState === 'loading'}
+                onClick={() => void onRefresh()}
+                type="button"
+              >
+                <RefreshCcw size={16} />
+                Refresh
+              </button>
+              {!isLaborOnlyMappingWorkspace ? (
+                <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
+                  <Zap size={16} />
+                  {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
 
@@ -21065,7 +20890,9 @@ function MappingsView(props: {
       {showInvestigationTicketMappingSection ? (
         <MappingSectionDrawer
           defaultOpen
-          meta="Board, type, optional subtype, and status for reconcile investigation tickets"
+          meta={isAzureMappingWorkspace
+            ? 'Board, type, and status for Azure usage-anomaly tickets'
+            : 'Board, type, optional subtype, and status for reconcile investigation tickets'}
           onOpenChange={setMappingSection}
           openState={mappingSectionOpen}
           sectionId="investigation-tickets"
@@ -21350,7 +21177,7 @@ function MappingsView(props: {
         </MappingSectionDrawer>
       ) : null}
 
-      {!isLaborOnlyMappingWorkspace ? (
+      {!isLaborOnlyMappingWorkspace && !isAzureMappingWorkspace ? (
         <MappingSectionDrawer
           defaultOpen={doNotSuggestNewAdditions || selectedIntegrationId === 'ncentral'}
           meta="Controls how reconcile suggests agreement changes"
@@ -21432,12 +21259,28 @@ function MappingsView(props: {
         </section>
       ) : null}
 
+      {isAzureMappingWorkspace ? null : (
       <section className="metric-grid mapping-metrics" aria-label="Mapping summary">
-        <MetricCard icon={Users} label="Mapped clients" tone="approved" value={formatCount(approvedAccountMappingCount)} />
-        <MetricCard icon={ClipboardCheck} label="Client review" tone="warn" value={formatCount(accountCandidates.filter((candidate) => candidate.status === 'needs-review').length)} />
-        <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(approvedProductMappingCount)} />
-        <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productCandidates.length)} />
+        <MetricCard
+          icon={Users}
+          label="Mapped clients"
+          tone="approved"
+          value={formatCount(approvedAccountMappingCount)}
+        />
+        <MetricCard
+          icon={ClipboardCheck}
+          label="Client review"
+          tone="warn"
+          value={formatCount(accountCandidates.filter((candidate) => candidate.status === 'needs-review').length)}
+        />
+        {showProductMappingWorkspace ? (
+          <>
+            <MetricCard icon={Package} label="Mapped products" tone="ready" value={formatCount(approvedProductMappingCount)} />
+            <MetricCard icon={Database} label="Unmapped products" tone="money" value={formatCount(productCandidates.length)} />
+          </>
+        ) : null}
       </section>
+      )}
 
       {selectedIntegrationId === 'ncentral' ? (
         <MappingSectionDrawer
@@ -21492,8 +21335,8 @@ function MappingsView(props: {
 
       <section className="mapping-review-grid">
         <MappingSectionDrawer
-          defaultOpen={false}
-          meta={`${approvedAccountMappingCount.toLocaleString()} mapped customers`}
+          defaultOpen={isAzureMappingWorkspace || accountCandidates.length > 0}
+          meta={`${approvedAccountMappingCount.toLocaleString()} mapped ${isAzureMappingWorkspace ? 'tenants' : 'customers'}`}
           onOpenChange={setMappingSection}
           openState={mappingSectionOpen}
           sectionId="customer"
@@ -21506,12 +21349,34 @@ function MappingsView(props: {
             <div>
               <span className="section-kicker">Customer mapping</span>
               <h2>
-                {showMappedAccounts
-                  ? `${accountRows.length.toLocaleString()} ${selectedDatasetLabel} accounts`
-                  : `${accountCandidates.length.toLocaleString()} unmapped ${selectedDatasetLabel} accounts`}
+                {isAzureMappingWorkspace
+                  ? (showMappedAccounts
+                    ? `${accountRows.length.toLocaleString()} Microsoft tenants`
+                    : `${accountCandidates.length.toLocaleString()} unmapped Microsoft tenants`)
+                  : (showMappedAccounts
+                    ? `${accountRows.length.toLocaleString()} ${selectedDatasetLabel} accounts`
+                    : `${accountCandidates.length.toLocaleString()} unmapped ${selectedDatasetLabel} accounts`)}
               </h2>
             </div>
             <div className="surface-header-actions">
+              {isAzureMappingWorkspace ? (
+                <>
+                  <button
+                    className="button secondary compact"
+                    disabled={loadState === 'loading'}
+                    onClick={() => void onRefresh()}
+                    title="Refresh delegated tenants from Azure Lighthouse"
+                    type="button"
+                  >
+                    <RefreshCcw size={16} />
+                    Refresh
+                  </button>
+                  <button className="button secondary compact" disabled={Boolean(busyAction)} onClick={onAutomap} type="button">
+                    <Zap size={16} />
+                    {busyAction === 'automap' ? 'Automapping' : 'Run automap'}
+                  </button>
+                </>
+              ) : null}
               <button
                 className="button primary compact"
                 disabled={Boolean(busyAction) || !canBulkApproveSuggested}
@@ -21541,9 +21406,9 @@ function MappingsView(props: {
 
           <div className="mapping-review-list">
             <div className="mapping-review-header account" role="row">
-              <span>{selectedDatasetLabel} customer</span>
+              <span>{isAzureMappingWorkspace ? 'Microsoft tenant' : `${selectedDatasetLabel} customer`}</span>
               <span aria-hidden="true" />
-              <span>ConnectWise customer / agreement</span>
+              <span>{isAzureMappingWorkspace ? 'ConnectWise customer' : 'ConnectWise customer / agreement'}</span>
               <span>Status</span>
               <span>Score</span>
               <span>Actions</span>
@@ -21551,8 +21416,12 @@ function MappingsView(props: {
             {accountRows.length === 0 ? (
               <div className="empty-state">
                 <Users size={20} />
-                <strong>No account mappings found.</strong>
-                <span>Run automap after a vendor sync to generate client candidates.</span>
+                <strong>{isAzureMappingWorkspace ? 'No Microsoft tenants found.' : 'No account mappings found.'}</strong>
+                <span>
+                  {isAzureMappingWorkspace
+                    ? 'Refresh to discover newly delegated Lighthouse tenants. Propagation can take several minutes after the client deploys the ARM template.'
+                    : 'Run automap after a vendor sync to generate client candidates.'}
+                </span>
               </div>
             ) : null}
 
@@ -21565,17 +21434,36 @@ function MappingsView(props: {
               const isEditing = editingAccountId === row.externalAccountId;
               const selectedCustomer = customerOptions.find((option) => option.customerId === manualCustomerId);
               const selectedAgreementOptions = selectedCustomer?.agreements ?? [];
+              const subscriptionCount = row.evidence.find((item) => item.label === 'Subscriptions' || item.label === 'Vendor rows')?.value;
+              const tenantHeading = isAzureMappingWorkspace
+                ? azureTenantHeading(row.externalAccountName, row.externalAccountId)
+                : row.externalAccountName;
+              const azureSubscriptionSummary = isAzureMappingWorkspace
+                ? azureMappingSubscriptionSummary(row.azureSubscriptions, tenantHeading)
+                : undefined;
+              const sourceDetail = isAzureMappingWorkspace
+                ? (azureSubscriptionSummary
+                  ?? (typeof subscriptionCount === 'number' && subscriptionCount > 0
+                    ? `${subscriptionCount.toLocaleString()} subscription${subscriptionCount === 1 ? '' : 's'}`
+                    : 'No subscriptions discovered'))
+                : row.externalAccountId;
               return (
                 <Fragment key={`${row.externalAccountId}-${row.agreementId ?? 'none'}-${isCandidate ? 'candidate' : 'saved'}`}>
                   <article className="mapping-review-row account">
                     <div>
-                      <strong>{row.externalAccountName}</strong>
-                      <span>{row.externalAccountId}</span>
+                      <strong>{tenantHeading}</strong>
+                      <span title={isAzureMappingWorkspace ? `Tenant ID: ${row.externalAccountId}` : undefined}>
+                        {sourceDetail}
+                      </span>
                     </div>
                     <ArrowRight size={16} />
                     <div>
                       <strong>{row.customerName ?? 'No customer match'}</strong>
-                      <span>{row.agreementName ?? (row.customerId ? 'No Agreement Sync' : 'No agreement selected')}</span>
+                      {isAzureMappingWorkspace ? (
+                        <span>{row.customerId ? 'Microsoft tenant mapping' : 'Choose a ConnectWise customer'}</span>
+                      ) : (
+                        <span>{row.agreementName ?? (row.customerId ? 'No Agreement Sync' : 'No agreement selected')}</span>
+                      )}
                     </div>
                     <span className={`status-pill ${mappingStatusClass(row.status, isCandidate)}`}>
                       {mappingStatusLabel(row.status, isCandidate)}
@@ -21622,6 +21510,7 @@ function MappingsView(props: {
                           ))}
                         </select>
                       </label>
+                      {isAzureMappingWorkspace ? null : (
                       <label>
                         <span>Agreement</span>
                         <select
@@ -21638,12 +21527,17 @@ function MappingsView(props: {
                           ))}
                         </select>
                       </label>
+                      )}
                       <div className="mapping-edit-actions">
                         <button
                           className="button primary compact"
-                          disabled={!manualCustomerId || !manualAgreementId || busyAction === actionKey}
+                          disabled={!manualCustomerId || (!isAzureMappingWorkspace && !manualAgreementId) || busyAction === actionKey}
                           onClick={async () => {
-                            const saved = await onAccountManualSave(row, manualCustomerId, manualAgreementId);
+                            const saved = await onAccountManualSave(
+                              row,
+                              manualCustomerId,
+                              isAzureMappingWorkspace ? noAgreementSyncValue : manualAgreementId,
+                            );
                             if (saved) {
                               setEditingAccountId(null);
                             }
@@ -21670,6 +21564,8 @@ function MappingsView(props: {
           </div>
         </MappingSectionDrawer>
 
+        {showProductMappingWorkspace ? (
+        <>
         <MappingSectionDrawer
           defaultOpen={unmatchedProductGroupCount > 0}
           meta={`${approvedProductMappingCount.toLocaleString()} mapped products`}
@@ -21928,8 +21824,12 @@ function MappingsView(props: {
             </div>
           </div>
         </MappingSectionDrawer>
+        </>
+        ) : null}
       </section>
 
+      {showProductMappingWorkspace ? (
+        <>
       <MappingSectionDrawer
         defaultOpen={false}
         meta={`${productLinkRules.length.toLocaleString()} saved linked count rules`}
@@ -22924,6 +22824,8 @@ function MappingsView(props: {
         </div>
       </section>
       </MappingSectionDrawer>
+        </>
+      ) : null}
         </>
       ) : null}
 
@@ -25221,6 +25123,15 @@ function IntegrationModal(props: {
   const [scheduleFrequency, setScheduleFrequency] = useState<IntegrationSyncScheduleFrequency>(
     integration.schedule.frequency,
   );
+  const azureDailySaved = integration.schedule.operationSchedules?.find((item) => item.operationKey === 'azure-cost-usage');
+  const azureMonthlySaved = integration.schedule.operationSchedules?.find((item) => item.operationKey === 'azure-cost-monthly');
+  const [azureDailyFrequency, setAzureDailyFrequency] = useState<IntegrationSyncScheduleFrequency>(
+    azureDailySaved?.frequency
+      ?? (integration.id === 'microsoft-azure' && integration.schedule.frequency === 'daily' ? 'daily' : 'manual'),
+  );
+  const [azureMonthlyFrequency, setAzureMonthlyFrequency] = useState<IntegrationSyncScheduleFrequency>(
+    azureMonthlySaved?.frequency ?? 'manual',
+  );
   const syncOperations = listIntegrationApiOperations(integration.id);
   const buildPayload = (form: HTMLFormElement): IntegrationSettingsPayload => {
     const formData = new FormData(form);
@@ -25246,14 +25157,39 @@ function IntegrationModal(props: {
       secrets,
       ...(integration.capabilities.includes('live-api')
         ? {
-            schedule: {
-              frequency: String(formData.get('schedule:frequency') ?? 'manual') as IntegrationSyncScheduleFrequency,
-              scheduledHour: Number(formData.get('schedule:hour') ?? integrationSchedulerFirstHour),
-              weekdays: formData.getAll('schedule:weekday').map(Number),
-              dayOfMonth: Number(formData.get('schedule:dayOfMonth') ?? 1),
-              timeZone: integrationSchedulerTimeZone,
-              operationKeys: formData.getAll('schedule:operation').map(String),
-            },
+            schedule: integration.id === 'microsoft-azure'
+              ? {
+                  frequency: 'manual' as IntegrationSyncScheduleFrequency,
+                  scheduledHour: integrationSchedulerFirstHour,
+                  weekdays: [] as number[],
+                  dayOfMonth: Number(formData.get('schedule:azure-cost-monthly:dayOfMonth') ?? 2),
+                  timeZone: integrationSchedulerTimeZone,
+                  operationKeys: [] as string[],
+                  operationSchedules: [
+                    {
+                      operationKey: 'azure-cost-usage',
+                      frequency: String(formData.get('schedule:azure-cost-usage:frequency') ?? 'manual') as IntegrationSyncScheduleFrequency,
+                      scheduledHour: Number(formData.get('schedule:azure-cost-usage:hour') ?? integrationSchedulerFirstHour),
+                      weekdays: [],
+                      dayOfMonth: 1,
+                    },
+                    {
+                      operationKey: 'azure-cost-monthly',
+                      frequency: String(formData.get('schedule:azure-cost-monthly:frequency') ?? 'manual') as IntegrationSyncScheduleFrequency,
+                      scheduledHour: Number(formData.get('schedule:azure-cost-monthly:hour') ?? integrationSchedulerFirstHour),
+                      weekdays: [],
+                      dayOfMonth: Number(formData.get('schedule:azure-cost-monthly:dayOfMonth') ?? 2),
+                    },
+                  ],
+                }
+              : {
+                  frequency: String(formData.get('schedule:frequency') ?? 'manual') as IntegrationSyncScheduleFrequency,
+                  scheduledHour: Number(formData.get('schedule:hour') ?? integrationSchedulerFirstHour),
+                  weekdays: formData.getAll('schedule:weekday').map(Number),
+                  dayOfMonth: Number(formData.get('schedule:dayOfMonth') ?? 1),
+                  timeZone: integrationSchedulerTimeZone,
+                  operationKeys: formData.getAll('schedule:operation').map(String),
+                },
           }
         : {}),
     };
@@ -25338,7 +25274,97 @@ function IntegrationModal(props: {
             {integration.id === 'microsoft-azure' ? (
               <AzureLighthouseTemplateConfiguration canManage={canManageAzureTemplate} />
             ) : null}
-            {integration.capabilities.includes('live-api') ? (
+            {integration.id === 'microsoft-azure' ? (
+              <div className="integration-settings-section integration-schedule-section">
+                <h3 className="integration-settings-section-title">Sync schedule</h3>
+                <p className="config-note">
+                  Azure Cost Management returns one charge line per product, resource, meter, and charge type for each completed day. Daily refresh pulls the current month through yesterday. Monthly backfill re-pulls up to three fully completed months and never includes the current partial month.
+                </p>
+                <div className="azure-schedule-grid">
+                  <fieldset className="integration-schedule-options">
+                    <legend>Daily charges</legend>
+                    <div className="integration-settings-grid">
+                      <label className="config-field">
+                        <span>Frequency</span>
+                        <select
+                          defaultValue={azureDailyFrequency}
+                          name="schedule:azure-cost-usage:frequency"
+                          onChange={(event) => setAzureDailyFrequency(event.target.value as IntegrationSyncScheduleFrequency)}
+                        >
+                          <option value="manual">Manual</option>
+                          <option value="daily">Daily</option>
+                        </select>
+                      </label>
+                      {azureDailyFrequency === 'daily' ? (
+                        <label className="config-field">
+                          <span>Start time</span>
+                          <select defaultValue={String(azureDailySaved?.scheduledHour ?? integration.schedule.scheduledHour)} name="schedule:azure-cost-usage:hour">
+                            {Array.from(
+                              { length: integrationSchedulerLastHour - integrationSchedulerFirstHour + 1 },
+                              (_, index) => integrationSchedulerFirstHour + index,
+                            ).map((hour) => (
+                              <option key={hour} value={hour}>
+                                {new Date(2026, 0, 1, hour).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <input name="schedule:azure-cost-usage:hour" type="hidden" value={azureDailySaved?.scheduledHour ?? integrationSchedulerFirstHour} />
+                      )}
+                    </div>
+                  </fieldset>
+                  <fieldset className="integration-schedule-options">
+                    <legend>Completed-month backfill</legend>
+                    <div className="integration-settings-grid">
+                      <label className="config-field">
+                        <span>Frequency</span>
+                        <select
+                          defaultValue={azureMonthlyFrequency}
+                          name="schedule:azure-cost-monthly:frequency"
+                          onChange={(event) => setAzureMonthlyFrequency(event.target.value as IntegrationSyncScheduleFrequency)}
+                        >
+                          <option value="manual">Manual</option>
+                          <option value="monthly">Monthly</option>
+                        </select>
+                      </label>
+                      {azureMonthlyFrequency === 'monthly' ? (
+                        <>
+                          <label className="config-field">
+                            <span>Start time</span>
+                            <select defaultValue={String(azureMonthlySaved?.scheduledHour ?? integration.schedule.scheduledHour)} name="schedule:azure-cost-monthly:hour">
+                              {Array.from(
+                                { length: integrationSchedulerLastHour - integrationSchedulerFirstHour + 1 },
+                                (_, index) => integrationSchedulerFirstHour + index,
+                              ).map((hour) => (
+                                <option key={hour} value={hour}>
+                                  {new Date(2026, 0, 1, hour).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="config-field">
+                            <span>Day of month</span>
+                            <select defaultValue={String(azureMonthlySaved?.dayOfMonth ?? 2)} name="schedule:azure-cost-monthly:dayOfMonth">
+                              {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                                <option key={day} value={day}>{day}</option>
+                              ))}
+                            </select>
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <input name="schedule:azure-cost-monthly:hour" type="hidden" value={azureMonthlySaved?.scheduledHour ?? integrationSchedulerFirstHour} />
+                          <input name="schedule:azure-cost-monthly:dayOfMonth" type="hidden" value={azureMonthlySaved?.dayOfMonth ?? 2} />
+                        </>
+                      )}
+                    </div>
+                  </fieldset>
+                </div>
+                <p className="config-note integration-schedule-note">Times use Eastern Time. Run monthly on the 2nd so the previous month can finish settling.</p>
+              </div>
+            ) : null}
+            {integration.id !== 'microsoft-azure' && integration.capabilities.includes('live-api') ? (
               <div className="integration-settings-section integration-schedule-section">
                 <h3 className="integration-settings-section-title">Sync schedule</h3>
                 <div className="integration-settings-grid">
@@ -25492,6 +25518,9 @@ function IntegrationModal(props: {
 function syncTargetForOperation(integrationId: IntegrationId, operationKey: string): IntegrationSyncTarget | undefined {
   if (integrationId === 'microsoft-365') return operationKey === 'm365-licenses' ? 'licenses' : 'users';
   if (integrationId === 'datto') return operationKey === 'datto-bcdr' ? 'datto-bcdr' : 'datto-saas';
+  if (integrationId === 'microsoft-azure') {
+    return operationKey === 'azure-cost-monthly' ? 'azure-cost-monthly' : 'azure-cost-usage';
+  }
   return undefined;
 }
 
@@ -27814,13 +27843,22 @@ function AzureCostMonitorWorkspace({
 
       {view === 'history' ? (
         <section className="work-surface azure-monitor-panel">
-          <header className="surface-header"><div><span className="section-kicker">Scheduled evaluations</span><h3>Monitoring history</h3><p>One row per subscription and currency for each completed monitoring run.</p></div></header>
+          <header className="surface-header"><div><span className="section-kicker">Scheduled evaluations</span><h3>Monitoring history</h3><p>One row per subscription and currency for each comparison window. Re-syncing the same dates updates the existing row instead of adding a duplicate.</p></div></header>
           {monitorRuns.length === 0 ? <div className="empty-state"><History size={20} /><strong>No monitoring history yet.</strong></div> : (
             <div className="azure-monitor-table-wrap"><table className="data-table azure-monitor-history-table"><thead><tr><th>Run / windows</th><th>Client / subscription</th><th>Current</th><th>Baseline</th><th>Change</th><th>Status</th><th>Idle / coverage</th></tr></thead><tbody>
               {monitorRuns.flatMap((run) => (run.evaluations ?? []).map((evaluation) => (
                 <tr key={`${run.id}:${evaluation.id}`}>
                   <td><strong>{formatDateTime(run.completedAt ?? run.startedAt)}</strong><small>{run.currentWindowStart}–{run.currentWindowEnd}<br />vs {run.baselineWindowStart}–{run.baselineWindowEnd}</small></td>
-                  <td><strong>{evaluation.customerName ?? 'Unmapped client'}</strong><small>{evaluation.subscriptionName ?? evaluation.subscriptionId}</small><AzureMonitorContributorDetails currency={evaluation.currency} details={evaluation.details} /></td>
+                  <td>
+                    <strong>{evaluation.customerName ?? 'Unmapped client'}</strong>
+                    <small>
+                      {evaluation.subscriptionName
+                        && evaluation.subscriptionName.toLowerCase() !== evaluation.subscriptionId.toLowerCase()
+                        ? `${evaluation.subscriptionName} · ${evaluation.subscriptionId}`
+                        : evaluation.subscriptionId}
+                    </small>
+                    <AzureMonitorContributorDetails currency={evaluation.currency} details={evaluation.details} />
+                  </td>
                   <td>{formatAzureMonitorCurrency(evaluation.currentCost, evaluation.currency)}</td><td>{formatAzureMonitorCurrency(evaluation.baselineCost, evaluation.currency)}</td>
                   <td className={evaluation.costChange > 0 ? 'money-negative' : 'money-positive'}>{formatSignedAzureMonitorCurrency(evaluation.costChange, evaluation.currency)}<small>{evaluation.percentChange === undefined ? 'New spend' : `${evaluation.percentChange >= 0 ? '+' : ''}${evaluation.percentChange.toFixed(1)}%`}</small></td>
                   <td><span className={`status-chip ${evaluation.status}`}>{azureBillingStatusLabel(evaluation.status)}</span><small>{evaluation.findingCount} findings</small></td>

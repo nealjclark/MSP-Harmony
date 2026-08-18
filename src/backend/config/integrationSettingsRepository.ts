@@ -125,44 +125,67 @@ export class PostgresIntegrationSettingsRepository
     schedule: IntegrationSyncSchedule;
     updatedBy: string;
   }) {
-    await this.database.query(
-      `insert into integration_sync_schedules (
-         integration_id, operation_key, frequency, scheduled_hour, weekdays, day_of_month, time_zone, updated_at
-       )
-       select $1, operation_key, $2, $3, $4::jsonb, $5, $6, now()
-       from unnest($7::text[]) operation_key
-       on conflict (integration_id, operation_key)
-       do update set
-         frequency = excluded.frequency,
-         scheduled_hour = excluded.scheduled_hour,
-         weekdays = excluded.weekdays,
-         day_of_month = excluded.day_of_month,
-         time_zone = excluded.time_zone,
-         last_enqueued_slot = case
-           when integration_sync_schedules.frequency is distinct from excluded.frequency
-             or integration_sync_schedules.scheduled_hour is distinct from excluded.scheduled_hour
-             or integration_sync_schedules.weekdays is distinct from excluded.weekdays
-             or integration_sync_schedules.day_of_month is distinct from excluded.day_of_month
-             or integration_sync_schedules.time_zone is distinct from excluded.time_zone
-           then null
-           else integration_sync_schedules.last_enqueued_slot
-         end,
-         updated_at = now()`,
-      [
-        input.integrationId,
-        input.schedule.frequency,
-        input.schedule.scheduledHour,
-        JSON.stringify(input.schedule.weekdays),
-        input.schedule.dayOfMonth,
-        input.schedule.timeZone,
-        input.schedule.operationKeys,
-      ],
-    );
+    const rows = (input.schedule.operationSchedules ?? [])
+      .filter((item) => item.frequency !== 'manual')
+      .map((item) => ({
+        operationKey: item.operationKey,
+        frequency: item.frequency,
+        scheduledHour: item.scheduledHour,
+        weekdays: item.weekdays,
+        dayOfMonth: item.dayOfMonth,
+      }));
+    const fallbackRows = input.schedule.frequency === 'manual'
+      ? []
+      : input.schedule.operationKeys.map((operationKey) => ({
+          operationKey,
+          frequency: input.schedule.frequency,
+          scheduledHour: input.schedule.scheduledHour,
+          weekdays: input.schedule.weekdays,
+          dayOfMonth: input.schedule.dayOfMonth,
+        }));
+    const savedRows = (input.schedule.operationSchedules?.length ? rows : fallbackRows)
+      .filter((item) => item.frequency !== 'manual');
+    const savedKeys = savedRows.map((item) => item.operationKey);
+
+    for (const row of savedRows) {
+      await this.database.query(
+        `insert into integration_sync_schedules (
+           integration_id, operation_key, frequency, scheduled_hour, weekdays, day_of_month, time_zone, updated_at
+         )
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, now())
+         on conflict (integration_id, operation_key)
+         do update set
+           frequency = excluded.frequency,
+           scheduled_hour = excluded.scheduled_hour,
+           weekdays = excluded.weekdays,
+           day_of_month = excluded.day_of_month,
+           time_zone = excluded.time_zone,
+           last_enqueued_slot = case
+             when integration_sync_schedules.frequency is distinct from excluded.frequency
+               or integration_sync_schedules.scheduled_hour is distinct from excluded.scheduled_hour
+               or integration_sync_schedules.weekdays is distinct from excluded.weekdays
+               or integration_sync_schedules.day_of_month is distinct from excluded.day_of_month
+               or integration_sync_schedules.time_zone is distinct from excluded.time_zone
+             then null
+             else integration_sync_schedules.last_enqueued_slot
+           end,
+           updated_at = now()`,
+        [
+          input.integrationId,
+          row.operationKey,
+          row.frequency,
+          row.scheduledHour,
+          JSON.stringify(row.weekdays),
+          row.dayOfMonth,
+          input.schedule.timeZone,
+        ],
+      );
+    }
     await this.database.query(
       `delete from integration_sync_schedules
        where integration_id = $1
          and not (operation_key = any($2::text[]))`,
-      [input.integrationId, input.schedule.operationKeys],
+      [input.integrationId, savedKeys],
     );
 
     await this.database.query(
@@ -223,6 +246,13 @@ export class PostgresIntegrationSettingsRepository
             dayOfMonth: first.day_of_month,
             timeZone: first.time_zone,
             operationKeys: rows.map((row) => row.operation_key),
+            operationSchedules: rows.map((row) => ({
+              operationKey: row.operation_key,
+              frequency: row.frequency,
+              scheduledHour: row.scheduled_hour,
+              weekdays: numberArrayFromJson(row.weekdays),
+              dayOfMonth: row.day_of_month,
+            })),
             lastEnqueuedAt: latestEnqueuedAt,
           },
         ];
@@ -318,8 +348,12 @@ export class PostgresIntegrationSettingsRepository
   async markSyncJobRunning(jobId: string) {
     await this.database.query(
       `update integration_sync_jobs
-       set status = 'running', started_at = coalesce(started_at, now()), updated_at = now()
-       where id = $1::uuid and status in ('queued', 'running')`,
+       set status = 'running',
+           started_at = coalesce(started_at, now()),
+           completed_at = null,
+           error_message = null,
+           updated_at = now()
+       where id = $1::uuid and status in ('queued', 'running', 'failed')`,
       [jobId],
     );
   }

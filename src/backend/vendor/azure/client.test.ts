@@ -5,12 +5,13 @@ import {
   AzureCostManagementClient,
   azureCredentialsFromSettings,
   azureSubscriptionAllowlist,
+  discoverDelegatedAzureTenants,
+  enrichSubscriptionsWithTenants,
 } from './client';
 
 async function run() {
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; init?: RequestInit }> = [];
-  let rejectModernCostColumns = false;
 
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     requests.push({ url: String(url), init });
@@ -29,71 +30,43 @@ async function run() {
         ],
       });
     }
-    if (String(url).includes('Microsoft.CostManagement/query')) {
-      const body = String(init?.body ?? '');
-      if (rejectModernCostColumns && body.includes('CostInBillingCurrency')) {
-        return jsonResponse({
-          error: { message: "Invalid dataset configuration columns: 'CostInBillingCurrency'." },
-        }, 400);
-      }
-      if (body.includes('PreTaxCost')) {
-        return jsonResponse({
-          properties: {
-            columns: [
-              { name: 'PreTaxCost', type: 'Number' },
-              { name: 'UsageQuantity', type: 'Number' },
-              { name: 'ServiceName', type: 'String' },
-              { name: 'ResourceId', type: 'String' },
-              { name: 'ResourceType', type: 'String' },
-              { name: 'MeterCategory', type: 'String' },
-              { name: 'ChargeType', type: 'String' },
-              { name: 'UsageDate', type: 'Number' },
-              { name: 'Currency', type: 'String' },
-            ],
-            rows: [[
-              12.34,
-              72,
-              'Virtual Machines',
-              '/subscriptions/sub-1/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm-1',
-              'microsoft.compute/virtualmachines',
-              'Virtual Machines',
-              'Usage',
-              20260724,
-              'USD',
-            ]],
-          },
-        });
-      }
-      return jsonResponse({
-        properties: {
-          columns: [
-            { name: 'CostInBillingCurrency', type: 'Number' },
-            { name: 'Quantity', type: 'Number' },
-            { name: 'Product', type: 'String' },
-            { name: 'InstanceName', type: 'String' },
-            { name: 'ConsumedService', type: 'String' },
-            { name: 'ResourceGroup', type: 'String' },
-            { name: 'MeterCategory', type: 'String' },
-            { name: 'ChargeType', type: 'String' },
-            { name: 'Date', type: 'Number' },
-            { name: 'BillingCurrencyCode', type: 'String' },
-          ],
-          rows: [
-            [
-              12.34,
-              72,
-              'Virtual Machines',
-              '/subscriptions/sub-1/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm-1',
-              'microsoft.compute/virtualmachines',
-              'rg-app',
-              'Virtual Machines',
-              'Usage',
-              20260724,
-              'USD',
-            ],
-          ],
+    if (String(url).includes('generateCostDetailsReport')) {
+      const subscriptionId = String(url).match(/\/subscriptions\/([^/]+)/i)?.[1] ?? 'unknown';
+      return new Response(undefined, {
+        status: 202,
+        headers: {
+          Location:
+            `https://management.azure.com/subscriptions/${subscriptionId}` +
+            `/providers/Microsoft.CostManagement/costDetailsOperationResults/${subscriptionId}?api-version=2025-03-01`,
+          'Retry-After': '0',
         },
       });
+    }
+    if (String(url).includes('costDetailsOperationResults')) {
+      const subscriptionId = String(url).match(/costDetailsOperationResults\/([^?]+)/i)?.[1] ?? 'unknown';
+      return jsonResponse({
+        name: `operation-${subscriptionId}`,
+        status: 'Completed',
+        manifest: {
+          blobCount: 1,
+          compressData: false,
+          dataFormat: 'Csv',
+          manifestVersion: '2022-05-01',
+          blobs: [{ blobLink: `https://reports.test/${subscriptionId}.csv` }],
+        },
+      });
+    }
+    if (String(url) === 'https://reports.test/sub-legacy.csv') {
+      return textResponse([
+        'UsageDateTime,ServiceName,ResourceId,ResourceType,MeterCategory,ChargeType,Currency,UsageQuantity,PreTaxCost',
+        '2026-07-24,Virtual Machines,/subscriptions/sub-legacy/resourceGroups/rg-legacy/providers/Microsoft.Compute/virtualMachines/vm-legacy,microsoft.compute/virtualmachines,Virtual Machines,Usage,USD,10,4.56',
+      ].join('\r\n'));
+    }
+    if (String(url).startsWith('https://reports.test/')) {
+      return textResponse([
+        'date,serviceFamily,ProductName,consumedService,meterCategory,chargeType,billingCurrency,resourceGroupName,ResourceId,quantity,costInBillingCurrency',
+        '07/24/2026,Compute,"Virtual Machines, D2s",Microsoft.Compute,Virtual Machines,Usage,USD,rg-app,/subscriptions/sub-1/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm-1,72,12.34',
+      ].join('\r\n'));
     }
     if (String(url).includes('/tenants?page=2')) {
       return jsonResponse({
@@ -110,6 +83,24 @@ async function run() {
       return jsonResponse({
         value: [{ tenantId: 'msp-tenant', displayName: 'BMB Solutions', defaultDomain: 'bmb.example' }],
         nextLink: 'https://management.azure.com/tenants?page=2',
+      });
+    }
+    if (String(url).includes('Microsoft.ManagedServices/registrationAssignments')) {
+      return jsonResponse({
+        value: [{
+          id: '/subscriptions/sub-1/providers/Microsoft.ManagedServices/registrationAssignments/offer-1',
+          properties: {
+            registrationDefinition: {
+              properties: {
+                registrationDefinitionName: 'BMB Azure Management',
+                manageeTenantId: 'customer-tenant',
+                manageeTenantName: 'Callaghan CPA LLP',
+                managedByTenantId: 'msp-tenant',
+                managedByTenantName: 'BMB Solutions',
+              },
+            },
+          },
+        }],
       });
     }
     if (String(url).includes('Microsoft.Advisor/recommendations') || String(url).includes('/advisor?page=')) {
@@ -147,34 +138,87 @@ async function run() {
     assert.equal(tenants[1]?.tenantId, 'customer-tenant');
     assert.equal(tenants[1]?.displayName, 'Northstar Legal');
     assert.equal(tenants[1]?.defaultDomain, 'northstar.example');
+    const delegations = await client.listLighthouseDelegations();
+    assert.equal(delegations[0]?.manageeTenantName, 'Callaghan CPA LLP');
+    assert.equal(delegations[0]?.subscriptionId, 'sub-1');
+    const lighthouseRequest = requests.find((request) => request.url.includes('Microsoft.ManagedServices/registrationAssignments'));
+    assert.equal(lighthouseRequest?.url.includes('$expandRegistrationDefinition=true'), true);
+    assert.equal(lighthouseRequest?.url.includes('$expand=registrationDefinition'), false);
+    const discovered = await discoverDelegatedAzureTenants(client, subscriptions);
+    const named = enrichSubscriptionsWithTenants(subscriptions, discovered.tenantsById);
+    assert.equal(named[0]?.tenantName, 'Northstar Legal');
+    const lighthouseOnly = await discoverDelegatedAzureTenants({
+      async listTenants() {
+        return [{ tenantId: 'msp-tenant', displayName: 'BMB Solutions', domains: [], raw: {} }];
+      },
+      async listLighthouseDelegations() {
+        return [{ manageeTenantId: 'customer-tenant', manageeTenantName: 'Callaghan CPA LLP' }];
+      },
+    }, [{ subscriptionId: 'sub-1', tenantId: 'customer-tenant', raw: {} }]);
+    assert.equal(lighthouseOnly.tenantsById.get('customer-tenant')?.displayName, 'Callaghan CPA LLP');
+    const fromSubscription = await discoverDelegatedAzureTenants({
+      async listTenants() {
+        return [{ tenantId: 'msp-tenant', displayName: 'BMB Solutions', domains: [], raw: {} }];
+      },
+      async listLighthouseDelegations() {
+        throw new Error('Tenant-scope Lighthouse listing is forbidden');
+      },
+      async listLighthouseDelegationsForSubscription(subscriptionId) {
+        assert.equal(subscriptionId, 'sub-1');
+        return [{ subscriptionId, manageeTenantId: 'customer-tenant', manageeTenantName: 'Callaghan CPA LLP' }];
+      },
+    }, [{ subscriptionId: 'sub-1', tenantId: 'customer-tenant', raw: {} }]);
+    assert.equal(fromSubscription.tenantsById.get('customer-tenant')?.displayName, 'Callaghan CPA LLP');
+    const reportProgress: string[] = [];
     const rows = await client.queryCostUsage({
       subscriptionId: 'sub-1',
       from: '2026-07-01T00:00:00.000Z',
       to: '2026-07-25T00:00:00.000Z',
+      onProgress: async (progress) => {
+        reportProgress.push(`${progress.phase}:${progress.message}`);
+      },
     });
     assert.equal(rows[0]?.cost, 12.34);
     assert.equal(rows[0]?.usageQuantity, 72);
     assert.equal(rows[0]?.usageDate, '2026-07-24');
     assert.equal(rows[0]?.resourceGroup, 'rg-app');
-    assert.equal(rows[0]?.resourceType, 'microsoft.compute/virtualmachines');
+    assert.equal(rows[0]?.resourceType, 'Microsoft.Compute');
     assert.equal(rows[0]?.meterCategory, 'Virtual Machines');
     assert.equal(rows[0]?.chargeType, 'Usage');
+    assert.equal(rows[0]?.serviceName, 'Virtual Machines, D2s');
+    assert.equal(rows[0]?.currency, 'USD');
     assert.equal(requests.filter((request) => request.url.includes('/oauth2/v2.0/token')).length, 1);
-    const queryRequest = requests.find((request) => request.url.includes('Microsoft.CostManagement/query'));
-    assert.equal(queryRequest?.init?.method, 'POST');
-    assert.match(String(queryRequest?.init?.body), /CostInBillingCurrency/);
-    assert.match(String(queryRequest?.init?.body), /"type":"ActualCost"/);
-    assert.match(String(queryRequest?.init?.body), /ChargeType/);
-    assert.doesNotMatch(String(queryRequest?.init?.body), /"grouping"/);
-    rejectModernCostColumns = true;
+    const reportRequest = requests.find((request) => request.url.includes('generateCostDetailsReport'));
+    assert.equal(reportRequest?.init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(reportRequest?.init?.body)), {
+      metric: 'ActualCost',
+      timePeriod: {
+        start: '2026-07-01',
+        end: '2026-07-24',
+      },
+    });
+    assert.equal(new Headers(reportRequest?.init?.headers).get('ClientType'), 'MSPHarmonyAzureCostSync');
+    const pollRequest = requests.find((request) => request.url.includes('costDetailsOperationResults'));
+    assert.equal(new Headers(pollRequest?.init?.headers).get('ClientType'), 'MSPHarmonyAzureCostSync');
+    assert.equal(requests.some((request) => request.url.includes('Microsoft.CostManagement/query')), false);
+    assert.ok(reportProgress.some((status) => status.startsWith('requesting:')));
+    assert.ok(reportProgress.some((status) => status.startsWith('waiting:')));
+    assert.ok(reportProgress.some((status) => status.startsWith('polling:')));
+    assert.ok(reportProgress.some((status) => status.startsWith('ready:')));
+    assert.ok(reportProgress.some((status) => status.startsWith('downloading:')));
+    assert.ok(reportProgress.some((status) => status.startsWith('parsing:')));
+    assert.ok(reportProgress.some((status) => status.includes('complete:Cost report loaded · 1 rows')));
+
     const legacyRows = await client.queryCostUsage({
-      subscriptionId: 'sub-1',
+      subscriptionId: 'sub-legacy',
       from: '2026-07-01T00:00:00.000Z',
       to: '2026-07-25T00:00:00.000Z',
     });
-    assert.equal(legacyRows[0]?.cost, 12.34);
-    assert.equal(legacyRows[0]?.resourceGroup, 'rg-app');
-    assert.match(String(requests[requests.length - 1]?.init?.body), /PreTaxCost/);
+    assert.equal(legacyRows[0]?.cost, 4.56);
+    assert.equal(legacyRows[0]?.usageQuantity, 10);
+    assert.equal(legacyRows[0]?.usageDate, '2026-07-24');
+    assert.equal(legacyRows[0]?.resourceGroup, 'rg-legacy');
+    assert.equal(legacyRows[0]?.resourceType, 'microsoft.compute/virtualmachines');
     const advisor = await client.listAdvisorRecommendations('sub-1');
     assert.equal(advisor.length, 2);
     assert.equal(advisor[0]?.category, 'Cost');
@@ -210,7 +254,7 @@ async function run() {
       if (String(url).includes('/oauth2/v2.0/token')) {
         return jsonResponse({ access_token: 'token', token_type: 'Bearer', expires_in: 3600 });
       }
-      if (String(url).includes('Microsoft.CostManagement/query')) {
+      if (String(url).includes('generateCostDetailsReport')) {
         throttledCostAttempts += 1;
         if (throttledCostAttempts === 1) {
           return jsonResponse(
@@ -219,7 +263,7 @@ async function run() {
             { 'x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after': '0' },
           );
         }
-        return jsonResponse({ properties: { columns: [], rows: [] } });
+        return jsonResponse({ status: 'NoDataFound' });
       }
       return jsonResponse({}, 404);
     }) as typeof fetch;
@@ -246,6 +290,13 @@ function jsonResponse(body: unknown, status = 200, headers?: Record<string, stri
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', ...headers },
+  });
+}
+
+function textResponse(body: string, status = 200, headers?: Record<string, string>) {
+  return new Response(body, {
+    status,
+    headers: { 'Content-Type': 'text/csv', ...headers },
   });
 }
 

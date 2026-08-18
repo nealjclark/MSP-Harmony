@@ -72,4 +72,33 @@ assert.throws(
   /at least one weekday/i,
 );
 
+const azureSchedules = validateIntegrationSyncSchedule('microsoft-azure', {
+  frequency: 'manual',
+  scheduledHour: 6,
+  weekdays: [],
+  dayOfMonth: 2,
+  timeZone: 'America/New_York',
+  operationKeys: [],
+  operationSchedules: [
+    {
+      operationKey: 'azure-cost-usage',
+      frequency: 'daily',
+      scheduledHour: 6,
+      weekdays: [],
+      dayOfMonth: 1,
+    },
+    {
+      operationKey: 'azure-cost-monthly',
+      frequency: 'monthly',
+      scheduledHour: 7,
+      weekdays: [],
+      dayOfMonth: 2,
+    },
+  ],
+});
+assert.deepEqual(azureSchedules.operationKeys, ['azure-cost-usage', 'azure-cost-monthly']);
+assert.equal(azureSchedules.frequency, 'daily');
+assert.equal(azureSchedules.dayOfMonth, 2);
+assert.equal(azureSchedules.operationSchedules?.[1]?.frequency, 'monthly');
+
 console.log('integration schedule tests passed');

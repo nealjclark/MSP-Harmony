@@ -9,10 +9,12 @@ import {
   AzureCostManagementClient,
   azureCredentialsFromSettings,
   azureIntegrationId,
+  discoverDelegatedAzureTenants,
+  enrichSubscriptionsWithTenants,
   type AzureSubscription,
   type AzureTenant,
 } from './client';
-import { assertAzureReady, type AzureUsageClient, type Queryable } from './operations';
+import { assertAzureReady, persistAzureLighthouseTenantsFromSubscriptions, type AzureUsageClient, type Queryable } from './operations';
 
 export type AzureOnboardingInput = {
   customerId: string;
@@ -103,10 +105,8 @@ export async function listAzureOnboardingState(input: {
       managingTenantId = settings.nonSecrets.tenantId;
       assertAzureReady(settings);
       const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
-      const [discoveredSubscriptions, tenantDiscovery] = await Promise.all([
-        client.listSubscriptions(100),
-        discoverAzureTenants(client),
-      ]);
+      const discoveredSubscriptions = await client.listSubscriptions(100);
+      const tenantDiscovery = await discoverDelegatedAzureTenants(client, discoveredSubscriptions);
       subscriptions = discoveredSubscriptions;
       tenantsById = tenantDiscovery.tenantsById;
       tenantLookupWarning = tenantDiscovery.warning;
@@ -149,12 +149,7 @@ export async function listAzureOnboardingState(input: {
         subscriptionName:
           subscription?.displayName ?? mapping?.external_account_name ?? mapping?.external_account_id ?? id,
         tenantId: subscription?.tenantId ?? mapping?.tenant_id ?? undefined,
-        tenantName:
-          subscription?.tenantName ??
-          mapping?.tenant_name ??
-          subscription?.tenantId ??
-          mapping?.tenant_id ??
-          undefined,
+        tenantName: subscription?.tenantName ?? mapping?.tenant_name ?? undefined,
         tenantDefaultDomain: subscription?.tenantDefaultDomain ?? mapping?.tenant_default_domain ?? undefined,
         state: subscription?.state,
         delegated: Boolean(subscription),
@@ -180,6 +175,127 @@ export async function listAzureOnboardingState(input: {
       };
     }).sort((left, right) => String(left.subscriptionName).localeCompare(String(right.subscriptionName))),
   };
+}
+
+export async function refreshAzureLighthouseTenants(input: {
+  pool: Queryable;
+  provider?: IntegrationSettingsProvider;
+  client?: AzureUsageClient;
+  actor?: string;
+}) {
+  const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
+  const settings = await provider.getIntegrationSettings(azureIntegrationId);
+  assertAzureReady(settings);
+  const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
+  const discoveredSubscriptions = await client.listSubscriptions(100);
+  const tenantDiscovery = await discoverDelegatedAzureTenants(client, discoveredSubscriptions);
+  const subscriptions = enrichSubscriptionsWithTenants(discoveredSubscriptions, tenantDiscovery.tenantsById);
+  const tenants = new Map<string, {
+    tenantId: string;
+    tenantName?: string;
+    tenantDefaultDomain?: string;
+    subscriptionIds: string[];
+  }>();
+
+  for (const subscription of subscriptions) {
+    const tenantId = subscription.tenantId?.trim();
+    if (!tenantId) continue;
+    const key = tenantId.toLowerCase();
+    const existing = tenants.get(key);
+    if (existing) {
+      existing.subscriptionIds.push(subscription.subscriptionId);
+      existing.tenantName = existing.tenantName ?? subscription.tenantName;
+      existing.tenantDefaultDomain = existing.tenantDefaultDomain ?? subscription.tenantDefaultDomain;
+      continue;
+    }
+    tenants.set(key, {
+      tenantId,
+      tenantName: subscription.tenantName,
+      tenantDefaultDomain: subscription.tenantDefaultDomain,
+      subscriptionIds: [subscription.subscriptionId],
+    });
+  }
+
+  await persistAzureLighthouseTenantsFromSubscriptions(input.pool, subscriptions);
+
+  const mappingHints = await loadAzureTenantMappingHints(input.pool);
+  let mappedCount = 0;
+  for (const tenant of tenants.values()) {
+    const existing = await getAzureMappingStatus(input.pool, tenant.tenantId);
+    if (existing?.active && existing.mapping_status === 'approved') {
+      if (tenant.tenantName || tenant.tenantDefaultDomain) {
+        await input.pool.query(
+          `update vendor_account_mappings
+           set external_account_name = $3,
+               updated_at = now()
+           where vendor_id = $1
+             and lower(external_account_id) = lower($2)
+             and (
+               external_account_name is null
+               or lower(trim(external_account_name)) = lower(trim(external_account_id))
+             )`,
+          [
+            azureIntegrationId,
+            tenant.tenantId,
+            tenant.tenantName && tenant.tenantDefaultDomain
+              ? `${tenant.tenantName} (${tenant.tenantDefaultDomain})`
+              : tenant.tenantName ?? tenant.tenantDefaultDomain ?? tenant.tenantId,
+          ],
+        );
+      }
+      mappedCount += 1;
+      continue;
+    }
+    const hint = mappingHints.get(tenant.tenantId.toLowerCase())
+      ?? tenant.subscriptionIds
+        .map((subscriptionId) => mappingHints.get(subscriptionId.toLowerCase()))
+        .find((candidate) => candidate?.customerId);
+    if (!hint?.customerId) continue;
+    await updateAccountMapping(input.pool, azureIntegrationId, tenant.tenantId, {
+      status: 'approved',
+      customerId: hint.customerId,
+      agreementId: hint.agreementId,
+      externalAccountName: tenant.tenantName && tenant.tenantDefaultDomain
+        ? `${tenant.tenantName} (${tenant.tenantDefaultDomain})`
+        : tenant.tenantName ?? tenant.tenantDefaultDomain ?? tenant.tenantId,
+      reviewedBy: input.actor ?? 'azure-lighthouse-refresh',
+    });
+    mappedCount += 1;
+  }
+
+  return {
+    integrationId: azureIntegrationId,
+    tenantCount: tenants.size,
+    mappedCount,
+    unmappedCount: Math.max(0, tenants.size - mappedCount),
+    tenantLookupWarning: tenantDiscovery.warning,
+  };
+}
+
+async function loadAzureTenantMappingHints(database: Queryable) {
+  const result = await database.query<{
+    vendor_id: string;
+    external_account_id: string;
+    customer_id: string;
+    agreement_id: string | null;
+  }>(
+    `select vendor_id, external_account_id, customer_id, agreement_id
+     from vendor_account_mappings
+     where vendor_id = any($1::text[])
+       and active = true
+       and mapping_status = 'approved'`,
+    [[azureIntegrationId, 'microsoft-365']],
+  );
+  return new Map(
+    result.rows.map((row) => [
+      row.external_account_id.toLowerCase(),
+      {
+        customerId: row.customer_id,
+        agreementId: row.agreement_id ?? undefined,
+        source: row.vendor_id,
+      },
+    ]),
+  );
 }
 
 export async function prepareAzureOnboardingPackage(input: {
@@ -235,7 +351,7 @@ export async function verifyAzureOnboarding(input: {
   assertAzureReady(settings);
   const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
   const subscriptions = await client.listSubscriptions(100);
-  const tenantDiscovery = await discoverAzureTenants(client);
+  const tenantDiscovery = await discoverDelegatedAzureTenants(client, subscriptions);
   const tenantsById = tenantDiscovery.tenantsById;
   const subscription = subscriptions.find(
     (candidate) => candidate.subscriptionId.toLowerCase() === onboarding.subscriptionId.toLowerCase(),
@@ -333,7 +449,7 @@ export async function verifyAzureOnboarding(input: {
     subscriptionName: subscription.displayName,
     tenantId: subscription.tenantId,
     tenantName: subscription.tenantId
-      ? tenantsById.get(subscription.tenantId.toLowerCase())?.displayName ?? subscription.tenantId
+      ? tenantsById.get(subscription.tenantId.toLowerCase())?.displayName
       : undefined,
     tenantDefaultDomain: subscription.tenantId
       ? tenantsById.get(subscription.tenantId.toLowerCase())?.defaultDomain
@@ -730,35 +846,6 @@ async function validateAzureMappingTarget(
     additionCode: row.product_code,
     additionName: row.product_name,
   };
-}
-
-async function discoverAzureTenants(client: AzureUsageClient) {
-  const tenantsById = new Map<string, AzureTenant>();
-  if (!client.listTenants) return { tenantsById, warning: undefined as string | undefined };
-  try {
-    const tenants = await client.listTenants(100);
-    for (const tenant of tenants) tenantsById.set(tenant.tenantId.toLowerCase(), tenant);
-    return { tenantsById, warning: undefined as string | undefined };
-  } catch (error) {
-    return {
-      tenantsById,
-      warning: `Tenant names could not be loaded: ${errorMessage(error)}`,
-    };
-  }
-}
-
-function enrichSubscriptionsWithTenants(
-  subscriptions: AzureSubscription[],
-  tenantsById: Map<string, AzureTenant>,
-) {
-  return subscriptions.map((subscription) => {
-    const tenant = subscription.tenantId ? tenantsById.get(subscription.tenantId.toLowerCase()) : undefined;
-    return {
-      ...subscription,
-      tenantName: tenant?.displayName ?? subscription.tenantId,
-      tenantDefaultDomain: tenant?.defaultDomain,
-    };
-  });
 }
 
 function isActiveAdditionStatus(status: string) {

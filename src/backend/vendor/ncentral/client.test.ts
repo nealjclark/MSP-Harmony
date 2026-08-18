@@ -60,6 +60,48 @@ const responses: Array<{ status: number; body: unknown; headers?: Record<string,
       },
     },
   },
+  {
+    status: 200,
+    body: {
+      data: [
+        { customerId: 200, customerName: 'Acme' },
+        { orgUnitId: 201, orgUnitName: 'Beta' },
+      ],
+    },
+  },
+  {
+    status: 200,
+    body: { data: [{ customerId: 202, name: 'Contoso' }] },
+  },
+  {
+    status: 200,
+    body: { data: [{ siteId: 300, siteName: 'Acme HQ', customerId: 200 }] },
+  },
+  {
+    status: 200,
+    body: { data: [{ deviceId: 102, longName: 'mac-01', deviceClass: 'MacBook', orgUnitId: 300 }] },
+  },
+  {
+    status: 401,
+    body: { message: 'Access token expired' },
+  },
+  {
+    status: 200,
+    body: {
+      tokens: {
+        access: { token: 'access-2', expirySeconds: 3600 },
+        refresh: { token: 'refresh-2', expirySeconds: 7200 },
+      },
+    },
+  },
+  {
+    status: 200,
+    body: {
+      data: {
+        application: [{ name: 'Firefox', version: '128.0' }],
+      },
+    },
+  },
 ];
 
 const originalFetch = globalThis.fetch;
@@ -93,6 +135,23 @@ async function run() {
 
   const detail = await client.getDevice(101);
   assert.equal(detail.lastApplianceCheckinTime, '2026-06-16T12:00:00Z');
+
+  const customers = await client.listCustomers({ pageSize: 2, maxPages: 10 });
+  assert.deepEqual(customers.map((customer) => customer.customerName), ['Acme', 'Beta', 'Contoso']);
+  assert.ok(calls.some((call) => call.url.includes('/api/customers?pageNumber=2&pageSize=2')));
+
+  const sites = await client.listSites({ pageSize: 25, maxPages: 2 });
+  assert.deepEqual(sites.map((site) => [site.siteId, site.customerId]), [['300', '200']]);
+
+  const scopedDevices = await client.listDevicesByOrgUnit('300', { pageSize: 25, maxPages: 2 });
+  assert.equal(scopedDevices[0]?.longName, 'mac-01');
+  assert.ok(calls.some((call) => call.url.includes('/api/org-units/300/devices')));
+
+  const assets = await client.getDeviceAssets(102);
+  assert.deepEqual(assets.application, [{ name: 'Firefox', version: '128.0' }]);
+  assert.ok(calls.some((call) => call.url.endsWith('/api/auth/refresh')));
+  const finalAssetCall = calls[calls.length - 1];
+  assert.equal(finalAssetCall?.init?.headers && (finalAssetCall.init.headers as Record<string, string>).Authorization, 'Bearer access-2');
 
   globalThis.fetch = originalFetch;
   console.log('ncentral client tests passed');

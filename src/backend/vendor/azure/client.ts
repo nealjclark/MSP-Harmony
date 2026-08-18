@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import type { IntegrationRuntimeSettings } from '../../config/settingsProvider';
 
 export const azureIntegrationId = 'microsoft-azure' as const;
@@ -29,6 +30,24 @@ export type AzureTenant = {
   raw: Record<string, unknown>;
 };
 
+export type AzureLighthouseDelegation = {
+  subscriptionId?: string;
+  manageeTenantId?: string;
+  manageeTenantName?: string;
+  managedByTenantId?: string;
+  managedByTenantName?: string;
+  offerName?: string;
+};
+
+export type AzureTenantLookupClient = {
+  listTenants?: (maxPages?: number) => Promise<AzureTenant[]>;
+  listLighthouseDelegations?: (maxPages?: number) => Promise<AzureLighthouseDelegation[]>;
+  listLighthouseDelegationsForSubscription?: (
+    subscriptionId: string,
+    maxPages?: number,
+  ) => Promise<AzureLighthouseDelegation[]>;
+};
+
 export type AzureCostUsageRow = {
   subscriptionId: string;
   usageDate?: string;
@@ -42,6 +61,16 @@ export type AzureCostUsageRow = {
   usageQuantity: number;
   currency?: string;
   raw: unknown;
+};
+
+export type AzureCostReportProgress = {
+  phase: 'requesting' | 'waiting' | 'polling' | 'ready' | 'downloading' | 'parsing' | 'complete' | 'no-data';
+  message: string;
+  pollCount?: number;
+  retryAfterMs?: number;
+  blobIndex?: number;
+  blobCount?: number;
+  rowCount?: number;
 };
 
 export type AzureAdvisorRecommendation = {
@@ -93,17 +122,34 @@ type AzureCollection<T> = {
   nextLink?: string;
 };
 
-type CostQueryResponse = {
-  properties?: {
-    nextLink?: string;
-    columns?: Array<{ name?: string; type?: string }>;
-    rows?: unknown[][];
+type CostDetailsOperationResult = {
+  name?: string;
+  status?: 'Completed' | 'NoDataFound' | 'Failed' | string;
+  validTill?: string;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+  manifest?: {
+    blobCount?: number;
+    byteCount?: number;
+    compressData?: boolean;
+    dataFormat?: string;
+    manifestVersion?: string;
+    blobs?: Array<{
+      blobLink?: string;
+      byteCount?: number;
+    }>;
   };
 };
 
 const authorityHost = 'https://login.microsoftonline.com';
 const maxRetryCount = 5;
 const costManagementMinimumRequestIntervalMs = 1_000;
+const costDetailsReportMaxPollCount = 30;
+const costManagementClientType = 'MSPHarmonyAzureCostSync';
+
+export type AzureThrottleScope = 'qpu' | 'entity' | 'tenant' | 'client' | 'unknown';
 
 export class AzureApiError extends Error {
   constructor(
@@ -111,6 +157,8 @@ export class AzureApiError extends Error {
     public readonly status?: number,
     public readonly responseText?: string,
     public readonly requestId?: string | null,
+    public readonly retryAfterMs?: number,
+    public readonly throttleScope?: AzureThrottleScope,
   ) {
     super(message);
   }
@@ -199,79 +247,183 @@ export class AzureCostManagementClient {
     return tenants;
   }
 
+  async listLighthouseDelegations(maxPages = 100): Promise<AzureLighthouseDelegation[]> {
+    return this.listLighthouseDelegationPages(
+      '/providers/Microsoft.ManagedServices/registrationAssignments?api-version=2022-10-01&$expandRegistrationDefinition=true',
+      maxPages,
+    );
+  }
+
+  async listLighthouseDelegationsForSubscription(
+    subscriptionId: string,
+    maxPages = 20,
+  ): Promise<AzureLighthouseDelegation[]> {
+    return this.listLighthouseDelegationPages(
+      `/subscriptions/${encodeURIComponent(subscriptionId)}/providers/Microsoft.ManagedServices/registrationAssignments?api-version=2022-10-01&$expandRegistrationDefinition=true`,
+      maxPages,
+    );
+  }
+
+  private async listLighthouseDelegationPages(path: string, maxPages: number) {
+    const delegations: AzureLighthouseDelegation[] = [];
+    let nextUrl: string | undefined = path;
+    for (let page = 0; nextUrl && page < Math.max(1, maxPages); page += 1) {
+      const response: AzureCollection<Record<string, unknown>> = await this.request(nextUrl);
+      delegations.push(
+        ...(response.value ?? [])
+          .map(parseLighthouseDelegation)
+          .filter((delegation): delegation is AzureLighthouseDelegation => Boolean(delegation)),
+      );
+      nextUrl = response.nextLink;
+    }
+    return delegations;
+  }
+
   async queryCostUsage(input: {
     subscriptionId: string;
     from: string;
     to: string;
+    onProgress?: (progress: AzureCostReportProgress) => void | Promise<void>;
   }): Promise<AzureCostUsageRow[]> {
-    // Azure exposes different Cost Management column names for modern MCA/CSP
-    // subscriptions and legacy EA-style subscriptions. Try the current billing
-    // schema first, then retry the legacy schema only for a column-validation
-    // failure. This keeps Lighthouse discovery portable across customer offers.
-    const columnSets = [
-      [
-        'CostInBillingCurrency',
-        'Quantity',
-        'Product',
-        'InstanceName',
-        'ConsumedService',
-        'ResourceGroup',
-        'MeterCategory',
-        'ChargeType',
-        'Date',
-        'BillingCurrencyCode',
-      ],
-      [
-        'PreTaxCost',
-        'UsageQuantity',
-        'ServiceName',
-        'ResourceId',
-        'ResourceType',
-        'MeterCategory',
-        'ChargeType',
-        'UsageDate',
-        'Currency',
-      ],
-    ];
-    let columnError: unknown;
+    // Sync windows use an exclusive `to` boundary. Cost Details uses inclusive
+    // calendar dates, so send the day immediately before that boundary. This
+    // preserves the checkpoint contract and prevents partial current-day data.
+    const start = reportDate(input.from);
+    const end = shiftReportDate(reportDate(input.to), -1);
+    if (end < start) return [];
 
-    for (const columns of columnSets) {
-      const body = {
-        type: 'ActualCost',
-        timeframe: 'Custom',
-        timePeriod: {
-          from: input.from,
-          to: input.to,
-        },
-        dataset: {
-          granularity: 'Daily',
-          configuration: { columns },
-        },
-      };
-      const rows: AzureCostUsageRow[] = [];
-      let nextUrl: string | undefined =
-        `/subscriptions/${encodeURIComponent(input.subscriptionId)}` +
-        '/providers/Microsoft.CostManagement/query?api-version=2025-03-01';
+    const path =
+      `/subscriptions/${encodeURIComponent(input.subscriptionId)}` +
+      '/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version=2025-03-01';
+    await input.onProgress?.({
+      phase: 'requesting',
+      message: 'Requesting the cost details report from Azure',
+    });
+    await this.waitForCostManagementRequestSlot();
+    let response = await this.requestResponse(path, {
+      method: 'POST',
+      body: JSON.stringify({
+        metric: 'ActualCost',
+        timePeriod: { start, end },
+      }),
+      headers: {
+        ClientType: costManagementClientType,
+        'Content-Type': 'application/json',
+      },
+    });
 
-      try {
-        while (nextUrl) {
-          await this.waitForCostManagementRequestSlot();
-          const response: CostQueryResponse = await this.request(nextUrl, {
-            method: 'POST',
-            body: JSON.stringify(body),
-            headers: { 'Content-Type': 'application/json' },
-          });
-          rows.push(...parseCostRows(input.subscriptionId, response));
-          nextUrl = response.properties?.nextLink;
-        }
-        return rows;
-      } catch (error) {
-        if (!isInvalidCostColumnError(error)) throw error;
-        columnError = error;
+    for (let pollCount = 0; pollCount <= costDetailsReportMaxPollCount; pollCount += 1) {
+      if (response.status === 204) {
+        await input.onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
+        return [];
       }
+      if (response.status === 200) {
+        const result = await parseResponseJson<CostDetailsOperationResult>(response);
+        if (result.status === 'NoDataFound') {
+          await input.onProgress?.({ phase: 'no-data', message: 'Azure reported no cost data', rowCount: 0 });
+          return [];
+        }
+        if (result.status === 'Failed') {
+          throw new Error(
+            result.error?.message ?? result.error?.code ?? 'Azure Cost Details report generation failed.',
+          );
+        }
+        if (result.status && result.status !== 'Completed') {
+          throw new Error(`Azure Cost Details report returned unexpected status "${result.status}".`);
+        }
+        if (result.manifest?.dataFormat && result.manifest.dataFormat.toLowerCase() !== 'csv') {
+          throw new Error(`Azure Cost Details report returned unsupported format "${result.manifest.dataFormat}".`);
+        }
+        if (!result.manifest) {
+          throw new Error('Azure Cost Details report completed without a manifest.');
+        }
+        const blobs = result.manifest.blobs?.filter(
+          (blob): blob is { blobLink: string; byteCount?: number } => Boolean(blob.blobLink),
+        ) ?? [];
+        if (blobs.length === 0) {
+          throw new Error('Azure Cost Details report completed without a downloadable CSV blob.');
+        }
+        await input.onProgress?.({
+          phase: 'ready',
+          message: `Azure report ready · ${blobs.length} CSV ${blobs.length === 1 ? 'file' : 'files'}`,
+          blobCount: blobs.length,
+        });
+        const rows: AzureCostUsageRow[] = [];
+        for (const [blobIndex, blob] of blobs.entries()) {
+          await input.onProgress?.({
+            phase: 'downloading',
+            message: `Downloading cost CSV ${blobIndex + 1} of ${blobs.length}`,
+            blobIndex: blobIndex + 1,
+            blobCount: blobs.length,
+          });
+          const csv = await this.downloadCostDetailsBlob(blob.blobLink);
+          await input.onProgress?.({
+            phase: 'parsing',
+            message: `Reading cost CSV ${blobIndex + 1} of ${blobs.length}`,
+            blobIndex: blobIndex + 1,
+            blobCount: blobs.length,
+          });
+          rows.push(...parseCostDetailsCsv(input.subscriptionId, csv));
+        }
+        await input.onProgress?.({
+          phase: 'complete',
+          message: `Cost report loaded · ${rows.length.toLocaleString('en-US')} rows`,
+          rowCount: rows.length,
+          blobCount: blobs.length,
+        });
+        return rows;
+      }
+      if (response.status !== 202) {
+        throw new Error(`Azure Cost Details report returned unexpected HTTP ${response.status}.`);
+      }
+      if (pollCount === costDetailsReportMaxPollCount) {
+        throw new Error('Azure Cost Details report did not finish before the polling limit.');
+      }
+      const location = response.headers.get('location');
+      if (!location) throw new Error('Azure Cost Details report returned HTTP 202 without a Location header.');
+      assertArmOperationUrl(location, this.baseUrl);
+      const retryAfterMs = costDetailsPollDelayMs(response);
+      await input.onProgress?.({
+        phase: 'waiting',
+        message: `Azure is generating the report · checking again in ${formatWaitDuration(retryAfterMs)}`,
+        pollCount: pollCount + 1,
+        retryAfterMs,
+      });
+      await delay(retryAfterMs);
+      await input.onProgress?.({
+        phase: 'polling',
+        message: `Checking Azure report status · attempt ${pollCount + 1}`,
+        pollCount: pollCount + 1,
+      });
+      await this.waitForCostManagementRequestSlot();
+      response = await this.requestResponse(location, {
+        headers: { ClientType: costManagementClientType },
+      });
     }
 
-    throw columnError;
+    throw new Error('Azure Cost Details report did not return a result.');
+  }
+
+  private async downloadCostDetailsBlob(blobLink: string, retryCount = 0): Promise<string> {
+    const url = new URL(blobLink);
+    if (url.protocol !== 'https:') throw new Error('Azure Cost Details report returned a non-HTTPS blob URL.');
+    const response = await fetch(url);
+    if (shouldRetry(response.status) && retryCount < maxRetryCount) {
+      await delay(retryDelayMs(response, retryCount));
+      return this.downloadCostDetailsBlob(blobLink, retryCount + 1);
+    }
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new AzureApiError(
+        `Azure Cost Details CSV download failed with HTTP ${response.status}.`,
+        response.status,
+        responseText.slice(0, 1_000),
+        response.headers.get('request-id') ?? response.headers.get('x-ms-request-id'),
+      );
+    }
+    const input = Buffer.from(await response.arrayBuffer());
+    const bytes = input[0] === 0x1f && input[1] === 0x8b ? gunzipSync(input) : input;
+    return bytes.toString('utf8');
   }
 
   private async waitForCostManagementRequestSlot() {
@@ -401,6 +553,20 @@ export class AzureCostManagementClient {
       retryCount?: number;
     } = {},
   ): Promise<T> {
+    const response = await this.requestResponse(pathOrUrl, options);
+    const responseText = await response.text();
+    return (responseText.trim() ? parseJson<unknown>(responseText) : undefined) as T;
+  }
+
+  private async requestResponse(
+    pathOrUrl: string,
+    options: {
+      method?: string;
+      body?: string;
+      headers?: Record<string, string>;
+      retryCount?: number;
+    } = {},
+  ): Promise<Response> {
     const token = await this.authenticate();
     const requestId = randomUUID();
     const response = await fetch(absoluteUrl(pathOrUrl, this.baseUrl), {
@@ -413,18 +579,18 @@ export class AzureCostManagementClient {
       },
       body: options.body,
     });
-    const responseText = await response.text();
 
     if (shouldRetry(response.status) && (options.retryCount ?? 0) < maxRetryCount) {
       await delay(retryDelayMs(response, options.retryCount ?? 0));
-      return this.request<T>(pathOrUrl, {
+      return this.requestResponse(pathOrUrl, {
         ...options,
         retryCount: (options.retryCount ?? 0) + 1,
       });
     }
 
-    const parsed = responseText.trim() ? parseJson<unknown>(responseText) : undefined;
     if (!response.ok) {
+      const responseText = await response.text();
+      const parsed = responseText.trim() ? parseJson<unknown>(responseText) : undefined;
       if (response.status === 401) {
         this.token = undefined;
       }
@@ -434,10 +600,12 @@ export class AzureCostManagementClient {
         response.status,
         responseText.slice(0, 1000),
         response.headers.get('request-id') ?? requestId,
+        response.status === 429 ? retryDelayMs(response, options.retryCount ?? 0) : undefined,
+        response.status === 429 ? throttleScope(response) : undefined,
       );
     }
 
-    return parsed as T;
+    return response;
   }
 }
 
@@ -455,6 +623,73 @@ export function azureSubscriptionAllowlist(settings: IntegrationRuntimeSettings)
     .split(/[\s,;]+/)
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
+}
+
+export async function discoverDelegatedAzureTenants(
+  client: AzureTenantLookupClient,
+  subscriptions: AzureSubscription[] = [],
+) {
+  const tenantsById = new Map<string, AzureTenant>();
+  const warnings: string[] = [];
+  const directoryTask = client.listTenants
+    ? client.listTenants(100).catch((error: unknown) => {
+      warnings.push(`Tenant names could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+      return [] as AzureTenant[];
+    })
+    : Promise.resolve([] as AzureTenant[]);
+  const lighthouseTask = client.listLighthouseDelegations
+    ? client.listLighthouseDelegations(100).catch((error: unknown) => {
+      warnings.push(`Lighthouse tenant names could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+      return [] as AzureLighthouseDelegation[];
+    })
+    : Promise.resolve([] as AzureLighthouseDelegation[]);
+  const [directoryTenants, lighthouseDelegations] = await Promise.all([directoryTask, lighthouseTask]);
+  for (const tenant of directoryTenants) mergeAzureTenant(tenantsById, tenant);
+  for (const delegation of lighthouseDelegations) {
+    mergeAzureTenant(tenantsById, tenantFromLighthouseDelegation(delegation));
+  }
+
+  const missingTenantIds = uniqueMissingTenantIds(subscriptions, tenantsById);
+  if (missingTenantIds.length > 0 && client.listLighthouseDelegationsForSubscription) {
+    const subscriptionByTenant = new Map<string, string>();
+    for (const subscription of subscriptions) {
+      const tenantId = subscription.tenantId?.toLowerCase();
+      if (tenantId && missingTenantIds.includes(tenantId) && !subscriptionByTenant.has(tenantId)) {
+        subscriptionByTenant.set(tenantId, subscription.subscriptionId);
+      }
+    }
+    const results = await Promise.allSettled(
+      [...subscriptionByTenant.values()].map((subscriptionId) =>
+        client.listLighthouseDelegationsForSubscription?.(subscriptionId, 20) ?? Promise.resolve([]),
+      ),
+    );
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue;
+      for (const delegation of result.value) {
+        mergeAzureTenant(tenantsById, tenantFromLighthouseDelegation(delegation));
+      }
+    }
+  }
+
+  const stillMissing = uniqueMissingTenantIds(subscriptions, tenantsById);
+  return {
+    tenantsById,
+    warning: stillMissing.length > 0 || subscriptions.length === 0 ? warnings[0] : undefined,
+  };
+}
+
+export function enrichSubscriptionsWithTenants(
+  subscriptions: AzureSubscription[],
+  tenantsById: Map<string, AzureTenant>,
+) {
+  return subscriptions.map((subscription) => {
+    const tenant = subscription.tenantId ? tenantsById.get(subscription.tenantId.toLowerCase()) : undefined;
+    return {
+      ...subscription,
+      tenantName: readableAzureTenantName(tenant?.displayName, subscription.tenantId) ?? readableAzureTenantName(subscription.tenantName, subscription.tenantId),
+      tenantDefaultDomain: tenant?.defaultDomain ?? subscription.tenantDefaultDomain,
+    };
+  });
 }
 
 function parseSubscription(record: Record<string, unknown>): AzureSubscription | undefined {
@@ -491,7 +726,7 @@ function parseTenant(record: Record<string, unknown>): AzureTenant | undefined {
   if (!tenantId) return undefined;
   return {
     tenantId,
-    displayName: stringValue(record.displayName),
+    displayName: readableAzureTenantName(stringValue(record.displayName), tenantId),
     defaultDomain: stringValue(record.defaultDomain),
     domains: Array.isArray(record.domains)
       ? record.domains.map(stringValue).filter((domain): domain is string => Boolean(domain))
@@ -501,45 +736,164 @@ function parseTenant(record: Record<string, unknown>): AzureTenant | undefined {
   };
 }
 
-function parseCostRows(subscriptionId: string, response: CostQueryResponse): AzureCostUsageRow[] {
-  const columns = response.properties?.columns ?? [];
-  const names = columns.map((column) => String(column.name ?? '').toLowerCase());
+function parseLighthouseDelegation(record: Record<string, unknown>): AzureLighthouseDelegation | undefined {
+  const properties = recordValue(record.properties);
+  const definition = recordValue(properties.registrationDefinition);
+  const definitionProperties = recordValue(definition.properties);
+  const id = stringValue(record.id) ?? stringValue(definition.id) ?? '';
+  const subscriptionId = id.match(/\/subscriptions\/([^/]+)/i)?.[1];
+  const manageeTenantId =
+    stringValue(definitionProperties.manageeTenantId) ??
+    stringValue(properties.manageeTenantId);
+  const manageeTenantName = readableAzureTenantName(
+    stringValue(definitionProperties.manageeTenantName) ?? stringValue(properties.manageeTenantName),
+    manageeTenantId,
+  );
+  const managedByTenantId =
+    stringValue(definitionProperties.managedByTenantId) ??
+    stringValue(properties.managedByTenantId);
+  if (!subscriptionId && !manageeTenantId) return undefined;
+  return {
+    subscriptionId,
+    manageeTenantId,
+    manageeTenantName,
+    managedByTenantId,
+    managedByTenantName: readableAzureTenantName(
+      stringValue(definitionProperties.managedByTenantName) ?? stringValue(properties.managedByTenantName),
+      managedByTenantId,
+    ),
+    offerName:
+      stringValue(definitionProperties.registrationDefinitionName) ??
+      stringValue(definitionProperties.description),
+  };
+}
 
-  return (response.properties?.rows ?? []).map((values) => {
-    const value = (name: string) => values[names.indexOf(name.toLowerCase())];
-    const resourceId = stringValue(value('ResourceId')) ?? stringValue(value('InstanceName'));
+function tenantFromLighthouseDelegation(delegation: AzureLighthouseDelegation): AzureTenant | undefined {
+  if (!delegation.manageeTenantId) return undefined;
+  return {
+    tenantId: delegation.manageeTenantId,
+    displayName: delegation.manageeTenantName,
+    defaultDomain: undefined,
+    domains: [],
+    raw: { source: 'azure-lighthouse', ...delegation },
+  };
+}
+
+function mergeAzureTenant(tenantsById: Map<string, AzureTenant>, tenant: AzureTenant | undefined) {
+  if (!tenant?.tenantId) return;
+  const key = tenant.tenantId.toLowerCase();
+  const existing = tenantsById.get(key);
+  if (!existing) {
+    tenantsById.set(key, tenant);
+    return;
+  }
+  tenantsById.set(key, {
+    ...existing,
+    displayName: existing.displayName ?? tenant.displayName,
+    defaultDomain: existing.defaultDomain ?? tenant.defaultDomain,
+    domains: existing.domains.length > 0 ? existing.domains : tenant.domains,
+    tenantCategory: existing.tenantCategory ?? tenant.tenantCategory,
+  });
+}
+
+function uniqueMissingTenantIds(subscriptions: AzureSubscription[], tenantsById: Map<string, AzureTenant>) {
+  return [...new Set(
+    subscriptions
+      .map((subscription) => subscription.tenantId?.toLowerCase())
+      .filter((tenantId): tenantId is string => {
+        if (!tenantId) return false;
+        return !tenantsById.get(tenantId)?.displayName;
+      }),
+  )];
+}
+
+function readableAzureTenantName(name: string | undefined, tenantId?: string) {
+  if (!name) return undefined;
+  if (tenantId && name.toLowerCase() === tenantId.toLowerCase()) return undefined;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name)) return undefined;
+  return name;
+}
+
+function parseCostDetailsCsv(subscriptionId: string, csv: string): AzureCostUsageRow[] {
+  const records = parseCsvRecords(csv);
+  const columns = (records[0] ?? []).map((column, index) =>
+    (index === 0 ? column.replace(/^\uFEFF/, '') : column).trim(),
+  );
+  const dataRows = records.slice(1).filter((row) => row.some((value) => value.trim().length > 0));
+  if (columns.length === 0 || dataRows.length === 0) return [];
+  const names = columns.map((column) => column.toLowerCase());
+  const indexOf = (...candidates: string[]) =>
+    candidates.map((candidate) => names.indexOf(candidate.toLowerCase())).find((index) => index >= 0) ?? -1;
+  const costIndex = indexOf('PreTaxCost', 'CostInBillingCurrency', 'Cost', 'totalCost');
+  const quantityIndex = indexOf('UsageQuantity', 'Quantity', 'ConsumedQuantity', 'totalUsage');
+  if (costIndex < 0 || quantityIndex < 0) {
+    const missing = [
+      costIndex < 0 ? 'cost (PreTaxCost or CostInBillingCurrency)' : '',
+      quantityIndex < 0 ? 'quantity (UsageQuantity or Quantity)' : '',
+    ].filter(Boolean);
+    throw new Error(`Azure Cost Details CSV omitted required ${missing.join(' and ')} columns.`);
+  }
+
+  return dataRows.map((row) => {
+    const value = (...candidates: string[]) => {
+      const index = indexOf(...candidates);
+      return index >= 0 ? row[index] : undefined;
+    };
+    const resourceId = stringValue(value('ResourceId', 'InstanceId', 'InstanceName'));
     return {
       subscriptionId,
-      usageDate: usageDateValue(value('UsageDate') ?? value('Date')),
+      usageDate: usageDateValue(value('UsageDate', 'UsageDateTime', 'Date')),
       serviceName:
-        stringValue(value('ServiceName')) ??
-        stringValue(value('Product')) ??
-        stringValue(value('ServiceFamily')),
+        stringValue(value('ServiceName', 'ProductName', 'Product', 'ServiceFamily', 'ConsumedService')),
       resourceId,
-      resourceGroup: stringValue(value('ResourceGroup')) ?? resourceGroupFromId(resourceId),
-      resourceType: stringValue(value('ResourceType')) ?? stringValue(value('ConsumedService')),
+      resourceGroup:
+        stringValue(value('ResourceGroup', 'ResourceGroupName')) ?? resourceGroupFromId(resourceId),
+      resourceType: stringValue(value('ResourceType', 'ConsumedService')),
       meterCategory: stringValue(value('MeterCategory')),
       chargeType: stringValue(value('ChargeType')),
-      cost:
-        numberValue(value('PreTaxCost')) ??
-        numberValue(value('CostInBillingCurrency')) ??
-        numberValue(value('Cost')) ??
-        numberValue(value('totalCost')) ??
-        0,
-      usageQuantity:
-        numberValue(value('UsageQuantity')) ??
-        numberValue(value('Quantity')) ??
-        numberValue(value('totalUsage')) ??
-        0,
-      currency: stringValue(value('Currency')) ?? stringValue(value('BillingCurrencyCode')),
-      raw: Object.fromEntries(columns.map((column, index) => [column.name ?? `column${index}`, values[index]])),
+      cost: numberValue(row[costIndex]) ?? 0,
+      usageQuantity: numberValue(row[quantityIndex]) ?? 0,
+      currency: stringValue(value('BillingCurrency', 'BillingCurrencyCode', 'Currency', 'PricingCurrency')),
+      raw: Object.fromEntries(columns.map((column, index) => [column || `column${index}`, row[index] ?? ''])),
     };
   });
 }
 
-function isInvalidCostColumnError(error: unknown) {
-  if (!(error instanceof AzureApiError)) return false;
-  return `${error.message}\n${error.responseText ?? ''}`.toLowerCase().includes('invalid dataset configuration columns');
+function parseCsvRecords(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+      } else {
+        field += character;
+      }
+    } else if (character === '"') {
+      quoted = true;
+    } else if (character === ',') {
+      row.push(field);
+      field = '';
+    } else if (character === '\n') {
+      row.push(field.replace(/\r$/, ''));
+      rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += character;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field.replace(/\r$/, ''));
+    rows.push(row);
+  }
+  return rows;
 }
 
 function parseAdvisorRecommendation(record: Record<string, unknown>): AzureAdvisorRecommendation | undefined {
@@ -580,8 +934,26 @@ function usageDateValue(value: unknown) {
   if (/^\d{8}$/.test(text)) {
     return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
   }
+  const usDate = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s|$)/);
+  if (usDate) {
+    return `${usDate[3]}-${usDate[1]?.padStart(2, '0')}-${usDate[2]?.padStart(2, '0')}`;
+  }
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString().slice(0, 10);
+}
+
+function reportDate(value: string) {
+  const direct = value.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid Azure cost report date "${value}".`);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function shiftReportDate(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function resourceGroupFromId(resourceId?: string) {
@@ -597,6 +969,14 @@ function normalizeEndpoint(endpoint: string) {
 function absoluteUrl(pathOrUrl: string, baseUrl: string) {
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
   return `${baseUrl}${pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`}`;
+}
+
+function assertArmOperationUrl(value: string, baseUrl: string) {
+  const operation = new URL(value);
+  const base = new URL(baseUrl);
+  if (operation.protocol !== 'https:' || operation.origin.toLowerCase() !== base.origin.toLowerCase()) {
+    throw new Error('Azure Cost Details report returned an unexpected operation URL.');
+  }
 }
 
 function shouldRetry(status: number) {
@@ -633,6 +1013,14 @@ function retryDelayMs(response: Response, retryCount: number) {
     : Math.min(30_000, 500 * 2 ** retryCount);
 }
 
+function throttleScope(response: Response): AzureThrottleScope {
+  if (response.headers.has('x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after')) return 'qpu';
+  if (response.headers.has('x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after')) return 'tenant';
+  if (response.headers.has('x-ms-ratelimit-microsoft.costmanagement-client-retry-after')) return 'client';
+  if (response.headers.has('x-ms-ratelimit-microsoft.costmanagement-entity-retry-after')) return 'entity';
+  return 'unknown';
+}
+
 function numericHeader(response: Response, header: string) {
   const raw = response.headers.get(header);
   if (!raw?.trim()) return undefined;
@@ -648,6 +1036,17 @@ function retryAfterDelayMs(value: string | null) {
   return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
 }
 
+function costDetailsPollDelayMs(response: Response) {
+  return Math.min(60_000, retryAfterDelayMs(response.headers.get('retry-after')) ?? 10_000);
+}
+
+function formatWaitDuration(milliseconds: number) {
+  const seconds = Math.ceil(milliseconds / 1_000);
+  if (seconds <= 0) return 'a moment';
+  if (seconds < 60) return `${seconds} seconds`;
+  return '1 minute';
+}
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -658,6 +1057,13 @@ function parseJson<T>(value: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+async function parseResponseJson<T>(response: Response): Promise<T> {
+  const responseText = await response.text();
+  const parsed = responseText.trim() ? parseJson<T>(responseText) : undefined;
+  if (!parsed) throw new Error('Azure Cost Details report returned an invalid JSON response.');
+  return parsed;
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -677,7 +1083,7 @@ function stringValue(value: unknown) {
 function numberValue(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
-    const parsed = Number.parseFloat(value);
+    const parsed = Number.parseFloat(value.replace(/,/g, ''));
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;

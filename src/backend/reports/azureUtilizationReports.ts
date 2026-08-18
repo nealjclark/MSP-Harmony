@@ -1,4 +1,5 @@
 import type { Queryable } from './agreementReports';
+import { sqlAzureAccountMappingLateral, sqlAzureSubscriptionDisplayName } from '../shared/azureAccountMappingSql';
 
 type SyncRunRow = {
   id: string;
@@ -28,7 +29,10 @@ type InvoiceRow = {
 };
 
 type ResourceSnapshotRow = {
+  subscription_id: string;
   resource_id: string;
+  customer_name: string | null;
+  subscription_name: string | null;
   power_state: string | null;
   average_cpu: string | number | null;
   maximum_cpu: string | number | null;
@@ -131,13 +135,14 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
          sum(coalesce(nullif(snapshots.dimensions->>'cost', '')::numeric, 0)) as retail_cost,
          max(nullif(snapshots.dimensions->>'currency', '')) as currency
        from vendor_usage_snapshots snapshots
-       left join vendor_account_mappings account_mapping
-         on account_mapping.vendor_id = snapshots.vendor_id
-        and lower(account_mapping.external_account_id) = lower(snapshots.external_account_id)
-        and account_mapping.active = true
-        and account_mapping.mapping_status = 'approved'
+       ${sqlAzureAccountMappingLateral('snapshots.external_account_id')}
+       left join vendor_account_mappings tenant_mapping
+         on tenant_mapping.vendor_id = snapshots.vendor_id
+        and lower(tenant_mapping.external_account_id) = lower(coalesce(snapshots.dimensions->>'tenantId', ''))
+        and tenant_mapping.active = true
+        and tenant_mapping.mapping_status = 'approved'
        left join customers
-         on customers.id = coalesce(account_mapping.customer_id, snapshots.customer_id)
+         on customers.id = coalesce(account_mapping.customer_id, tenant_mapping.customer_id, snapshots.customer_id)
        where snapshots.vendor_id = 'microsoft-azure'
          and snapshots.sync_run_id = $1
        group by snapshots.external_account_id,
@@ -171,7 +176,10 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
     ),
     database.query<ResourceSnapshotRow>(
       `select
+         resources.subscription_id,
          resources.resource_id,
+         max(customers.name) as customer_name,
+         max(${sqlAzureSubscriptionDisplayName('resources.subscription_id')}) as subscription_name,
          max(resources.power_state) as power_state,
          avg(metrics.average_value) filter (where lower(metrics.metric_name) = 'percentage cpu') as average_cpu,
          max(metrics.maximum_value) filter (where lower(metrics.metric_name) = 'percentage cpu') as maximum_cpu,
@@ -182,8 +190,10 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
        left join azure_resource_metric_daily metrics
          on metrics.sync_run_id = resources.sync_run_id
         and lower(metrics.resource_id) = lower(resources.resource_id)
+       ${sqlAzureAccountMappingLateral('resources.subscription_id')}
+       left join customers on customers.id = account_mapping.customer_id
        where resources.sync_run_id = $1
-       group by resources.resource_id`,
+       group by resources.subscription_id, resources.resource_id`,
       [syncRun.id],
     ),
   ]);
@@ -275,6 +285,42 @@ export async function getAzureUtilizationReport(database: Queryable): Promise<Az
       services: [],
       resources: [],
     });
+  }
+
+  for (const row of resourceSnapshotResult.rows) {
+    const key = row.subscription_id.toLowerCase();
+    const subscription = subscriptions.get(key) ?? {
+      subscriptionId: row.subscription_id,
+      subscriptionName: row.subscription_name ?? undefined,
+      customerName: row.customer_name ?? undefined,
+      azureEstimatedActualCost: 0,
+      retailCost: 0,
+      ingramCost: invoiceBySubscription.get(key) ?? 0,
+      variance: 0,
+      currency: 'USD',
+      services: [],
+      resources: [],
+    };
+    if (!subscription.customerName && row.customer_name) subscription.customerName = row.customer_name;
+    if (!subscription.subscriptionName && row.subscription_name) subscription.subscriptionName = row.subscription_name;
+    if (!subscription.resources.some((resource) => resource.resourceId.toLowerCase() === row.resource_id.toLowerCase())) {
+      subscription.resources.push({
+        resourceId: row.resource_id,
+        resourceName: resourceName(row.resource_id),
+        serviceName: 'Azure resource',
+        dailyCosts: [],
+        azureEstimatedActualCost: 0,
+        retailCost: 0,
+        usageQuantity: 0,
+        powerState: row.power_state ?? undefined,
+        averageCpu: nullableNumericValue(row.average_cpu),
+        maximumCpu: nullableNumericValue(row.maximum_cpu),
+        availableMemoryBytes: nullableNumericValue(row.available_memory_bytes),
+        activeSessions: nullableNumericValue(row.active_sessions),
+        disconnectedSessions: nullableNumericValue(row.disconnected_sessions),
+      });
+    }
+    subscriptions.set(key, subscription);
   }
 
   const rows = [...subscriptions.values()]

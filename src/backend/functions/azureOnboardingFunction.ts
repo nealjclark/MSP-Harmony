@@ -1,6 +1,7 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import {
   listAzureOnboardingState,
+  refreshAzureLighthouseTenants,
   getCurrentAzureLighthouseTemplate,
   prepareAzureOnboardingPackage,
   saveAzureSubscriptionMapping,
@@ -198,6 +199,37 @@ export async function uploadAzureLighthouseTemplateHttp(
   }
 }
 
+export async function refreshAzureLighthouseTenantsHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+  dependencies: OnboardingDependencies = {},
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const originResponse = requireMutatingRequestOrigin(request);
+  if (originResponse) return originResponse;
+  const repositoryContext = await (dependencies.createRepositoryContext ?? createOptionalPostgresSettingsRepository)();
+  if (!repositoryContext.pool) {
+    await repositoryContext.close();
+    return databaseRequiredResponse(repositoryContext.missingDatabaseSettings);
+  }
+
+  try {
+    return jsonResponse(200, await refreshAzureLighthouseTenants({
+      pool: repositoryContext.pool,
+      actor: auth.principal.name,
+      provider: createIntegrationSettingsProvider({
+        loadLocalEnv: true,
+        metadataReader: repositoryContext.repository,
+      }),
+    }));
+  } catch (error) {
+    return serverErrorResponse(context, error, 'Unable to refresh Azure Lighthouse tenants.', 'azure_lighthouse_tenants_refresh_failed');
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
 export async function getAzureLighthouseTemplateHttp(
   request: HttpRequest,
   context: InvocationContext,
@@ -272,4 +304,11 @@ app.http('manageAzureLighthouseTemplate', {
   authLevel: 'anonymous',
   route: 'integrations/microsoft-azure/onboarding/template',
   handler: manageAzureLighthouseTemplateHttp,
+});
+
+app.http('refreshAzureLighthouseTenants', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'integrations/microsoft-azure/onboarding/tenants/refresh',
+  handler: refreshAzureLighthouseTenantsHttp,
 });

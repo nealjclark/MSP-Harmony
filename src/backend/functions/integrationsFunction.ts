@@ -620,6 +620,7 @@ export async function processIntegrationSyncQueueMessage(
       const result = await syncAzureCostUsage({
         pool: repositoryContext.pool,
         provider,
+        operationKey: parsed.operationKey,
         onProgress,
       });
       syncRunId = result.syncRunId;
@@ -676,11 +677,16 @@ export async function processIntegrationSyncQueueMessage(
     await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
     context.log(`Microsoft 365 ${dataset} queued sync ${syncRunId} completed.`);
   } catch (error) {
-    await repositoryContext.repository.failSyncJob(
-      parsed.jobId,
-      error instanceof Error ? error.message : 'Sync worker failed.',
-      syncRunId,
-    ).catch(() => undefined);
+    const message = error instanceof Error ? error.message : 'Sync worker failed.';
+    if (isFinalSyncQueueAttempt(context)) {
+      await repositoryContext.repository.failSyncJob(
+        parsed.jobId,
+        message,
+        syncRunId,
+      ).catch(() => undefined);
+    } else {
+      context.log(`Queued ${integrationDisplayName(parsed.integrationId)} sync will retry: ${message}`);
+    }
     throw error;
   } finally {
     await repositoryContext.close();
@@ -922,6 +928,22 @@ async function transientTestProvider(
 
 function enqueueIntegrationSyncWorker(context: InvocationContext, message: IntegrationSyncQueueMessage) {
   context.extraOutputs?.set(integrationSyncQueueOutput, message);
+}
+
+const integrationSyncQueueMaxDequeueCount = 5;
+
+function isFinalSyncQueueAttempt(context: InvocationContext) {
+  const metadata = (context.triggerMetadata ?? {}) as Record<string, unknown>;
+  const dequeueCount = Number(metadata.dequeueCount ?? metadata.DequeueCount ?? 0);
+  if (Number.isFinite(dequeueCount) && dequeueCount > 0) {
+    return dequeueCount >= integrationSyncQueueMaxDequeueCount;
+  }
+  const retryCount = context.retryContext?.retryCount;
+  const maxRetryCount = context.retryContext?.maxRetryCount;
+  if (typeof retryCount === 'number' && typeof maxRetryCount === 'number' && maxRetryCount > 0) {
+    return retryCount >= maxRetryCount;
+  }
+  return true;
 }
 
 function enqueueAppRiverSyncWorker(

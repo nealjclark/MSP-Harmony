@@ -10,13 +10,14 @@ import {
   upsertAzureDailyCost,
 } from '../../azureMonitoring/azureCostMonitorService';
 import {
+  AzureApiError,
   AzureCostManagementClient,
   azureCredentialsFromSettings,
   azureIntegrationId,
-  azureSubscriptionAllowlist,
+  discoverDelegatedAzureTenants,
+  enrichSubscriptionsWithTenants,
   type AzureCostUsageRow,
   type AzureSubscription,
-  type AzureTenant,
 } from './client';
 
 export type Queryable = {
@@ -26,6 +27,8 @@ export type Queryable = {
 export type AzureUsageClient = {
   listSubscriptions: AzureCostManagementClient['listSubscriptions'];
   listTenants?: AzureCostManagementClient['listTenants'];
+  listLighthouseDelegations?: AzureCostManagementClient['listLighthouseDelegations'];
+  listLighthouseDelegationsForSubscription?: AzureCostManagementClient['listLighthouseDelegationsForSubscription'];
   queryCostUsage: AzureCostManagementClient['queryCostUsage'];
   listResources?: AzureCostManagementClient['listResources'];
   getVmInstanceView?: AzureCostManagementClient['getVmInstanceView'];
@@ -37,9 +40,135 @@ export type AzureUsageClient = {
 type AccountMappingRow = {
   external_account_id: string;
   customer_id: string;
+  customer_name: string | null;
   agreement_id: string | null;
   agreement_addition_id: string | null;
 };
+
+type AccountMapping = {
+  customerId: string;
+  customerName?: string;
+  agreementId?: string;
+  agreementAdditionId?: string;
+};
+
+const azureCostCalendarTimeZone = 'America/New_York';
+const azureDailyCorrectionDays = 5;
+const azureThrottleMinimumRetryMs = 60_000;
+
+export type AzureCostSyncMode = 'daily' | 'monthly';
+
+export type AzureCostSyncCheckpoint = {
+  subscriptionId: string;
+  syncMode: AzureCostSyncMode;
+  coveredFrom?: string;
+  coveredThrough?: string;
+  cursorDate?: string;
+  lastAttemptAt?: Date;
+  lastSuccessAt?: Date;
+  lastRowCount: number;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  nextRetryAt?: Date;
+  lastError?: string;
+};
+
+export type AzureCostCheckpointWindow = {
+  from: string;
+  to: string;
+  coveredThrough: string;
+  cursorDate?: string;
+};
+
+export function azureCostSyncMode(operationKey?: string): AzureCostSyncMode {
+  return operationKey === 'azure-cost-monthly' ? 'monthly' : 'daily';
+}
+
+export function azureCostQueryWindow(input: {
+  mode: AzureCostSyncMode;
+  now: Date;
+  monthlyBackfillMonths?: number;
+}) {
+  const today = calendarDateInTimeZone(input.now, azureCostCalendarTimeZone);
+  const [year, month, day] = today.split('-').map((part) => Number(part));
+  if (input.mode === 'daily') {
+    const monthStart = `${year}-${pad2(month)}-01`;
+    const from = day === 1 ? shiftCalendarDate(today, -1) : monthStart;
+    return {
+      from: `${from}T00:00:00.000Z`,
+      to: `${today}T00:00:00.000Z`,
+      mode: input.mode,
+      lookbackDays: Math.max(0, day - 1),
+    };
+  }
+
+  const months = Math.min(12, Math.max(1, input.monthlyBackfillMonths ?? 3));
+  const startIndex = year * 12 + (month - 1) - months;
+  const startYear = Math.floor(startIndex / 12);
+  const startMonth = (startIndex % 12) + 1;
+  return {
+    from: `${startYear}-${pad2(startMonth)}-01T00:00:00.000Z`,
+    to: `${year}-${pad2(month)}-01T00:00:00.000Z`,
+    mode: input.mode,
+    lookbackDays: 0,
+    months,
+  };
+}
+
+export function azureCostMonthWindows(from: string, to: string) {
+  const windows: Array<{ from: string; to: string }> = [];
+  const end = new Date(to);
+  let cursor = new Date(from);
+  if (!(cursor.getTime() < end.getTime())) return [{ from, to }];
+  while (cursor < end) {
+    const next = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+    const chunkTo = next < end ? next : end;
+    windows.push({ from: cursor.toISOString(), to: chunkTo.toISOString() });
+    cursor = next;
+  }
+  return windows;
+}
+
+export function azureCheckpointCostWindows(input: {
+  mode: AzureCostSyncMode;
+  fullWindow: { from: string; to: string };
+  checkpoint?: AzureCostSyncCheckpoint;
+  correctionDays?: number;
+}) {
+  const fullFrom = input.fullWindow.from.slice(0, 10);
+  const fullTo = input.fullWindow.to.slice(0, 10);
+  if (input.mode === 'daily') {
+    const targetDate = shiftCalendarDate(fullTo, -1);
+    if (input.checkpoint?.coveredThrough && input.checkpoint.coveredThrough >= targetDate) {
+      return [] as AzureCostCheckpointWindow[];
+    }
+    const correctionDays = Math.max(1, input.correctionDays ?? azureDailyCorrectionDays);
+    const correctionFrom = shiftCalendarDate(targetDate, -(correctionDays - 1));
+    const nextUncovered = input.checkpoint?.coveredThrough
+      ? shiftCalendarDate(input.checkpoint.coveredThrough, 1)
+      : fullFrom;
+    const requestedFrom = input.checkpoint
+      ? [nextUncovered, correctionFrom].sort()[0] ?? fullFrom
+      : fullFrom;
+    const from = [fullFrom, requestedFrom].sort()[1] ?? fullFrom;
+    return [{
+      from: `${from}T00:00:00.000Z`,
+      to: input.fullWindow.to,
+      coveredThrough: targetDate,
+    }];
+  }
+
+  let cursor = input.checkpoint?.cursorDate ?? fullFrom;
+  if (input.checkpoint?.coveredFrom && fullFrom < input.checkpoint.coveredFrom) {
+    cursor = fullFrom;
+  }
+  if (cursor < fullFrom) cursor = fullFrom;
+  if (cursor >= fullTo) return [] as AzureCostCheckpointWindow[];
+  return azureCostMonthWindows(`${cursor}T00:00:00.000Z`, input.fullWindow.to).map((window) => ({
+    ...window,
+    coveredThrough: shiftCalendarDate(window.to.slice(0, 10), -1),
+    cursorDate: window.to.slice(0, 10),
+  }));
+}
 
 export async function testAzureConnection(input: {
   provider?: IntegrationSettingsProvider;
@@ -50,9 +179,10 @@ export async function testAzureConnection(input: {
   const settings = await provider.getIntegrationSettings(azureIntegrationId);
   assertAzureReady(settings);
   const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
-  const tenantDiscovery = await discoverAzureTenants(client);
+  const discoveredSubscriptions = await client.listSubscriptions(5);
+  const tenantDiscovery = await discoverDelegatedAzureTenants(client, discoveredSubscriptions);
   const subscriptions = filterSubscriptions(
-    enrichSubscriptionsWithTenants(await client.listSubscriptions(5), tenantDiscovery.tenantsById),
+    enrichSubscriptionsWithTenants(discoveredSubscriptions, tenantDiscovery.tenantsById),
     settings,
   );
 
@@ -75,6 +205,7 @@ export async function syncAzureCostUsage(input: {
   provider?: IntegrationSettingsProvider;
   client?: AzureUsageClient;
   now?: string;
+  operationKey?: string;
   onProgress?: SyncProgressReporter;
 }) {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
@@ -82,17 +213,35 @@ export async function syncAzureCostUsage(input: {
   assertAzureReady(settings);
 
   const now = input.now ? new Date(input.now) : new Date();
-  const window = azureQueryWindow(settings, now);
+  const mode = azureCostSyncMode(input.operationKey);
+  const operationKey = mode === 'monthly' ? 'azure-cost-monthly' : 'azure-cost-usage';
+  const window = azureCostQueryWindow({
+    mode,
+    now,
+    monthlyBackfillMonths: boundedInteger(settings.nonSecrets.monthlyBackfillMonths, 3, 1, 12),
+  });
+  const collectLiveInventory = mode === 'daily';
   const client = input.client ?? new AzureCostManagementClient(azureCredentialsFromSettings(settings));
-  const tenantDiscovery = await discoverAzureTenants(client);
+  const discoveredSubscriptions = await client.listSubscriptions(100);
+  const tenantDiscovery = await discoverDelegatedAzureTenants(client, discoveredSubscriptions);
   const subscriptions = filterSubscriptions(
-    enrichSubscriptionsWithTenants(await client.listSubscriptions(100), tenantDiscovery.tenantsById),
+    enrichSubscriptionsWithTenants(discoveredSubscriptions, tenantDiscovery.tenantsById),
     settings,
   );
-  const syncRunId = await startSyncRun(input.pool, window, subscriptions.length);
+  await persistAzureLighthouseTenantsFromSubscriptions(input.pool, subscriptions);
+  const syncRunId = await startSyncRun(input.pool, operationKey, window, subscriptions.length);
 
   try {
     const accountMappings = await loadAccountMappings(input.pool);
+    const checkpoints = await loadAzureCostSyncCheckpoints(
+      input.pool,
+      subscriptions.map((subscription) => subscription.subscriptionId),
+      mode,
+    );
+    const costCoverage = await loadAzureCostCoverage(
+      input.pool,
+      subscriptions.map((subscription) => subscription.subscriptionId),
+    );
     let recordsRead = 0;
     let recordsWritten = 0;
     let mappedSnapshots = 0;
@@ -102,113 +251,304 @@ export async function syncAzureCostUsage(input: {
     let metricSnapshots = 0;
     let advisorRecommendations = 0;
     const advisorFailures: Array<{ subscriptionId: string; error: string }> = [];
-    const failures: Array<{ subscriptionId: string; error: string }> = [];
-    const progressTotal = subscriptions.length + 1;
+    const failures: Array<{
+      subscriptionId: string;
+      subscriptionName?: string;
+      customerName?: string;
+      error: string;
+    }> = [];
+    const emptyCostWithResources: Array<{
+      subscriptionId: string;
+      customerName?: string;
+      resourceCount: number;
+    }> = [];
+    const skippedCostQueries: string[] = [];
+    const deferredCostQueries: Array<{
+      subscriptionId: string;
+      reason: string;
+      nextRetryAt?: string;
+    }> = [];
+    let costQueryWindowsCompleted = 0;
+    let sharedThrottleUntil: Date | undefined;
+    const progressTotal = Math.max(1, subscriptions.length);
+    const plans = subscriptions.map((subscription) => {
+      const mapping = accountMappings.get(subscription.tenantId?.toLowerCase() ?? '')
+        ?? accountMappings.get(subscription.subscriptionId.toLowerCase());
+      const checkpoint = checkpoints.get(subscription.subscriptionId.toLowerCase());
+      const retryDeferred = checkpoint?.nextRetryAt && checkpoint.nextRetryAt > now;
+      const windows = retryDeferred
+        ? []
+        : azureCheckpointCostWindows({ mode, fullWindow: window, checkpoint });
+      const skipReason = retryDeferred
+        ? 'retry-not-due'
+        : windows.length === 0
+          ? 'already-covered'
+          : undefined;
+      if (skipReason) skippedCostQueries.push(subscription.subscriptionId);
+      if (retryDeferred) {
+        deferredCostQueries.push({
+          subscriptionId: subscription.subscriptionId,
+          reason: skipReason ?? 'retry-not-due',
+          nextRetryAt: checkpoint?.nextRetryAt?.toISOString(),
+        });
+      }
+      return {
+        subscription,
+        mapping,
+        checkpoint,
+        windows,
+        skipReason,
+        failed: false,
+        deferred: Boolean(retryDeferred),
+        costQuerySucceeded: false,
+        costRowsWritten: 0,
+      };
+    });
 
     await input.onProgress?.({
       completed: 0,
       total: progressTotal,
       currentItem: 'Discovering delegated subscriptions',
-      unitLabel: 'monitoring steps',
+      unitLabel: 'subscriptions',
     });
-    for (const [index, subscription] of subscriptions.entries()) {
-      await input.onProgress?.({
-        completed: index,
-        total: progressTotal,
-        failed: failures.length,
-        currentItem: `Collecting ${subscription.displayName ?? subscription.subscriptionId}`,
-        unitLabel: 'monitoring steps',
-      });
+    const maxWindowCount = Math.max(0, ...plans.map((plan) => plan.windows.length));
+    for (let windowIndex = 0; windowIndex < maxWindowCount; windowIndex += 1) {
+      for (const [planIndex, plan] of plans.entries()) {
+        const queryWindow = plan.windows[windowIndex];
+        if (!queryWindow || plan.failed || plan.skipReason) continue;
+        if (sharedThrottleUntil) {
+          if (!plan.deferred) {
+            plan.deferred = true;
+            skippedCostQueries.push(plan.subscription.subscriptionId);
+            deferredCostQueries.push({
+              subscriptionId: plan.subscription.subscriptionId,
+              reason: 'shared-throttle',
+              nextRetryAt: sharedThrottleUntil.toISOString(),
+            });
+          }
+          continue;
+        }
 
-      try {
-        const rows = await client.queryCostUsage({
-          subscriptionId: subscription.subscriptionId,
-          from: window.from,
-          to: window.to,
+        const label = azureSubscriptionLabel(plan.subscription, plan.mapping);
+        const progressPrefix = mode === 'monthly'
+          ? `Backfilling ${label} · ${queryWindow.from.slice(0, 7)}`
+          : `Collecting ${label}`;
+        await input.onProgress?.({
+          completed: Math.min(planIndex, progressTotal - 1),
+          total: progressTotal,
+          failed: failures.length,
+          currentItem: progressPrefix,
+          unitLabel: 'subscriptions',
         });
-        recordsRead += rows.length;
+        await markAzureCostSyncAttempt(input.pool, {
+          subscriptionId: plan.subscription.subscriptionId,
+          mode,
+          syncRunId,
+          window: queryWindow,
+        });
 
-        for (const row of rows) {
-          if (row.cost === 0 && row.usageQuantity === 0) continue;
-          const mapping = accountMappings.get(subscription.subscriptionId.toLowerCase());
-          const productKey = azureProductKey(row);
-          if (mapping?.customerId && mapping.agreementId && mapping.agreementAdditionId) mappedSnapshots += 1;
-          else unmappedSnapshots += 1;
-          totalCost += row.cost;
-
-          await insertSnapshot(input.pool, {
-            syncRunId,
-            subscription,
-            row,
-            customerId: mapping?.customerId,
-            agreementId: mapping?.agreementId,
-            agreementAdditionId: mapping?.agreementAdditionId,
-            vendorProductKey: productKey,
-            productCode: productKey,
-            productName: row.serviceName ?? row.meterCategory ?? 'Azure consumption',
+        try {
+          const rows = await client.queryCostUsage({
+            subscriptionId: plan.subscription.subscriptionId,
+            from: queryWindow.from,
+            to: queryWindow.to,
+            onProgress: async (reportProgress) => input.onProgress?.({
+              completed: Math.min(planIndex, progressTotal - 1),
+              total: progressTotal,
+              failed: failures.length,
+              currentItem: `${progressPrefix} · ${reportProgress.message}`,
+              unitLabel: 'subscriptions',
+            }),
           });
-          if (row.usageDate) {
-            await upsertAzureDailyCost(input.pool, {
+          recordsRead += rows.length;
+
+          if (rows.length > 0) {
+            await input.onProgress?.({
+              completed: Math.min(planIndex, progressTotal - 1),
+              total: progressTotal,
+              failed: failures.length,
+              currentItem: `${progressPrefix} · Storing ${rows.length.toLocaleString('en-US')} cost rows`,
+              unitLabel: 'subscriptions',
+            });
+          }
+          for (const [rowIndex, row] of rows.entries()) {
+            if (row.cost === 0 && row.usageQuantity === 0) continue;
+            const productKey = azureProductKey(row);
+            if (plan.mapping?.customerId) mappedSnapshots += 1;
+            else unmappedSnapshots += 1;
+            totalCost += row.cost;
+            await insertSnapshot(input.pool, {
               syncRunId,
-              subscriptionId: subscription.subscriptionId,
-              usageDate: row.usageDate,
-              serviceName: row.serviceName,
-              resourceId: row.resourceId,
-              resourceGroup: row.resourceGroup,
-              resourceType: row.resourceType,
-              meterCategory: row.meterCategory,
-              chargeType: row.chargeType,
-              currency: row.currency,
-              actualCost: row.cost,
-              usageQuantity: row.usageQuantity,
-              raw: row.raw,
+              subscription: plan.subscription,
+              row,
+              customerId: plan.mapping?.customerId,
+              agreementId: plan.mapping?.agreementId,
+              agreementAdditionId: plan.mapping?.agreementAdditionId,
+              vendorProductKey: productKey,
+              productCode: productKey,
+              productName: row.serviceName ?? row.meterCategory ?? 'Azure consumption',
             });
+            if (row.usageDate) {
+              await upsertAzureDailyCost(input.pool, {
+                syncRunId,
+                subscriptionId: plan.subscription.subscriptionId,
+                usageDate: row.usageDate,
+                serviceName: row.serviceName,
+                resourceId: row.resourceId,
+                resourceGroup: row.resourceGroup,
+                resourceType: row.resourceType,
+                meterCategory: row.meterCategory,
+                chargeType: row.chargeType,
+                currency: row.currency,
+                actualCost: row.cost,
+                usageQuantity: row.usageQuantity,
+                raw: row.raw,
+              });
+            }
+            recordsWritten += 1;
+            plan.costRowsWritten += 1;
+            const storedCount = rowIndex + 1;
+            if (storedCount % 100 === 0 || storedCount === rows.length) {
+              await input.onProgress?.({
+                completed: Math.min(planIndex, progressTotal - 1),
+                total: progressTotal,
+                failed: failures.length,
+                currentItem:
+                  `${progressPrefix} · Storing cost rows ${storedCount.toLocaleString('en-US')}` +
+                  ` of ${rows.length.toLocaleString('en-US')}`,
+                unitLabel: 'subscriptions',
+              });
+            }
           }
-          recordsWritten += 1;
+          await markAzureCostSyncSuccess(input.pool, {
+            subscriptionId: plan.subscription.subscriptionId,
+            mode,
+            syncRunId,
+            window: queryWindow,
+            rowCount: rows.length,
+          });
+          plan.costQuerySucceeded = true;
+          costQueryWindowsCompleted += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failures.push({
+            subscriptionId: plan.subscription.subscriptionId,
+            subscriptionName: plan.subscription.displayName,
+            customerName: plan.mapping?.customerName ?? plan.subscription.displayName,
+            error: message,
+          });
+          plan.failed = true;
+          const retry = azureRetryState(error, now);
+          await markAzureCostSyncFailure(input.pool, {
+            subscriptionId: plan.subscription.subscriptionId,
+            mode,
+            syncRunId,
+            window: queryWindow,
+            error: message,
+            nextRetryAt: retry?.nextRetryAt,
+          });
+          await input.onProgress?.({
+            completed: Math.min(planIndex, progressTotal - 1),
+            total: progressTotal,
+            failed: failures.length,
+            currentItem: `${progressPrefix} · Failed: ${message}`,
+            unitLabel: 'subscriptions',
+          });
+          if (retry?.shared) sharedThrottleUntil = retry.nextRetryAt;
         }
-        if (client.listResources) {
-          const inventory = await collectAzureResourceInventory(input.pool, client, syncRunId, subscription, window);
-          resourceSnapshots += inventory.resourceSnapshots;
-          metricSnapshots += inventory.metricSnapshots;
-          recordsWritten += inventory.resourceSnapshots + inventory.metricSnapshots;
-        }
-        if (client.listAdvisorRecommendations) {
-          try {
-            const recommendations = await client.listAdvisorRecommendations(subscription.subscriptionId, 100);
-            await storeAzureAdvisorRecommendations(input.pool, syncRunId, subscription.subscriptionId, recommendations);
-            advisorRecommendations += recommendations.length;
-          } catch (error) {
-            advisorFailures.push({
-              subscriptionId: subscription.subscriptionId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      } catch (error) {
-        failures.push({
-          subscriptionId: subscription.subscriptionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
       }
     }
 
+    if (collectLiveInventory) {
+      for (const [planIndex, plan] of plans.entries()) {
+        if (!plan.costQuerySucceeded || plan.failed || plan.skipReason || plan.deferred) continue;
+        const label = azureSubscriptionLabel(plan.subscription, plan.mapping);
+        await input.onProgress?.({
+          completed: Math.min(planIndex, progressTotal - 1),
+          total: progressTotal,
+          failed: failures.length,
+          currentItem: `Collecting resources for ${label}`,
+          unitLabel: 'subscriptions',
+        });
+        try {
+          let inventory = { resourceSnapshots: 0, metricSnapshots: 0 };
+          if (client.listResources) {
+            inventory = await collectAzureResourceInventory(input.pool, client, syncRunId, plan.subscription, window);
+            resourceSnapshots += inventory.resourceSnapshots;
+            metricSnapshots += inventory.metricSnapshots;
+            recordsWritten += inventory.resourceSnapshots + inventory.metricSnapshots;
+          }
+          if (plan.costRowsWritten === 0 && inventory.resourceSnapshots > 0
+            && (costCoverage.get(plan.subscription.subscriptionId.toLowerCase())?.rowCount ?? 0) === 0) {
+            emptyCostWithResources.push({
+              subscriptionId: plan.subscription.subscriptionId,
+              customerName: plan.mapping?.customerName ?? plan.subscription.displayName,
+              resourceCount: inventory.resourceSnapshots,
+            });
+          }
+          if (client.listAdvisorRecommendations) {
+            try {
+              const recommendations = await client.listAdvisorRecommendations(plan.subscription.subscriptionId, 100);
+              await storeAzureAdvisorRecommendations(input.pool, syncRunId, plan.subscription.subscriptionId, recommendations);
+              advisorRecommendations += recommendations.length;
+            } catch (error) {
+              advisorFailures.push({
+                subscriptionId: plan.subscription.subscriptionId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        } catch (error) {
+          failures.push({
+            subscriptionId: plan.subscription.subscriptionId,
+            subscriptionName: plan.subscription.displayName,
+            customerName: plan.mapping?.customerName ?? plan.subscription.displayName,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          plan.failed = true;
+        }
+      }
+    }
+
+    const deferredSubscriptionCount = new Set(
+      deferredCostQueries.map((item) => item.subscriptionId.toLowerCase()),
+    ).size;
+    const successfulSubscriptions = Math.max(
+      0,
+      subscriptions.length - failures.length - deferredSubscriptionCount,
+    );
+
+    const failureSummary = failures
+      .map((failure) => failure.customerName ?? failure.subscriptionName ?? failure.subscriptionId)
+      .join(', ');
     await input.onProgress?.({
       completed: subscriptions.length,
       total: progressTotal,
       failed: failures.length,
-      currentItem: 'Evaluating cost changes, idle VMs, and Advisor results',
-      unitLabel: 'monitoring steps',
+      currentItem: failures.length
+        ? `${collectLiveInventory ? 'Evaluating monitor window' : 'Collecting completed months'} · ${failureSummary} failed`
+        : collectLiveInventory
+          ? 'Evaluating cost changes, idle VMs, and Advisor results'
+          : 'Storing completed-month charges',
+      unitLabel: 'subscriptions',
     });
 
     if (subscriptions.length > 0 && failures.length === subscriptions.length) {
-      throw new Error(`Azure Cost Management failed for every delegated subscription: ${failures[0]?.error ?? 'unknown error'}`);
+      throw new Error(
+        `Azure Cost Management failed for every delegated subscription: ${
+          failures
+            .map((failure) => `${failure.customerName ?? failure.subscriptionId}: ${failure.error}`)
+            .join('; ')
+        }`,
+      );
     }
 
     await completeSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
-      entity: 'azure-cost-usage',
+      entity: operationKey,
+      operationKey,
       queryWindow: window,
       subscriptionCount: subscriptions.length,
-      successfulSubscriptions: subscriptions.length - failures.length,
+      successfulSubscriptions,
       failedSubscriptions: failures,
       mappedSnapshots,
       unmappedSnapshots,
@@ -218,25 +558,41 @@ export async function syncAzureCostUsage(input: {
       advisorRecommendations,
       advisorFailures,
       tenantLookupWarning: tenantDiscovery.warning,
+      emptyCostWithResources,
+      skippedCostQueries,
+      deferredCostQueries,
+      costQueryWindowsCompleted,
+      sharedThrottleUntil: sharedThrottleUntil?.toISOString(),
     });
 
     let monitoring:
       | Awaited<ReturnType<typeof runAzureCostMonitor>>
       | undefined;
     let monitoringWarning: string | undefined;
-    try {
-      monitoring = await runAzureCostMonitor({ database: input.pool, syncRunId, now });
-    } catch (error) {
-      monitoringWarning = error instanceof Error ? error.message : String(error);
+    if (collectLiveInventory) {
+      try {
+        monitoring = await runAzureCostMonitor({ database: input.pool, syncRunId, now });
+      } catch (error) {
+        monitoringWarning = error instanceof Error ? error.message : String(error);
+      }
     }
+    const monitorSummary = !collectLiveInventory
+      ? 'Completed-month backfill stored'
+      : monitoringWarning
+        ? 'Azure Cost Monitor completed with an evaluation warning'
+        : 'Azure Cost Monitor complete';
     await input.onProgress?.({
       completed: progressTotal,
       total: progressTotal,
       failed: failures.length,
-      currentItem: monitoringWarning
-        ? 'Azure Cost Monitor completed with an evaluation warning'
-        : 'Azure Cost Monitor complete',
-      unitLabel: 'monitoring steps',
+      currentItem: [
+        monitorSummary,
+        failureSummary ? `${failureSummary} failed` : '',
+        emptyCostWithResources.length
+          ? `${emptyCostWithResources.map((item) => item.customerName ?? item.subscriptionId).join(', ')} returned no cost data`
+          : '',
+      ].filter(Boolean).join(' · '),
+      unitLabel: 'subscriptions',
     });
 
     return {
@@ -244,7 +600,7 @@ export async function syncAzureCostUsage(input: {
       recordsRead,
       recordsWritten,
       subscriptionCount: subscriptions.length,
-      successfulSubscriptions: subscriptions.length - failures.length,
+      successfulSubscriptions,
       failedSubscriptions: failures.length,
       mappedSnapshots,
       unmappedSnapshots,
@@ -254,6 +610,13 @@ export async function syncAzureCostUsage(input: {
       advisorRecommendations,
       advisorFailures,
       tenantLookupWarning: tenantDiscovery.warning,
+      emptyCostWithResources,
+      skippedCostQueries,
+      deferredCostQueries,
+      costQueryWindowsCompleted,
+      sharedThrottleUntil: sharedThrottleUntil?.toISOString(),
+      operationKey,
+      mode,
       monitoring,
       monitoringWarning,
       queryWindow: window,
@@ -396,11 +759,76 @@ export function azureProductKey(row: Pick<AzureCostUsageRow, 'serviceName' | 'me
   return `azure:${slug(row.serviceName ?? row.meterCategory ?? 'consumption')}`;
 }
 
-function filterSubscriptions(subscriptions: AzureSubscription[], settings: IntegrationRuntimeSettings) {
-  const allowlist = new Set(azureSubscriptionAllowlist(settings));
+export async function persistAzureLighthouseTenantsFromSubscriptions(
+  pool: Queryable,
+  subscriptions: Array<{
+    subscriptionId: string;
+    displayName?: string;
+    tenantId?: string;
+    tenantName?: string;
+    tenantDefaultDomain?: string;
+  }>,
+) {
+  const tenants = new Map<string, {
+    tenantId: string;
+    tenantName?: string;
+    tenantDefaultDomain?: string;
+    subscriptionIds: string[];
+    subscriptionNames: Record<string, string>;
+  }>();
+  for (const subscription of subscriptions) {
+    const tenantId = subscription.tenantId?.trim();
+    if (!tenantId) continue;
+    const key = tenantId.toLowerCase();
+    const displayName = readableAzureSubscriptionName(subscription.displayName, subscription.subscriptionId);
+    const existing = tenants.get(key);
+    if (existing) {
+      existing.subscriptionIds.push(subscription.subscriptionId);
+      existing.tenantName = existing.tenantName ?? subscription.tenantName;
+      existing.tenantDefaultDomain = existing.tenantDefaultDomain ?? subscription.tenantDefaultDomain;
+      if (displayName) existing.subscriptionNames[subscription.subscriptionId.toLowerCase()] = displayName;
+      continue;
+    }
+    tenants.set(key, {
+      tenantId,
+      tenantName: subscription.tenantName,
+      tenantDefaultDomain: subscription.tenantDefaultDomain,
+      subscriptionIds: [subscription.subscriptionId],
+      subscriptionNames: displayName ? { [subscription.subscriptionId.toLowerCase()]: displayName } : {},
+    });
+  }
+
+  for (const tenant of tenants.values()) {
+    await pool.query(
+      `insert into azure_lighthouse_tenants (
+         tenant_id, tenant_name, tenant_default_domain, subscription_ids, subscription_names,
+         subscription_count, last_seen_at, updated_at
+       )
+       values ($1, $2, $3, $4::jsonb, $5::jsonb, $6, now(), now())
+       on conflict (tenant_id) do update set
+         tenant_name = coalesce(excluded.tenant_name, azure_lighthouse_tenants.tenant_name),
+         tenant_default_domain = coalesce(excluded.tenant_default_domain, azure_lighthouse_tenants.tenant_default_domain),
+         subscription_ids = excluded.subscription_ids,
+         subscription_names = coalesce(azure_lighthouse_tenants.subscription_names, '{}'::jsonb)
+           || coalesce(excluded.subscription_names, '{}'::jsonb),
+         subscription_count = excluded.subscription_count,
+         last_seen_at = now(),
+         updated_at = now()`,
+      [
+        tenant.tenantId,
+        tenant.tenantName ?? null,
+        tenant.tenantDefaultDomain ?? null,
+        JSON.stringify(tenant.subscriptionIds),
+        JSON.stringify(tenant.subscriptionNames),
+        tenant.subscriptionIds.length,
+      ],
+    );
+  }
+}
+
+function filterSubscriptions(subscriptions: AzureSubscription[], _settings: IntegrationRuntimeSettings) {
   return subscriptions
     .filter((subscription) => subscription.state?.toLowerCase() !== 'disabled')
-    .filter((subscription) => allowlist.size === 0 || allowlist.has(subscription.subscriptionId.toLowerCase()))
     .sort((left, right) =>
       (left.displayName ?? left.subscriptionId).localeCompare(right.displayName ?? right.subscriptionId),
     );
@@ -417,50 +845,15 @@ function subscriptionSummary(subscription: AzureSubscription) {
   };
 }
 
-async function discoverAzureTenants(client: AzureUsageClient) {
-  const tenantsById = new Map<string, AzureTenant>();
-  if (!client.listTenants) return { tenantsById, warning: undefined as string | undefined };
-  try {
-    const tenants = await client.listTenants(100);
-    for (const tenant of tenants) tenantsById.set(tenant.tenantId.toLowerCase(), tenant);
-    return { tenantsById, warning: undefined as string | undefined };
-  } catch (error) {
-    return {
-      tenantsById,
-      warning: `Tenant names could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
-function enrichSubscriptionsWithTenants(
-  subscriptions: AzureSubscription[],
-  tenantsById: Map<string, AzureTenant>,
-) {
-  return subscriptions.map((subscription) => {
-    const tenant = subscription.tenantId ? tenantsById.get(subscription.tenantId.toLowerCase()) : undefined;
-    return {
-      ...subscription,
-      tenantName: tenant?.displayName ?? subscription.tenantId,
-      tenantDefaultDomain: tenant?.defaultDomain,
-    };
-  });
-}
-
-function azureQueryWindow(settings: IntegrationRuntimeSettings, now: Date) {
-  const lookbackDays = boundedInteger(settings.nonSecrets.lookbackDays, 35, 1, 366);
-  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  const from = new Date(to);
-  from.setUTCDate(from.getUTCDate() - lookbackDays);
-  return { from: from.toISOString(), to: to.toISOString(), lookbackDays };
-}
-
 async function loadAccountMappings(database: Queryable) {
   const result = await database.query<AccountMappingRow>(
-    `select external_account_id, customer_id, agreement_id, agreement_addition_id
-     from vendor_account_mappings
-     where vendor_id = $1
-       and active = true
-       and mapping_status = 'approved'`,
+    `select mappings.external_account_id, mappings.customer_id, customers.name as customer_name,
+            mappings.agreement_id, mappings.agreement_addition_id
+     from vendor_account_mappings mappings
+     left join customers on customers.id = mappings.customer_id
+     where mappings.vendor_id = $1
+       and mappings.active = true
+       and mappings.mapping_status = 'approved'`,
     [azureIntegrationId],
   );
   return new Map(
@@ -468,23 +861,225 @@ async function loadAccountMappings(database: Queryable) {
       row.external_account_id.toLowerCase(),
       {
         customerId: row.customer_id,
+        customerName: row.customer_name ?? undefined,
         agreementId: row.agreement_id ?? undefined,
         agreementAdditionId: row.agreement_addition_id ?? undefined,
-      },
+      } satisfies AccountMapping,
     ]),
   );
 }
 
+type AzureCostSyncCheckpointRow = {
+  subscription_id: string;
+  sync_mode: AzureCostSyncMode;
+  covered_from: Date | string | null;
+  covered_through: Date | string | null;
+  cursor_date: Date | string | null;
+  last_attempt_at: Date | string | null;
+  last_success_at: Date | string | null;
+  last_row_count: string | number;
+  status: AzureCostSyncCheckpoint['status'];
+  next_retry_at: Date | string | null;
+  last_error: string | null;
+};
+
+async function loadAzureCostSyncCheckpoints(
+  database: Queryable,
+  subscriptionIds: string[],
+  mode: AzureCostSyncMode,
+) {
+  if (subscriptionIds.length === 0) return new Map<string, AzureCostSyncCheckpoint>();
+  const result = await database.query<AzureCostSyncCheckpointRow>(
+    `select subscription_id, sync_mode, covered_from, covered_through, cursor_date,
+            last_attempt_at, last_success_at, last_row_count, status, next_retry_at, last_error
+     from azure_cost_sync_checkpoints
+     where lower(subscription_id) = any($1::text[])
+       and sync_mode = $2`,
+    [subscriptionIds.map((id) => id.toLowerCase()), mode],
+  );
+  return new Map(result.rows.map((row) => [
+    row.subscription_id.toLowerCase(),
+    {
+      subscriptionId: row.subscription_id,
+      syncMode: row.sync_mode,
+      coveredFrom: dateOnly(row.covered_from),
+      coveredThrough: dateOnly(row.covered_through),
+      cursorDate: dateOnly(row.cursor_date),
+      lastAttemptAt: dateTime(row.last_attempt_at),
+      lastSuccessAt: dateTime(row.last_success_at),
+      lastRowCount: Number(row.last_row_count) || 0,
+      status: row.status,
+      nextRetryAt: dateTime(row.next_retry_at),
+      lastError: row.last_error ?? undefined,
+    } satisfies AzureCostSyncCheckpoint,
+  ]));
+}
+
+async function markAzureCostSyncAttempt(database: Queryable, input: {
+  subscriptionId: string;
+  mode: AzureCostSyncMode;
+  syncRunId: string;
+  window: AzureCostCheckpointWindow;
+}) {
+  await database.query(
+    `insert into azure_cost_sync_checkpoints (
+       subscription_id, sync_mode, status, last_window_from, last_window_to,
+       last_attempt_at, last_sync_run_id, updated_at
+     ) values ($1, $2, 'running', $3::date, $4::date, now(), $5::uuid, now())
+     on conflict (subscription_id, sync_mode) do update set
+       status = 'running',
+       last_window_from = excluded.last_window_from,
+       last_window_to = excluded.last_window_to,
+       last_attempt_at = excluded.last_attempt_at,
+       next_retry_at = null,
+       last_error = null,
+       last_sync_run_id = excluded.last_sync_run_id,
+       updated_at = now()`,
+    [
+      input.subscriptionId,
+      input.mode,
+      input.window.from.slice(0, 10),
+      input.window.coveredThrough,
+      input.syncRunId,
+    ],
+  );
+}
+
+async function markAzureCostSyncSuccess(database: Queryable, input: {
+  subscriptionId: string;
+  mode: AzureCostSyncMode;
+  syncRunId: string;
+  window: AzureCostCheckpointWindow;
+  rowCount: number;
+}) {
+  await database.query(
+    `insert into azure_cost_sync_checkpoints (
+       subscription_id, sync_mode, covered_from, covered_through, cursor_date,
+       last_window_from, last_window_to, last_attempt_at, last_success_at,
+       last_row_count, status, next_retry_at, last_error, last_sync_run_id, updated_at
+     ) values (
+       $1, $2, $3::date, $4::date, $5::date, $3::date, $4::date,
+       now(), now(), $6, 'success', null, null, $7::uuid, now()
+     )
+     on conflict (subscription_id, sync_mode) do update set
+       covered_from = least(
+         coalesce(azure_cost_sync_checkpoints.covered_from, excluded.covered_from),
+         excluded.covered_from
+       ),
+       covered_through = greatest(
+         coalesce(azure_cost_sync_checkpoints.covered_through, excluded.covered_through),
+         excluded.covered_through
+       ),
+       cursor_date = coalesce(excluded.cursor_date, azure_cost_sync_checkpoints.cursor_date),
+       last_window_from = excluded.last_window_from,
+       last_window_to = excluded.last_window_to,
+       last_attempt_at = excluded.last_attempt_at,
+       last_success_at = excluded.last_success_at,
+       last_row_count = excluded.last_row_count,
+       status = 'success',
+       next_retry_at = null,
+       last_error = null,
+       last_sync_run_id = excluded.last_sync_run_id,
+       updated_at = now()`,
+    [
+      input.subscriptionId,
+      input.mode,
+      input.window.from.slice(0, 10),
+      input.window.coveredThrough,
+      input.window.cursorDate ?? null,
+      input.rowCount,
+      input.syncRunId,
+    ],
+  );
+}
+
+async function markAzureCostSyncFailure(database: Queryable, input: {
+  subscriptionId: string;
+  mode: AzureCostSyncMode;
+  syncRunId: string;
+  window: AzureCostCheckpointWindow;
+  error: string;
+  nextRetryAt?: Date;
+}) {
+  await database.query(
+    `insert into azure_cost_sync_checkpoints (
+       subscription_id, sync_mode, status, last_window_from, last_window_to,
+       last_attempt_at, next_retry_at, last_error, last_sync_run_id, updated_at
+     ) values ($1, $2, 'failed', $3::date, $4::date, now(), $5, $6, $7::uuid, now())
+     on conflict (subscription_id, sync_mode) do update set
+       status = 'failed',
+       last_window_from = excluded.last_window_from,
+       last_window_to = excluded.last_window_to,
+       last_attempt_at = excluded.last_attempt_at,
+       next_retry_at = excluded.next_retry_at,
+       last_error = excluded.last_error,
+       last_sync_run_id = excluded.last_sync_run_id,
+       updated_at = now()`,
+    [
+      input.subscriptionId,
+      input.mode,
+      input.window.from.slice(0, 10),
+      input.window.coveredThrough,
+      input.nextRetryAt?.toISOString() ?? null,
+      input.error.slice(0, 2000),
+      input.syncRunId,
+    ],
+  );
+}
+
+type CostCoverage = {
+  rowCount: number;
+};
+
+async function loadAzureCostCoverage(database: Queryable, subscriptionIds: string[]) {
+  if (subscriptionIds.length === 0) return new Map<string, CostCoverage>();
+  const result = await database.query<{
+    subscription_id: string;
+    row_count: string | number;
+  }>(
+    `select lower(subscription_id) as subscription_id,
+            count(*)::int as row_count
+     from azure_cost_daily
+     where lower(subscription_id) = any($1::text[])
+     group by 1`,
+    [subscriptionIds.map((id) => id.toLowerCase())],
+  );
+  return new Map(result.rows.map((row) => [
+    row.subscription_id,
+    {
+      rowCount: Number(row.row_count) || 0,
+    } satisfies CostCoverage,
+  ]));
+}
+
+function azureSubscriptionLabel(subscription: AzureSubscription, mapping?: AccountMapping) {
+  return mapping?.customerName ?? subscription.displayName ?? subscription.subscriptionId;
+}
+
+function readableAzureSubscriptionName(name: string | undefined, subscriptionId: string) {
+  const trimmed = name?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.toLowerCase() === subscriptionId.toLowerCase()) return undefined;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) return undefined;
+  return trimmed;
+}
+
 async function startSyncRun(
   database: Queryable,
-  window: { from: string; to: string; lookbackDays: number },
+  operationKey: string,
+  window: { from: string; to: string; lookbackDays?: number; mode?: string; months?: number },
   subscriptionCount: number,
 ) {
   const result = await database.query<{ id: string }>(
     `insert into sync_runs (integration_id, status, metadata)
      values ($1, 'running', $2::jsonb)
      returning id`,
-    [azureIntegrationId, JSON.stringify({ entity: 'azure-cost-usage', queryWindow: window, subscriptionCount })],
+    [azureIntegrationId, JSON.stringify({
+      entity: operationKey,
+      operationKey,
+      queryWindow: window,
+      subscriptionCount,
+    })],
   );
   const id = result.rows[0]?.id;
   if (!id) throw new Error('Unable to create Azure - Lighthouse cost usage sync run.');
@@ -578,6 +1173,43 @@ async function failSyncRun(database: Queryable, syncRunId: string, error: unknow
   );
 }
 
+function calendarDateInTimeZone(now: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: '2-digit',
+    month: '2-digit',
+    timeZone,
+    year: 'numeric',
+  }).formatToParts(now);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}-${value('month')}-${value('day')}`;
+}
+
+function pad2(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+function shiftCalendarDate(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateOnly(value: Date | string | null | undefined) {
+  if (!value) return undefined;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const direct = value.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString().slice(0, 10);
+}
+
+function dateTime(value: Date | string | null | undefined) {
+  if (!value) return undefined;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
 function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number) {
   const parsed = Number.parseInt(value ?? '', 10);
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, minimum), maximum) : fallback;
@@ -593,4 +1225,18 @@ function slug(value: string) {
 
 function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 10000) / 10000;
+}
+
+function azureRetryState(error: unknown, now: Date) {
+  const throttled = error instanceof AzureApiError
+    ? error.status === 429
+    : /too many requests/i.test(error instanceof Error ? error.message : String(error));
+  if (!throttled) return undefined;
+  const retryAfterMs = error instanceof AzureApiError ? error.retryAfterMs : undefined;
+  const nextRetryAt = new Date(now.getTime() + Math.max(azureThrottleMinimumRetryMs, retryAfterMs ?? 0));
+  const scope = error instanceof AzureApiError ? error.throttleScope : 'unknown';
+  return {
+    nextRetryAt,
+    shared: scope !== 'entity',
+  };
 }

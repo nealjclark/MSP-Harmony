@@ -53,18 +53,40 @@ async function run() {
           ],
         };
       }
+      if (sql.includes('from azure_resource_snapshots resources')) {
+        return {
+          rows: [
+            {
+              subscription_id: 'sub-gentile',
+              resource_id: '/subscriptions/sub-gentile/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-gpb',
+              customer_name: 'Gentile Brengel and Lin LLP',
+              subscription_name: 'Gentile, Pismeny, and Brengel LLP',
+              power_state: 'VM running',
+              average_cpu: '4.2',
+              maximum_cpu: '11',
+              available_memory_bytes: null,
+              active_sessions: null,
+              disconnected_sessions: null,
+            } as T,
+          ],
+        };
+      }
       return { rows: [] as T[] };
     },
   };
 
   const report = await getAzureUtilizationReport(database);
-  assert.equal(report.summary.subscriptionCount, 1);
-  assert.equal(report.summary.mappedSubscriptionCount, 1);
+  assert.equal(report.summary.subscriptionCount, 2);
+  assert.equal(report.summary.mappedSubscriptionCount, 2);
   assert.equal(report.summary.retailCost, 145.75);
   assert.equal(report.summary.ingramCost, 100);
   assert.equal(report.summary.variance, 45.75);
   assert.equal(report.subscriptions[0]?.services[0]?.serviceName, 'Virtual Machines');
   assert.equal(report.invoice?.number, 'ING-1001');
+  const resourceOnly = report.subscriptions.find((subscription) => subscription.subscriptionId === 'sub-gentile');
+  assert.equal(resourceOnly?.customerName, 'Gentile Brengel and Lin LLP');
+  assert.equal(resourceOnly?.resources[0]?.resourceName, 'vm-gpb');
+  assert.equal(resourceOnly?.azureEstimatedActualCost, 0);
   console.log('azure utilization report tests passed');
 }
 
