@@ -226,6 +226,89 @@ async function run() {
     ],
   );
 
+  const proofpointFailureMetadata = {
+    entity: 'usage-snapshots',
+    failedOrganizations: 1,
+    failedOrganizationDetails: [
+      {
+        organizationDomain: 'rosko.example',
+        organizationName: 'Rosko Farm Realty LLC',
+        stackUrl: 'https://us5.proofpointessentials.com',
+        message: 'The organization did not return a valid active_users value.',
+      },
+    ],
+  };
+  const proofpointRepository = new PostgresIntegrationSettingsRepository({
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from integration_sync_jobs')) {
+        return {
+          rows: [{
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            integration_id: 'proofpoint',
+            operation_key: 'usage-snapshots',
+            operation_label: 'Customer user counts',
+            status: 'complete',
+            requested_by: 'admin@example.com',
+            requested_at: new Date('2026-08-19T17:00:00.000Z'),
+            started_at: new Date('2026-08-19T17:00:01.000Z'),
+            completed_at: new Date('2026-08-19T17:01:00.000Z'),
+            sync_run_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+            error_message: null,
+            progress_completed: 138,
+            progress_total: 138,
+            progress_failed: 1,
+            progress_current_item: null,
+            progress_unit_label: 'organizations',
+            sync_metadata: proofpointFailureMetadata,
+          } as T],
+        };
+      }
+      if (sql.includes('from sync_runs') && sql.includes('select distinct on')) {
+        return {
+          rows: [{
+            integration_id: 'proofpoint',
+            id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+            started_at: new Date('2026-08-19T17:00:01.000Z'),
+            completed_at: new Date('2026-08-19T17:01:00.000Z'),
+            status: 'complete',
+            records_read: 5000,
+            records_written: 137,
+            error_message: null,
+            metadata: proofpointFailureMetadata,
+          } as T],
+        };
+      }
+      if (sql.includes('from sync_runs')) {
+        return {
+          rows: [{
+            id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+            started_at: new Date('2026-08-19T17:00:01.000Z'),
+            completed_at: new Date('2026-08-19T17:01:00.000Z'),
+            status: 'complete',
+            records_read: 5000,
+            records_written: 137,
+            error_message: null,
+          } as T],
+        };
+      }
+      if (sql.includes('from vendor_usage_snapshots')) return { rows: [{ count: '137' } as T] };
+      return { rows: [] as T[] };
+    },
+  });
+  const proofpointStatus = await proofpointRepository.loadOperationalStatus('proofpoint');
+  assert.deepEqual(proofpointStatus?.operations?.[0]?.failures, [
+    {
+      itemId: 'rosko.example',
+      itemName: 'Rosko Farm Realty LLC',
+      relatedId: 'https://us5.proofpointessentials.com',
+      category: 'Organization',
+      message: 'The organization did not return a valid active_users value.',
+    },
+  ]);
+  const [proofpointJob] = await proofpointRepository.listRecentSyncJobs();
+  assert.equal(proofpointJob?.progress?.failed, 1);
+  assert.match(proofpointJob?.warnings?.[0] ?? '', /Rosko Farm Realty LLC.*active_users/i);
+
   console.log('integration settings repository tests passed');
 }
 

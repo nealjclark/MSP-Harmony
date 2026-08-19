@@ -42,10 +42,18 @@ export type ProofpointUsageSnapshotSyncResult = {
   recordsRead: number;
   recordsWritten: number;
   organizationsRead: number;
+  failedOrganizations: number;
   activeBillableUsers: number;
   excludedUsers: number;
   mappedSnapshots: number;
   unmappedSnapshots: number;
+};
+
+type ProofpointOrganizationSyncError = {
+  organizationDomain: string;
+  organizationName?: string;
+  stackUrl: string;
+  message: string;
 };
 
 type VendorAccountMappingRow = { external_account_id: string; customer_id: string; agreement_id: string | null };
@@ -132,24 +140,42 @@ export async function syncProofpointUsageSnapshots(input: {
     let excludedUsers = 0;
     let mappedSnapshots = 0;
     let unmappedSnapshots = 0;
+    const failedOrganizationDetails: ProofpointOrganizationSyncError[] = [];
 
     await input.onProgress?.({ completed: 0, total: organizations.length, unitLabel: 'organizations' });
     for (const [index, { source, organization }] of organizations.entries()) {
       await input.onProgress?.({
         completed: index,
         total: organizations.length,
+        failed: failedOrganizationDetails.length,
         currentItem: organization.name ?? organization.primaryDomain,
         unitLabel: 'organizations',
       });
-      const [domains, users] = await Promise.all([
-        withProofpointStack(source.endpoint, () => source.client.listDomains(organization.primaryDomain)),
-        withProofpointStack(source.endpoint, () => source.client.listUsers(organization.primaryDomain)),
-      ]);
+
+      let domains: ProofpointDomain[];
+      let users: ProofpointUser[];
+      let quantity: number;
+      let vendorProductKey: string;
+      try {
+        quantity = requireProofpointActiveUsers(organization);
+        vendorProductKey = requireProofpointLicensingPackage(organization);
+        [domains, users] = await Promise.all([
+          withProofpointStack(source.endpoint, () => source.client.listDomains(organization.primaryDomain)),
+          withProofpointStack(source.endpoint, () => source.client.listUsers(organization.primaryDomain)),
+        ]);
+      } catch (error) {
+        failedOrganizationDetails.push({
+          organizationDomain: organization.primaryDomain,
+          organizationName: organization.name,
+          stackUrl: source.endpoint,
+          message: errorMessage(error),
+        });
+        continue;
+      }
+
       recordsRead += users.length;
       const domainCounts = countBillableUsersByDomain(organization, domains, users);
       const usersEndpointActiveBillableCount = [...domainCounts.values()].reduce((sum, count) => sum + count, 0);
-      const quantity = requireProofpointActiveUsers(organization);
-      const vendorProductKey = requireProofpointLicensingPackage(organization);
       const product = productMappings.get(vendorProductKey) ?? defaultProductForPackage(vendorProductKey);
       activeBillableUsers += quantity;
       excludedUsers += users.filter((user) => !user.isActive || !user.isBillable).length;
@@ -177,10 +203,17 @@ export async function syncProofpointUsageSnapshots(input: {
       recordsWritten += 1;
     }
 
-    await input.onProgress?.({ completed: organizations.length, total: organizations.length, unitLabel: 'organizations' });
+    await input.onProgress?.({
+      completed: organizations.length,
+      total: organizations.length,
+      failed: failedOrganizationDetails.length,
+      unitLabel: 'organizations',
+    });
     await completeSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
       entity: 'usage-snapshots',
       organizationsRead: organizations.length,
+      failedOrganizations: failedOrganizationDetails.length,
+      failedOrganizationDetails,
       stackCount: sources.length,
       stackUrls: sources.map((source) => source.endpoint),
       activeBillableUsers,
@@ -194,6 +227,7 @@ export async function syncProofpointUsageSnapshots(input: {
       recordsRead,
       recordsWritten,
       organizationsRead: organizations.length,
+      failedOrganizations: failedOrganizationDetails.length,
       activeBillableUsers,
       excludedUsers,
       mappedSnapshots,
@@ -258,7 +292,7 @@ function requireProofpointActiveUsers(organization: ProofpointOrganization) {
   if (organization.activeUsers !== undefined) return organization.activeUsers;
   throw new Error(
     `Proofpoint Essentials organization ${organization.name ?? organization.primaryDomain} did not return a valid active_users value. ` +
-    'The sync was stopped because active_users is the authoritative billed quantity.',
+    'The organization was skipped because active_users is the authoritative billed quantity.',
   );
 }
 
@@ -267,8 +301,12 @@ function requireProofpointLicensingPackage(organization: ProofpointOrganization)
   if (licensingPackage) return licensingPackage;
   throw new Error(
     `Proofpoint Essentials organization ${organization.name ?? organization.primaryDomain} did not return licensing_package. ` +
-    'The sync was stopped because licensing_package is required for product mapping.',
+    'The organization was skipped because licensing_package is required for product mapping.',
   );
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function domainsForSnapshot(

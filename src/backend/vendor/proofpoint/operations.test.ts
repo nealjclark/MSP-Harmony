@@ -123,6 +123,7 @@ async function run() {
   });
   assert.equal(result.recordsRead, 9);
   assert.equal(result.recordsWritten, 3);
+  assert.equal(result.failedOrganizations, 0);
   assert.equal(result.activeBillableUsers, 11);
   assert.equal(result.excludedUsers, 2);
   assert.equal(result.mappedSnapshots, 1);
@@ -158,6 +159,74 @@ async function run() {
   const completedMetadata = JSON.parse(String(completed[0]?.[3]));
   assert.equal(completedMetadata.activeBillableUsers, 11);
   assert.equal(completedMetadata.stackCount, 2);
+
+  const rosko = {
+    primaryDomain: 'rosko.example', name: 'Rosko Farm Realty LLC', eid: '104',
+    userLicenses: 0, licensingPackage: 'business_plus', raw: { eid: 104, active_users: null },
+  };
+  const unavailable = {
+    primaryDomain: 'unavailable.example', name: 'Unavailable Organization', eid: '105', activeUsers: 3,
+    userLicenses: 3, licensingPackage: 'business_plus', raw: { eid: 105, active_users: 3 },
+  };
+  let roskoDetailRequests = 0;
+  const resilientClient = {
+    async listOrganizations() {
+      return [organizations[0], rosko, unavailable, organizations[1]];
+    },
+    async listDomains(domain: string) {
+      if (domain === rosko.primaryDomain) roskoDetailRequests += 1;
+      if (domain === unavailable.primaryDomain) throw new Error('Proofpoint organization details are unavailable.');
+      return client.listDomains(domain);
+    },
+    async listUsers(domain: string) {
+      if (domain === rosko.primaryDomain) {
+        roskoDetailRequests += 1;
+        return [
+          { primaryEmail: 'one@rosko.example', isActive: true, isBillable: true, raw: {} },
+          { primaryEmail: 'two@rosko.example', isActive: true, isBillable: true, raw: {} },
+        ];
+      }
+      return client.listUsers(domain);
+    },
+  };
+  const progress: Array<{
+    completed: number;
+    total: number;
+    failed?: number;
+    currentItem?: string;
+    unitLabel: string;
+  }> = [];
+  const insertedBeforeResilientSync = inserted.length;
+  const resilientResult = await syncProofpointUsageSnapshots({
+    pool: database,
+    provider,
+    client: resilientClient,
+    now: '2026-07-18T12:10:00.000Z',
+    onProgress(update) { progress.push(update); },
+  });
+  assert.equal(resilientResult.organizationsRead, 4);
+  assert.equal(resilientResult.recordsWritten, 2);
+  assert.equal(resilientResult.failedOrganizations, 2);
+  assert.equal(resilientResult.activeBillableUsers, 7);
+  assert.equal(roskoDetailRequests, 0);
+  assert.deepEqual(
+    inserted.slice(insertedBeforeResilientSync).map((values) => values[3]),
+    ['northstar.example', 'summit.example'],
+  );
+  assert.deepEqual(progress[progress.length - 1], {
+    completed: 4,
+    total: 4,
+    failed: 2,
+    unitLabel: 'organizations',
+  });
+  const resilientMetadata = JSON.parse(String(completed[1]?.[3]));
+  assert.equal(resilientMetadata.failedOrganizations, 2);
+  assert.deepEqual(
+    resilientMetadata.failedOrganizationDetails.map((failure: { organizationDomain: string }) => failure.organizationDomain),
+    ['rosko.example', 'unavailable.example'],
+  );
+  assert.match(resilientMetadata.failedOrganizationDetails[0]?.message ?? '', /authoritative billed quantity/i);
+  assert.match(resilientMetadata.failedOrganizationDetails[1]?.message ?? '', /organization details are unavailable/i);
   console.log('proofpoint operations tests passed');
 }
 

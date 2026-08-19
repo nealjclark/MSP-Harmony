@@ -932,6 +932,14 @@ function syncFailureDetails(
               'subscriptionKey',
             ),
           ]
+        : integrationId === 'proofpoint'
+          ? failureArray(
+              metadata.failedOrganizationDetails,
+              'Organization',
+              'organizationDomain',
+              'organizationName',
+              'stackUrl',
+            )
         : [];
 
   return failures.length > 0 ? failures : undefined;
