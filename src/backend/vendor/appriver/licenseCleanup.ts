@@ -274,8 +274,10 @@ type CleanupActionRow = {
   requested_quantity: string | number;
   attempts: string | number;
   verification_attempts: string | number;
+  accepted_at: Date | string | null;
   expires_at: Date | string;
   request_payload: unknown;
+  response_payload: unknown;
   previous_status: string;
 };
 
@@ -349,6 +351,11 @@ type DueCountRow = {
   due_count: string | number;
 };
 
+type CleanupProcessingFailure = {
+  status: 'failed';
+  message: string;
+};
+
 type ChargeIncrease = {
   effectiveDate: Date;
   previousQuantity: number;
@@ -390,6 +397,8 @@ type CandidateSource = {
 const activeActionStatuses = ['queued', 'running', 'reviewing', 'updating', 'confirm'];
 const defaultWindowDays = 7;
 const verificationDelayMs = 60_000;
+const confirmationRetryDelayMs = 15 * 60_000;
+const confirmationHardLimitMs = 30 * 60_000;
 const appRiverWorkerLockKey = 'msp-harmony:opentext-appriver:sync-worker';
 
 export async function listAppRiverLicenseCleanupCandidates(
@@ -970,8 +979,9 @@ async function processNextAppRiverLicenseCleanupActionLocked(
   }
 
   try {
+    let processingFailure: CleanupProcessingFailure | undefined;
     if (action.previous_status === 'confirm') {
-      await verifyCleanupAction(database, client, action, now);
+      processingFailure = await verifyCleanupAction(database, client, action, now);
     } else if (action.previous_status === 'updating') {
       await markCleanupActionConfirm(database, action.id, now, {
         recovery: 'The prior worker stopped after entering Updating. The update will be confirmed without sending it again.',
@@ -980,6 +990,14 @@ async function processNextAppRiverLicenseCleanupActionLocked(
       await applyCleanupAction(database, client, action, now);
     }
     await refreshCleanupBatch(database, action.batch_id, now);
+    if (processingFailure) {
+      return {
+        ...processingFailure,
+        shouldContinue: await hasDueCleanupAction(database, now),
+        batchId: action.batch_id,
+        actionId: action.id,
+      };
+    }
     return processedResult(database, action, now);
   } catch (error) {
     const message = errorMessage(error);
@@ -1094,7 +1112,7 @@ async function verifyCleanupAction(
   client: AppRiverLicenseCleanupClient,
   action: CleanupActionRow,
   now: string,
-) {
+): Promise<CleanupProcessingFailure | undefined> {
   const detail = await client.getCustomerSubscriptionDetails(action.external_customer_id, action.subscription_key);
   const observedQuantity = appRiverSubscriptionQuantityForCleanup(detail);
   const requestedQuantity = integerValue(action.requested_quantity);
@@ -1104,13 +1122,57 @@ async function verifyCleanupAction(
     await markCleanupActionVerified(database, action.id, now, {
       verifiedDetail: detail,
       liveCandidate: liveSource,
-    });
+    }, true);
     return;
   }
 
-  if (Date.parse(isoDate(action.expires_at) ?? '') <= Date.parse(now)) {
-    await markCleanupActionFailed(database, action.id, now, `AppRiver did not report ${requestedQuantity} within the confirmation window; last observed ${observedQuantity}.`);
-    return;
+  const nowMs = Date.parse(now);
+  const acceptedAt = isoDate(action.accepted_at);
+  const acceptedAtMs = Date.parse(acceptedAt ?? '');
+  const expiresAtMs = Date.parse(isoDate(action.expires_at) ?? '');
+  const responsePayload = recordFromJson(action.response_payload);
+  const confirmationRetry = recordFromJson(responsePayload.confirmationRetry);
+  const retryAttemptedAt = stringValue(confirmationRetry.attemptedAt);
+  const retryAttemptedAtMs = Date.parse(retryAttemptedAt ?? '');
+  const hardLimitReached =
+    (Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) ||
+    (Number.isFinite(acceptedAtMs) && acceptedAtMs + confirmationHardLimitMs <= nowMs);
+  const retryWindowExpired =
+    Number.isFinite(retryAttemptedAtMs) && retryAttemptedAtMs + confirmationRetryDelayMs <= nowMs;
+
+  if (hardLimitReached || retryWindowExpired) {
+    const retrySummary = retryAttemptedAt ? 'after one retry' : 'before the single retry could run';
+    const message = `AppRiver did not report ${requestedQuantity} within the 30-minute confirmation window ${retrySummary}; last observed ${observedQuantity}.`;
+    const failure = {
+      failedAt: now,
+      acceptedAt,
+      retryAttemptedAt,
+      requestedQuantity,
+      observedQuantity,
+      verificationAttempts: integerValue(action.verification_attempts) + 1,
+      verifiedDetail: detail,
+      liveCandidate: liveSource,
+    };
+    await markCleanupActionFailed(database, action.id, now, message, { confirmationFailure: failure }, true);
+    await insertAuditEvent(database, {
+      actor: 'system:appriver-license-cleanup-worker',
+      eventType: 'appriver.license-cleanup.action.confirmation-failed',
+      entityType: 'appriver_license_cleanup_action',
+      entityId: action.id,
+      payload: {
+        batchId: action.batch_id,
+        ...failure,
+      },
+    });
+    return { status: 'failed', message };
+  }
+
+  const retryDue =
+    !retryAttemptedAt &&
+    Number.isFinite(acceptedAtMs) &&
+    acceptedAtMs + confirmationRetryDelayMs <= nowMs;
+  if (retryDue) {
+    return retryCleanupAction(database, client, action, now, requestedQuantity, observedQuantity, detail, liveSource);
   }
 
   await markCleanupActionConfirm(database, action.id, now, {
@@ -1118,6 +1180,72 @@ async function verifyCleanupAction(
     verifiedDetail: detail,
     liveCandidate: liveSource,
   }, true);
+}
+
+async function retryCleanupAction(
+  database: Queryable,
+  client: AppRiverLicenseCleanupClient,
+  action: CleanupActionRow,
+  now: string,
+  requestedQuantity: number,
+  observedQuantity: number,
+  detail: AppRiverSubscriptionDetail,
+  liveSource: CandidateSource,
+): Promise<CleanupProcessingFailure | undefined> {
+  let updateResult: AppRiverSubscriptionQuantityUpdateResult | undefined;
+  let updateError: string | undefined;
+  try {
+    updateResult = await client.setCustomerSubscriptionLicenseCount(
+      action.external_customer_id,
+      action.subscription_key,
+      requestedQuantity,
+    );
+  } catch (error) {
+    if (!isAmbiguousAppRiverUpdateError(error)) {
+      const message = `AppRiver rejected the single confirmation retry: ${errorMessage(error)}`;
+      const retryFailure = {
+        attemptedAt: now,
+        requestedQuantity,
+        observedQuantity,
+        error: errorMessage(error),
+        verifiedDetail: detail,
+        liveCandidate: liveSource,
+      };
+      await markCleanupActionFailed(database, action.id, now, message, { confirmationRetry: retryFailure }, true);
+      await insertAuditEvent(database, {
+        actor: 'system:appriver-license-cleanup-worker',
+        eventType: 'appriver.license-cleanup.action.retry-failed',
+        entityType: 'appriver_license_cleanup_action',
+        entityId: action.id,
+        payload: { batchId: action.batch_id, ...retryFailure },
+      });
+      return { status: 'failed', message };
+    }
+    updateError = errorMessage(error);
+  }
+
+  const retryResult = {
+    attemptedAt: now,
+    requestedQuantity,
+    observedQuantity,
+    updateResult,
+    updateError,
+  };
+  await markCleanupActionConfirm(database, action.id, now, {
+    confirmationRetry: retryResult,
+    verifiedDetail: detail,
+    liveCandidate: liveSource,
+  }, true);
+  await insertAuditEvent(database, {
+    actor: 'system:appriver-license-cleanup-worker',
+    eventType: 'appriver.license-cleanup.action.retried',
+    entityType: 'appriver_license_cleanup_action',
+    entityId: action.id,
+    payload: {
+      batchId: action.batch_id,
+      ...retryResult,
+    },
+  });
 }
 
 function cleanupReviewChanges(action: CleanupActionRow, live: CandidateSource) {
@@ -2011,7 +2139,7 @@ async function insertCleanupAction(
      values (
        $1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, 'queued',
        $11, $12, $13, $14, $15, $16, $17, $18::timestamptz, $19::date, $20::date,
-       $21::timestamptz, $21::timestamptz + interval '24 hours', $22::jsonb, $21::timestamptz, $21::timestamptz
+       $21::timestamptz, $21::timestamptz + interval '30 minutes', $22::jsonb, $21::timestamptz, $21::timestamptz
      )`,
     [
       batchId,
@@ -2092,7 +2220,7 @@ async function insertMatchedCompleteAction(
        $14, $15, 0, $14,
        $16, $17, $18::timestamptz, $19::date, $20::date,
        $21::timestamptz, $21::timestamptz, $21::timestamptz, $21::timestamptz, $21::timestamptz,
-       $21::timestamptz + interval '24 hours', $22::jsonb, $23::jsonb, $21::timestamptz, $21::timestamptz
+       $21::timestamptz + interval '30 minutes', $22::jsonb, $23::jsonb, $21::timestamptz, $21::timestamptz
      )`,
     [
       batchId,
@@ -2267,8 +2395,10 @@ async function claimNextCleanupAction(database: Queryable, now: string) {
        appriver_license_cleanup_actions.requested_quantity,
        appriver_license_cleanup_actions.attempts,
        appriver_license_cleanup_actions.verification_attempts,
+       appriver_license_cleanup_actions.accepted_at,
        appriver_license_cleanup_actions.expires_at,
        appriver_license_cleanup_actions.request_payload,
+       appriver_license_cleanup_actions.response_payload,
        candidate.status as previous_status`,
     [now],
   );
@@ -2281,12 +2411,14 @@ async function markCleanupActionVerified(
   actionId: string,
   now: string,
   payload: Record<string, unknown>,
+  incrementVerification = false,
 ) {
   await database.query(
     `update appriver_license_cleanup_actions
      set status = 'verified',
          completed_at = $2::timestamptz,
          verified_at = $2::timestamptz,
+          verification_attempts = verification_attempts + case when $4::boolean then 1 else 0 end,
           final_quantity = requested_quantity,
           live_total_licenses = coalesce(($3::jsonb->'liveCandidate'->>'totalLicenses')::integer, live_total_licenses),
           live_assigned_licenses = coalesce(($3::jsonb->'liveCandidate'->>'assignedLicenses')::integer, live_assigned_licenses),
@@ -2294,7 +2426,7 @@ async function markCleanupActionVerified(
           response_payload = response_payload || $3::jsonb,
          updated_at = $2::timestamptz
      where id = $1::uuid`,
-    [actionId, now, JSON.stringify(payload)],
+    [actionId, now, JSON.stringify(payload), incrementVerification],
   );
 }
 
@@ -2339,6 +2471,10 @@ async function markCleanupActionConfirm(
     `update appriver_license_cleanup_actions
      set status = 'confirm',
          accepted_at = coalesce(accepted_at, $2::timestamptz),
+         expires_at = case
+           when accepted_at is null then $2::timestamptz + interval '30 minutes'
+           else expires_at
+         end,
          verification_attempts = verification_attempts + case when $3::boolean then 1 else 0 end,
          next_check_at = $4::timestamptz,
          live_total_licenses = coalesce(($5::jsonb->'liveCandidate'->>'totalLicenses')::integer, live_total_licenses),
@@ -2408,16 +2544,24 @@ async function markCleanupActionNeedsReview(
   });
 }
 
-async function markCleanupActionFailed(database: Queryable, actionId: string, now: string, message: string) {
+async function markCleanupActionFailed(
+  database: Queryable,
+  actionId: string,
+  now: string,
+  message: string,
+  payload: Record<string, unknown> = {},
+  incrementVerification = false,
+) {
   await database.query(
     `update appriver_license_cleanup_actions
      set status = 'failed',
          completed_at = $2::timestamptz,
          error_message = $3,
+         verification_attempts = verification_attempts + case when $5::boolean then 1 else 0 end,
          response_payload = response_payload || $4::jsonb,
          updated_at = $2::timestamptz
      where id = $1::uuid`,
-    [actionId, now, message, JSON.stringify({ error: message })],
+    [actionId, now, message, JSON.stringify({ error: message, ...payload }), incrementVerification],
   );
 }
 

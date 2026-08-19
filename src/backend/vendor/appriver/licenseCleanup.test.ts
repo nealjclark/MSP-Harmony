@@ -70,11 +70,13 @@ type CleanupAction = {
   requested_quantity: number;
   attempts: number;
   verification_attempts: number;
+  accepted_at?: string | null;
   expires_at: string;
   next_check_at: string;
   created_at: string;
   updated_at: string;
   request_payload: Record<string, unknown>;
+  response_payload?: Record<string, unknown>;
   live_total_licenses?: number | null;
   live_assigned_licenses?: number | null;
   live_unassigned_licenses?: number | null;
@@ -213,7 +215,7 @@ class CleanupDatabase implements Queryable {
             attempts: action.attempts,
             verification_attempts: action.verification_attempts,
             next_check_at: action.next_check_at,
-            accepted_at: null,
+            accepted_at: action.accepted_at ?? null,
             verified_at: null,
             started_at: action.status === 'queued' ? null : action.created_at,
             completed_at: ['verified', 'needs_review', 'failed', 'timed_out', 'skipped', 'cancelled'].includes(action.status)
@@ -306,10 +308,11 @@ class CleanupDatabase implements Queryable {
         attempts: 0,
         verification_attempts: 0,
         next_check_at: String(values?.[20]),
-        expires_at: new Date(Date.parse(String(values?.[20])) + 24 * 60 * 60 * 1000).toISOString(),
+        expires_at: new Date(Date.parse(String(values?.[20])) + 30 * 60 * 1000).toISOString(),
         created_at: String(values?.[20]),
         updated_at: String(values?.[20]),
         request_payload: JSON.parse(String(values?.[21] ?? '{}')) as Record<string, unknown>,
+        response_payload: {},
       };
       this.actions.push(action);
       return { rows: [] as T[] };
@@ -349,6 +352,16 @@ class CleanupDatabase implements Queryable {
 
     if (sql.includes("set status = 'verified'")) {
       this.updateAction(String(values?.[0]), { status: 'verified', updated_at: String(values?.[1]) });
+      const action = this.actions.find((current) => current.id === values?.[0]);
+      if (action) {
+        if (values?.[3] === true) {
+          action.verification_attempts += 1;
+        }
+        action.response_payload = {
+          ...(action.response_payload ?? {}),
+          ...JSON.parse(String(values?.[2] ?? '{}')),
+        };
+      }
       return { rows: [] as T[] };
     }
 
@@ -394,12 +407,23 @@ class CleanupDatabase implements Queryable {
     }
 
     if (sql.includes("set status = 'confirm'")) {
+      const action = this.actions.find((current) => current.id === values?.[0]);
+      const acceptedAt = action?.accepted_at ?? String(values?.[1]);
       this.updateAction(String(values?.[0]), {
         status: 'confirm',
         updated_at: String(values?.[1]),
         next_check_at: String(values?.[3]),
+        accepted_at: acceptedAt,
+        expires_at: action?.accepted_at
+          ? action.expires_at
+          : new Date(Date.parse(String(values?.[1])) + 30 * 60 * 1000).toISOString(),
       });
-      const action = this.actions.find((current) => current.id === values?.[0]);
+      if (action) {
+        action.response_payload = {
+          ...(action.response_payload ?? {}),
+          ...JSON.parse(String(values?.[4] ?? '{}')),
+        };
+      }
       if (action && values?.[2] === true) {
         action.verification_attempts += 1;
       }
@@ -419,7 +443,21 @@ class CleanupDatabase implements Queryable {
     }
 
     if (sql.includes("set status = 'failed'")) {
-      this.updateAction(String(values?.[0]), { status: 'failed', error_message: String(values?.[2]) });
+      const action = this.actions.find((current) => current.id === values?.[0]);
+      this.updateAction(String(values?.[0]), {
+        status: 'failed',
+        error_message: String(values?.[2]),
+        updated_at: String(values?.[1]),
+      });
+      if (action) {
+        if (values?.[4] === true) {
+          action.verification_attempts += 1;
+        }
+        action.response_payload = {
+          ...(action.response_payload ?? {}),
+          ...JSON.parse(String(values?.[3] ?? '{}')),
+        };
+      }
       return { rows: [] as T[] };
     }
 
@@ -457,7 +495,8 @@ async function run() {
   await testQueuedUpdatesFinishBeforeConfirmation();
   await testAmbiguousUpdateTimeoutMovesToConfirm();
   await testChangedCountsNeedReview();
-  await testVerificationTimeout();
+  await testVerificationRetryCanSucceed();
+  await testVerificationRetryAndTimeout();
 
   console.log('appriver license cleanup tests passed');
 }
@@ -1089,19 +1128,110 @@ async function testQueuedUpdatesFinishBeforeConfirmation() {
   assert.deepEqual(database.actions.map((action) => action.status), ['verified', 'confirm']);
 }
 
-async function testVerificationTimeout() {
+async function testVerificationRetryCanSucceed() {
   const database = new CleanupDatabase();
   database.batchIds.push('bbbbbbbb-bbbb-4bbb-8bbb-000000000001');
-  database.actions.push({
-    id: 'cccccccc-cccc-4ccc-8ccc-000000000001',
-    batch_id: database.batchIds[0],
+  database.actions.push(confirmationAction(database.batchIds[0], 'retry-success'));
+
+  let liveQuantity = 10;
+  let updateCalls = 0;
+  const client: AppRiverLicenseCleanupClient = {
+    async getCustomerSubscriptionDetails() {
+      return detail({
+        subscriptionKey: 'retry-success',
+        totalLicenses: liveQuantity,
+        subscriptionQuantity: liveQuantity,
+        assignedLicenses: 8,
+        unassignedLicenses: liveQuantity - 8,
+      });
+    },
+    async listChargeEvents() {
+      return [];
+    },
+    async setCustomerSubscriptionLicenseCount(_customerId, _subscriptionKey, licenseCount) {
+      updateCalls += 1;
+      liveQuantity = licenseCount;
+      return { accepted: true, endpoint: 'https://example.test/retry-success' };
+    },
+  };
+
+  await processNextAppRiverLicenseCleanupAction({
+    database,
+    client,
+    batchId: database.batchIds[0],
+    now: '2026-07-15T12:15:01.000Z',
+  });
+  assert.equal(database.actions[0]?.status, 'confirm');
+  assert.equal(updateCalls, 1);
+  assert.equal(
+    (database.actions[0]?.response_payload?.confirmationRetry as { attemptedAt?: string } | undefined)?.attemptedAt,
+    '2026-07-15T12:15:01.000Z',
+  );
+
+  await processNextAppRiverLicenseCleanupAction({
+    database,
+    client,
+    batchId: database.batchIds[0],
+    now: '2026-07-15T12:16:02.000Z',
+  });
+  assert.equal(database.actions[0]?.status, 'verified');
+  assert.equal(updateCalls, 1);
+}
+
+async function testVerificationRetryAndTimeout() {
+  const database = new CleanupDatabase();
+  database.batchIds.push('bbbbbbbb-bbbb-4bbb-8bbb-000000000001');
+  database.actions.push(confirmationAction(database.batchIds[0], 'timeout'));
+
+  const requestedCounts: number[] = [];
+  const client: AppRiverLicenseCleanupClient = {
+    async getCustomerSubscriptionDetails() {
+      return detail({ subscriptionKey: 'timeout', totalLicenses: 10, subscriptionQuantity: 10, assignedLicenses: 8, unassignedLicenses: 2 });
+    },
+    async listChargeEvents() {
+      return [];
+    },
+    async setCustomerSubscriptionLicenseCount(_customerId, _subscriptionKey, licenseCount) {
+      requestedCounts.push(licenseCount);
+      return { accepted: true, endpoint: 'https://example.test/retry-timeout' };
+    },
+  };
+
+  const retry = await processNextAppRiverLicenseCleanupAction({
+    database,
+    client,
+    batchId: database.batchIds[0],
+    now: '2026-07-15T12:15:01.000Z',
+  });
+  assert.equal(retry.status, 'processed');
+  assert.equal(database.actions[0]?.status, 'confirm');
+  assert.deepEqual(requestedCounts, [8]);
+  assert.ok(database.calls.some((call) => call.values?.[1] === 'appriver.license-cleanup.action.retried'));
+
+  const result = await processNextAppRiverLicenseCleanupAction({
+    database,
+    client,
+    batchId: database.batchIds[0],
+    now: '2026-07-15T12:30:01.000Z',
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(database.actions[0]?.status, 'failed');
+  assert.match(database.actions[0]?.error_message ?? '', /30-minute confirmation window after one retry/);
+  assert.deepEqual(requestedCounts, [8]);
+  assert.ok(database.calls.some((call) => call.values?.[1] === 'appriver.license-cleanup.action.confirmation-failed'));
+}
+
+function confirmationAction(batchId: string, subscriptionKey: string): CleanupAction {
+  return {
+    id: `cccccccc-cccc-4ccc-8ccc-${subscriptionKey === 'timeout' ? '000000000001' : '000000000002'}`,
+    batch_id: batchId,
     customer_id: customerId,
     customer_name: 'Mapped Client',
     external_customer_id: 'cust-1',
-    vendor_product_key: 'timeout-product',
-    product_code: 'TIMEOUT',
-    product_name: 'Timeout Product',
-    subscription_key: 'timeout',
+    vendor_product_key: `${subscriptionKey}-product`,
+    product_code: subscriptionKey.toUpperCase(),
+    product_name: `${subscriptionKey} Product`,
+    subscription_key: subscriptionKey,
     domain: null,
     status: 'confirm',
     current_total_licenses: 10,
@@ -1111,34 +1241,14 @@ async function testVerificationTimeout() {
     requested_quantity: 8,
     attempts: 0,
     verification_attempts: 1,
-    next_check_at: '2026-07-15T12:31:00.000Z',
+    next_check_at: '2026-07-15T12:15:00.000Z',
+    accepted_at: now,
     expires_at: '2026-07-15T12:30:00.000Z',
     created_at: now,
     updated_at: now,
     request_payload: {},
-  });
-
-  const client: AppRiverLicenseCleanupClient = {
-    async getCustomerSubscriptionDetails() {
-      return detail({ subscriptionKey: 'timeout', totalLicenses: 10, subscriptionQuantity: 10, assignedLicenses: 8, unassignedLicenses: 2 });
-    },
-    async listChargeEvents() {
-      return [];
-    },
-    async setCustomerSubscriptionLicenseCount() {
-      throw new Error('No patch expected while timing out verification.');
-    },
+    response_payload: {},
   };
-
-  const result = await processNextAppRiverLicenseCleanupAction({
-    database,
-    client,
-    batchId: database.batchIds[0],
-    now: '2026-07-15T12:31:00.000Z',
-  });
-  assert.equal(result.status, 'processed');
-  assert.equal(database.actions[0]?.status, 'failed');
-  assert.match(database.actions[0]?.error_message ?? '', /did not report 8/);
 }
 
 function snapshot(

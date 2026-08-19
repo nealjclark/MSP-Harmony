@@ -575,7 +575,7 @@ CREATE TABLE IF NOT EXISTS appriver_license_cleanup_actions (
   verified_at timestamptz,
   started_at timestamptz,
   completed_at timestamptz,
-  expires_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '30 minutes',
   error_message text,
   request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   response_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -1761,6 +1761,13 @@ ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS dismissed_by text;
 ALTER TABLE appriver_license_cleanup_actions
   ADD COLUMN IF NOT EXISTS sync_run_id uuid REFERENCES sync_runs(id) ON DELETE SET NULL;
+ALTER TABLE appriver_license_cleanup_actions
+  ALTER COLUMN expires_at SET DEFAULT now() + interval '30 minutes';
+UPDATE appriver_license_cleanup_actions
+SET expires_at = least(expires_at, coalesce(accepted_at, started_at, created_at) + interval '30 minutes'),
+    updated_at = now()
+WHERE status IN ('confirm', 'accepted', 'verifying')
+  AND expires_at > coalesce(accepted_at, started_at, created_at) + interval '30 minutes';
 CREATE INDEX IF NOT EXISTS idx_appriver_license_cleanup_actions_sync
   ON appriver_license_cleanup_actions(sync_run_id, created_at DESC);
 UPDATE appriver_license_cleanup_actions

@@ -318,7 +318,7 @@ export async function processAppRiverLicenseCleanupQueueMessage(
       batchId: parsed.batchId,
     });
     context.log(
-      `AppRiver license cleanup batch ${parsed.batchId}: ${result.status}${result.actionId ? ` ${result.actionId}` : ''}.`,
+      `AppRiver license cleanup batch ${parsed.batchId}: ${result.status}${result.actionId ? ` ${result.actionId}` : ''}${result.message ? `: ${result.message}` : ''}.`,
     );
 
     if (result.shouldContinue) {
@@ -345,7 +345,9 @@ export async function processAppRiverLicenseCleanupTimer(_timer: unknown, contex
       database: repositoryContext.pool,
       client,
     });
-    context.log(`AppRiver license cleanup timer: ${result.status}${result.actionId ? ` ${result.actionId}` : ''}.`);
+    context.log(
+      `AppRiver license cleanup timer: ${result.status}${result.actionId ? ` ${result.actionId}` : ''}${result.message ? `: ${result.message}` : ''}.`,
+    );
   } finally {
     await repositoryContext.close();
   }

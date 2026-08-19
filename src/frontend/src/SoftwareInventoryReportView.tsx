@@ -458,12 +458,13 @@ function DetailsTable(props: { result: PagedResult<SoftwareInventoryDetailRow> |
   if (!props.result || props.result.rows.length === 0) return <TableMessage text="No matching detail rows were found." />;
   return (
     <table className="software-inventory-table details">
-      <thead><tr><th>Customer / site</th><th>Device</th><th>Class / last user</th><th>Software</th><th>Version</th><th>Publisher</th><th>Installed</th></tr></thead>
+      <thead><tr><th>Customer / site</th><th>Device</th><th>Device class</th><th>Last user</th><th>Software</th><th>Version</th><th>Publisher</th><th>Installed</th></tr></thead>
       <tbody>{props.result.rows.map((row, index) => (
         <tr className={row.collectionStatus === 'Failed' ? 'failed' : ''} key={`${row.deviceId}:${row.applicationName ?? 'error'}:${row.version ?? ''}:${index}`}>
           <td><strong>{row.customerName}</strong><small>{row.siteName ?? '—'}</small></td>
           <td><strong>{row.deviceName}</strong><small>{row.deviceId}</small></td>
-          <td>{row.deviceClass ?? '—'}<small>{row.lastUser ?? 'No last user'}</small></td>
+          <td>{row.deviceClass ?? '—'}</td>
+          <td>{row.lastUser ?? 'No last user'}</td>
           <td>
             {row.applicationName ?? 'Collection failed'}
             {row.installLocation ? <small>{row.installLocation}</small> : null}
@@ -500,12 +501,13 @@ function ApplicationDevicesModal(props: { modal: ApplicationDevicesModalState; o
               <p><Monitor size={15} /> {props.modal.devices.length.toLocaleString()} associated device{props.modal.devices.length === 1 ? '' : 's'}</p>
               <div className="software-inventory-device-modal-table">
                 <table className="software-inventory-table">
-                  <thead><tr><th>Device</th><th>Customer / site</th><th>Class / last user</th><th>Version</th><th>Publisher</th></tr></thead>
+                  <thead><tr><th>Device</th><th>Customer / site</th><th>Device class</th><th>Last user</th><th>Version</th><th>Publisher</th></tr></thead>
                   <tbody>{props.modal.devices.map((device) => (
                     <tr key={device.deviceId}>
                       <td><strong>{device.deviceName}</strong><small>{device.deviceId}</small></td>
                       <td><strong>{device.customerName}</strong><small>{device.siteName ?? 'All sites'}</small></td>
-                      <td>{device.deviceClass ?? '—'}<small>{device.lastUser ?? 'No last user'}</small></td>
+                      <td>{device.deviceClass ?? '—'}</td>
+                      <td>{device.lastUser ?? 'No last user'}</td>
                       <td>{device.versions.join(', ') || '—'}</td>
                       <td>{device.publishers.join(', ') || '—'}</td>
                     </tr>

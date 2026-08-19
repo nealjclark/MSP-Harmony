@@ -15,6 +15,8 @@ import {
   getSoftwareInventoryReport,
   listSoftwareInventoryReports,
   listSoftwareInventoryScopes,
+  type SoftwareInventoryCountRow,
+  type SoftwareInventoryDetailRow,
   type SoftwareInventoryScopeType,
 } from '../reports/ncentralSoftwareInventory';
 import { NcentralApiError, NcentralClient, ncentralCredentialsFromSettings } from '../vendor/ncentral/client';
@@ -208,13 +210,7 @@ export async function exportSoftwareInventoryReportHttp(
     }
     const counts = await getSoftwareInventoryCounts(repository.pool, reportId, { pageSize: 1048575 });
     const workbook = XLSX.utils.book_new();
-    appendSheet(workbook, counts.rows.map((row) => ({
-      Software: row.applicationName,
-      Devices: row.deviceCount,
-      Installations: row.installationCount,
-      Publishers: row.publishers.join('; '),
-      Versions: row.versions.join('; '),
-    })), 'Counts');
+    appendSoftwareInventoryCountsSheet(workbook, counts.rows);
 
     const detailPageSize = 1048575;
     const firstDetails = await getSoftwareInventoryDetails(repository.pool, reportId, { pageSize: detailPageSize });
@@ -223,21 +219,11 @@ export async function exportSoftwareInventoryReportHttp(
       const details = page === 1
         ? firstDetails
         : await getSoftwareInventoryDetails(repository.pool, reportId, { page, pageSize: detailPageSize });
-      appendSheet(workbook, details.rows.map((row) => ({
-        Customer: row.customerName,
-        Site: row.siteName ?? '',
-        Device: row.deviceName,
-        'Device ID': row.deviceId,
-        'Device class': row.deviceClass ?? '',
-        'Last user': row.lastUser ?? '',
-        Software: row.applicationName ?? '',
-        Publisher: row.publisher ?? '',
-        Version: row.version ?? '',
-        'Install date': row.installDate ?? '',
-        'Install location': row.installLocation ?? '',
-        'Collection status': row.collectionStatus,
-        'Collection error': row.collectionError ?? '',
-      })), detailPages === 1 ? 'Full details' : `Full details ${page}`);
+      appendSoftwareInventoryDetailsSheet(
+        workbook,
+        details.rows,
+        detailPages === 1 ? 'Full details' : `Full details ${page}`,
+      );
     }
     const workbookBytes = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
     const bytes = await freezeWorkbookHeaderRows(workbookBytes);
@@ -383,10 +369,60 @@ function queryInteger(request: HttpRequest, name: string, fallback: number) {
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
 }
 
+export function appendSoftwareInventoryCountsSheet(
+  workbook: XLSX.WorkBook,
+  rows: SoftwareInventoryCountRow[],
+) {
+  appendSheet(workbook, rows.map((row) => ({
+    Software: row.applicationName,
+    Devices: row.deviceCount,
+    Publishers: row.publishers.join('; '),
+    Versions: row.versions.join('; '),
+  })), 'Counts');
+}
+
+export function appendSoftwareInventoryDetailsSheet(
+  workbook: XLSX.WorkBook,
+  rows: SoftwareInventoryDetailRow[],
+  name = 'Full details',
+) {
+  appendSheet(workbook, rows.map((row) => ({
+    Customer: row.customerName,
+    Site: row.siteName ?? '',
+    Device: row.deviceName,
+    'Device ID': row.deviceId,
+    'Device class': row.deviceClass ?? '',
+    'Last user': row.lastUser ?? '',
+    Software: row.applicationName ?? '',
+    Publisher: row.publisher ?? '',
+    Version: row.version ?? '',
+    'Install date': row.installDate ?? '',
+    'Install location': row.installLocation ?? '',
+  })), name);
+}
+
 function appendSheet(workbook: XLSX.WorkBook, rows: Record<string, unknown>[], name: string) {
-  const sheet = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ Message: 'No rows found.' }]);
+  const worksheetRows = rows.length > 0 ? rows : [{ Message: 'No rows found.' }];
+  const sheet = XLSX.utils.json_to_sheet(worksheetRows);
   if (sheet['!ref']) sheet['!autofilter'] = { ref: sheet['!ref'] };
+  sheet['!cols'] = autoSizeColumns(worksheetRows);
   XLSX.utils.book_append_sheet(workbook, sheet, name.slice(0, 31));
+}
+
+function autoSizeColumns(rows: Record<string, unknown>[]) {
+  const headers = Object.keys(rows[0] ?? {});
+  const widths = headers.map((header) => header.length);
+  for (const row of rows) {
+    for (const [index, header] of headers.entries()) {
+      widths[index] = Math.max(widths[index] ?? 0, displayWidth(row[header]));
+    }
+  }
+  return widths.map((width) => ({ wch: Math.min(60, Math.max(10, width + 2)) }));
+}
+
+function displayWidth(value: unknown) {
+  if (value === null || value === undefined) return 0;
+  return String(value).split(/\r?\n/).reduce((width, line) => Math.max(width, line.length), 0);
 }
 
 export async function freezeWorkbookHeaderRows(bytes: Buffer) {
