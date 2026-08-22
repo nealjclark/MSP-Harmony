@@ -1351,6 +1351,24 @@ ALTER TABLE azure_billing_results ADD COLUMN IF NOT EXISTS external_pre_tax_sugg
 CREATE INDEX IF NOT EXISTS idx_azure_billing_results_queue
   ON azure_billing_results(billing_run_id, status, customer_id);
 
+CREATE TABLE IF NOT EXISTS azure_billing_client_comments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  billing_run_id uuid NOT NULL REFERENCES azure_billing_runs(id) ON DELETE CASCADE,
+  billing_month text NOT NULL,
+  customer_id uuid NOT NULL REFERENCES customers(id),
+  author_email text NOT NULL,
+  author_name text NOT NULL,
+  comment text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (billing_month ~ '^\d{4}-\d{2}$'),
+  CHECK (length(trim(comment)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_azure_billing_client_comments_history
+  ON azure_billing_client_comments(customer_id, billing_month DESC, created_at);
+CREATE INDEX IF NOT EXISTS idx_azure_billing_client_comments_run
+  ON azure_billing_client_comments(billing_run_id, customer_id, created_at);
+
 CREATE TABLE IF NOT EXISTS azure_billing_result_approvals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   billing_result_id uuid NOT NULL REFERENCES azure_billing_results(id) ON DELETE CASCADE,

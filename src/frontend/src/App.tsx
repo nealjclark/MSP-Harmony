@@ -25,6 +25,7 @@ import {
   Layers3,
   Link2,
   ListChecks,
+  MessageSquare,
   MoreHorizontal,
   Package,
   Pencil,
@@ -1053,6 +1054,16 @@ type AzureBillingRunSummary = {
   projectedMargin: number;
 };
 
+type AzureBillingIngramInvoiceSummary = {
+  invoiceImportId: string;
+  invoiceDate?: string;
+  invoiceNumber?: string;
+  fileName?: string;
+  importedAt: string;
+  lineCount: number;
+  invoiceCost: number;
+};
+
 type AzureBillingIngramReadiness = {
   billingMonth: string;
   expectedReleaseDate: string;
@@ -1063,6 +1074,7 @@ type AzureBillingIngramReadiness = {
   invoiceDate?: string;
   lineCount: number;
   invoiceCost: number;
+  latestInvoice?: AzureBillingIngramInvoiceSummary;
 };
 
 type AzureBillingApproval = {
@@ -1070,6 +1082,17 @@ type AzureBillingApproval = {
   reviewerName: string;
   decision: 'approved' | 'rejected';
   comment?: string;
+  createdAt: string;
+};
+
+type AzureBillingClientComment = {
+  id: string;
+  billingRunId: string;
+  billingMonth: string;
+  customerId: string;
+  authorEmail: string;
+  authorName: string;
+  comment: string;
   createdAt: string;
 };
 
@@ -1113,6 +1136,7 @@ type AzureBillingResult = {
   approvals: AzureBillingApproval[];
   sourceEvidence: Record<string, unknown>;
   ingramComparisonMonth?: string;
+  comments: AzureBillingClientComment[];
   ingramChanges: Array<{
     status: 'new' | 'removed' | 'changed' | 'same';
     productCode: string;
@@ -1142,6 +1166,7 @@ type AzureBillingResult = {
     effectiveMarkupRate?: number;
     projectedRevenue: number;
     projectedMargin: number;
+    comments: AzureBillingClientComment[];
   }>;
 };
 
@@ -26564,12 +26589,14 @@ function AzureBillingWorkspace({
   canUpdateFindings,
   canRelease,
   onMonitorQueued,
+
 }: {
   canAcceptShadow: boolean;
   canManageApprovers: boolean;
   canUpdateFindings: boolean;
   canRelease: boolean;
   onMonitorQueued: () => Promise<void>;
+
 }) {
   const [tab, setTab] = useState<AzureBillingTab>(() => azureBillingTabFromPath(window.location.pathname) ?? 'runs');
   const [runs, setRuns] = useState<AzureBillingRunSummary[]>([]);
@@ -26664,17 +26691,31 @@ function AzureBillingWorkspace({
     setReleases(response.releases);
   };
 
-  const runAction = async (key: string, action: () => Promise<void>) => {
+  const runAction = async (
+    key: string,
+    action: () => Promise<void>,
+    options?: { successMessage?: string | false },
+  ) => {
     setBusyActions((current) => current.includes(key) ? current : [...current, key]);
     setMessage('Saving Azure billing changes...');
     try {
       await action();
-      setMessage('Azure billing workspace updated.');
+      if (options?.successMessage !== false) {
+        setMessage(options?.successMessage ?? 'Azure billing workspace updated.');
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Azure billing action failed.');
     } finally {
       setBusyActions((current) => current.filter((activeKey) => activeKey !== key));
     }
+  };
+
+  const refreshIngramReadiness = async () => {
+    const response = await azureBillingJson<{ readiness: AzureBillingIngramReadiness }>(
+      `/api/azure-billing/ingram-readiness?billingMonth=${encodeURIComponent(billingMonth)}`,
+    );
+    setIngramReadiness(response.readiness);
+    return response.readiness;
   };
 
   useEffect(() => {
@@ -26938,8 +26979,70 @@ function AzureBillingWorkspace({
             <div className="azure-billing-create">
               <label>Billing month<input onChange={(event) => setBillingMonth(event.target.value)} type="month" value={billingMonth} /></label>
               <button
+                className="button secondary"
+                disabled={Boolean(busy)}
+                onClick={() => void runAction('ingram-sync', async () => {
+                  const previousImportId = ingramReadiness?.latestInvoice?.invoiceImportId;
+                  setMessage('Checking Ingram for newly released invoices...');
+                  const syncResponse = await fetch('/api/integrations/ingram-micro/sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                  });
+                  const syncBody = await responseJson(syncResponse);
+                  if (!syncResponse.ok) {
+                    throw new Error(String(syncBody.error ?? `Ingram sync failed with HTTP ${syncResponse.status}.`));
+                  }
+                  await onMonitorQueued();
+                  const queuedAt = typeof syncBody.queuedAt === 'string' ? syncBody.queuedAt : new Date().toISOString();
+                  const queued = syncBody.status === 'queued' || syncBody.queued === true;
+                  if (queued) {
+                    for (let attempt = 0; attempt < 60; attempt += 1) {
+                      await new Promise((resolve) => window.setTimeout(resolve, 3000));
+                      const runtime = await fetchRuntimeIntegrations();
+                      const operation = runtime.integrations
+                        .find((item) => item.integrationId === 'ingram-micro')
+                        ?.operationalStatus?.operations
+                        ?.find((item) => item.operationKey === 'ingram-invoices');
+                      const startedAt = operation?.startedAt ? Date.parse(operation.startedAt) : Number.NaN;
+                      const isRequestedRun = Number.isFinite(startedAt) && startedAt >= Date.parse(queuedAt) - 1000;
+                      if (!isRequestedRun || operation?.status === 'running' || operation?.status === 'queued') {
+                        continue;
+                      }
+                      if (operation?.status === 'failed') {
+                        throw new Error(operation.error
+                          ? `Ingram sync failed: ${operation.error}`
+                          : 'Ingram sync failed.');
+                      }
+                      break;
+                    }
+                  }
+                  const readiness = await refreshIngramReadiness();
+                  const latest = readiness.latestInvoice;
+                  if (!latest) {
+                    setMessage('Ingram sync finished. No invoice imports were found yet.');
+                    return;
+                  }
+                  const unchanged = latest.invoiceImportId === previousImportId;
+                  if (readiness.ready) {
+                    setMessage(`Ingram invoice is ready for ${billingMonth}. Last import ${formatDateTime(latest.importedAt)}.`);
+                    return;
+                  }
+                  setMessage(
+                    unchanged
+                      ? `No new Ingram invoice yet. Last import remains ${latest.invoiceDate ?? 'unknown date'} (${formatDateTime(latest.importedAt)}).`
+                      : `Ingram brought in a newer invoice dated ${latest.invoiceDate ?? 'unknown'}, but the major ${billingMonth} invoice is still not ready.`,
+                  );
+                }, { successMessage: false })}
+                type="button"
+                title="Pull the latest Ingram Microsoft invoice reports and refresh readiness."
+              >
+                <RefreshCcw size={17} />
+                Check Ingram invoices
+              </button>
+              <button
                 className="button primary"
-                disabled={Boolean(busy) || billingMonthRunIsProtected}
+                disabled={Boolean(busy) || billingMonthRunIsProtected || !ingramReadiness?.ready}
                 onClick={() => void runAction('create', async () => {
                   if (
                     existingBillingMonthRun
@@ -26961,15 +27064,41 @@ function AzureBillingWorkspace({
                   setTab('review');
                 })}
                 type="button"
-                title={billingMonthRunIsProtected ? 'This run has release activity and cannot be regenerated.' : undefined}
+                title={
+                  billingMonthRunIsProtected
+                    ? 'This run has release activity and cannot be regenerated.'
+                    : !ingramReadiness?.ready
+                      ? (ingramReadiness?.message ?? 'Wait for the major Ingram invoice before generating this month.')
+                      : undefined
+                }
               >
                 {existingBillingMonthRun ? <RefreshCcw size={17} /> : <Plus size={17} />}
                 {existingBillingMonthRun ? 'Regenerate run' : 'Create run'}
               </button>
             </div>
-            {ingramReadiness && !existingBillingMonthRun ? (
+            {ingramReadiness ? (
               <div className={`azure-billing-ingram-readiness ${ingramReadiness.status}`}>
-                <strong>{ingramReadiness.ready ? 'Ingram invoice ready' : 'Ingram invoice not ready'}</strong>
+                <div>
+                  <strong>{ingramReadiness.ready ? 'Ingram invoice ready' : 'Ingram invoice not ready'}</strong>
+                  <p>{ingramReadiness.message}</p>
+                  {ingramReadiness.latestInvoice ? (
+                    <p className="azure-billing-ingram-latest">
+                      Last invoice synced:{' '}
+                      {ingramReadiness.latestInvoice.invoiceDate ?? 'unknown date'}
+                      {' · '}
+                      imported {formatDateTime(ingramReadiness.latestInvoice.importedAt) ?? 'unknown time'}
+                      {' · '}
+                      {formatCount(ingramReadiness.latestInvoice.lineCount)} lines
+                      {' · '}
+                      {formatBillingCurrency(ingramReadiness.latestInvoice.invoiceCost)}
+                      {ingramReadiness.latestInvoice.fileName
+                        ? ` · ${ingramReadiness.latestInvoice.fileName}`
+                        : ''}
+                    </p>
+                  ) : (
+                    <p className="azure-billing-ingram-latest">No Ingram invoice has been synced yet.</p>
+                  )}
+                </div>
               </div>
             ) : null}
           </section>
@@ -28223,11 +28352,19 @@ function AzureBillingClientReviewTable({
   const [externalDraft, setExternalDraft] = useState(externalBeforeTax.toFixed(2));
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [approvalExplanation, setApprovalExplanation] = useState('');
+  const [commentModalOpen, setCommentModalOpen] = useState(false);
+  const [commentDraft, setCommentDraft] = useState('');
+  const [viewedCommentMonth, setViewedCommentMonth] = useState<NonNullable<AzureBillingResult['history']>[number] | null>(null);
+  const [ingramModalOpen, setIngramModalOpen] = useState(false);
   const [historyLimit, setHistoryLimit] = useState(4);
   useEffect(() => {
     setExternalDraft(externalBeforeTax.toFixed(2));
     setApprovalModalOpen(false);
     setApprovalExplanation('');
+    setCommentModalOpen(false);
+    setCommentDraft('');
+    setViewedCommentMonth(null);
+    setIngramModalOpen(false);
   }, [result.id, result.revision, externalBeforeTax]);
   useEffect(() => setHistoryLimit(4), [result.id]);
 
@@ -28297,6 +28434,20 @@ function AzureBillingClientReviewTable({
     });
   };
 
+  const saveComment = async () => {
+    const comment = commentDraft.trim();
+    if (!comment) return;
+    await runAction(`comment:${result.id}`, async () => {
+      await azureBillingJson(`/api/azure-billing/results/${encodeURIComponent(result.id)}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ comment }),
+      });
+      await onReload();
+      setCommentDraft('');
+      setCommentModalOpen(false);
+    });
+  };
+
   return (
     <>
       <article className="azure-billing-client-table-card">
@@ -28329,6 +28480,7 @@ function AzureBillingClientReviewTable({
           <thead>
             <tr>
               <th>Month</th>
+              <th>Comment</th>
               <th>Invoice Users</th>
               <th>Live Users</th>
               <th>External Pre-Tax</th>
@@ -28347,9 +28499,39 @@ function AzureBillingClientReviewTable({
               const marginPercent = month.projectedRevenue > 0
                 ? month.projectedMargin / month.projectedRevenue
                 : undefined;
+              const hasLargeCostDelta = Boolean(
+                previousMonth && Math.abs(month.combinedCost - previousMonth.combinedCost) > 50,
+              );
               return (
-                <tr className={isCurrent ? 'current' : ''} key={month.billingMonth}>
+                <tr
+                  className={[isCurrent ? 'current' : '', hasLargeCostDelta ? 'large-cost-delta' : ''].filter(Boolean).join(' ')}
+                  key={month.billingMonth}
+                  title={hasLargeCostDelta ? 'Combined cost changed by more than $50 from the prior month.' : undefined}
+                >
                   <th scope="row">{month.billingMonth}{isCurrent ? <span>Current</span> : null}</th>
+                  <td>
+                    {isCurrent ? (
+                      <button
+                        className="button secondary compact azure-billing-comment-button"
+                        disabled={busy}
+                        onClick={() => {
+                          setCommentDraft('');
+                          setCommentModalOpen(true);
+                        }}
+                        type="button"
+                      >
+                        <MessageSquare size={14} /> Add comment
+                      </button>
+                    ) : (
+                      <button
+                        className="button secondary compact azure-billing-comment-button"
+                        onClick={() => setViewedCommentMonth(month)}
+                        type="button"
+                      >
+                        <MessageSquare size={14} /> Comment{month.comments.length ? ` (${month.comments.length})` : ''}
+                      </button>
+                    )}
+                  </td>
                   <td>{formatCount(month.invoiceNerdioCount ?? 0)}</td>
                   <td>{month.liveNerdioCount === undefined ? '—' : formatCount(month.liveNerdioCount)}</td>
                   <td className={month.externalPreTaxOverride !== undefined ? 'overridden' : ''}>
@@ -28429,6 +28611,22 @@ function AzureBillingClientReviewTable({
         {result.reviewerNote && result.externalPreTaxOverride === undefined ? <span>Review note <strong>{result.reviewerNote}</strong></span> : null}
       </div>
 
+      {result.comments.length ? (
+        <section className="azure-billing-client-comments" aria-label={`${result.customerName} comments for ${runMonth}`}>
+          <strong><MessageSquare size={15} /> Review comments</strong>
+          {result.comments.map((comment) => (
+            <article key={comment.id}>
+              <p>{comment.comment}</p>
+              <small>
+                {comment.authorName}
+                {comment.authorEmail !== comment.authorName ? ` (${comment.authorEmail})` : ''}
+                {' · '}{formatDateTime(comment.createdAt)}
+              </small>
+            </article>
+          ))}
+        </section>
+      ) : null}
+
       {result.policyType === 'fixed-avd-per-user' ? (
         <div className="azure-billing-count-choice">
           <span>User-count source for this month</span>
@@ -28454,62 +28652,170 @@ function AzureBillingClientReviewTable({
       {result.varianceFlags.length ? <p className="azure-billing-warning">{result.varianceFlags.join(' · ')}</p> : null}
       {result.holdReason ? <p className="azure-billing-warning">Skipped this month: {result.holdReason}</p> : null}
 
-      <details className="azure-billing-evidence">
-        <summary>Ingram Details</summary>
-        {result.ingramChanges.length ? (
-          <section className="azure-billing-ingram-changes">
-            {result.ingramComparisonMonth ? (
-              <h4>Compared with {result.ingramComparisonMonth}</h4>
-            ) : (
-              <h4>Current Ingram line items</h4>
-            )}
-            <div className="azure-billing-change-table">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Product</th>
-                    <th>SKU</th>
-                    <th>Previous Qty</th>
-                    <th>Current Qty</th>
-                    <th>Qty Δ</th>
-                    <th>Unit Cost</th>
-                    <th>Previous Cost</th>
-                    <th>Current Cost</th>
-                    <th>Cost Δ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.ingramChanges.map((change) => (
-                    <tr key={`${change.subscriptionId ?? ''}:${change.productCode}:${change.productName}`}>
-                      <td><span className={`status-chip ${change.status}`}>{azureBillingStatusLabel(change.status)}</span></td>
-                      <td>{change.productName}</td>
-                      <td>{change.productCode || '—'}</td>
-                      <td>{formatCount(change.previousQuantity)}</td>
-                      <td>{formatCount(change.currentQuantity)}</td>
-                      <td>{formatSignedNumber(change.quantityChange)}</td>
-                      <td>{formatOptionalCurrency(change.unitCost)}</td>
-                      <td>{formatCurrency(change.previousCost)}</td>
-                      <td>{formatCurrency(change.currentCost)}</td>
-                      <td>{formatSignedCurrency(change.costChange)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ) : (
-          <p className="field-help">No Ingram line items for this client.</p>
-        )}
-        {result.approvals.map((approval) => (
-          <p key={`${approval.reviewerEmail}:${approval.createdAt}`}>
-            <strong>{approval.reviewerName}</strong> approved {formatDateTime(approval.createdAt)}
-            {approval.comment ? ` — ${approval.comment}` : ''}
-          </p>
-        ))}
-      </details>
+      <button className="azure-billing-ingram-link" onClick={() => setIngramModalOpen(true)} type="button">
+        Ingram Details
+      </button>
 
       </article>
+
+      {ingramModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby={`azure-billing-ingram-title-${result.id}`}
+            aria-modal="true"
+            className="modal-card azure-billing-ingram-modal"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="section-kicker">Monthly line-item comparison</span>
+                <h2 id={`azure-billing-ingram-title-${result.id}`}>Ingram Details · {result.customerName}</h2>
+                <p>{result.ingramComparisonMonth ? `Compared with ${result.ingramComparisonMonth}` : 'Current Ingram line items'}</p>
+              </div>
+              <button aria-label="Close Ingram details" className="modal-close" onClick={() => setIngramModalOpen(false)} title="Close" type="button">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="azure-billing-ingram-modal-body">
+              {result.ingramChanges.length ? (
+                <section className="azure-billing-ingram-changes">
+                  <div className="azure-billing-change-table">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Status</th>
+                          <th>Product</th>
+                          <th>SKU</th>
+                          <th>Previous Qty</th>
+                          <th>Current Qty</th>
+                          <th>Qty Δ</th>
+                          <th>Unit Cost</th>
+                          <th>Previous Cost</th>
+                          <th>Current Cost</th>
+                          <th>Cost Δ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.ingramChanges.map((change) => (
+                          <tr
+                            className={Math.abs(change.costChange) > 50 ? 'large-cost-delta' : undefined}
+                            key={`${change.subscriptionId ?? ''}:${change.productCode}:${change.productName}`}
+                            title={Math.abs(change.costChange) > 50 ? 'Month-to-month cost change is greater than $50.' : undefined}
+                          >
+                            <td><span className={`status-chip ${change.status}`}>{azureBillingStatusLabel(change.status)}</span></td>
+                            <td>{change.productName}</td>
+                            <td>{change.productCode || '—'}</td>
+                            <td>{formatCount(change.previousQuantity)}</td>
+                            <td>{formatCount(change.currentQuantity)}</td>
+                            <td>{formatSignedNumber(change.quantityChange)}</td>
+                            <td>{formatOptionalCurrency(change.unitCost)}</td>
+                            <td>{formatCurrency(change.previousCost)}</td>
+                            <td>{formatCurrency(change.currentCost)}</td>
+                            <td>{formatSignedCurrency(change.costChange)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : (
+                <p className="field-help">No Ingram line items for this client.</p>
+              )}
+              {result.approvals.length ? (
+                <div className="azure-billing-ingram-approvals">
+                  {result.approvals.map((approval) => (
+                    <p key={`${approval.reviewerEmail}:${approval.createdAt}`}>
+                      <strong>{approval.reviewerName}</strong> approved {formatDateTime(approval.createdAt)}
+                      {approval.comment ? ` — ${approval.comment}` : ''}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <div className="modal-actions">
+              <button className="button secondary" onClick={() => setIngramModalOpen(false)} type="button">Close</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {commentModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby={`azure-billing-comment-title-${result.id}`}
+            aria-modal="true"
+            className="modal-card azure-billing-comment-modal"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="section-kicker">{runMonth} client review</span>
+                <h2 id={`azure-billing-comment-title-${result.id}`}>Add comment · {result.customerName}</h2>
+                <p>Your signed-in name and the current date and time will be saved with this comment.</p>
+              </div>
+              <button aria-label="Close comment dialog" className="modal-close" disabled={busy} onClick={() => setCommentModalOpen(false)} title="Close" type="button">
+                <X size={20} />
+              </button>
+            </div>
+            <label className="azure-billing-comment-editor">
+              <span>Comment</span>
+              <textarea
+                autoFocus
+                disabled={busy}
+                maxLength={4000}
+                onChange={(event) => setCommentDraft(event.target.value)}
+                placeholder="Add context for this client's monthly billing review…"
+                rows={6}
+                value={commentDraft}
+              />
+              <small>{commentDraft.length.toLocaleString()} / 4,000</small>
+            </label>
+            <div className="modal-actions">
+              <button className="button secondary" disabled={busy} onClick={() => setCommentModalOpen(false)} type="button">Cancel</button>
+              <button className="button primary" disabled={busy || !commentDraft.trim()} onClick={() => void saveComment()} type="button">
+                <Save size={17} /> Save comment
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {viewedCommentMonth ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby={`azure-billing-comment-history-title-${result.id}`}
+            aria-modal="true"
+            className="modal-card azure-billing-comment-modal"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="section-kicker">Historical client review</span>
+                <h2 id={`azure-billing-comment-history-title-${result.id}`}>Comments · {result.customerName}</h2>
+                <p>Billing period {viewedCommentMonth.billingMonth}</p>
+              </div>
+              <button aria-label="Close comment history" className="modal-close" onClick={() => setViewedCommentMonth(null)} title="Close" type="button">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="azure-billing-comment-history">
+              {viewedCommentMonth.comments.length ? viewedCommentMonth.comments.map((comment) => (
+                <article key={comment.id}>
+                  <p>{comment.comment}</p>
+                  <small>
+                    {comment.authorName}
+                    {comment.authorEmail !== comment.authorName ? ` (${comment.authorEmail})` : ''}
+                    {' · '}{formatDateTime(comment.createdAt)}
+                  </small>
+                </article>
+              )) : <p className="field-help">No comments were saved for this billing period.</p>}
+            </div>
+            <div className="modal-actions">
+              <button className="button secondary" onClick={() => setViewedCommentMonth(null)} type="button">Close</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {approvalModalOpen ? (
         <div className="modal-backdrop" role="presentation">

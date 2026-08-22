@@ -11431,6 +11431,15 @@ h2 {
   background: #eef7f0;
 }
 
+.azure-billing-ingram-readiness p {
+  margin: 6px 0 0;
+  line-height: 1.4;
+}
+
+.azure-billing-ingram-latest {
+  opacity: 0.92;
+}
+
 .azure-billing-runs-table-surface {
   width: 100%;
 }
@@ -11858,6 +11867,22 @@ h2 {
   background: #eef7e9;
 }
 
+.azure-billing-client-matrix tr.large-cost-delta th,
+.azure-billing-client-matrix tr.large-cost-delta td,
+.azure-billing-ingram-changes tr.large-cost-delta td {
+  background: #fff1c7;
+}
+
+.azure-billing-client-matrix tr.large-cost-delta th {
+  box-shadow: inset 4px 0 0 #d38100;
+}
+
+.azure-billing-comment-button {
+  min-width: 106px;
+  justify-content: center;
+  white-space: nowrap;
+}
+
 .azure-billing-client-matrix td.overridden {
   color: #744707;
   background: #fff5dd;
@@ -12049,6 +12074,132 @@ h2 {
 
 .azure-billing-review-context strong {
   color: var(--ink);
+}
+
+.azure-billing-client-comments {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #b8c5e8;
+  border-left: 4px solid #526db0;
+  border-radius: 8px;
+  color: #26365f;
+  background: #eef2ff;
+}
+
+.azure-billing-client-comments > strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.azure-billing-client-comments article,
+.azure-billing-comment-history article {
+  padding-top: 8px;
+  border-top: 1px solid rgba(82, 109, 176, 0.22);
+}
+
+.azure-billing-client-comments p,
+.azure-billing-comment-history p {
+  margin: 0;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.azure-billing-client-comments small,
+.azure-billing-comment-history small {
+  display: block;
+  margin-top: 4px;
+  color: #586b9c;
+}
+
+.azure-billing-ingram-link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  color: #285d75;
+  background: transparent;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.azure-billing-ingram-link:hover {
+  color: #183f53;
+}
+
+.azure-billing-ingram-modal {
+  width: min(1180px, 100%);
+  max-height: min(90vh, 820px);
+}
+
+.azure-billing-ingram-modal-body {
+  min-height: 180px;
+  overflow: auto;
+  padding: 8px 22px 18px;
+  scrollbar-color: #8d918e transparent;
+  scrollbar-width: thin;
+}
+
+.azure-billing-ingram-modal .azure-billing-change-table {
+  overflow: visible;
+}
+
+.azure-billing-ingram-modal .data-table {
+  min-width: 1050px;
+}
+
+.azure-billing-ingram-approvals {
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.azure-billing-comment-modal {
+  width: min(620px, 100%);
+  max-height: min(90vh, 720px);
+}
+
+.azure-billing-comment-editor {
+  display: grid;
+  gap: 7px;
+  padding: 14px 22px 20px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.azure-billing-comment-editor textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 1px solid #c6cfca;
+  border-radius: 7px;
+  color: var(--ink);
+  background: #fbfcfa;
+  font: inherit;
+  font-weight: 400;
+}
+
+.azure-billing-comment-editor textarea:focus {
+  border-color: #526db0;
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(82, 109, 176, 0.14);
+}
+
+.azure-billing-comment-editor small {
+  justify-self: end;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.azure-billing-comment-history {
+  display: grid;
+  gap: 10px;
+  min-height: 120px;
+  overflow-y: auto;
+  padding: 14px 22px 20px;
 }
 
 .azure-billing-client-actions {

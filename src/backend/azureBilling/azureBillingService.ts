@@ -189,6 +189,16 @@ export type AzureBillingRunSummary = {
   projectedMargin: number;
 };
 
+export type AzureBillingIngramInvoiceSummary = {
+  invoiceImportId: string;
+  invoiceDate?: string;
+  invoiceNumber?: string;
+  fileName?: string;
+  importedAt: string;
+  lineCount: number;
+  invoiceCost: number;
+};
+
 export type AzureBillingIngramReadiness = {
   billingMonth: string;
   expectedReleaseDate: string;
@@ -199,6 +209,8 @@ export type AzureBillingIngramReadiness = {
   invoiceDate?: string;
   lineCount: number;
   invoiceCost: number;
+  /** Most recently imported Ingram invoice, used to confirm whether a sync brought anything new. */
+  latestInvoice?: AzureBillingIngramInvoiceSummary;
 };
 
 export type AzureBillingIngramChange = {
@@ -213,6 +225,17 @@ export type AzureBillingIngramChange = {
   previousCost: number;
   currentCost: number;
   costChange: number;
+};
+
+export type AzureBillingClientComment = {
+  id: string;
+  billingRunId: string;
+  billingMonth: string;
+  customerId: string;
+  authorEmail: string;
+  authorName: string;
+  comment: string;
+  createdAt: string;
 };
 
 export type AzureBillingResult = {
@@ -265,6 +288,7 @@ export type AzureBillingResult = {
   connectWiseSnapshot: Record<string, unknown>;
   ingramComparisonMonth?: string;
   ingramChanges: AzureBillingIngramChange[];
+  comments: AzureBillingClientComment[];
   approvals: Array<{
     reviewerEmail: string;
     reviewerName: string;
@@ -288,6 +312,7 @@ export type AzureBillingResult = {
     effectiveMarkupRate?: number;
     projectedRevenue: number;
     projectedMargin: number;
+    comments: AzureBillingClientComment[];
   }>;
 };
 
@@ -392,6 +417,17 @@ type ApprovalRow = {
   reviewer_name: string;
   decision: 'approved' | 'rejected';
   comment: string | null;
+  created_at: Date | string;
+};
+
+type ClientCommentRow = {
+  id: string;
+  billing_run_id: string;
+  billing_month: string;
+  customer_id: string;
+  author_email: string;
+  author_name: string;
+  comment: string;
   created_at: Date | string;
 };
 
@@ -1256,6 +1292,10 @@ export async function createAzureBillingRun(
   },
 ): Promise<{ run: AzureBillingRunSummary; results: AzureBillingResult[] }> {
   validateBillingMonth(input.billingMonth);
+  const ingramReadiness = await getAzureBillingIngramReadiness(database, input.billingMonth);
+  if (!ingramReadiness.ready) {
+    throw new Error(ingramReadiness.message || 'The Ingram invoice is not ready for this billing month.');
+  }
   const sources = await resolveBillingRunSources(database, input);
   const runInsert = await database.query<{ id: string; regenerated: boolean }>(
     `with existing as materialized (
@@ -1490,19 +1530,11 @@ async function resolveBillingRunSources(
 ) {
   const monthStart = `${input.billingMonth}-01`;
   const nextMonth = nextMonthStart(input.billingMonth);
-  const [ingram, nerdioInvoice, nerdioLive, azureCost, connectWise] = await Promise.all([
+  const [ingramInvoiceImportIds, nerdioInvoice, nerdioLive, azureCost, connectWise] = await Promise.all([
     input.ingramInvoiceImportIds?.length
-      ? Promise.resolve({ rows: input.ingramInvoiceImportIds.map((id) => ({ id })) })
-      : database.query<{ id: string }>(
-          `select id
-           from invoice_imports
-           where vendor_id = 'ingram-micro'
-             and status in ('ready', 'review')
-             and coalesce(invoice_date, imported_at::date) >= $1::date
-             and coalesce(invoice_date, imported_at::date) < $2::date
-           order by imported_at, id`,
-          [monthStart, nextMonth],
-        ),
+      ? Promise.resolve(uniqueStrings(input.ingramInvoiceImportIds))
+      : loadMajorIngramInvoiceSummary(database, { monthStart, nextMonth }).then((invoice) =>
+        invoice ? [invoice.invoiceImportId] : []),
     input.nerdioInvoiceSyncRunId
       ? Promise.resolve({ rows: [{ id: input.nerdioInvoiceSyncRunId }] })
       : latestSourceSyncRun(database, 'nerdio', 'nerdio-invoices'),
@@ -1517,7 +1549,7 @@ async function resolveBillingRunSources(
       : latestCompletedSyncRun(database, 'connectwise'),
   ]);
   return {
-    ingramInvoiceImportIds: uniqueStrings(ingram.rows.map((row) => row.id)),
+    ingramInvoiceImportIds,
     nerdioInvoiceSyncRunId: nerdioInvoice.rows[0]?.id,
     nerdioLiveSyncRunId: nerdioLive.rows[0]?.id,
     azureCostSyncRunId: azureCost.rows[0]?.id,
@@ -1588,15 +1620,102 @@ export async function getAzureBillingIngramReadiness(
   validateBillingMonth(billingMonth);
   const monthStart = `${billingMonth}-01`;
   const nextMonth = nextMonthStart(billingMonth);
-  const invoice = await database.query<{
-    id: string;
-    invoice_date: Date | string;
-    line_count: string | number;
-    invoice_cost: string | number;
-  }>(
+  const [monthInvoice, latestInvoice] = await Promise.all([
+    loadMajorIngramInvoiceSummary(database, { monthStart, nextMonth }),
+    loadLatestIngramInvoiceSummary(database),
+  ]);
+  return buildAzureBillingIngramReadiness(billingMonth, monthInvoice, now, latestInvoice);
+}
+
+export function buildAzureBillingIngramReadiness(
+  billingMonth: string,
+  invoice: {
+    invoiceImportId: string;
+    invoiceDate: string;
+    lineCount: number;
+    invoiceCost: number;
+  } | undefined,
+  now = new Date(),
+  latestInvoice?: AzureBillingIngramInvoiceSummary,
+): AzureBillingIngramReadiness {
+  validateBillingMonth(billingMonth);
+  const expectedReleaseDate = `${billingMonth}-21`;
+  if (invoice) {
+    return {
+      billingMonth,
+      expectedReleaseDate,
+      status: 'ready',
+      ready: true,
+      message: `The major Ingram invoice is available with an invoice date of ${invoice.invoiceDate}.`,
+      ...invoice,
+      latestInvoice,
+    };
+  }
+
+  const today = easternDate(now);
+  const currentMonth = today.slice(0, 7);
+  if (billingMonth < currentMonth) {
+    return {
+      billingMonth,
+      expectedReleaseDate,
+      status: 'missing-history',
+      ready: false,
+      message: 'No major Ingram invoice is saved for this billing month. Sync or import it before regenerating the run.',
+      lineCount: 0,
+      invoiceCost: 0,
+      latestInvoice,
+    };
+  }
+  if (billingMonth > currentMonth || today < expectedReleaseDate) {
+    return {
+      billingMonth,
+      expectedReleaseDate,
+      status: 'before-release',
+      ready: false,
+      message: `The latest Ingram invoice is normally released around ${expectedReleaseDate}. Wait until the 21st before generating this month.`,
+      lineCount: 0,
+      invoiceCost: 0,
+      latestInvoice,
+    };
+  }
+  return {
+    billingMonth,
+    expectedReleaseDate,
+    status: 'due',
+    ready: false,
+    message: 'The expected Ingram invoice has not been released yet. It can arrive 1–3 days late; sync Ingram to check whether the Excel file has been published.',
+    lineCount: 0,
+    invoiceCost: 0,
+    latestInvoice,
+  };
+}
+
+type IngramInvoiceSummaryRow = {
+  id: string;
+  invoice_date: Date | string | null;
+  invoice_number: string | null;
+  file_name: string | null;
+  imported_at: Date | string;
+  line_count: string | number;
+  invoice_cost: string | number;
+};
+
+async function loadMajorIngramInvoiceSummary(
+  database: Queryable,
+  range: { monthStart: string; nextMonth: string },
+): Promise<{
+  invoiceImportId: string;
+  invoiceDate: string;
+  lineCount: number;
+  invoiceCost: number;
+} | undefined> {
+  const invoice = await database.query<IngramInvoiceSummaryRow>(
     `select
        imports.id,
        imports.invoice_date,
+       imports.invoice_number,
+       imports.file_name,
+       imports.imported_at,
        count(lines.id) as line_count,
        coalesce(sum(coalesce(lines.billed_amount, lines.amount, lines.rate * lines.quantity, 0)), 0) as invoice_cost
      from invoice_imports imports
@@ -1612,72 +1731,48 @@ export async function getAzureBillingIngramReadiness(
               imports.invoice_date desc,
               imports.imported_at desc
      limit 1`,
-    [monthStart, nextMonth],
+    [range.monthStart, range.nextMonth],
   );
   const row = invoice.rows[0];
-  return buildAzureBillingIngramReadiness(billingMonth, row ? {
+  if (!row?.invoice_date) return undefined;
+  return {
     invoiceImportId: row.id,
     invoiceDate: isoDate(row.invoice_date).slice(0, 10),
     lineCount: numericValue(row.line_count),
     invoiceCost: round(numericValue(row.invoice_cost), cents),
-  } : undefined, now);
+  };
 }
 
-export function buildAzureBillingIngramReadiness(
-  billingMonth: string,
-  invoice: {
-    invoiceImportId: string;
-    invoiceDate: string;
-    lineCount: number;
-    invoiceCost: number;
-  } | undefined,
-  now = new Date(),
-): AzureBillingIngramReadiness {
-  validateBillingMonth(billingMonth);
-  const expectedReleaseDate = `${billingMonth}-21`;
-  if (invoice) {
-    return {
-      billingMonth,
-      expectedReleaseDate,
-      status: 'ready',
-      ready: true,
-      message: `The major Ingram invoice is available with an invoice date of ${invoice.invoiceDate}.`,
-      ...invoice,
-    };
-  }
-
-  const today = easternDate(now);
-  const currentMonth = today.slice(0, 7);
-  if (billingMonth < currentMonth) {
-    return {
-      billingMonth,
-      expectedReleaseDate,
-      status: 'missing-history',
-      ready: false,
-      message: 'No major Ingram invoice is saved for this billing month. Sync or import it before regenerating the run.',
-      lineCount: 0,
-      invoiceCost: 0,
-    };
-  }
-  if (billingMonth > currentMonth || today < expectedReleaseDate) {
-    return {
-      billingMonth,
-      expectedReleaseDate,
-      status: 'before-release',
-      ready: false,
-      message: `The latest Ingram invoice is normally released around ${expectedReleaseDate}. Wait until the 21st before generating this month.`,
-      lineCount: 0,
-      invoiceCost: 0,
-    };
-  }
+async function loadLatestIngramInvoiceSummary(
+  database: Queryable,
+): Promise<AzureBillingIngramInvoiceSummary | undefined> {
+  const invoice = await database.query<IngramInvoiceSummaryRow>(
+    `select
+       imports.id,
+       imports.invoice_date,
+       imports.invoice_number,
+       imports.file_name,
+       imports.imported_at,
+       count(lines.id) as line_count,
+       coalesce(sum(coalesce(lines.billed_amount, lines.amount, lines.rate * lines.quantity, 0)), 0) as invoice_cost
+     from invoice_imports imports
+     left join invoice_line_items lines on lines.invoice_import_id = imports.id
+     where imports.vendor_id = 'ingram-micro'
+       and imports.status in ('ready', 'review')
+     group by imports.id
+     order by imports.imported_at desc, imports.invoice_date desc nulls last
+     limit 1`,
+  );
+  const row = invoice.rows[0];
+  if (!row) return undefined;
   return {
-    billingMonth,
-    expectedReleaseDate,
-    status: 'due',
-    ready: false,
-    message: 'The expected Ingram invoice has not been released yet. It can arrive 1–3 days late; try again tomorrow.',
-    lineCount: 0,
-    invoiceCost: 0,
+    invoiceImportId: row.id,
+    invoiceDate: row.invoice_date ? isoDate(row.invoice_date).slice(0, 10) : undefined,
+    invoiceNumber: row.invoice_number ?? undefined,
+    fileName: row.file_name ?? undefined,
+    importedAt: isoDate(row.imported_at),
+    lineCount: numericValue(row.line_count),
+    invoiceCost: round(numericValue(row.invoice_cost), cents),
   };
 }
 
@@ -1766,7 +1861,7 @@ export async function getAzureBillingRun(
   const runResult = await database.query<RunRow>(`${runSummarySql()} having runs.id = $1`, [runId]);
   const run = runResult.rows[0];
   if (!run) throw new Error('Azure billing run was not found.');
-  const [resultsResult, approvalsResult, historyResult] = await Promise.all([
+  const [resultsResult, approvalsResult, historyResult, commentsResult] = await Promise.all([
     database.query<ResultRow>(
       `select
          results.*,
@@ -1837,10 +1932,24 @@ export async function getAzureBillingRun(
        select * from ranked where month_rank <= 12 order by policy_id, billing_month desc`,
       [runId],
     ),
+    database.query<ClientCommentRow>(
+      `select comments.*
+       from azure_billing_client_comments comments
+       where comments.customer_id in (
+         select customer_id from azure_billing_results where billing_run_id = $1
+       )
+       order by comments.billing_month desc, comments.created_at`,
+      [runId],
+    ),
   ]);
   const approvals = new Map<string, ApprovalRow[]>();
   for (const row of approvalsResult.rows) {
     approvals.set(row.billing_result_id, [...(approvals.get(row.billing_result_id) ?? []), row]);
+  }
+  const comments = new Map<string, AzureBillingClientComment[]>();
+  for (const row of commentsResult.rows) {
+    const key = `${row.customer_id}:${row.billing_month}`;
+    comments.set(key, [...(comments.get(key) ?? []), mapClientCommentRow(row)]);
   }
   const history = new Map<string, AzureBillingResult['history']>();
   for (const row of historyResult.rows) {
@@ -1869,6 +1978,7 @@ export async function getAzureBillingRun(
         ),
         projectedRevenue: numericValue(row.projected_revenue),
         projectedMargin: numericValue(row.projected_margin),
+        comments: [],
       },
     ]);
   }
@@ -1889,10 +1999,66 @@ export async function getAzureBillingRun(
           asRecords(mapped.sourceEvidence.ingramLines),
           asRecords(asRecord(previous?.source_evidence).ingramLines),
         ),
-        history: history.get(row.policy_id) ?? [],
+        comments: comments.get(`${row.customer_id}:${run.billing_month}`) ?? [],
+        history: (history.get(row.policy_id) ?? []).map((month) => ({
+          ...month,
+          comments: comments.get(`${row.customer_id}:${month.billingMonth}`) ?? [],
+        })),
       };
     }),
   };
+}
+
+export async function addAzureBillingClientComment(
+  database: Queryable,
+  resultId: string,
+  value: string,
+  author: { email: string; name: string },
+): Promise<AzureBillingClientComment> {
+  const comment = normalizeAzureBillingClientComment(value);
+  const result = await database.query<{
+    billing_run_id: string;
+    billing_month: string;
+    customer_id: string;
+  }>(
+    `select results.billing_run_id, runs.billing_month, results.customer_id
+     from azure_billing_results results
+     inner join azure_billing_runs runs on runs.id = results.billing_run_id
+     where results.id = $1`,
+    [resultId],
+  );
+  const target = result.rows[0];
+  if (!target) throw new Error('Azure billing result was not found.');
+  const inserted = await database.query<ClientCommentRow>(
+    `insert into azure_billing_client_comments (
+       billing_run_id, billing_month, customer_id, author_email, author_name, comment
+     )
+     values ($1, $2, $3, $4, $5, $6)
+     returning *`,
+    [
+      target.billing_run_id,
+      target.billing_month,
+      target.customer_id,
+      author.email,
+      author.name,
+      comment,
+    ],
+  );
+  const saved = inserted.rows[0];
+  if (!saved) throw new Error('Unable to save the Azure billing comment.');
+  await insertAuditEvent(database, author.email, 'azure-billing.client-comment.created', 'azure_billing_run', target.billing_run_id, {
+    commentId: saved.id,
+    billingMonth: target.billing_month,
+    customerId: target.customer_id,
+  });
+  return mapClientCommentRow(saved);
+}
+
+export function normalizeAzureBillingClientComment(value: string): string {
+  const comment = String(value ?? '').trim();
+  if (!comment) throw new Error('A comment is required.');
+  if (comment.length > 4000) throw new Error('Comments cannot exceed 4,000 characters.');
+  return comment;
 }
 
 export async function reviseAzureBillingResult(
@@ -2948,6 +3114,7 @@ function mapResultRow(row: ResultRow, approvals: ApprovalRow[], billingMonth: st
     sourceEvidence: asRecord(row.source_evidence),
     connectWiseSnapshot: asRecord(row.connectwise_snapshot),
     ingramChanges: [],
+    comments: [],
     approvals: approvals.map((approval) => ({
       reviewerEmail: approval.reviewer_email,
       reviewerName: approval.reviewer_name,
@@ -2955,6 +3122,19 @@ function mapResultRow(row: ResultRow, approvals: ApprovalRow[], billingMonth: st
       comment: approval.comment ?? undefined,
       createdAt: isoDate(approval.created_at),
     })),
+  };
+}
+
+function mapClientCommentRow(row: ClientCommentRow): AzureBillingClientComment {
+  return {
+    id: row.id,
+    billingRunId: row.billing_run_id,
+    billingMonth: row.billing_month,
+    customerId: row.customer_id,
+    authorEmail: row.author_email,
+    authorName: row.author_name,
+    comment: row.comment,
+    createdAt: isoDate(row.created_at),
   };
 }
 

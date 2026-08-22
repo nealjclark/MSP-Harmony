@@ -5,10 +5,15 @@ import {
   calculateAzureBillingResult,
   classifyAzureBillingIngramProduct,
   compareAzureBillingIngramLines,
+  normalizeAzureBillingClientComment,
   sumNerdioClientInvoiceLines,
 } from './azureBillingService';
 
 function run() {
+  assert.equal(normalizeAzureBillingClientComment('  Month-end note.  '), 'Month-end note.');
+  assert.throws(() => normalizeAzureBillingClientComment('   '), /comment is required/i);
+  assert.throws(() => normalizeAzureBillingClientComment('x'.repeat(4001)), /4,000/);
+
   const combined = calculateAzureBillingResult({
     policyType: 'combined-avd-markup',
     ingramCost: 1000.1234,
@@ -264,7 +269,7 @@ function run() {
     new Date('2026-07-21T16:00:00.000Z'),
   );
   assert.equal(due.status, 'due');
-  assert.match(due.message, /try again tomorrow/i);
+  assert.match(due.message, /has not been released yet/i);
 
   const missingHistory = buildAzureBillingIngramReadiness(
     '2026-06',
@@ -282,10 +287,36 @@ function run() {
       invoiceCost: 1234.56,
     },
     new Date('2026-07-22T16:00:00.000Z'),
+    {
+      invoiceImportId: 'invoice-1',
+      invoiceDate: '2026-07-22',
+      importedAt: '2026-07-22T18:00:00.000Z',
+      lineCount: 42,
+      invoiceCost: 1234.56,
+      fileName: 'Every Invoice - July.xlsx',
+    },
   );
   assert.equal(ready.status, 'ready');
   assert.equal(ready.lineCount, 42);
   assert.equal(ready.invoiceCost, 1234.56);
+  assert.equal(ready.latestInvoice?.fileName, 'Every Invoice - July.xlsx');
+
+  const dueWithLatest = buildAzureBillingIngramReadiness(
+    '2026-08',
+    undefined,
+    new Date('2026-08-22T16:00:00.000Z'),
+    {
+      invoiceImportId: 'invoice-prev',
+      invoiceDate: '2026-07-22',
+      importedAt: '2026-07-23T12:00:00.000Z',
+      lineCount: 100,
+      invoiceCost: 5000,
+    },
+  );
+  assert.equal(dueWithLatest.status, 'due');
+  assert.equal(dueWithLatest.ready, false);
+  assert.equal(dueWithLatest.latestInvoice?.invoiceDate, '2026-07-22');
+  assert.equal(dueWithLatest.latestInvoice?.lineCount, 100);
 }
 
 run();

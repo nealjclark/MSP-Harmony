@@ -1,6 +1,7 @@
 import { app, output, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
 import * as XLSX from '@e965/xlsx';
 import {
+  addAzureBillingClientComment,
   approveAzureBillingResult,
   acceptAzureBillingShadowRun,
   createAzureBillingRun,
@@ -423,6 +424,33 @@ export async function reviseAzureBillingResultHttp(
   });
 }
 
+export async function addAzureBillingClientCommentHttp(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const auth = await requireRole(request, 'Analyst');
+  if (auth.response) return auth.response;
+  const origin = requireMutatingRequestOrigin(request);
+  if (origin) return origin;
+  const body = await readJsonBody<{ comment: string }>(request);
+  if (!body.ok) return body.response;
+  return withDatabase(context, async (database) => {
+    try {
+      const email = auth.principal.email ?? auth.principal.name;
+      return jsonResponse(201, {
+        comment: await addAzureBillingClientComment(
+          database,
+          requiredParam(request, 'resultId'),
+          body.body.comment,
+          { email, name: auth.principal.name || email },
+        ),
+      });
+    } catch (error) {
+      return domainError(error);
+    }
+  });
+}
+
 export async function approveAzureBillingResultHttp(
   request: HttpRequest,
   context: InvocationContext,
@@ -696,6 +724,7 @@ app.http('listAzureBillingReleaseHistory', { methods: ['GET'], authLevel: 'anony
 app.http('createAzureBillingRun', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/runs', handler: createAzureBillingRunHttp });
 app.http('getAzureBillingRun', { methods: ['GET'], authLevel: 'anonymous', route: 'azure-billing/runs/{runId}', handler: getAzureBillingRunHttp });
 app.http('reviseAzureBillingResult', { methods: ['PATCH'], authLevel: 'anonymous', route: 'azure-billing/results/{resultId}', handler: reviseAzureBillingResultHttp });
+app.http('addAzureBillingClientComment', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/results/{resultId}/comments', handler: addAzureBillingClientCommentHttp });
 app.http('approveAzureBillingResult', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/results/{resultId}/approve', handler: approveAzureBillingResultHttp });
 app.http('holdAzureBillingResult', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/results/{resultId}/hold', handler: holdAzureBillingResultHttp });
 app.http('releaseAzureBillingRun', { methods: ['POST'], authLevel: 'anonymous', route: 'azure-billing/runs/{runId}/release', handler: releaseAzureBillingRunHttp });
