@@ -373,7 +373,12 @@ export async function createAzureBillingRunHttp(
   if (auth.response) return auth.response;
   const origin = requireMutatingRequestOrigin(request);
   if (origin) return origin;
-  const body = await readJsonBody<{ billingMonth: string; overwriteExisting?: boolean }>(request);
+  const body = await readJsonBody<{
+    billingMonth: string;
+    overwriteExisting?: boolean;
+    nerdioInvoiceSyncRunId?: string;
+    nerdioLiveSyncRunId?: string;
+  }>(request);
   if (!body.ok) return body.response;
   return withDatabase(context, async (database) => {
     try {
@@ -382,6 +387,8 @@ export async function createAzureBillingRunHttp(
         billingMonth: body.body.billingMonth,
         requestedBy: actor,
         overwriteExisting: body.body.overwriteExisting === true,
+        nerdioInvoiceSyncRunId: body.body.nerdioInvoiceSyncRunId,
+        nerdioLiveSyncRunId: body.body.nerdioLiveSyncRunId,
       }));
     } catch (error) {
       return domainError(error);

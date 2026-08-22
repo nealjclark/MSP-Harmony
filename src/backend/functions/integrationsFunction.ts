@@ -84,6 +84,7 @@ type AppRiverSyncQueueMessage = {
 };
 
 const integrationSyncQueueName = 'integration-sync-work';
+const integrationSyncPoisonQueueName = `${integrationSyncQueueName}-poison`;
 const appRiverSyncQueueName = 'appriver-sync-work';
 const integrationSyncQueueOutput = output.storageQueue({
   queueName: integrationSyncQueueName,
@@ -713,9 +714,21 @@ export async function processIntegrationSyncQueueMessage(
         pool: repositoryContext.pool,
         provider,
         operationKey: parsed.operationKey,
+        jobId: parsed.jobId,
+        syncRunId: parsed.syncRunId,
+        maxCostQueryWindows: parsed.operationKey === 'azure-cost-monthly' ? 1 : undefined,
         onProgress,
       });
       syncRunId = result.syncRunId;
+      await repositoryContext.repository.attachSyncJobRun(parsed.jobId, syncRunId);
+      if (result.continuationPending) {
+        enqueueIntegrationSyncWorker(context, { ...parsed, syncRunId });
+        context.log(
+          `Azure - Lighthouse queued sync ${syncRunId} stored a backfill slice; `
+          + `${result.remainingCostQueryWindows} subscription-month windows remain.`,
+        );
+        return;
+      }
       await repositoryContext.repository.completeSyncJob(parsed.jobId, syncRunId);
       context.log(`Azure - Lighthouse queued sync ${syncRunId} completed.`);
       return;
@@ -780,6 +793,46 @@ export async function processIntegrationSyncQueueMessage(
       context.log(`Queued ${integrationDisplayName(parsed.integrationId)} sync will retry: ${message}`);
     }
     throw error;
+  } finally {
+    await repositoryContext.close();
+  }
+}
+
+export async function processIntegrationSyncPoisonQueueMessage(
+  message: IntegrationSyncQueueMessage | string,
+  context: InvocationContext,
+) {
+  const parsed = parseIntegrationSyncQueueMessage(message);
+  const repositoryContext = await createOptionalPostgresSettingsRepository();
+  if (!repositoryContext.pool || !repositoryContext.repository) {
+    throw new Error(`${integrationDisplayName(parsed.integrationId)} poison-message handling needs PostgreSQL settings.`);
+  }
+
+  const errorMessage = `${integrationDisplayName(parsed.integrationId)} sync exhausted all queue retries before completing.`;
+  try {
+    await repositoryContext.repository.failSyncJob(parsed.jobId, errorMessage, parsed.syncRunId);
+    if (parsed.integrationId === 'microsoft-azure') {
+      const failedRuns = await repositoryContext.pool.query<{ id: string }>(
+        `update sync_runs
+         set status = 'failed', completed_at = now(), error_message = $2
+         where integration_id = 'microsoft-azure'
+           and status = 'running'
+           and metadata->>'jobId' = $1
+         returning id`,
+        [parsed.jobId, errorMessage],
+      );
+      const failedRunIds = failedRuns.rows.map((row) => row.id);
+      if (failedRunIds.length > 0) {
+        await repositoryContext.pool.query(
+          `update azure_cost_sync_checkpoints
+           set status = 'failed', last_error = $2, updated_at = now()
+           where status = 'running'
+             and last_sync_run_id = any($1::uuid[])`,
+          [failedRunIds, errorMessage],
+        );
+      }
+    }
+    context.log(`${errorMessage} Job ${parsed.jobId} was marked failed.`);
   } finally {
     await repositoryContext.close();
   }
@@ -873,8 +926,14 @@ app.http('syncIntegration', {
 app.storageQueue<IntegrationSyncQueueMessage | string>('processIntegrationSyncQueueMessage', {
   queueName: integrationSyncQueueName,
   connection: 'AzureWebJobsStorage',
-  extraOutputs: [appRiverSyncQueueOutput],
+  extraOutputs: [integrationSyncQueueOutput, appRiverSyncQueueOutput],
   handler: processIntegrationSyncQueueMessage,
+});
+
+app.storageQueue<IntegrationSyncQueueMessage | string>('processIntegrationSyncPoisonQueueMessage', {
+  queueName: integrationSyncPoisonQueueName,
+  connection: 'AzureWebJobsStorage',
+  handler: processIntegrationSyncPoisonQueueMessage,
 });
 
 app.storageQueue<AppRiverSyncQueueMessage | string>('processAppRiverSyncQueueMessage', {

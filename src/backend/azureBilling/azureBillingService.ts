@@ -1296,7 +1296,19 @@ export async function createAzureBillingRun(
   if (!ingramReadiness.ready) {
     throw new Error(ingramReadiness.message || 'The Ingram invoice is not ready for this billing month.');
   }
+  if (
+    input.billingMonth === new Date().toISOString().slice(0, 7)
+    && (!input.nerdioInvoiceSyncRunId || !input.nerdioLiveSyncRunId)
+  ) {
+    throw new Error('Newly completed Nerdio invoice and live usage syncs are required before generating the current billing month.');
+  }
   const sources = await resolveBillingRunSources(database, input);
+  if (
+    input.billingMonth === new Date().toISOString().slice(0, 7)
+    && (!sources.nerdioInvoiceSyncRunId || !sources.nerdioLiveSyncRunId)
+  ) {
+    throw new Error('A requested Nerdio sync is unavailable or does not contain billing-period data. The report was not generated.');
+  }
   const runInsert = await database.query<{ id: string; regenerated: boolean }>(
     `with existing as materialized (
        select runs.id, runs.status
@@ -1530,16 +1542,47 @@ async function resolveBillingRunSources(
 ) {
   const monthStart = `${input.billingMonth}-01`;
   const nextMonth = nextMonthStart(input.billingMonth);
+  const nerdioInvoiceMonthStart = previousMonthStart(input.billingMonth);
   const [ingramInvoiceImportIds, nerdioInvoice, nerdioLive, azureCost, connectWise] = await Promise.all([
     input.ingramInvoiceImportIds?.length
       ? Promise.resolve(uniqueStrings(input.ingramInvoiceImportIds))
       : loadMajorIngramInvoiceSummary(database, { monthStart, nextMonth }).then((invoice) =>
         invoice ? [invoice.invoiceImportId] : []),
     input.nerdioInvoiceSyncRunId
-      ? Promise.resolve({ rows: [{ id: input.nerdioInvoiceSyncRunId }] })
+      ? database.query<{ id: string }>(
+          `select runs.id
+           from sync_runs runs
+           where runs.id = $1::uuid
+             and runs.integration_id = 'nerdio'
+             and runs.status = 'complete'
+             and runs.metadata->>'entity' = 'nerdio-invoices'
+             and exists (
+               select 1
+               from nerdio_invoice_items items
+               where items.sync_run_id = runs.id
+                 and items.billing_period_start >= $2::date
+                 and items.billing_period_start < ($2::date + interval '1 month')
+             )`,
+          [input.nerdioInvoiceSyncRunId, nerdioInvoiceMonthStart],
+        )
       : latestSourceSyncRun(database, 'nerdio', 'nerdio-invoices'),
     input.nerdioLiveSyncRunId
-      ? Promise.resolve({ rows: [{ id: input.nerdioLiveSyncRunId }] })
+      ? database.query<{ id: string }>(
+          `select runs.id
+           from sync_runs runs
+           where runs.id = $1::uuid
+             and runs.integration_id = 'nerdio'
+             and runs.status = 'complete'
+             and runs.metadata->>'entity' = 'nerdio-live-usage'
+             and exists (
+               select 1
+               from nerdio_live_usage_snapshots snapshots
+               where snapshots.sync_run_id = runs.id
+                 and snapshots.collected_at >= $2::date
+                 and snapshots.collected_at < ($2::date + interval '1 month')
+             )`,
+          [input.nerdioLiveSyncRunId, monthStart],
+        )
       : sourceSyncRunForBillingMonth(database, 'nerdio', 'nerdio-live-usage', input.billingMonth),
     input.azureCostSyncRunId
       ? Promise.resolve({ rows: [{ id: input.azureCostSyncRunId }] })

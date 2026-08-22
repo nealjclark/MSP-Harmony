@@ -375,6 +375,93 @@ async function run() {
     `collect:${subscriptions[0]?.subscriptionId ?? ''}`,
     `collect:${secondSubscription.subscriptionId}`,
   ]);
+
+  const boundedCalls: Array<{ subscriptionId: string; from: string }> = [];
+  const boundedWrites: string[] = [];
+  const boundedDatabase: Queryable = {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes("metadata->>'jobId'")) {
+        return { rows: [{ id: 'azure-resumable-sync' } as T] };
+      }
+      boundedWrites.push(sql);
+      return { rows: [] as T[] };
+    },
+  };
+  const bounded = await syncAzureCostUsage({
+    pool: boundedDatabase,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return [...subscriptions, secondSubscription];
+      },
+      async queryCostUsage(input) {
+        boundedCalls.push({ subscriptionId: input.subscriptionId, from: input.from });
+        return [];
+      },
+    },
+    now: '2026-08-13T12:00:00.000Z',
+    operationKey: 'azure-cost-monthly',
+    jobId: 'azure-job-1',
+    maxCostQueryWindows: 1,
+  });
+  assert.equal(bounded.syncRunId, 'azure-resumable-sync');
+  assert.equal(bounded.continuationPending, true);
+  assert.equal(bounded.remainingCostQueryWindows, 5);
+  assert.deepEqual(boundedCalls, [
+    { subscriptionId: subscriptions[0]?.subscriptionId ?? '', from: '2026-05-01T00:00:00.000Z' },
+  ]);
+  assert.equal(boundedWrites.filter((sql) => sql.includes('delete from vendor_usage_snapshots')).length, 1);
+  assert.equal(boundedWrites.filter((sql) => sql.includes("set status = 'complete'")).length, 0);
+  assert.equal(boundedWrites.filter((sql) => sql.includes("and status = 'running'")).length, 1);
+
+  let alreadyCoveredCostQueries = 0;
+  let alreadyCoveredRunInserts = 0;
+  const alreadyCoveredDatabase: Queryable = {
+    async query<T = unknown>(sql: string) {
+      if (sql.includes('from azure_cost_sync_checkpoints')) {
+        return {
+          rows: [subscriptions[0], secondSubscription].map((subscription) => ({
+            subscription_id: subscription?.subscriptionId,
+            sync_mode: 'monthly',
+            covered_from: '2026-05-01',
+            covered_through: '2026-07-31',
+            cursor_date: '2026-08-01',
+            last_attempt_at: '2026-08-13T12:00:00.000Z',
+            last_success_at: '2026-08-13T12:00:00.000Z',
+            last_row_count: 1,
+            status: 'success',
+            next_retry_at: null,
+            last_error: null,
+          } as T)),
+        };
+      }
+      if (sql.includes("status = 'complete'") && sql.includes("metadata->>'entity'")) {
+        return { rows: [{ id: 'azure-completed-backfill' } as T] };
+      }
+      if (sql.includes('insert into sync_runs')) alreadyCoveredRunInserts += 1;
+      return { rows: [] as T[] };
+    },
+  };
+  const alreadyCovered = await syncAzureCostUsage({
+    pool: alreadyCoveredDatabase,
+    provider,
+    client: {
+      async listSubscriptions() {
+        return [...subscriptions, secondSubscription];
+      },
+      async queryCostUsage() {
+        alreadyCoveredCostQueries += 1;
+        return [];
+      },
+    },
+    now: '2026-08-13T12:00:00.000Z',
+    operationKey: 'azure-cost-monthly',
+    maxCostQueryWindows: 1,
+  });
+  assert.equal(alreadyCovered.alreadyCovered, true);
+  assert.equal(alreadyCovered.syncRunId, 'azure-completed-backfill');
+  assert.equal(alreadyCoveredCostQueries, 0);
+  assert.equal(alreadyCoveredRunInserts, 0);
   assert.equal(azureProductKey({ serviceName: 'Azure SQL Database' }), 'azure:azure-sql-database');
 
   console.log('azure operations tests passed');

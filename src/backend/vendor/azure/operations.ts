@@ -209,6 +209,9 @@ export async function syncAzureCostUsage(input: {
   client?: AzureUsageClient;
   now?: string;
   operationKey?: string;
+  jobId?: string;
+  syncRunId?: string;
+  maxCostQueryWindows?: number;
   onProgress?: SyncProgressReporter;
 }) {
   const provider = input.provider ?? createIntegrationSettingsProvider({ loadLocalEnv: true });
@@ -232,7 +235,7 @@ export async function syncAzureCostUsage(input: {
     settings,
   );
   await persistAzureLighthouseTenantsFromSubscriptions(input.pool, subscriptions);
-  const syncRunId = await startSyncRun(input.pool, operationKey, window, subscriptions.length);
+  let syncRunId = input.syncRunId;
 
   try {
     const accountMappings = await loadAccountMappings(input.pool);
@@ -308,6 +311,129 @@ export async function syncAzureCostUsage(input: {
       };
     });
 
+    const maxWindowCount = Math.max(0, ...plans.map((plan) => plan.windows.length));
+    const availableWorkItems: Array<{ planIndex: number; windowIndex: number }> = [];
+    for (let windowIndex = 0; windowIndex < maxWindowCount; windowIndex += 1) {
+      for (const [planIndex, plan] of plans.entries()) {
+        if (plan.windows[windowIndex] && !plan.skipReason) {
+          availableWorkItems.push({ planIndex, windowIndex });
+        }
+      }
+    }
+    const requestedWindowLimit = input.maxCostQueryWindows;
+    const windowLimit = typeof requestedWindowLimit === 'number' && Number.isFinite(requestedWindowLimit)
+      ? Math.max(1, Math.floor(requestedWindowLimit))
+      : availableWorkItems.length;
+    const selectedWorkItems = availableWorkItems.slice(0, windowLimit);
+    const selectedWorkItemKeys = new Set(
+      selectedWorkItems.map((item) => `${item.planIndex}:${item.windowIndex}`),
+    );
+    const remainingCostQueryWindows = Math.max(0, availableWorkItems.length - selectedWorkItems.length);
+
+    if (mode === 'monthly' && availableWorkItems.length === 0) {
+      const runningSyncRunId = await findRunningAzureSyncRun(input.pool, {
+        requestedSyncRunId: syncRunId,
+        jobId: input.jobId,
+        operationKey,
+      });
+      if (runningSyncRunId) {
+        syncRunId = runningSyncRunId;
+        await completeSyncRun(input.pool, runningSyncRunId, 0, 0, {
+          entity: operationKey,
+          operationKey,
+          queryWindow: window,
+          subscriptionCount: subscriptions.length,
+          costQueryWindowsCompleted: 0,
+          remainingCostQueryWindows: 0,
+          continuationPending: false,
+        });
+        await input.onProgress?.({
+          completed: progressTotal,
+          total: progressTotal,
+          failed: 0,
+          currentItem: 'Completed-month backfill checkpoints are complete',
+          unitLabel: 'subscriptions',
+        });
+        return {
+          syncRunId: runningSyncRunId,
+          recordsRead: 0,
+          recordsWritten: 0,
+          subscriptionCount: subscriptions.length,
+          successfulSubscriptions: subscriptions.length,
+          failedSubscriptions: 0,
+          mappedSnapshots: 0,
+          unmappedSnapshots: 0,
+          totalCost: 0,
+          resourceSnapshots: 0,
+          metricSnapshots: 0,
+          advisorRecommendations: 0,
+          advisorFailures: [],
+          tenantLookupWarning: tenantDiscovery.warning,
+          emptyCostWithResources: [],
+          skippedCostQueries,
+          deferredCostQueries,
+          costQueryWindowsCompleted: 0,
+          remainingCostQueryWindows: 0,
+          continuationPending: false,
+          alreadyCovered: false,
+          sharedThrottleUntil: undefined,
+          operationKey,
+          mode,
+          monitoring: undefined,
+          monitoringWarning: undefined,
+          queryWindow: window,
+        };
+      }
+      const completedSyncRunId = await latestCompletedAzureSyncRun(input.pool, operationKey);
+      if (completedSyncRunId) {
+        await input.onProgress?.({
+          completed: progressTotal,
+          total: progressTotal,
+          failed: 0,
+          currentItem: 'Completed-month charges are already fully covered',
+          unitLabel: 'subscriptions',
+        });
+        return {
+          syncRunId: completedSyncRunId,
+          recordsRead: 0,
+          recordsWritten: 0,
+          subscriptionCount: subscriptions.length,
+          successfulSubscriptions: subscriptions.length,
+          failedSubscriptions: 0,
+          mappedSnapshots: 0,
+          unmappedSnapshots: 0,
+          totalCost: 0,
+          resourceSnapshots: 0,
+          metricSnapshots: 0,
+          advisorRecommendations: 0,
+          advisorFailures: [],
+          tenantLookupWarning: tenantDiscovery.warning,
+          emptyCostWithResources: [],
+          skippedCostQueries,
+          deferredCostQueries,
+          costQueryWindowsCompleted: 0,
+          remainingCostQueryWindows: 0,
+          continuationPending: false,
+          alreadyCovered: true,
+          sharedThrottleUntil: undefined,
+          operationKey,
+          mode,
+          monitoring: undefined,
+          monitoringWarning: undefined,
+          queryWindow: window,
+        };
+      }
+    }
+
+    const activeSyncRunId = await resolveAzureSyncRun(input.pool, {
+      requestedSyncRunId: syncRunId,
+      jobId: input.jobId,
+      operationKey,
+      window,
+      subscriptionCount: subscriptions.length,
+    });
+    syncRunId = activeSyncRunId;
+
     await input.onProgress?.({
       completed: 0,
       total: progressTotal,
@@ -343,7 +469,7 @@ export async function syncAzureCostUsage(input: {
       await markAzureCostSyncFailure(input.pool, {
         subscriptionId: plan.subscription.subscriptionId,
         mode,
-        syncRunId,
+        syncRunId: activeSyncRunId,
         window: queryWindow,
         error: message,
         nextRetryAt: retry?.nextRetryAt,
@@ -360,7 +486,6 @@ export async function syncAzureCostUsage(input: {
     const supportsStagedCostReports = Boolean(
       client.requestCostUsageReport && client.collectCostUsageReport,
     );
-    const maxWindowCount = Math.max(0, ...plans.map((plan) => plan.windows.length));
     for (let windowIndex = 0; windowIndex < maxWindowCount; windowIndex += 1) {
       const submittedReports: Array<{
         planIndex: number;
@@ -375,7 +500,12 @@ export async function syncAzureCostUsage(input: {
       // remaining subscription requests are being issued.
       for (const [planIndex, plan] of plans.entries()) {
         const queryWindow = plan.windows[windowIndex];
-        if (!queryWindow || plan.failed || plan.skipReason) continue;
+        if (
+          !queryWindow
+          || plan.failed
+          || plan.skipReason
+          || !selectedWorkItemKeys.has(`${planIndex}:${windowIndex}`)
+        ) continue;
         if (sharedThrottleUntil) {
           if (!plan.deferred) {
             plan.deferred = true;
@@ -400,6 +530,13 @@ export async function syncAzureCostUsage(input: {
           currentItem: progressPrefix,
           unitLabel: 'subscriptions',
         });
+        if (mode === 'monthly') {
+          await clearPartialAzureCostWindowSnapshots(input.pool, {
+            syncRunId,
+            subscriptionId: plan.subscription.subscriptionId,
+            window: queryWindow,
+          });
+        }
         await markAzureCostSyncAttempt(input.pool, {
           subscriptionId: plan.subscription.subscriptionId,
           mode,
@@ -565,6 +702,7 @@ export async function syncAzureCostUsage(input: {
     const deferredSubscriptionCount = new Set(
       deferredCostQueries.map((item) => item.subscriptionId.toLowerCase()),
     ).size;
+    const continuationPending = mode === 'monthly' && remainingCostQueryWindows > 0;
     const successfulSubscriptions = Math.max(
       0,
       subscriptions.length - failures.length - deferredSubscriptionCount,
@@ -574,10 +712,17 @@ export async function syncAzureCostUsage(input: {
       .map((failure) => failure.customerName ?? failure.subscriptionName ?? failure.subscriptionId)
       .join(', ');
     await input.onProgress?.({
-      completed: subscriptions.length,
+      completed: continuationPending
+        ? Math.min(
+            progressTotal - 1,
+            selectedWorkItems[selectedWorkItems.length - 1]?.planIndex ?? 0,
+          )
+        : subscriptions.length,
       total: progressTotal,
       failed: failures.length,
-      currentItem: failures.length
+      currentItem: continuationPending
+        ? `Stored a completed-month slice · ${remainingCostQueryWindows.toLocaleString('en-US')} remaining`
+        : failures.length
         ? `${collectLiveInventory ? 'Evaluating monitor window' : 'Collecting completed months'} · ${failureSummary} failed`
         : collectLiveInventory
           ? 'Evaluating cost changes, idle VMs, and Advisor results'
@@ -593,6 +738,52 @@ export async function syncAzureCostUsage(input: {
             .join('; ')
         }`,
       );
+    }
+
+    if (continuationPending) {
+      await updateRunningSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
+        entity: operationKey,
+        operationKey,
+        queryWindow: window,
+        subscriptionCount: subscriptions.length,
+        mappedSnapshots,
+        unmappedSnapshots,
+        totalCost: roundMoney(totalCost),
+        skippedCostQueries,
+        deferredCostQueries,
+        costQueryWindowsCompleted,
+        remainingCostQueryWindows,
+        continuationPending: true,
+      });
+      return {
+        syncRunId,
+        recordsRead,
+        recordsWritten,
+        subscriptionCount: subscriptions.length,
+        successfulSubscriptions,
+        failedSubscriptions: failures.length,
+        mappedSnapshots,
+        unmappedSnapshots,
+        totalCost: roundMoney(totalCost),
+        resourceSnapshots,
+        metricSnapshots,
+        advisorRecommendations,
+        advisorFailures,
+        tenantLookupWarning: tenantDiscovery.warning,
+        emptyCostWithResources,
+        skippedCostQueries,
+        deferredCostQueries,
+        costQueryWindowsCompleted,
+        remainingCostQueryWindows,
+        continuationPending: true,
+        alreadyCovered: false,
+        sharedThrottleUntil: sharedThrottleUntil?.toISOString(),
+        operationKey,
+        mode,
+        monitoring: undefined,
+        monitoringWarning: undefined,
+        queryWindow: window,
+      };
     }
 
     await completeSyncRun(input.pool, syncRunId, recordsRead, recordsWritten, {
@@ -614,6 +805,8 @@ export async function syncAzureCostUsage(input: {
       skippedCostQueries,
       deferredCostQueries,
       costQueryWindowsCompleted,
+      remainingCostQueryWindows: 0,
+      continuationPending: false,
       sharedThrottleUntil: sharedThrottleUntil?.toISOString(),
     });
 
@@ -666,6 +859,9 @@ export async function syncAzureCostUsage(input: {
       skippedCostQueries,
       deferredCostQueries,
       costQueryWindowsCompleted,
+      remainingCostQueryWindows: 0,
+      continuationPending: false,
+      alreadyCovered: false,
       sharedThrottleUntil: sharedThrottleUntil?.toISOString(),
       operationKey,
       mode,
@@ -674,7 +870,7 @@ export async function syncAzureCostUsage(input: {
       queryWindow: window,
     };
   } catch (error) {
-    await failSyncRun(input.pool, syncRunId, error);
+    if (syncRunId) await failSyncRun(input.pool, syncRunId, error);
     throw error;
   }
 }
@@ -1121,6 +1317,7 @@ async function startSyncRun(
   operationKey: string,
   window: { from: string; to: string; lookbackDays?: number; mode?: string; months?: number },
   subscriptionCount: number,
+  jobId?: string,
 ) {
   const result = await database.query<{ id: string }>(
     `insert into sync_runs (integration_id, status, metadata)
@@ -1131,11 +1328,103 @@ async function startSyncRun(
       operationKey,
       queryWindow: window,
       subscriptionCount,
+      ...(jobId ? { jobId } : {}),
     })],
   );
   const id = result.rows[0]?.id;
   if (!id) throw new Error('Unable to create Azure - Lighthouse cost usage sync run.');
   return id;
+}
+
+async function resolveAzureSyncRun(database: Queryable, input: {
+  requestedSyncRunId?: string;
+  jobId?: string;
+  operationKey: string;
+  window: { from: string; to: string; lookbackDays?: number; mode?: string; months?: number };
+  subscriptionCount: number;
+}) {
+  const existing = await findRunningAzureSyncRun(database, input);
+  if (existing) return existing;
+
+  return startSyncRun(
+    database,
+    input.operationKey,
+    input.window,
+    input.subscriptionCount,
+    input.jobId,
+  );
+}
+
+async function findRunningAzureSyncRun(database: Queryable, input: {
+  requestedSyncRunId?: string;
+  jobId?: string;
+  operationKey: string;
+}) {
+  if (input.requestedSyncRunId) {
+    const requested = await database.query<{ id: string }>(
+      `select id
+       from sync_runs
+       where id = $1::uuid
+         and integration_id = $2
+         and status = 'running'
+         and metadata->>'entity' = $3
+       limit 1`,
+      [input.requestedSyncRunId, azureIntegrationId, input.operationKey],
+    );
+    if (requested.rows[0]?.id) return requested.rows[0].id;
+  }
+
+  if (input.jobId) {
+    const existing = await database.query<{ id: string }>(
+      `select id
+       from sync_runs
+       where integration_id = $1
+         and status = 'running'
+         and metadata->>'entity' = $2
+         and metadata->>'jobId' = $3
+       order by started_at desc
+       limit 1`,
+      [azureIntegrationId, input.operationKey, input.jobId],
+    );
+    if (existing.rows[0]?.id) return existing.rows[0].id;
+  }
+  return undefined;
+}
+
+async function latestCompletedAzureSyncRun(database: Queryable, operationKey: string) {
+  const result = await database.query<{ id: string }>(
+    `select id
+     from sync_runs
+     where integration_id = $1
+       and status = 'complete'
+       and metadata->>'entity' = $2
+     order by completed_at desc nulls last, started_at desc
+     limit 1`,
+    [azureIntegrationId, operationKey],
+  );
+  return result.rows[0]?.id;
+}
+
+async function clearPartialAzureCostWindowSnapshots(database: Queryable, input: {
+  syncRunId: string;
+  subscriptionId: string;
+  window: AzureCostCheckpointWindow;
+}) {
+  await database.query(
+    `delete from vendor_usage_snapshots
+     where sync_run_id = $1::uuid
+       and vendor_id = $2
+       and lower(external_account_id) = lower($3)
+       and observed_at >= $4::date
+       and observed_at < $5::date`,
+    [
+      input.syncRunId,
+      azureIntegrationId,
+      input.subscriptionId,
+      input.window.from.slice(0, 10),
+      input.window.to.slice(0, 10),
+    ],
+  );
 }
 
 async function insertSnapshot(
@@ -1208,10 +1497,28 @@ async function completeSyncRun(
     `update sync_runs
      set status = 'complete',
          completed_at = now(),
-         records_read = $2,
-         records_written = $3,
+         records_read = records_read + $2,
+         records_written = records_written + $3,
          metadata = metadata || $4::jsonb
      where id = $1`,
+    [syncRunId, recordsRead, recordsWritten, JSON.stringify(metadata)],
+  );
+}
+
+async function updateRunningSyncRun(
+  database: Queryable,
+  syncRunId: string,
+  recordsRead: number,
+  recordsWritten: number,
+  metadata: Record<string, unknown>,
+) {
+  await database.query(
+    `update sync_runs
+     set records_read = records_read + $2,
+         records_written = records_written + $3,
+         metadata = metadata || $4::jsonb
+     where id = $1
+       and status = 'running'`,
     [syncRunId, recordsRead, recordsWritten, JSON.stringify(metadata)],
   );
 }

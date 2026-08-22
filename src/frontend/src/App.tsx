@@ -25,7 +25,6 @@ import {
   Layers3,
   Link2,
   ListChecks,
-  MessageSquare,
   MoreHorizontal,
   Package,
   Pencil,
@@ -452,6 +451,7 @@ type IntegrationSyncJob = {
   requestedAt: string;
   startedAt?: string;
   completedAt?: string;
+  syncRunId?: string;
   error?: string;
   progress?: {
     completed: number;
@@ -26718,6 +26718,45 @@ function AzureBillingWorkspace({
     return response.readiness;
   };
 
+  const syncCurrentNerdioOperation = async (
+    operationKey: 'nerdio-invoices' | 'nerdio-live-usage',
+    label: string,
+  ) => {
+    setMessage(`Synchronizing current ${label} before generating the report...`);
+    const response = await fetch('/api/integrations/nerdio/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operationKey }),
+    });
+    const body = await responseJson(response);
+    if (!response.ok) {
+      throw new Error(String(body.error ?? `${label} sync failed with HTTP ${response.status}.`));
+    }
+    const jobId = typeof body.jobId === 'string' ? body.jobId : undefined;
+    if (!jobId) throw new Error(`${label} sync did not return a background job ID.`);
+    await onMonitorQueued();
+
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const runtime = await fetchRuntimeIntegrations();
+      const job = runtime.syncJobs.find((item) => item.id === jobId);
+      if (job?.status === 'failed') {
+        throw new Error(job.error ? `${label} sync failed: ${job.error}` : `${label} sync failed.`);
+      }
+      if (job?.status === 'complete') {
+        if (!job.syncRunId) throw new Error(`${label} sync completed without a saved sync run.`);
+        setMessage(`${label} are current.`);
+        return job.syncRunId;
+      }
+      if (job?.progress) {
+        setMessage(
+          `Synchronizing ${label}: ${job.progress.completed.toLocaleString()} of ${job.progress.total.toLocaleString()} ${job.progress.unitLabel}.`,
+        );
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    }
+    throw new Error(`${label} sync did not finish within four minutes. The report was not generated.`);
+  };
+
   useEffect(() => {
     void Promise.all([
       loadRuns(),
@@ -27052,11 +27091,20 @@ function AzureBillingWorkspace({
                   ) {
                     return;
                   }
+                  let nerdioInvoiceSyncRunId: string | undefined;
+                  let nerdioLiveSyncRunId: string | undefined;
+                  if (billingMonth === new Date().toISOString().slice(0, 7)) {
+                    nerdioInvoiceSyncRunId = await syncCurrentNerdioOperation('nerdio-invoices', 'Nerdio invoice charges');
+                    nerdioLiveSyncRunId = await syncCurrentNerdioOperation('nerdio-live-usage', 'Nerdio live user counts');
+                    setMessage('Nerdio invoice charges and live user counts are current. Generating the Azure billing report...');
+                  }
                   const created = await azureBillingJson<AzureBillingRunDetail>('/api/azure-billing/runs', {
                     method: 'POST',
                     body: JSON.stringify({
                       billingMonth,
                       overwriteExisting: Boolean(existingBillingMonthRun),
+                      nerdioInvoiceSyncRunId,
+                      nerdioLiveSyncRunId,
                     }),
                   });
                   setDetail(created);
@@ -27069,7 +27117,9 @@ function AzureBillingWorkspace({
                     ? 'This run has release activity and cannot be regenerated.'
                     : !ingramReadiness?.ready
                       ? (ingramReadiness?.message ?? 'Wait for the major Ingram invoice before generating this month.')
-                      : undefined
+                      : billingMonth === new Date().toISOString().slice(0, 7)
+                        ? 'Synchronizes Nerdio invoice charges and live user counts before generating the report.'
+                        : undefined
                 }
               >
                 {existingBillingMonthRun ? <RefreshCcw size={17} /> : <Plus size={17} />}
@@ -28480,7 +28530,6 @@ function AzureBillingClientReviewTable({
           <thead>
             <tr>
               <th>Month</th>
-              <th>Comment</th>
               <th>Invoice Users</th>
               <th>Live Users</th>
               <th>External Pre-Tax</th>
@@ -28490,6 +28539,7 @@ function AzureBillingClientReviewTable({
               <th>Mark-up</th>
               <th>Gross</th>
               <th>Margin %</th>
+              <th>Comment</th>
             </tr>
           </thead>
           <tbody>
@@ -28499,39 +28549,9 @@ function AzureBillingClientReviewTable({
               const marginPercent = month.projectedRevenue > 0
                 ? month.projectedMargin / month.projectedRevenue
                 : undefined;
-              const hasLargeCostDelta = Boolean(
-                previousMonth && Math.abs(month.combinedCost - previousMonth.combinedCost) > 50,
-              );
               return (
-                <tr
-                  className={[isCurrent ? 'current' : '', hasLargeCostDelta ? 'large-cost-delta' : ''].filter(Boolean).join(' ')}
-                  key={month.billingMonth}
-                  title={hasLargeCostDelta ? 'Combined cost changed by more than $50 from the prior month.' : undefined}
-                >
+                <tr className={isCurrent ? 'current' : ''} key={month.billingMonth}>
                   <th scope="row">{month.billingMonth}{isCurrent ? <span>Current</span> : null}</th>
-                  <td>
-                    {isCurrent ? (
-                      <button
-                        className="button secondary compact azure-billing-comment-button"
-                        disabled={busy}
-                        onClick={() => {
-                          setCommentDraft('');
-                          setCommentModalOpen(true);
-                        }}
-                        type="button"
-                      >
-                        <MessageSquare size={14} /> Add comment
-                      </button>
-                    ) : (
-                      <button
-                        className="button secondary compact azure-billing-comment-button"
-                        onClick={() => setViewedCommentMonth(month)}
-                        type="button"
-                      >
-                        <MessageSquare size={14} /> Comment{month.comments.length ? ` (${month.comments.length})` : ''}
-                      </button>
-                    )}
-                  </td>
                   <td>{formatCount(month.invoiceNerdioCount ?? 0)}</td>
                   <td>{month.liveNerdioCount === undefined ? '—' : formatCount(month.liveNerdioCount)}</td>
                   <td className={month.externalPreTaxOverride !== undefined ? 'overridden' : ''}>
@@ -28590,6 +28610,30 @@ function AzureBillingClientReviewTable({
                   <td>{month.effectiveMarkupRate === undefined ? '—' : `${(month.effectiveMarkupRate * 100).toFixed(2)}%`}</td>
                   <td>{formatBillingCurrency(month.projectedMargin)}</td>
                   <td>{marginPercent === undefined ? '—' : `${(marginPercent * 100).toFixed(2)}%`}</td>
+                  <td>
+                    {isCurrent ? (
+                      <button
+                        className="button secondary compact azure-billing-comment-button"
+                        disabled={busy}
+                        onClick={() => {
+                          setCommentDraft('');
+                          setCommentModalOpen(true);
+                        }}
+                        type="button"
+                      >
+                        Add
+                      </button>
+                    ) : (
+                      <button
+                        className="button secondary compact azure-billing-comment-button"
+                        onClick={() => setViewedCommentMonth(month)}
+                        title={`${month.comments.length} saved comment${month.comments.length === 1 ? '' : 's'}`}
+                        type="button"
+                      >
+                        View
+                      </button>
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -28613,15 +28657,10 @@ function AzureBillingClientReviewTable({
 
       {result.comments.length ? (
         <section className="azure-billing-client-comments" aria-label={`${result.customerName} comments for ${runMonth}`}>
-          <strong><MessageSquare size={15} /> Review comments</strong>
+          <h4>Comments</h4>
           {result.comments.map((comment) => (
             <article key={comment.id}>
-              <p>{comment.comment}</p>
-              <small>
-                {comment.authorName}
-                {comment.authorEmail !== comment.authorName ? ` (${comment.authorEmail})` : ''}
-                {' · '}{formatDateTime(comment.createdAt)}
-              </small>
+              <p><strong>{comment.authorName}</strong>: {formatDateOnly(comment.createdAt)} : {comment.comment}</p>
             </article>
           ))}
         </section>
@@ -28801,12 +28840,7 @@ function AzureBillingClientReviewTable({
             <div className="azure-billing-comment-history">
               {viewedCommentMonth.comments.length ? viewedCommentMonth.comments.map((comment) => (
                 <article key={comment.id}>
-                  <p>{comment.comment}</p>
-                  <small>
-                    {comment.authorName}
-                    {comment.authorEmail !== comment.authorName ? ` (${comment.authorEmail})` : ''}
-                    {' · '}{formatDateTime(comment.createdAt)}
-                  </small>
+                  <p><strong>{comment.authorName}</strong>: {formatDateOnly(comment.createdAt)} : {comment.comment}</p>
                 </article>
               )) : <p className="field-help">No comments were saved for this billing period.</p>}
             </div>

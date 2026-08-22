@@ -31,6 +31,7 @@ export type SyncableIntegrationId = Extract<
 
 export type IntegrationSyncQueueMessage = IntegrationSyncRequest & {
   jobId: string;
+  syncRunId?: string;
   integrationId: SyncableIntegrationId;
   requestedBy: string;
   requestedAt: string;
